@@ -330,7 +330,7 @@ impl KoreReader {
         Ok(KoreReader {
             columns: cols,
             nrows,
-            ncols: ncols,
+            ncols,
             nchunks: fnchunks,
             chunk_nrows,
             col_meta,
@@ -537,7 +537,7 @@ impl KoreReader {
                 let meta = &self.col_meta[chunk_idx][ci];
                 self.decode_col_block(ci, meta, cnr, chunk_idx)
             }).collect();
-            let local_start = if start > chunk_start { start - chunk_start } else { 0 };
+            let local_start = start.saturating_sub(chunk_start);
             let local_end = if end < chunk_end { end - chunk_start } else { cnr };
             for ri in local_start..local_end {
                 let row: Vec<KVal> = chunk_cols.iter()

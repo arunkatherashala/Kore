@@ -323,7 +323,7 @@ fn xor_encrypt(data: &[u8], key: &[u8; 32]) -> Vec<u8> {
     let mut state = u64::from_le_bytes(key[..8].try_into().unwrap_or([0u8;8]));
     let mut i = 0;
     while stream_key.len() < data.len() {
-        state ^= u64::from_le_bytes(key[i % 32..(i % 32)+8.min(32)].try_into().unwrap_or_else(|_| {
+        state ^= u64::from_le_bytes(key[i % 32..(i % 32)+8].try_into().unwrap_or_else(|_| {
             let mut b = [0u8;8]; b[..key[i%32..].len().min(8)].copy_from_slice(&key[i%32..i%32+key[i%32..].len().min(8)]); b
         }));
         state = state.wrapping_mul(0x9e3779b97f4a7c15).rotate_left(17);
@@ -359,7 +359,7 @@ fn rle_decode_bytes(data: &[u8]) -> Vec<u8> {
     while i + 1 < data.len() {
         let run = data[i] as usize;
         let b   = data[i+1];
-        out.extend(std::iter::repeat(b).take(run));
+        out.extend(std::iter::repeat_n(b, run));
         i += 2;
     }
     out
