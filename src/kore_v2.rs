@@ -1,4 +1,5 @@
 // ============================================================================
+#![allow(clippy::manual_div_ceil, clippy::needless_range_loop, clippy::needless_borrow, clippy::explicit_counter_loop)]
 // KORE v2 — Killer Optimized Record Exchange — World-Class Columnar Format
 // ============================================================================
 //
