@@ -150,9 +150,10 @@ impl BloomFilter {
         (h >> 4) as usize % 4096
     }
 
-    impl Default for BloomFilter {
-        fn default() -> Self { BloomFilter::new() }
-    }
+
+impl Default for BloomFilter {
+    fn default() -> Self { BloomFilter::new() }
+}
     fn hash3(s: &str) -> usize {
         let mut h: u64 = 0xbf58476d1ce4e5b9;
         for b in s.bytes() { h = h.wrapping_mul(0x94d049bb133111eb) ^ b as u64; }

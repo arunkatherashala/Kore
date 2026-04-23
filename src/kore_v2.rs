@@ -1438,9 +1438,7 @@ impl Bloom {
         }
     }
 
-    impl Default for Bloom {
-        fn default() -> Self { Bloom::new() }
-    }
+    
 
     pub fn may_contain(&self, s: &str) -> bool {
         [0x9e3779b97f4a7c15u64, 0x6c62272e07bb0142, 0xbf58476d1ce4e5b9]
@@ -1466,6 +1464,10 @@ impl Bloom {
         }
         bf
     }
+}
+
+impl Default for Bloom {
+    fn default() -> Self { Bloom::new() }
 }
 
 // ============================================================================
