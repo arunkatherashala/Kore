@@ -1,0 +1,32 @@
+print("KORE builtin regression")
+
+schema = "name:str,age:int,salary:float,dept:str"
+data = "[[Alice,25,90000.0,Engineering],[Bob,30,120000.0,Management],[Charlie,25,90000.0,Engineering]]"
+path = "kore_builtin_regression_test.kore"
+
+write_res = kore_write(path, schema, data)
+print(K"write: {write_res}")
+r1 = assert_true(len(write_res) > 0)
+print(K"write non-empty: {r1}")
+
+info = kore_info(path)
+print(K"info: {info}")
+r2 = assert_contains(info, "rows")
+print(K"info contains rows: {r2}")
+
+rows = kore_read(path)
+print(K"rows: {rows}")
+r3 = assert_contains(rows, "Alice")
+print(K"rows contain Alice: {r3}")
+
+salary_col = kore_read_col(path, "salary")
+print(K"salary: {salary_col}")
+r4 = assert_contains(salary_col, "90000")
+print(K"salary contains 90000: {r4}")
+
+dept_col = kore_read_col(path, "dept")
+print(K"dept: {dept_col}")
+r5 = assert_contains(dept_col, "Engineering")
+print(K"dept contains Engineering: {r5}")
+
+print("KORE builtin regression passed.")
