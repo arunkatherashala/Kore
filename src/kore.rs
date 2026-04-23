@@ -107,14 +107,26 @@ pub enum KoreValue {
 
 impl KoreValue {
     fn as_i64(&self) -> i64 {
-        match self { KoreValue::Int(x) => *x, KoreValue::Float(f) => *f as i64,
-                     KoreValue::Bool(b) => if *b { 1 } else { 0 }, _ => 0 }
+        match self {
+            KoreValue::Int(x) => *x,
+            KoreValue::Float(f) => *f as i64,
+            KoreValue::Bool(true) => 1,
+            KoreValue::Bool(false) => 0,
+            _ => 0,
+        }
     }
     fn as_f64(&self) -> f64 {
-        match self { KoreValue::Float(x) => *x, KoreValue::Int(i) => *i as f64, _ => 0.0 }
+        match self {
+            KoreValue::Float(x) => *x,
+            KoreValue::Int(i) => *i as f64,
+            _ => 0.0,
+        }
     }
     fn as_str(&self) -> &str {
-        match self { KoreValue::Str(s) => s.as_str(), _ => "" }
+        match self {
+            KoreValue::Str(s) => s.as_str(),
+            _ => "",
+        }
     }
     fn to_display(&self) -> String {
         match self {
