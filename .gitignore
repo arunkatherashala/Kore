@@ -1,0 +1,8 @@
+/target/
+/dist/
+*.zip
+*.zip.sha256
+*.sha256
+*.exe
+.vscode/
+.idea/
