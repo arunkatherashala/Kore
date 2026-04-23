@@ -1,0 +1,359 @@
+# KORE-K: standalone Killer implementation for validation
+# Pure Killer implementation using text-based column storage.
+
+kfn arr_index_of(arr, val) {
+  result = -1
+  i = 0
+  while (i < len(arr)) {
+    if (arr[i] == val) {
+      if (result == -1) {
+        result = i
+      }
+    }
+    i = i + 1
+  }
+  return result
+}
+
+kfn delta_encode(nums) {
+  n = len(nums)
+  if (n == 0) {
+    return "EMPTY"
+  }
+  result = str(parseInt(nums[0]))
+  i = 1
+  while (i < n) {
+    prev = i - 1
+    diff = parseInt(nums[i]) - parseInt(nums[prev])
+    result = result + "," + str(diff)
+    i = i + 1
+  }
+  return result
+}
+
+kfn delta_decode(enc) {
+  if (enc == "EMPTY") {
+    return []
+  }
+  parts = split(enc, ",")
+  result = []
+  cur = parseInt(parts[0])
+  result = push(result, str(cur))
+  i = 1
+  while (i < len(parts)) {
+    cur = cur + parseInt(parts[i])
+    result = push(result, str(cur))
+    i = i + 1
+  }
+  return result
+}
+
+kfn rle_encode(vals) {
+  n = len(vals)
+  if (n == 0) {
+    return "EMPTY"
+  }
+  parts = []
+  count = 1
+  cur = vals[0]
+  i = 1
+  while (i < n) {
+    if (vals[i] == cur) {
+      count = count + 1
+    } else {
+      parts = push(parts, str(count) + "~" + cur)
+      cur = vals[i]
+      count = 1
+    }
+    i = i + 1
+  }
+  parts = push(parts, str(count) + "~" + cur)
+  return join(parts, ",")
+}
+
+kfn rle_decode(enc) {
+  if (enc == "EMPTY") {
+    return []
+  }
+  parts = split(enc, ",")
+  result = []
+  i = 0
+  while (i < len(parts)) {
+    kv = split(parts[i], "~")
+    cnt = parseInt(kv[0])
+    val = kv[1]
+    j = 0
+    while (j < cnt) {
+      result = push(result, val)
+      j = j + 1
+    }
+    i = i + 1
+  }
+  return result
+}
+
+kfn dict_encode(vals) {
+  dict_arr = []
+  idx_arr = []
+  i = 0
+  while (i < len(vals)) {
+    val = vals[i]
+    idx = arr_index_of(dict_arr, val)
+    if (idx == -1) {
+      dict_arr = push(dict_arr, val)
+      idx = len(dict_arr) - 1
+    }
+    idx_arr = push(idx_arr, str(idx))
+    i = i + 1
+  }
+  return join(dict_arr, "^") + "*" + join(idx_arr, ",")
+}
+
+kfn dict_decode(enc) {
+  star_pos = indexOf(enc, "*")
+  dict_part = substring(enc, 0, star_pos)
+  idx_part = substring(enc, star_pos + 1, len(enc))
+  dict_arr = split(dict_part, "^")
+  idx_parts = split(idx_part, ",")
+  result = []
+  i = 0
+  while (i < len(idx_parts)) {
+    result = push(result, dict_arr[parseInt(idx_parts[i])])
+    i = i + 1
+  }
+  return result
+}
+
+kfn plain_encode(vals) {
+  return join(vals, ",")
+}
+
+kfn plain_decode(enc) {
+  return split(enc, ",")
+}
+
+kfn auto_algo(col_type) {
+  if (col_type == "int") {
+    return "delta"
+  } else {
+    if (col_type == "float") {
+      return "plain"
+    } else {
+      if (col_type == "bool") {
+        return "rle"
+      } else {
+        return "dict"
+      }
+    }
+  }
+}
+
+kfn encode_col(vals, algo) {
+  if (algo == "delta") {
+    return delta_encode(vals)
+  } else {
+    if (algo == "rle") {
+      return rle_encode(vals)
+    } else {
+      if (algo == "dict") {
+        return dict_encode(vals)
+      } else {
+        return plain_encode(vals)
+      }
+    }
+  }
+}
+
+kfn decode_col(enc, algo) {
+  if (algo == "delta") {
+    return delta_decode(enc)
+  } else {
+    if (algo == "rle") {
+      return rle_decode(enc)
+    } else {
+      if (algo == "dict") {
+        return dict_decode(enc)
+      } else {
+        return plain_decode(enc)
+      }
+    }
+  }
+}
+
+kfn parse_rows(data_str) {
+  inner = substring(data_str, 2, len(data_str) - 2)
+  row_strs = split(inner, "],[")
+  rows = []
+  i = 0
+  while (i < len(row_strs)) {
+    row = split(row_strs[i], ",")
+    rows = push(rows, row)
+    i = i + 1
+  }
+  return rows
+}
+
+kfn extract_col(rows, col_idx) {
+  col = []
+  i = 0
+  while (i < len(rows)) {
+    row = rows[i]
+    col = push(col, row[col_idx])
+    i = i + 1
+  }
+  return col
+}
+
+kfn kfile_write(path, schema_str, data_str) {
+  rows = parse_rows(data_str)
+  nrows = len(rows)
+  col_defs = split(schema_str, ",")
+  ncols = len(col_defs)
+
+  schema_parts = []
+  i = 0
+  while (i < ncols) {
+    def = split(col_defs[i], ":")
+    algo = auto_algo(def[1])
+    schema_parts = push(schema_parts, def[0] + ":" + def[1] + ":" + algo)
+    i = i + 1
+  }
+  schema_line = "SCHEMA " + join(schema_parts, " ")
+
+  data_lines = []
+  i = 0
+  while (i < ncols) {
+    def = split(col_defs[i], ":")
+    algo = auto_algo(def[1])
+    col_vals = extract_col(rows, i)
+    encoded = encode_col(col_vals, algo)
+    data_lines = push(data_lines, "COL " + def[0] + " " + encoded)
+    i = i + 1
+  }
+
+  content = "KORE-K\n" + schema_line + "\nROWS " + str(nrows) + "\n" + join(data_lines, "\n") + "\nEND"
+  ok = writeFile(path, content)
+  return K"kfile: wrote {nrows} rows x {ncols} cols to {path}"
+}
+
+kfn kfile_read(path) {
+  content = readFile(path)
+  lines = split(content, "\n")
+  schema_part = substring(lines[1], 7, len(lines[1]))
+  col_defs = split(schema_part, " ")
+  ncols = len(col_defs)
+  nrows = parseInt(substring(lines[2], 5, len(lines[2])))
+
+  cols = []
+  i = 0
+  while (i < ncols) {
+    def = split(col_defs[i], ":")
+    algo = def[2]
+    line = lines[3 + i]
+    p1 = indexOf(line, " ")
+    rest = substring(line, p1 + 1, len(line))
+    p2 = indexOf(rest, " ")
+    encoded = substring(rest, p2 + 1, len(rest))
+    col_vals = decode_col(encoded, algo)
+    cols = push(cols, col_vals)
+    i = i + 1
+  }
+
+  result = []
+  i = 0
+  while (i < nrows) {
+    row_parts = []
+    j = 0
+    while (j < ncols) {
+      col_j = cols[j]
+      row_parts = push(row_parts, col_j[i])
+      j = j + 1
+    }
+    result = push(result, "[" + join(row_parts, ",") + "]")
+    i = i + 1
+  }
+  return "[" + join(result, ",") + "]"
+}
+
+kfn kfile_read_col(path, col_name) {
+  content = readFile(path)
+  lines = split(content, "\n")
+  schema_part = substring(lines[1], 7, len(lines[1]))
+  col_defs = split(schema_part, " ")
+  ncols = len(col_defs)
+
+  col_idx = -1
+  col_algo = "plain"
+  i = 0
+  while (i < ncols) {
+    def = split(col_defs[i], ":")
+    if (def[0] == col_name) {
+      col_idx = i
+      col_algo = def[2]
+    }
+    i = i + 1
+  }
+
+  if (col_idx == -1) {
+    return K"ERROR: column {col_name} not found"
+  }
+  line = lines[3 + col_idx]
+  p1 = indexOf(line, " ")
+  rest = substring(line, p1 + 1, len(line))
+  p2 = indexOf(rest, " ")
+  encoded = substring(rest, p2 + 1, len(rest))
+  col_vals = decode_col(encoded, col_algo)
+  return "[" + join(col_vals, ",") + "]"
+}
+
+kfn kfile_info(path) {
+  content = readFile(path)
+  lines = split(content, "\n")
+  schema_part = substring(lines[1], 7, len(lines[1]))
+  nrows = parseInt(substring(lines[2], 5, len(lines[2])))
+  col_defs = split(schema_part, " ")
+  ncols = len(col_defs)
+  return K"kfile: {nrows} rows x {ncols} cols | {schema_part}"
+}
+
+print("KORE-K smoke test")
+
+schema = "name:str,age:int,salary:float,dept:str,active:bool"
+data = "[[Alice,25,90000.0,Engineering,true],[Bob,30,120000.0,Management,true],[Charlie,25,90000.0,Engineering,true],[Diana,35,150000.0,Management,true],[Eve,28,95000.0,Engineering,false]]"
+path = "kore_fileformat_test.kore"
+
+r1 = assert_eq(delta_encode(["25","30","25"]), "25,5,-5")
+print(K"delta test: {r1}")
+r2 = assert_eq(rle_encode(["true","true","false"]), "2~true,1~false")
+print(K"rle test: {r2}")
+r3 = assert_eq(dict_encode(["Eng","Mgmt","Eng"]), "Eng^Mgmt*0,1,0")
+print(K"dict test: {r3}")
+
+write_res = kfile_write(path, schema, data)
+print(K"write: {write_res}")
+
+info = kfile_info(path)
+r4 = assert_contains(info, "5 rows x 5 cols")
+print(K"info test: {r4}")
+
+rows = kfile_read(path)
+r5 = assert_contains(rows, "[Alice,25,90000.0,Engineering,true]")
+print(K"rows test: {r5}")
+
+salary_col = kfile_read_col(path, "salary")
+r6 = assert_eq(salary_col, "[90000.0,120000.0,90000.0,150000.0,95000.0]")
+print(K"salary col test: {r6}")
+
+dept_col = kfile_read_col(path, "dept")
+r7 = assert_eq(dept_col, "[Engineering,Management,Engineering,Management,Engineering]")
+print(K"dept col test: {r7}")
+
+active_col = kfile_read_col(path, "active")
+r8 = assert_eq(active_col, "[true,true,true,true,false]")
+print(K"bool col test: {r8}")
+
+missing = kfile_read_col(path, "missing")
+r9 = assert_contains(missing, "ERROR: column missing not found")
+print(K"missing col test: {r9}")
+
+print("KORE-K tests passed.")
