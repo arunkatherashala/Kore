@@ -1,0 +1,66 @@
+// Killer script: loads CSV, writes compressed KORE using kore_write
+print("Killer CSV→KORE builtin compression demo\n")
+
+let csv_path = "sample_10mb.csv"
+let out_path = "sample_10mb_builtin.kore"
+
+// Read CSV as text
+let csv = file_read(csv_path)
+let lines = []
+let cur = ""
+let idx = 0
+while idx < len(csv)
+{
+    let ch = csv[idx]
+    if ch == "\n"
+    {
+        lines = lines + [cur]
+        cur = ""
+    }
+    else
+    {
+        cur = cur + ch
+    }
+    idx = idx + 1
+}
+if len(cur) > 0
+{
+    lines = lines + [cur]
+}
+let schema = lines[0]
+let rows = []
+let i = 1
+while i < len(lines) && i < 1001
+{
+    let line = lines[i]
+    if len(line) == 0
+    {
+        i = i + 1
+        continue
+    }
+    // crude split: only works for no embedded commas
+    let cols = []
+    let part = ""
+    let j = 0
+    while j < len(line)
+    {
+        let c = line[j]
+        if c == ","
+        {
+            cols = cols + [part]
+            part = ""
+        }
+        else
+        {
+            part = part + c
+        }
+        j = j + 1
+    }
+    cols = cols + [part]
+    rows = rows + [cols]
+    i = i + 1
+}
+let data = str(rows)
+let res = kore_write(out_path, schema, data)
+print(K"kore_write: {res}")
+print(K"Wrote compressed KORE to {out_path}\n")

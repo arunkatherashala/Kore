@@ -1,0 +1,56 @@
+// Combined delta encoder + test for single-run execution
+print("kore_fileformat_killer: combined delta encoder test\n")
+
+// Delta encoder
+fn delta_encode(xs)
+{
+    if len(xs) == 0 {
+        return []
+    }
+    let prev = xs[0]
+    let out = [prev]
+    let i = 1
+    while i < len(xs)
+    {
+        let v = xs[i]
+        let d = v - prev
+        out = concat(out, [d])
+        prev = v
+        i = i + 1
+    }
+    return out
+}
+
+fn delta_decode(deltas)
+{
+    if len(deltas) == 0 {
+        return []
+    }
+    let prev = deltas[0]
+    let out = [prev]
+    let i = 1
+    while i < len(deltas)
+    {
+        let v = prev + deltas[i]
+        out = concat(out, [v])
+        prev = v
+        i = i + 1
+    }
+    return out
+}
+
+// Test
+let ages = [25, 30, 25, 26, 40]
+print(K"ages: {ages}")
+let deltas = delta_encode(ages)
+print(K"deltas: {deltas}")
+let decoded = delta_decode(deltas)
+print(K"decoded: {decoded}")
+let ok = (str(decoded) == str(ages))
+if ok {
+    print("TEST PASS: delta roundtrip OK")
+} else {
+    print("TEST FAIL: mismatch")
+}
+
+// end

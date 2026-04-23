@@ -1,0 +1,5 @@
+print("arith test")
+let a = 2
+let b = 3
+let c = a + b
+print(K"c: {c}")

@@ -1,0 +1,12 @@
+let a = [25]
+print(K"a: {a}")
+print(K"about to add literal 30")
+let b = a + [30]
+print(K"b: {b}")
+let x = 30
+print(K"about to add variable x")
+let c = a + [x]
+print(K"c: {c}")
+print(K"about to add expr x-5")
+let d = a + [x - 5]
+print(K"d: {d}")

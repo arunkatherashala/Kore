@@ -1,0 +1,4 @@
+print("Show kore_info for rust-generated KORE")
+let path = "A:\\My workspace\\Kore_fileformat\\tools\\sample_10mb_kore_builtin_full.kore"
+let info = kore_info(path)
+print(K"info: {info}")

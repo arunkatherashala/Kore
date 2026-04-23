@@ -1,0 +1,6 @@
+let rust_path = "A:\\My workspace\\Kore_fileformat\\tools\\sample_small_kore_builtin.kore"
+let killer_path = "A:\\My workspace\\Kore_fileformat\\tools\\killer_roundtrip.kore"
+let r = kore_info(rust_path)
+let k = kore_info(killer_path)
+print(K"KORE_INFO_RUST: {r}")
+print(K"KORE_INFO_KILLER: {k}")

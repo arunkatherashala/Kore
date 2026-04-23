@@ -1,0 +1,44 @@
+// kore_fileformat_killer/implementation.killer
+// Minimal pure-Killer reference for KORE fileformat.
+// This is a starting point — algorithmic optimizations and full parity tests
+// will follow. The intent is a pure-Killer implementation of KORE functionality.
+
+print("kore_fileformat_killer: pure-Killer reference loaded")
+
+// Simple helper: serialize rows (array of arrays) into a KORE-like text blob
+fn serialize_rows(rows) -> str {
+    let parts = []
+    let i = 0
+    while i < len(rows)
+    {
+        let r = rows[i]
+        let j = 0
+        let cols = ""
+        while j < len(r)
+        {
+            if j > 0 { cols = cols + "," }
+            cols = cols + r[j]
+            j = j + 1
+        }
+        parts = parts + ["[" + cols + "]"]
+        i = i + 1
+    }
+    return "[" + join(parts, ",") + "]"
+}
+
+// Public API (reference): kore_write_text(path, schema, rows)
+fn kore_write_text(path, schema, rows_str) -> str {
+    // naive text writer: schema on first line, data on second line
+    let out = schema + "\n" + rows_str + "\n"
+    // file write may not be available in all runtimes; provide a best-effort call
+    let ok = try file_write(path, out)
+    if ok == null { return "error: file_write not available in this runtime" }
+    return "ok: wrote " + path
+}
+
+// Simple stringify helper for Killer arrays (assumes input from scripts)
+fn rows_to_kore(rows) -> str {
+    return serialize_rows(rows)
+}
+
+print("kore_fileformat_killer: API available - kore_write_text, rows_to_kore")

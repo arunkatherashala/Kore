@@ -1,0 +1,23 @@
+[package]
+name = "kore_fileformat"
+version = "0.1.0"
+edition = "2021"
+description = "KORE — Killer Optimized Record Exchange: standalone Rust crate (zero deps)"
+license-file = "LICENSE"
+readme = "README.md"
+authors = ["Katherashala Sai Arun Kumar <arunkatherashala@gmail.com>"]
+repository = "https://github.com/example/kore_fileformat"
+homepage = "https://github.com/example/kore_fileformat"
+documentation = "https://docs.rs/kore_fileformat"
+keywords = ["columnar", "file-format", "analytics", "compression", "kore"]
+categories = ["encoding", "compression", "database-implementations"]
+
+[features]
+default = []
+kore_lite_compat = []
+
+[dependencies]
+
+[lib]
+name = "kore_fileformat"
+path = "src/lib.rs"
