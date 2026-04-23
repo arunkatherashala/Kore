@@ -1,4 +1,5 @@
 // ============================================================================
+#![allow(clippy::manual_div_ceil, clippy::needless_range_loop, clippy::needless_borrow, clippy::explicit_counter_loop)]
 // KORE v2 — Killer Optimized Record Exchange — World-Class Columnar Format
 // ============================================================================
 //
@@ -330,7 +331,7 @@ impl KoreReader {
         Ok(KoreReader {
             columns: cols,
             nrows,
-            ncols: ncols,
+            ncols,
             nchunks: fnchunks,
             chunk_nrows,
             col_meta,
@@ -537,7 +538,7 @@ impl KoreReader {
                 let meta = &self.col_meta[chunk_idx][ci];
                 self.decode_col_block(ci, meta, cnr, chunk_idx)
             }).collect();
-            let local_start = if start > chunk_start { start - chunk_start } else { 0 };
+            let local_start = start.saturating_sub(chunk_start);
             let local_end = if end < chunk_end { end - chunk_start } else { cnr };
             for ri in local_start..local_end {
                 let row: Vec<KVal> = chunk_cols.iter()
@@ -1438,6 +1439,8 @@ impl Bloom {
         }
     }
 
+    
+
     pub fn may_contain(&self, s: &str) -> bool {
         [0x9e3779b97f4a7c15u64, 0x6c62272e07bb0142, 0xbf58476d1ce4e5b9]
             .iter().all(|&seed| {
@@ -1462,6 +1465,10 @@ impl Bloom {
         }
         bf
     }
+}
+
+impl Default for Bloom {
+    fn default() -> Self { Bloom::new() }
 }
 
 // ============================================================================
@@ -2433,6 +2440,7 @@ fn atomic_write(path: &str, data: &[u8]) -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 

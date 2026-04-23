@@ -107,14 +107,26 @@ pub enum KoreValue {
 
 impl KoreValue {
     fn as_i64(&self) -> i64 {
-        match self { KoreValue::Int(x) => *x, KoreValue::Float(f) => *f as i64,
-                     KoreValue::Bool(b) => if *b { 1 } else { 0 }, _ => 0 }
+        match self {
+            KoreValue::Int(x) => *x,
+            KoreValue::Float(f) => *f as i64,
+            KoreValue::Bool(true) => 1,
+            KoreValue::Bool(false) => 0,
+            _ => 0,
+        }
     }
     fn as_f64(&self) -> f64 {
-        match self { KoreValue::Float(x) => *x, KoreValue::Int(i) => *i as f64, _ => 0.0 }
+        match self {
+            KoreValue::Float(x) => *x,
+            KoreValue::Int(i) => *i as f64,
+            _ => 0.0,
+        }
     }
     fn as_str(&self) -> &str {
-        match self { KoreValue::Str(s) => s.as_str(), _ => "" }
+        match self {
+            KoreValue::Str(s) => s.as_str(),
+            _ => "",
+        }
     }
     fn to_display(&self) -> String {
         match self {
@@ -149,6 +161,7 @@ impl BloomFilter {
         for b in s.bytes() { h = h.wrapping_add(b as u64); h ^= h >> 16; h = h.wrapping_mul(0x45d9f3b); }
         (h >> 4) as usize % 4096
     }
+
     fn hash3(s: &str) -> usize {
         let mut h: u64 = 0xbf58476d1ce4e5b9;
         for b in s.bytes() { h = h.wrapping_mul(0x94d049bb133111eb) ^ b as u64; }
@@ -181,6 +194,10 @@ impl BloomFilter {
         }
         bf
     }
+}
+
+impl Default for BloomFilter {
+    fn default() -> Self { BloomFilter::new() }
 }
 
 // -- LZ77 compression (pure stdlib sliding window) -----------------------------
@@ -323,7 +340,7 @@ fn xor_encrypt(data: &[u8], key: &[u8; 32]) -> Vec<u8> {
     let mut state = u64::from_le_bytes(key[..8].try_into().unwrap_or([0u8;8]));
     let mut i = 0;
     while stream_key.len() < data.len() {
-        state ^= u64::from_le_bytes(key[i % 32..(i % 32)+8.min(32)].try_into().unwrap_or_else(|_| {
+        state ^= u64::from_le_bytes(key[i % 32..(i % 32)+8].try_into().unwrap_or_else(|_| {
             let mut b = [0u8;8]; b[..key[i%32..].len().min(8)].copy_from_slice(&key[i%32..i%32+key[i%32..].len().min(8)]); b
         }));
         state = state.wrapping_mul(0x9e3779b97f4a7c15).rotate_left(17);
@@ -359,7 +376,7 @@ fn rle_decode_bytes(data: &[u8]) -> Vec<u8> {
     while i + 1 < data.len() {
         let run = data[i] as usize;
         let b   = data[i+1];
-        out.extend(std::iter::repeat(b).take(run));
+        out.extend(std::iter::repeat_n(b, run));
         i += 2;
     }
     out
