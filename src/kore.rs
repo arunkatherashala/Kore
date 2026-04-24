@@ -340,9 +340,12 @@ fn xor_encrypt(data: &[u8], key: &[u8; 32]) -> Vec<u8> {
     let mut state = u64::from_le_bytes(key[..8].try_into().unwrap_or([0u8;8]));
     let mut i = 0;
     while stream_key.len() < data.len() {
-        state ^= u64::from_le_bytes(key[i % 32..(i % 32)+8].try_into().unwrap_or_else(|_| {
-            let mut b = [0u8;8]; b[..key[i%32..].len().min(8)].copy_from_slice(&key[i%32..i%32+key[i%32..].len().min(8)]); b
-        }));
+        let start = i % 32;
+        let end = (start + 8).min(32);
+        let mut b = [0u8; 8];
+        let slice = &key[start..end];
+        b[..slice.len()].copy_from_slice(slice);
+        state ^= u64::from_le_bytes(b);
         state = state.wrapping_mul(0x9e3779b97f4a7c15).rotate_left(17);
         for b in state.to_le_bytes() { stream_key.push(b); }
         i += 8;
