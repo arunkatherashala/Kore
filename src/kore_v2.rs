@@ -1,5 +1,4 @@
 // ============================================================================
-#![allow(clippy::manual_div_ceil, clippy::needless_range_loop, clippy::needless_borrow, clippy::explicit_counter_loop)]
 // KORE v2 — Killer Optimized Record Exchange — World-Class Columnar Format
 // ============================================================================
 //
@@ -191,13 +190,13 @@ impl KoreReader {
         // Decode all chunks and concatenate per-column values
         let mut cols: Vec<Vec<KVal>> = vec![Vec::with_capacity(self.nrows); self.ncols];
         for chunk_idx in 0..self.nchunks {
-            let cnr = self.chunk_nrows[chunk_idx];
-            for ci in 0..self.ncols {
-                let meta = &self.col_meta[chunk_idx][ci];
-                let vals = self.decode_col_block(ci, meta, cnr, chunk_idx);
-                cols[ci].extend_from_slice(&vals);
+                let cnr = self.chunk_nrows[chunk_idx];
+                for (ci, col_vals) in cols.iter_mut().enumerate().take(self.ncols) {
+                    let meta = &self.col_meta[chunk_idx][ci];
+                    let vals = self.decode_col_block(ci, meta, cnr, chunk_idx);
+                    col_vals.extend_from_slice(&vals);
+                }
             }
-        }
         // Ensure each column has exactly nrows entries
         for c in &mut cols { if c.len() < self.nrows { c.resize(self.nrows, KVal::Null); } }
         cols
@@ -562,7 +561,7 @@ pub struct DeleteBitmap {
 
 impl DeleteBitmap {
     pub fn new(total_rows: usize) -> Self {
-        let nwords = (total_rows + 63) / 64;
+        let nwords = total_rows.div_ceil(64);
         DeleteBitmap { bits: vec![0u64; nwords], total_rows, deleted_count: 0 }
     }
 
@@ -610,12 +609,12 @@ impl DeleteBitmap {
         if data.len() < 16 { return Err("Delete bitmap too short".to_string()); }
         let total_rows = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
         let deleted_count = u64::from_le_bytes(data[8..16].try_into().unwrap()) as usize;
-        let nwords = (total_rows + 63) / 64;
+        let nwords = total_rows.div_ceil(64);
         let mut bits = vec![0u64; nwords];
-        for i in 0..nwords {
+        for (i, b) in bits.iter_mut().enumerate().take(nwords) {
             let off = 16 + i * 8;
             if off + 8 <= data.len() {
-                bits[i] = u64::from_le_bytes(data[off..off+8].try_into().unwrap());
+                *b = u64::from_le_bytes(data[off..off+8].try_into().unwrap());
             }
         }
         Ok(DeleteBitmap { bits, total_rows, deleted_count })
@@ -643,8 +642,8 @@ fn delta_decode_simd_hint(deltas: &[i64], base: i64) -> Vec<i64> {
         acc += deltas[i+2]; out.push(acc);
         acc += deltas[i+3]; out.push(acc);
     }
-    for i in (chunks * 4)..n {
-        acc += deltas[i];
+    for &d in deltas.iter().skip(chunks * 4) {
+        acc += d;
         out.push(acc);
     }
     out
@@ -761,16 +760,15 @@ fn lz77_compress(input: &[u8]) -> Vec<u8> {
 
     #[inline(always)]
     fn flush_literals(out: &mut Vec<u8>, input: &[u8], start: usize, end: usize) {
-        for i in start..end {
-            let b = input[i];
-            if b == 0xFF {
-                out.push(0xFF);
-                out.push(0); out.push(0);  // offset=0
-                out.push(1); out.push(0);  // len=1
-            } else {
-                out.push(b);
+        for &b in &input[start..end] {
+                if b == 0xFF {
+                    out.push(0xFF);
+                    out.push(0); out.push(0);  // offset=0
+                    out.push(1); out.push(0);  // len=1
+                } else {
+                    out.push(b);
+                }
             }
-        }
     }
 
     // Find best match at position using hash chain
@@ -934,7 +932,7 @@ fn huffman_compress(input: &[u8]) -> Vec<u8> {
     // Single symbol edge case — sparse header
     if heap.len() == 1 {
         let sym = heap.pop().unwrap().sym.unwrap();
-        let bitstream_len = (input.len() + 7) / 8;
+        let bitstream_len = input.len().div_ceil(8);
         let mut out = Vec::with_capacity(2 + 2 + 4 + bitstream_len);
         out.push(0xFF); // sparse tag
         out.push(1);    // 1 active entry
@@ -1171,15 +1169,15 @@ fn range_compress(input: &[u8]) -> Vec<u8> {
 
     // Build CDF (cumulative distribution function)
     let mut cdf = [0u32; 257];
-    for i in 0..256 { cdf[i + 1] = cdf[i] + norm[i] as u32; }
+    for (i, &v) in norm.iter().enumerate() { cdf[i + 1] = cdf[i] + v as u32; }
 
     // 2. Write header: [active_count:u16 LE] [byte_val:u8 freq:u16]×active [orig_len:u32]
     let mut out = Vec::with_capacity(input.len());
     out.extend_from_slice(&(active as u16).to_le_bytes());
-    for i in 0..256 {
-        if norm[i] > 0 {
+    for (i, &v) in norm.iter().enumerate() {
+        if v > 0 {
             out.push(i as u8);
-            out.extend_from_slice(&norm[i].to_le_bytes());
+            out.extend_from_slice(&v.to_le_bytes());
         }
     }
     out.extend_from_slice(&(input.len() as u32).to_le_bytes());
@@ -1241,7 +1239,7 @@ fn range_decompress(input: &[u8]) -> Vec<u8> {
 
     // Build CDF
     let mut cdf = [0u32; 257];
-    for i in 0..256 { cdf[i + 1] = cdf[i] + norm[i] as u32; }
+    for (i, &v) in norm.iter().enumerate() { cdf[i + 1] = cdf[i] + v as u32; }
 
     // Build reverse lookup: for each frequency position, which symbol?
     let mut sym_lookup = vec![0u8; RC_SCALE as usize];
@@ -1405,12 +1403,10 @@ fn xor_crypt(data: &[u8], key: &[u8; 32]) -> Vec<u8> {
     if key == &[0u8; 32] { return data.to_vec(); }
     let mut state: u64 = u64::from_le_bytes(key[..8].try_into().unwrap_or([0u8; 8]));
     let mut out = Vec::with_capacity(data.len());
-    let mut ki = 0usize;
-    for &b in data {
+    for (ki, &b) in data.iter().enumerate() {
         state ^= key[ki % 32] as u64;
         state = state.wrapping_mul(0x9e3779b97f4a7c15).rotate_left(17);
         out.push(b ^ (state >> 32) as u8);
-        ki += 1;
     }
     out
 }
@@ -1534,8 +1530,8 @@ fn decode_delta_int(data: &[u8], pos: usize, nrows: usize) -> (Vec<i64>, usize) 
         acc += deltas[i+2]; out.push(acc);
         acc += deltas[i+3]; out.push(acc);
     }
-    for i in (chunks * 4)..n {
-        acc += deltas[i];
+    for &d in deltas.iter().skip(chunks * 4) {
+        acc += d;
         out.push(acc);
     }
     (out, p)
@@ -1559,7 +1555,7 @@ fn decode_dict_rle(data: &[u8], pos: usize, nrows: usize, dict: &[String]) -> (V
 
 // ── Codec 4: Bitpack (booleans: 8 per byte, LSB-first) ─────────────────────
 fn encode_bitpack(bits: &[bool]) -> Vec<u8> {
-    let mut out = Vec::with_capacity((bits.len() + 7) / 8);
+    let mut out = Vec::with_capacity(bits.len().div_ceil(8));
     for chunk in bits.chunks(8) {
         let mut byte = 0u8;
         for (i, &b) in chunk.iter().enumerate() { if b { byte |= 1 << i; } }
@@ -1569,7 +1565,7 @@ fn encode_bitpack(bits: &[bool]) -> Vec<u8> {
 }
 
 fn decode_bitpack(data: &[u8], pos: usize, nrows: usize) -> (Vec<bool>, usize) {
-    let nbytes = (nrows + 7) / 8;
+    let nbytes = nrows.div_ceil(8);
     let mut out = Vec::with_capacity(nrows);
     for i in 0..nrows {
         let byte_idx = pos + i / 8;
@@ -1590,7 +1586,7 @@ fn encode_bdict(vals: &[&str]) -> Vec<u8> {
 
     // Phase 2: Sort by frequency descending (most common → index 0)
     let mut entries: Vec<(&str, u32)> = freq_map.into_iter().collect();
-    entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
 
     // Phase 3: Build ordered dictionary
     let mut dict_map: HashMap<&str, u32> = HashMap::with_capacity(entries.len());
@@ -1669,7 +1665,7 @@ fn encode_huffdict(vals: &[&str]) -> Vec<u8> {
     let mut freq_map: HashMap<&str, u32> = HashMap::new();
     for &v in vals { *freq_map.entry(v).or_insert(0) += 1; }
     let mut entries: Vec<(&str, u32)> = freq_map.into_iter().collect();
-    entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
 
     let n_unique = entries.len();
     if n_unique > 256 {
@@ -1795,7 +1791,7 @@ fn decode_for(data: &[u8], pos: usize, nrows: usize) -> (Vec<i64>, usize) {
     }
 
     let mask = (1u64 << bits_per) - 1;
-    let total_bytes = (bits_per * nrows + 7) / 8;
+    let total_bytes = (bits_per * nrows).div_ceil(8);
     let avail = data.len().saturating_sub(p);
     let packed = &data[p..p + total_bytes.min(avail)];
     let mut out = Vec::with_capacity(nrows);
@@ -1828,7 +1824,7 @@ fn decode_for(data: &[u8], pos: usize, nrows: usize) -> (Vec<i64>, usize) {
         out.push(min_val + ((word >> bit_offset) & mask) as i64);
         bitpos += bits_per;
     }
-    (out, p + (bitpos + 7) / 8)
+    (out, p + bitpos.div_ceil(8))
 }
 
 // ── RLE for strings ─────────────────────────────────────────────────────────
@@ -1941,7 +1937,7 @@ fn select_str_codec(vals: &[&str]) -> Codec {
         // Estimate BDict size: dictionary overhead + bit-packed indices
         let bits_per = 64 - (uniq as u64 - 1).leading_zeros();
         let dict_overhead: usize = seen.iter().map(|k| k.len() + 5).sum();
-        let bdict_est = dict_overhead + (bits_per as usize * vals.len() + 7) / 8;
+        let bdict_est = dict_overhead + (bits_per as usize * vals.len()).div_ceil(8);
 
         // Estimate RLE size: count actual runs
         let mut runs = 1usize;
@@ -1986,9 +1982,9 @@ fn select_encode_str_col(vals: &[KVal]) -> (Codec, Vec<u8>, ColStats, Bloom) {
     if !dict_map.contains_key(first_s) { dict_map.insert(first_s, 0); dict_list.push(first_s); }
 
     let mut prev_s = first_s;
-    for i in 1..n {
-        let s = vals[i].as_str();
-        if vals[i].is_null() { null_count += 1; }
+    for v in vals.iter().take(n).skip(1) {
+        let s = v.as_str();
+        if v.is_null() { null_count += 1; }
         else {
             match min_str {
                 None => { min_str = Some(s); max_str = Some(s); }
@@ -2037,7 +2033,7 @@ fn select_encode_str_col(vals: &[KVal]) -> (Codec, Vec<u8>, ColStats, Bloom) {
     // Estimate BDict vs RLE
     let bits_per = 64 - (uniq as u64 - 1).leading_zeros();
     let dict_overhead: usize = dict_list.iter().map(|k| k.len() + 5).sum();
-    let bdict_est = dict_overhead + (bits_per as usize * n + 7) / 8;
+    let bdict_est = dict_overhead + (bits_per as usize * n).div_ceil(8);
     let avg_str_len = dict_list.iter().map(|s| s.len()).sum::<usize>() / uniq.max(1);
     let rle_est = runs * (avg_str_len + 5);
 
@@ -2049,7 +2045,7 @@ fn select_encode_str_col(vals: &[KVal]) -> (Codec, Vec<u8>, ColStats, Bloom) {
         codec = Codec::BDict;
         // We already have the dict_map — encode BDict directly without rebuilding
         let bits = bits_per as usize;
-        let mut buf = Vec::with_capacity(dict_overhead + (bits * n + 7) / 8 + 16);
+        let mut buf = Vec::with_capacity(dict_overhead + (bits * n).div_ceil(8) + 16);
         write_varint(&mut buf, uniq as u64);
         for &s in &dict_list {
             let b = s.as_bytes();
@@ -2585,7 +2581,7 @@ impl KoreWriter {
         if rows.is_empty() { return Err("No rows to write".to_string()); }
         let ncols = self.columns.len();
         let nrows = rows.len();
-        let nchunks = (nrows + self.chunk_size - 1) / self.chunk_size;
+        let nchunks = nrows.div_ceil(self.chunk_size);
 
         // ── Build global dictionary (all unique strings) ──────────────────
         let mut dict_map: HashMap<String, u32> = HashMap::new();
@@ -2802,7 +2798,7 @@ impl KoreWriter {
     pub fn write_columns(&self, path: &str, cols: &[Vec<KVal>], nrows: usize) -> Result<String, String> {
         if nrows == 0 { return Err("No rows to write".to_string()); }
         let ncols = self.columns.len();
-        let nchunks = (nrows + self.chunk_size - 1) / self.chunk_size;
+        let nchunks = nrows.div_ceil(self.chunk_size);
 
         // Build global dictionary (scan string columns)
         let mut dict_map: HashMap<String, u32> = HashMap::new();
