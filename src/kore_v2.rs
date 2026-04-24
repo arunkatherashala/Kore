@@ -189,7 +189,7 @@ impl KoreReader {
     pub fn read_all_columns(&self) -> Vec<Vec<KVal>> {
         // Decode all chunks and concatenate per-column values
         let mut cols: Vec<Vec<KVal>> = vec![Vec::with_capacity(self.nrows); self.ncols];
-            for chunk_idx in 0..self.nchunks {
+        for chunk_idx in 0..self.nchunks {
                 let cnr = self.chunk_nrows[chunk_idx];
                 for (ci, col_vals) in cols.iter_mut().enumerate().take(self.ncols) {
                     let meta = &self.col_meta[chunk_idx][ci];
@@ -1982,9 +1982,9 @@ fn select_encode_str_col(vals: &[KVal]) -> (Codec, Vec<u8>, ColStats, Bloom) {
     if !dict_map.contains_key(first_s) { dict_map.insert(first_s, 0); dict_list.push(first_s); }
 
     let mut prev_s = first_s;
-    for i in 1..n {
-        let s = vals[i].as_str();
-        if vals[i].is_null() { null_count += 1; }
+    for v in vals.iter().take(n).skip(1) {
+        let s = v.as_str();
+        if v.is_null() { null_count += 1; }
         else {
             match min_str {
                 None => { min_str = Some(s); max_str = Some(s); }
