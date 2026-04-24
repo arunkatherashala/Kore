@@ -189,14 +189,14 @@ impl KoreReader {
     pub fn read_all_columns(&self) -> Vec<Vec<KVal>> {
         // Decode all chunks and concatenate per-column values
         let mut cols: Vec<Vec<KVal>> = vec![Vec::with_capacity(self.nrows); self.ncols];
-        for chunk_idx in 0..self.nchunks {
-            let cnr = self.chunk_nrows[chunk_idx];
-            for (ci, col_vals) in cols.iter_mut().enumerate().take(self.ncols) {
-                let meta = &self.col_meta[chunk_idx][ci];
-                let vals = self.decode_col_block(ci, meta, cnr, chunk_idx);
-                col_vals.extend_from_slice(&vals);
+            for chunk_idx in 0..self.nchunks {
+                let cnr = self.chunk_nrows[chunk_idx];
+                for (ci, col_vals) in cols.iter_mut().enumerate().take(self.ncols) {
+                    let meta = &self.col_meta[chunk_idx][ci];
+                    let vals = self.decode_col_block(ci, meta, cnr, chunk_idx);
+                    col_vals.extend_from_slice(&vals);
+                }
             }
-        }
         // Ensure each column has exactly nrows entries
         for c in &mut cols { if c.len() < self.nrows { c.resize(self.nrows, KVal::Null); } }
         cols
@@ -1174,10 +1174,10 @@ fn range_compress(input: &[u8]) -> Vec<u8> {
     // 2. Write header: [active_count:u16 LE] [byte_val:u8 freq:u16]×active [orig_len:u32]
     let mut out = Vec::with_capacity(input.len());
     out.extend_from_slice(&(active as u16).to_le_bytes());
-    for i in 0..256 {
-        if norm[i] > 0 {
+    for (i, &v) in norm.iter().enumerate() {
+        if v > 0 {
             out.push(i as u8);
-            out.extend_from_slice(&norm[i].to_le_bytes());
+            out.extend_from_slice(&v.to_le_bytes());
         }
     }
     out.extend_from_slice(&(input.len() as u32).to_le_bytes());
