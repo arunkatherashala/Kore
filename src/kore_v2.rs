@@ -2664,8 +2664,7 @@ impl KoreWriter {
 
             let mut chunk_meta = Vec::with_capacity(ncols);
 
-            for ci in 0..ncols {
-                let col = &self.columns[ci];
+            for (ci, col) in self.columns.iter().enumerate().take(ncols) {
                 // Extract column values for this chunk
                 let vals: Vec<KVal> = chunk_rows.iter()
                     .map(|r| r.get(ci).cloned().unwrap_or(KVal::Null))
@@ -2808,8 +2807,8 @@ impl KoreWriter {
         // Build global dictionary (scan string columns)
         let mut dict_map: HashMap<String, u32> = HashMap::new();
         let mut dict_list: Vec<String> = Vec::new();
-        for ci in 0..ncols {
-            if self.columns[ci].ktype == KType::Str {
+        for (ci, col) in self.columns.iter().enumerate().take(ncols) {
+            if col.ktype == KType::Str {
                 for v in &cols[ci] {
                     let s = v.as_str().to_string();
                     if !dict_map.contains_key(&s) {
@@ -2876,8 +2875,7 @@ impl KoreWriter {
             let rend = (rstart + self.chunk_size).min(nrows);
             let mut chunk_meta = Vec::with_capacity(ncols);
 
-            for ci in 0..ncols {
-                let col = &self.columns[ci];
+            for (ci, col) in self.columns.iter().enumerate().take(ncols) {
                 let vals = &cols[ci][rstart..rend];
 
                 let codec = match col.ktype {
