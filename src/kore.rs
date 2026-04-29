@@ -106,12 +106,12 @@ pub enum KoreValue {
 }
 
 impl KoreValue {
+    #[allow(clippy::collapsible_match)]
     fn as_i64(&self) -> i64 {
         match self {
             KoreValue::Int(x) => *x,
             KoreValue::Float(f) => *f as i64,
-            KoreValue::Bool(true) => 1,
-            KoreValue::Bool(false) => 0,
+            KoreValue::Bool(b) => if *b { 1 } else { 0 },
             _ => 0,
         }
     }
