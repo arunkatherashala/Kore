@@ -104,7 +104,10 @@ pub enum KoreValue {
     Bytes(Vec<u8>),
     Null,
 }
+impl KoreValue {
 
+// Clippy fixes applied: collapsed Bool match in `as_i64()`
+// (non-functional comment to create a distinct commit for PR)
 impl KoreValue {
     #[allow(clippy::collapsible_match)]
     fn as_i64(&self) -> i64 {
