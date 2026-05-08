@@ -1,0 +1,22 @@
+[package]
+name = "kore-py"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pyo3 = { version = "0.20", features = ["extension-module"] }
+rayon = "1.7"
+kore_fileformat = { path = ".." }
+
+[lib]
+name = "kore_native"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "benchmark"
+path = "examples/benchmark.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

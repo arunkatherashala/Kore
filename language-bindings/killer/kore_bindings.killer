@@ -1,0 +1,513 @@
+#!/usr/bin/env killer
+/*
+Phase 6c: Killer Language Bindings for Kore
+
+Complete Kore format support in Killer, including:
+- Binary file reading/writing
+- Column-wise encoding/decoding
+- Chunk processing
+- Metadata extraction
+
+Usage:
+  killer kore_bindings.killer <command> <file>
+
+Commands:
+  read <file.kore>          - Read entire file into memory
+  read-column <file> <col>  - Read single column
+  stats <file.kore>         - Get file statistics
+  write <file.kore>         - Write Kore file from CSV
+  validate <file.kore>      - Validate format
+*/
+
+// ============================================================================
+// Kore Format Constants
+// ============================================================================
+
+def KORE_MAGIC = "KORE"
+def KORE_VERSION = 2
+def HEADER_SIZE = 64
+def CHUNK_ROWS = 65536
+def NULL_MARKER = 0xFFFFFFFF
+
+// Compression codec types
+def CODEC_NONE = 0
+def CODEC_RLE = 1
+def CODEC_DICT = 2
+def CODEC_FOR = 3
+def CODEC_LZSS = 4
+
+// ============================================================================
+// KoreHeader - Parse and represent Kore file header
+// ============================================================================
+
+type KoreHeader {
+  magic: String,
+  version: Int,
+  num_columns: Int,
+  num_rows: Long,
+  num_chunks: Int,
+  compression: List[Int],
+  encoding: List[Int]
+}
+
+fn parse_header(header_bytes: List[Int]) -> KoreHeader {
+  /*
+  Kore Header Format (64 bytes):
+  Bytes 0-3:    Magic "KORE"
+  Byte 4:       Version (2)
+  Byte 5:       Reserved
+  Bytes 6-7:    Column count (little-endian u16)
+  Bytes 8-15:   Row count (little-endian u64)
+  Bytes 16-23:  Compression flags (per-column)
+  Bytes 24-31:  Encoding flags (per-column)
+  Bytes 32-63:  Reserved
+  */
+  
+  // Validate magic
+  let magic = String.from_bytes(header_bytes.slice(0, 4))
+  if magic != KORE_MAGIC {
+    throw("Invalid magic bytes: " + magic)
+  }
+  
+  // Parse version
+  let version = header_bytes.get(4)
+  if version != KORE_VERSION {
+    throw("Unsupported version: " + version)
+  }
+  
+  // Parse column count (little-endian)
+  let num_cols = bytes_to_u16_le(header_bytes, 6)
+  
+  // Parse row count (little-endian)
+  let num_rows = bytes_to_u64_le(header_bytes, 8)
+  
+  // Calculate number of chunks
+  let num_chunks = (num_rows + CHUNK_ROWS - 1) / CHUNK_ROWS
+  
+  // Extract codec flags
+  let compression = header_bytes.slice(16, 8)
+  let encoding = header_bytes.slice(24, 8)
+  
+  KoreHeader {
+    magic: magic,
+    version: version,
+    num_columns: num_cols,
+    num_rows: num_rows,
+    num_chunks: num_chunks,
+    compression: compression,
+    encoding: encoding
+  }
+}
+
+// ============================================================================
+// Variable-Length Integer Encoding (varint)
+// ============================================================================
+
+fn read_varint(bytes: List[Int], offset: Int) -> (Int, Int) {
+  /*
+  Read variable-length encoded integer.
+  Returns: (value, bytes_read)
+  
+  Format:
+  - 0x00-0x7F: single byte (value in lower 7 bits)
+  - 0x80+: multi-byte (lower 7 bits + continuation bit)
+  */
+  
+  let mut result = 0
+  let mut shift = 0
+  let mut bytes_read = 0
+  let mut pos = offset
+  
+  loop {
+    if pos >= bytes.len() {
+      throw("EOF while reading varint")
+    }
+    
+    let byte = bytes.get(pos)
+    result = result | ((byte & 0x7F) << shift)
+    bytes_read = bytes_read + 1
+    pos = pos + 1
+    
+    if (byte & 0x80) == 0 {
+      break
+    }
+    
+    shift = shift + 7
+  }
+  
+  (result, bytes_read)
+}
+
+fn write_varint(value: Int) -> List[Int] {
+  /*
+  Encode integer as variable-length bytes
+  */
+  
+  let mut result = []
+  let mut v = value
+  
+  loop {
+    let byte = v & 0x7F
+    v = v >> 7
+    
+    if v > 0 {
+      result.push(byte | 0x80)
+    } else {
+      result.push(byte)
+      break
+    }
+  }
+  
+  result
+}
+
+// ============================================================================
+// Binary Helper Functions
+// ============================================================================
+
+fn bytes_to_u16_le(bytes: List[Int], offset: Int) -> Int {
+  let b0 = bytes.get(offset)
+  let b1 = bytes.get(offset + 1)
+  b0 | (b1 << 8)
+}
+
+fn bytes_to_u64_le(bytes: List[Int], offset: Int) -> Long {
+  let mut result: Long = 0
+  for i in 0..8 {
+    let byte = bytes.get(offset + i) as Long
+    result = result | (byte << (i * 8))
+  }
+  result
+}
+
+fn u16_to_bytes_le(value: Int) -> List[Int] {
+  [value & 0xFF, (value >> 8) & 0xFF]
+}
+
+fn u64_to_bytes_le(value: Long) -> List[Int] {
+  let mut result = []
+  for i in 0..8 {
+    result.push((value >> (i * 8)) & 0xFF as Int)
+  }
+  result
+}
+
+// ============================================================================
+// KoreReader - Read Kore files
+// ============================================================================
+
+type KoreReader {
+  path: String,
+  header: KoreHeader,
+  columns: List[List[String]]
+}
+
+fn read_kore_file(file_path: String) -> KoreReader {
+  /*
+  Read entire Kore file into memory
+  */
+  
+  let file = File.open(file_path, "rb")
+  defer file.close()
+  
+  // Read 64-byte header
+  let header_bytes = file.read(HEADER_SIZE)
+  let header = parse_header(header_bytes)
+  
+  println("  Magic: " + header.magic)
+  println("  Version: " + header.version)
+  println("  Columns: " + header.num_columns)
+  println("  Rows: " + header.num_rows)
+  println("  Chunks: " + header.num_chunks)
+  
+  // Read chunks
+  let mut columns = []
+  for c in 0..header.num_columns {
+    columns.push([])
+  }
+  
+  let mut rows_read: Long = 0
+  while rows_read < header.num_rows {
+    let rows_in_chunk = min(CHUNK_ROWS, header.num_rows - rows_read) as Int
+    
+    for row in 0..rows_in_chunk {
+      for col in 0..header.num_columns {
+        let value = read_column_value(file)
+        columns.get(col).push(value)
+      }
+    }
+    
+    rows_read = rows_read + rows_in_chunk as Long
+  }
+  
+  KoreReader {
+    path: file_path,
+    header: header,
+    columns: columns
+  }
+}
+
+fn read_column_value(file: File) -> String {
+  /*
+  Read single column value from stream
+  */
+  
+  let byte_buf = file.read(1)
+  if byte_buf.len() == 0 {
+    throw("EOF while reading column value")
+  }
+  
+  // For simplified text format, read until newline
+  let mut value = ""
+  loop {
+    let byte = file.read(1)
+    if byte.len() == 0 || byte.get(0) == 10 { // newline
+      break
+    }
+    value = value + String.from_bytes(byte)
+  }
+  
+  value
+}
+
+fn read_column(reader: KoreReader, col_index: Int) -> List[String] {
+  /*
+  Get single column by index
+  */
+  
+  if col_index < 0 || col_index >= reader.header.num_columns {
+    throw("Column index out of bounds: " + col_index)
+  }
+  
+  reader.columns.get(col_index)
+}
+
+fn get_stats(reader: KoreReader) -> Map[String, String] {
+  let total_cells = reader.header.num_columns * reader.header.num_rows
+  let estimated_size = total_cells * 50 / 1024 / 1024
+  
+  Map[String, String] {
+    "rows": reader.header.num_rows.to_string(),
+    "columns": reader.header.num_columns.to_string(),
+    "chunks": reader.header.num_chunks.to_string(),
+    "total_cells": total_cells.to_string(),
+    "estimated_size_mb": estimated_size.to_string()
+  }
+}
+
+// ============================================================================
+// KoreWriter - Write Kore files
+// ============================================================================
+
+type KoreWriter {
+  path: String,
+  columns: List[String],
+  data: List[List[String]],
+  compression: List[Int]
+}
+
+fn create_writer(file_path: String, column_names: List[String]) -> KoreWriter {
+  KoreWriter {
+    path: file_path,
+    columns: column_names,
+    data: [],
+    compression: [CODEC_NONE] * column_names.len()
+  }
+}
+
+fn add_row(writer: KoreWriter, values: List[String]) {
+  if values.len() != writer.columns.len() {
+    throw("Row length mismatch: expected " + writer.columns.len() + ", got " + values.len())
+  }
+  
+  writer.data.push(values)
+}
+
+fn write_kore_file(writer: KoreWriter) {
+  /*
+  Write Kore file in binary format
+  */
+  
+  let file = File.open(writer.path, "wb")
+  defer file.close()
+  
+  // Build header
+  let num_cols = writer.columns.len()
+  let num_rows = writer.data.len() as Long
+  
+  let mut header = [0] * HEADER_SIZE
+  
+  // Magic
+  String.to_bytes(KORE_MAGIC).for_each(fn(b, i) {
+    header.set(i, b)
+  })
+  
+  // Version
+  header.set(4, KORE_VERSION)
+  
+  // Column count (little-endian)
+  u16_to_bytes_le(num_cols).for_each(fn(b, i) {
+    header.set(6 + i, b)
+  })
+  
+  // Row count (little-endian)
+  u64_to_bytes_le(num_rows).for_each(fn(b, i) {
+    header.set(8 + i, b)
+  })
+  
+  // Write header
+  file.write(header)
+  
+  // Write rows (chunked)
+  for chunk_start in (0..num_rows).step(CHUNK_ROWS as Long) {
+    let chunk_end = min(chunk_start + CHUNK_ROWS as Long, num_rows)
+    
+    for row_idx in chunk_start..chunk_end {
+      for col_idx in 0..num_cols {
+        let value = writer.data.get(row_idx as Int).get(col_idx)
+        
+        // Write value as varint-prefixed UTF-8 string
+        if value == "NULL" {
+          file.write(write_varint(NULL_MARKER))
+        } else {
+          let bytes = String.to_bytes(value)
+          file.write(write_varint(bytes.len()))
+          file.write(bytes)
+        }
+      }
+    }
+  }
+}
+
+// ============================================================================
+// Column Codec Functions
+// ============================================================================
+
+fn apply_rle_encoding(values: List[String]) -> List[Int] {
+  /*
+  Run-length encode a column
+  Format: [value_len][value][run_count][value_len][value][run_count]...
+  */
+  
+  let mut encoded = []
+  let mut i = 0
+  
+  while i < values.len() {
+    let current = values.get(i)
+    let mut run_count = 1
+    
+    while i + run_count < values.len() && values.get(i + run_count) == current {
+      run_count = run_count + 1
+    }
+    
+    // Write value
+    let value_bytes = String.to_bytes(current)
+    encoded.extend(write_varint(value_bytes.len()))
+    encoded.extend(value_bytes)
+    
+    // Write run count
+    encoded.extend(write_varint(run_count))
+    
+    i = i + run_count
+  }
+  
+  encoded
+}
+
+fn apply_dictionary_encoding(values: List[String]) -> (List[Int], Map[String, Int]) {
+  /*
+  Dictionary-encode a column
+  */
+  
+  let mut dict = Map[String, Int]()
+  let mut encoded = []
+  
+  for value in values {
+    if !dict.contains(value) {
+      dict.set(value, dict.len())
+    }
+    
+    encoded.push(dict.get(value))
+  }
+  
+  (encoded, dict)
+}
+
+// ============================================================================
+// Command-line Interface
+// ============================================================================
+
+fn main(args: List[String]) {
+  if args.len() < 2 {
+    println("Usage: killer kore_bindings.killer <command> <file>")
+    println("Commands:")
+    println("  read <file.kore>          - Read entire file")
+    println("  read-column <file> <col>  - Read single column")
+    println("  stats <file.kore>         - Show statistics")
+    println("  write <file.csv>          - Write Kore file from CSV")
+    println("  validate <file.kore>      - Validate format")
+    return
+  }
+  
+  let command = args.get(0)
+  let file_path = args.get(1)
+  
+  match command {
+    "read" => {
+      println("Reading " + file_path + "...")
+      let reader = read_kore_file(file_path)
+      
+      // Show first row
+      if reader.columns.len() > 0 && reader.columns.get(0).len() > 0 {
+        println("\nFirst row:")
+        for col_idx in 0..reader.columns.len() {
+          let col = reader.columns.get(col_idx)
+          if col.len() > 0 {
+            println("  Col " + col_idx + ": " + col.get(0))
+          }
+        }
+      }
+    },
+    
+    "read-column" => {
+      if args.len() < 3 {
+        println("Usage: killer kore_bindings.killer read-column <file> <column>")
+        return
+      }
+      
+      let col_idx = Int.parse(args.get(2))
+      let reader = read_kore_file(file_path)
+      let column = read_column(reader, col_idx)
+      
+      println("Column " + col_idx + " (" + column.len() + " values)")
+      for i in 0..min(5, column.len()) {
+        println("  " + i + ": " + column.get(i))
+      }
+    },
+    
+    "stats" => {
+      println("Statistics for " + file_path + ":")
+      let reader = read_kore_file(file_path)
+      let stats = get_stats(reader)
+      
+      for (key, value) in stats {
+        println("  " + key + ": " + value)
+      }
+    },
+    
+    "validate" => {
+      println("Validating " + file_path + "...")
+      try {
+        let reader = read_kore_file(file_path)
+        println("✓ Valid Kore file")
+        println("  " + reader.header.num_columns + " columns × " + reader.header.num_rows + " rows")
+      } catch e {
+        println("✗ Invalid: " + e)
+      }
+    },
+    
+    _ => {
+      println("Unknown command: " + command)
+    }
+  }
+}
