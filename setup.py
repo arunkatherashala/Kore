@@ -6,7 +6,7 @@ setup(
     author="Arun Kather Ashala",
     author_email="arunkatherashala@gmail.com",
     description="KORE Binary Format - Complete 8-language ecosystem for efficient data storage and querying",
-    long_description=open("README.md").read(),
+    long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     url="https://github.com/arunkatherashala/Kore",
     project_urls={
