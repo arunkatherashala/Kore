@@ -1,4 +1,5 @@
 name: Publish to Docker Hub
+# Deploy to Docker Hub on release or manual trigger
 
 on:
   release:
