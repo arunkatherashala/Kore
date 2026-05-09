@@ -1,19 +1,14 @@
 # Multi-language Kore Format Runtime
-FROM ubuntu:22.04
+FROM rust:latest
 
 LABEL maintainer="Arun Kather Ashala <arunkatherashala@gmail.com>"
 LABEL description="KORE Binary Format - Complete 8-language ecosystem"
 LABEL version="0.1.0"
 
-# Install system dependencies
+# Install additional system dependencies
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    curl \
-    git \
     python3 \
     python3-pip \
-    rustc \
-    cargo \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
