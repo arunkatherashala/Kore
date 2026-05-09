@@ -25,6 +25,10 @@ jobs:
       run: |
         python -m pip install --upgrade pip build
     
+    - name: Clean build artifacts
+      run: |
+        rm -rf build/ dist/ *.egg-info/ .eggs/ || true
+    
     - name: Build distribution packages
       run: |
         python -m build
