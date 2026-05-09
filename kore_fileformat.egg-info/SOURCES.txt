@@ -1,0 +1,9 @@
+LICENSE
+README.md
+setup.py
+kore_fileformat.egg-info/PKG-INFO
+kore_fileformat.egg-info/SOURCES.txt
+kore_fileformat.egg-info/dependency_links.txt
+kore_fileformat.egg-info/not-zip-safe
+kore_fileformat.egg-info/top_level.txt
+language-bindings/__init__.py

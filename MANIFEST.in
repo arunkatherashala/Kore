@@ -1,0 +1,3 @@
+include README.md
+include LICENSE
+recursive-include kore_fileformat *.py

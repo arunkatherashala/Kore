@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=77", "wheel", "build"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kore-fileformat"
+version = "0.1.0"
+description = "KORE Binary Format - Complete 8-language ecosystem for efficient data storage and querying"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [
+  { name = "Arun Kather Ashala", email = "arunkatherashala@gmail.com" }
+]
+license-files = ["LICENSE"]
+keywords = ["kore", "binary", "format", "data", "storage"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/arunkatherashala/Kore"
+Repository = "https://github.com/arunkatherashala/Kore"
+Issues = "https://github.com/arunkatherashala/Kore/issues"
+
+[tool.setuptools]
+packages = ["kore_fileformat"]
+
