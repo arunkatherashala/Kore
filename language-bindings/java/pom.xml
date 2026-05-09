@@ -5,7 +5,7 @@
                              http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>io.kore</groupId>
+    <groupId>com.github.arunkatherashala</groupId>
     <artifactId>kore-fileformat</artifactId>
     <version>0.1.0</version>
     <packaging>jar</packaging>
@@ -101,7 +101,6 @@
                 <configuration>
                     <publishingServerId>central</publishingServerId>
                     <tokenAuth>true</tokenAuth>
-                    <skipSigning>true</skipSigning>
                 </configuration>
             </plugin>
         </plugins>
