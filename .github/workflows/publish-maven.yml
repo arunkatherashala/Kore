@@ -37,10 +37,13 @@ jobs:
         EOF
         gpg --batch --generate-key /tmp/gpg_key_gen.txt
         gpg --list-keys
-        # Export secret key
+        # Export and upload public key to keys.openpgp.org
         GPG_KEY_ID=$(gpg --list-secret-keys --with-colons | grep uid -A 1 | head -2 | tail -1 | cut -d: -f5)
         echo "GPG_KEY_ID=$GPG_KEY_ID" >> $GITHUB_ENV
-        echo "GPG_KEY_FOUND=true" >> $GITHUB_ENV
+        gpg --export --armor $GPG_KEY_ID > /tmp/public_key.asc
+        echo "Uploading public key to PGP server..."
+        curl -X POST --data-binary @/tmp/public_key.asc https://keys.openpgp.org/vks/v1/upload
+        echo "Public key uploaded"
 
     - name: Build with Maven
       run: |
