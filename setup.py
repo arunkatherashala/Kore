@@ -15,6 +15,9 @@ setup(
         "Issue Tracker": "https://github.com/arunkatherashala/Kore/issues",
     },
     packages=["kore_fileformat"],
+    package_data={
+        "kore_fileformat": [],
+    },
     classifiers=[
         "Development Status :: 5 - Production/Stable",
         "Intended Audience :: Developers",
