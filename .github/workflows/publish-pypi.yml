@@ -33,15 +33,10 @@ jobs:
       run: |
         python -m build
     
-    - name: Check wheel metadata
+    - name: Verify wheel with twine
       run: |
-        echo "Wheel file contents:"
-        unzip -l dist/kore_fileformat-0.1.0-py3-none-any.whl
-        echo -e "\n\nMETADATA file:"
-        unzip -p dist/kore_fileformat-0.1.0-py3-none-any.whl kore_fileformat-0.1.0.dist-info/METADATA | head -20
-        echo -e "\n\nInstalling twine and checking:"
         pip install twine
-        twine check dist/*
+        twine check dist/* --strict
     
     - name: Publish to PyPI
       uses: pypa/gh-action-pypi-publish@v1.10.0
