@@ -21,35 +21,15 @@ jobs:
         server-username: MAVEN_USERNAME
         server-password: MAVEN_PASSWORD
 
-    - name: Set up GPG
+    - name: Import GPG key
+      env:
+        GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
       run: |
-        # Create a simple GPG key for signing
         mkdir -p ~/.gnupg
-        echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
-        
-        # Create a minimal GPG batch file for key generation
-        cat > /tmp/gen_key.batch <<EOF
-        %echo Generating GPG key
-        Key-Type: RSA
-        Key-Length: 2048
-        Name-Real: KORE CI
-        Name-Email: ci@kore.local
-        Expire-Date: 0
-        %commit
-        %echo done
-        EOF
-        
-        # Import an environment variable with the secret key
-        # For this test, we'll create a test key and use it
-        gpg --batch --generate-key /tmp/gen_key.batch 2>&1 || true
-        
-        # Get the key ID
-        GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format SHORT | grep "sec" | head -1 | awk '{print $1}' | cut -d'/' -f2)
-        echo "GPG_KEY_ID=${GPG_KEY_ID}" >> $GITHUB_ENV
-        
-        # Export public key
-        gpg --export --armor "${GPG_KEY_ID}" > ~/.gnupg/pubkey.asc
-        echo "GPG key generated: ${GPG_KEY_ID}"
+        echo "$GPG_PRIVATE_KEY" | gpg --batch --import --no-tty
+        echo "GPG key imported successfully"
+        gpg --list-secret-keys --keyid-format SHORT
 
     - name: Build with Maven
       run: |
@@ -60,6 +40,7 @@ jobs:
       env:
         MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
         MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
+        GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
       run: |
         cd language-bindings/java
-        mvn clean deploy -Dgpg.defaultKeyring=false -Dgpg.publicKeyring=$HOME/.gnupg/pubkey.asc
+        mvn clean deploy -Dgpg.passphrase="${GPG_PASSPHRASE}"
