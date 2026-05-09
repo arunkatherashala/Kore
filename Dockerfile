@@ -10,14 +10,10 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
     git \
-    openjdk-17-jdk \
     python3 \
     python3-pip \
-    golang-go \
-    scala \
     rustc \
     cargo \
-    maven \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -28,21 +24,6 @@ COPY . .
 
 # Build Rust core
 RUN cargo build --release
-
-# Build PyO3 bindings
-RUN cd rust-bindings && cargo build --release
-
-# Build Hadoop InputFormat
-RUN cd hadoop && mvn clean package -DskipTests
-
-# Build Spark DataSourceV2
-RUN cd spark-scala && sbt clean package
-
-# Build Go bindings
-RUN cd language-bindings/go && go build ./kore
-
-# Build Java JNI
-RUN cd language-bindings/java && javac -d . io/kore/bindings/*.java
 
 # Install Python package
 RUN pip install -e .
@@ -55,4 +36,4 @@ ENTRYPOINT ["/bin/bash"]
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python3 -c "import kore_parser; print('Kore Format OK')" || exit 1
+    CMD python3 -c "import kore_fileformat; print('Kore Format OK')" || exit 1
