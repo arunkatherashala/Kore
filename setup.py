@@ -1,44 +1,17 @@
 from setuptools import setup
 
+with open("README.md", "r", encoding="utf-8") as fh:
+    long_description = fh.read()
+
 setup(
     name="kore-fileformat",
     version="0.1.0",
     author="Arun Kather Ashala",
     author_email="arunkatherashala@gmail.com",
-    description="KORE Binary Format - Complete 8-language ecosystem for efficient data storage and querying",
-    long_description=open("README.md", encoding="utf-8").read(),
+    description="KORE Binary Format - Complete 8-language ecosystem",
+    long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/arunkatherashala/Kore",
-    project_urls={
-        "Documentation": "https://github.com/arunkatherashala/Kore/blob/main/DEPLOYMENT_GUIDE.md",
-        "Source Code": "https://github.com/arunkatherashala/Kore",
-        "Issue Tracker": "https://github.com/arunkatherashala/Kore/issues",
-    },
     packages=["kore_fileformat"],
-    package_data={
-        "kore_fileformat": [],
-    },
-    classifiers=[
-        "Development Status :: 5 - Production/Stable",
-        "Intended Audience :: Developers",
-        "Intended Audience :: Science/Research",
-        "Topic :: Software Development :: Libraries :: Python Modules",
-        "Topic :: Database",
-        "Topic :: Scientific/Engineering :: Information Analysis",
-        "License :: OSI Approved :: MIT License",
-        "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
-        "Programming Language :: Python :: 3.12",
-        "Operating System :: OS Independent",
-        "Operating System :: Microsoft :: Windows",
-        "Operating System :: POSIX :: Linux",
-        "Operating System :: MacOS",
-    ],
     python_requires=">=3.8",
-    keywords="kore binary format data storage compression hadoop spark",
-    include_package_data=True,
-    zip_safe=False,
 )
