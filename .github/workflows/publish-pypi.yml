@@ -27,7 +27,7 @@ jobs:
     
     - name: Clean build artifacts
       run: |
-        rm -rf build/ dist/ *.egg-info/ .eggs/ || true
+        rm -rf build/ dist/ *.egg-info/ kore_fileformat.egg-info/ .eggs/ || true
     
     - name: Build distribution packages
       run: |
