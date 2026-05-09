@@ -29,5 +29,13 @@ jobs:
     - name: Check package
       run: python -m twine check dist/*
     
+    - name: Inspect dist files
+      run: |
+        echo "Files in dist directory:"
+        ls -lah dist/
+        echo ""
+        echo "Wheel contents:"
+        python -m zipfile -l dist/*.whl | head -20
+    
     - name: Publish to PyPI
       uses: pypa/gh-action-pypi-publish@v1.10.0
