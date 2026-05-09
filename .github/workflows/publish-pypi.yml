@@ -34,13 +34,12 @@ jobs:
         echo "Files in dist directory:"
         ls -lah dist/
         echo ""
-        echo "Wheel contents:"
-        python -m zipfile -l dist/*.whl | head -20
+        echo "Wheel metadata:"
+        unzip -p dist/*.whl '*.dist-info/METADATA' | head -30
     
     - name: Publish to PyPI
       uses: pypa/gh-action-pypi-publish@v1.10.0
       with:
         skip-existing: false
-        verify-metadata: false
 
 
