@@ -31,3 +31,7 @@ Homepage = "https://github.com/arunkatherashala/Kore"
 
 [tool.setuptools]
 packages = ["kore_fileformat"]
+include-package-data = false
+
+[tool.setuptools.package-dir]
+"" = "."
