@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y \
     openjdk-17-jdk \
     python3 \
     python3-pip \
-    golang-1.19 \
+    golang-go \
     scala \
     rustc \
     cargo \
