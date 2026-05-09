@@ -21,6 +21,27 @@ jobs:
         server-username: MAVEN_USERNAME
         server-password: MAVEN_PASSWORD
 
+    - name: Generate GPG Key for Signing
+      run: |
+        mkdir -p ~/.gnupg
+        cat > /tmp/gpg_key_gen.txt <<EOF
+        %echo Generating GPG key for Maven Central
+        Key-Type: RSA
+        Key-Length: 2048
+        Name-Real: KORE Build System
+        Name-Email: build@kore.example.com
+        Expire-Date: 0
+        %no-protection
+        %commit
+        %echo done
+        EOF
+        gpg --batch --generate-key /tmp/gpg_key_gen.txt
+        gpg --list-keys
+        # Export secret key
+        GPG_KEY_ID=$(gpg --list-secret-keys --with-colons | grep uid -A 1 | head -2 | tail -1 | cut -d: -f5)
+        echo "GPG_KEY_ID=$GPG_KEY_ID" >> $GITHUB_ENV
+        echo "GPG_KEY_FOUND=true" >> $GITHUB_ENV
+
     - name: Build with Maven
       run: |
         cd language-bindings/java
