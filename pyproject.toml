@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "KORE Binary Format - Complete 8-language ecosystem for efficient data storage and querying"
 readme = "README.md"
 requires-python = ">=3.8"
+license = {text = "MIT"}
 authors = [
     {name = "Arun Kather Ashala", email = "arunkatherashala@gmail.com"}
 ]
@@ -31,7 +32,3 @@ Homepage = "https://github.com/arunkatherashala/Kore"
 
 [tool.setuptools]
 packages = ["kore_fileformat"]
-include-package-data = false
-
-[tool.setuptools.package-dir]
-"" = "."
