@@ -1,4 +1,4 @@
-from setuptools import setup, find_packages
+from setuptools import setup
 
 setup(
     name="kore-fileformat",
@@ -14,7 +14,7 @@ setup(
         "Source Code": "https://github.com/arunkatherashala/Kore",
         "Issue Tracker": "https://github.com/arunkatherashala/Kore/issues",
     },
-    packages=find_packages(),
+    packages=["kore_fileformat"],
     classifiers=[
         "Development Status :: 5 - Production/Stable",
         "Intended Audience :: Developers",
