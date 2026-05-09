@@ -27,6 +27,7 @@ jobs:
       run: |
         VERSION=${GITHUB_REF#refs/tags/}
         VERSION=${VERSION#refs/heads/}
+        VERSION=${VERSION#release/}
         echo "version=${VERSION}" >> $GITHUB_OUTPUT
     
     - name: Build and push Docker image
