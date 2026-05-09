@@ -33,6 +33,15 @@ jobs:
       run: |
         python -m build
     
+    - name: Inspect wheel contents
+      run: |
+        echo "===== Wheel contents ====="
+        unzip -l dist/kore_fileformat-0.1.0-py3-none-any.whl | grep -E "METADATA|PKG-INFO|WHEEL"
+        echo -e "\n===== METADATA file contents ====="
+        unzip -p dist/kore_fileformat-0.1.0-py3-none-any.whl "kore_fileformat-0.1.0.dist-info/METADATA" || echo "METADATA file not found"
+        echo -e "\n===== Setuptools info ====="
+        python -m pip show setuptools wheel build
+    
     - name: Verify wheel with twine
       run: |
         pip install twine
