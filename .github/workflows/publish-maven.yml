@@ -17,12 +17,15 @@ jobs:
       with:
         java-version: '11'
         distribution: 'temurin'
-    
+        server-id: central
+        server-username: MAVEN_USERNAME
+        server-password: MAVEN_PASSWORD
+
     - name: Build with Maven
       run: |
         cd language-bindings/java
         mvn clean package
-    
+
     - name: Publish to Maven Central
       env:
         MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
