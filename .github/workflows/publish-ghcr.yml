@@ -28,7 +28,11 @@ jobs:
     
     - name: Extract version
       id: version
-      run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/}
+        VERSION=${VERSION#refs/heads/}
+        VERSION=${VERSION#release/}
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
     
     - name: Build and push image to GHCR
       uses: docker/build-push-action@v5
@@ -36,7 +40,6 @@ jobs:
         context: .
         push: true
         tags: |
-          ghcr.io/${{ github.repository }}:latest
-          ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}
-        cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
-        cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=max
+          ghcr.io/${{ github.repository_owner }}/kore:latest
+          ghcr.io/${{ github.repository_owner }}/kore:${{ steps.version.outputs.version }}
+        cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/kore:buildcache,mode=max
