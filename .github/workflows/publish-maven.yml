@@ -29,4 +29,4 @@ jobs:
         MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
       run: |
         cd language-bindings/java
-        mvn clean deploy -P release
+        mvn clean deploy
