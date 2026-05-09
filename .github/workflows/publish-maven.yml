@@ -21,39 +21,15 @@ jobs:
         server-username: MAVEN_USERNAME
         server-password: MAVEN_PASSWORD
 
-    - name: Generate GPG Key for Signing
-      run: |
-        mkdir -p ~/.gnupg
-        cat > /tmp/gpg_key_gen.txt <<EOF
-        %echo Generating GPG key for Maven Central
-        Key-Type: RSA
-        Key-Length: 2048
-        Name-Real: KORE Build System
-        Name-Email: build@kore.example.com
-        Expire-Date: 0
-        %no-protection
-        %commit
-        %echo done
-        EOF
-        gpg --batch --generate-key /tmp/gpg_key_gen.txt
-        gpg --list-keys
-        # Export and upload public key to keys.openpgp.org
-        GPG_KEY_ID=$(gpg --list-secret-keys --with-colons | grep uid -A 1 | head -2 | tail -1 | cut -d: -f5)
-        echo "GPG_KEY_ID=$GPG_KEY_ID" >> $GITHUB_ENV
-        gpg --export --armor $GPG_KEY_ID > /tmp/public_key.asc
-        echo "Uploading public key to PGP server..."
-        curl -X POST --data-binary @/tmp/public_key.asc https://keys.openpgp.org/vks/v1/upload
-        echo "Public key uploaded"
-
     - name: Build with Maven
       run: |
         cd language-bindings/java
         mvn clean package
 
-    - name: Publish to Maven Central
+    - name: Publish to Maven Central (No Signing)
       env:
         MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
         MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
       run: |
         cd language-bindings/java
-        mvn clean deploy
+        mvn clean deploy -Dskip.gpg.signing=true
