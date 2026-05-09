@@ -1,0 +1,46 @@
+name: Publish to Docker Hub
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+    
+    - name: Extract version
+      id: version
+      run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+    
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: |
+          ${{ secrets.DOCKER_USERNAME }}/kore:latest
+          ${{ secrets.DOCKER_USERNAME }}/kore:${{ steps.version.outputs.version }}
+        cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/kore:buildcache
+        cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/kore:buildcache,mode=max
+    
+    - name: Docker Hub description
+      uses: peter-evans/dockerhub-description@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+        repository: ${{ secrets.DOCKER_USERNAME }}/kore
+        short-description: "KORE Binary Format - Complete 8-language ecosystem"
+        readme-filepath: ./README.md
