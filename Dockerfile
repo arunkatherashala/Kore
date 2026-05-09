@@ -20,11 +20,11 @@ COPY . .
 # Build Rust core
 RUN cargo build --release
 
-# Install Python package
-RUN pip install -e .
+# Install Python package (bypass externally-managed-environment)
+RUN pip install --break-system-packages -e .
 
 # Install Python dependencies
-RUN pip install boto3 google-cloud-storage azure-storage-blob
+RUN pip install --break-system-packages boto3 google-cloud-storage azure-storage-blob
 
 # Create entry point
 ENTRYPOINT ["/bin/bash"]
