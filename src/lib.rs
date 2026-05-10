@@ -11,6 +11,10 @@ pub mod query_engine;
 pub mod query_cache;
 pub mod index_manager;
 pub mod distributed_engine;
+pub mod query_parallelization;
+pub mod memory_pooling;
+pub mod join_optimization;
+pub mod baseline_benchmarking;
 
 #[cfg(feature = "kore_lite_compat")]
 pub mod kore_lite;
