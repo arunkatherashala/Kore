@@ -17,6 +17,11 @@ pub mod join_optimization;
 pub mod baseline_benchmarking;
 pub mod query_optimization_engine;
 pub mod realworld_benchmarking;
+pub mod deployment;
+pub mod comprehensive_testing;
+pub mod performance_profiling;
+pub mod advanced_features;
+pub mod documentation;
 
 #[cfg(feature = "kore_lite_compat")]
 pub mod kore_lite;
