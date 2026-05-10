@@ -1,0 +1,25 @@
+[package]
+name = "kore_spark"
+version = "0.2.0"
+edition = "2021"
+authors = ["Katherashala Sai Arun Kumar"]
+license = "Proprietary"
+repository = "https://github.com/arunkatherashala/Kore"
+description = "Apache Spark DataSource integration for KORE columnar format"
+
+[dependencies]
+kore_fileformat = { path = "../../", version = "0.1.0" }
+jni = "0.21"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[lib]
+name = "kore_spark"
+crate-type = ["cdylib", "rlib"]
+
+[[example]]
+name = "spark_integration"
+path = "examples/spark_integration.rs"
+
+[dev-dependencies]
+tempfile = "3.8"
