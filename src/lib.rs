@@ -8,6 +8,8 @@ pub mod kore_txn;
 pub mod gorilla;
 pub mod benchmarks;
 pub mod query_engine;
+pub mod query_cache;
+pub mod index_manager;
 pub mod distributed_engine;
 
 #[cfg(feature = "kore_lite_compat")]

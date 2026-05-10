@@ -14,18 +14,48 @@ fn main() {
         "tools/sample_small.kore",
     ];
 
-    // Run compression benchmarks
-    println!("📊 Compression Benchmarks");
-    println!("───────────────────────────────────────────────────────────────");
-    
-    let results = BenchmarkEngine::benchmark_files(sample_files);
-    BenchmarkEngine::print_report(&results);
+    // Filter to only existing files
+    let existing_files: Vec<&str> = sample_files
+        .into_iter()
+        .filter(|f| std::path::Path::new(f).exists())
+        .collect();
 
-    // Export to CSV
-    if let Err(e) = BenchmarkEngine::export_csv(&results, "benchmark_results.csv") {
-        eprintln!("Warning: Could not export CSV: {}", e);
+    if existing_files.is_empty() {
+        println!("⚠️  No sample KORE files found. Create sample files in tools/ directory:");
+        println!("   - tools/sample_10mb.kore");
+        println!("   - tools/sample_small.kore\n");
     } else {
-        println!("✓ Benchmark results exported to benchmark_results.csv");
+        // Run compression benchmarks
+        println!("📊 Compression Benchmarks");
+        println!("───────────────────────────────────────────────────────────────");
+        
+        let results = BenchmarkEngine::benchmark_files(existing_files.clone());
+        BenchmarkEngine::print_report(&results);
+
+        // Export to CSV
+        if let Err(e) = BenchmarkEngine::export_csv(&results, "benchmark_results.csv") {
+            eprintln!("Warning: Could not export CSV: {}", e);
+        } else {
+            println!("✓ Benchmark results exported to benchmark_results.csv");
+        }
+
+        // Detailed reports
+        println!("\n📋 Detailed Benchmark Reports");
+        println!("───────────────────────────────────────────────────────────────\n");
+        
+        for file in existing_files {
+            match BenchmarkEngine::benchmark_kore_detailed(file) {
+                Ok(bench) => {
+                    println!("File: {}", bench.filename);
+                    println!("  Original Size:  {:.2} MB", bench.original_size_mb);
+                    println!("  Compressed:     {:.2} MB ({:.1}% saved)", 
+                        bench.compressed_size_mb, bench.compression_percentage);
+                    println!("  Throughput:     {:.2} MB/s", bench.throughput_mbps);
+                    println!("  Est. Rows:      {}\n", bench.estimated_rows);
+                }
+                Err(e) => eprintln!("Error benchmarking {}: {}", file, e),
+            }
+        }
     }
 
     // Compare compression formats

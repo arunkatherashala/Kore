@@ -12,11 +12,17 @@ pub enum Token {
     And,
     Or,
     Limit,
+    Join,
+    Inner,
+    Left,
+    Right,
+    On,
     Star,
     Comma,
     Equal,
     Greater,
     Less,
+    Dot,
     Identifier(String),
     Number(f64),
     String(String),
@@ -28,8 +34,26 @@ pub enum Token {
 pub struct Query {
     pub select_cols: Vec<String>,
     pub table: String,
+    pub joins: Vec<JoinClause>,
     pub filters: Vec<Filter>,
     pub limit: Option<usize>,
+}
+
+/// JOIN clause
+#[derive(Debug, Clone)]
+pub struct JoinClause {
+    pub join_type: JoinType,
+    pub table: String,
+    pub left_col: String,
+    pub right_col: String,
+}
+
+/// JOIN types
+#[derive(Debug, Clone, PartialEq)]
+pub enum JoinType {
+    Inner,
+    Left,
+    Right,
 }
 
 /// Filter condition
@@ -174,6 +198,10 @@ impl Lexer {
                 self.advance();
                 Token::Less
             }
+            Some('.') => {
+                self.advance();
+                Token::Dot
+            }
             Some('"') | Some('\'') => {
                 self.advance();
                 let quote = self.input[self.pos - 1];
@@ -198,6 +226,11 @@ impl Lexer {
                     "AND" => Token::And,
                     "OR" => Token::Or,
                     "LIMIT" => Token::Limit,
+                    "JOIN" => Token::Join,
+                    "INNER" => Token::Inner,
+                    "LEFT" => Token::Left,
+                    "RIGHT" => Token::Right,
+                    "ON" => Token::On,
                     _ => Token::Identifier(ident),
                 }
             }
@@ -244,13 +277,16 @@ impl Parser {
 
         // Parse table
         let table = match &self.current_token {
-            Token::Identifier(name) => {
+            Token::Identifier(name) => { let name = name.clone();
                 let t = name.clone();
                 self.advance();
                 t
             }
             _ => return Err("Expected table name".to_string()),
         };
+
+        // Parse JOIN clauses (optional)
+        let joins = self.parse_joins()?;
 
         // Parse WHERE clause (optional)
         let filters = if self.current_token == Token::Where {
@@ -278,6 +314,7 @@ impl Parser {
         Ok(Query {
             select_cols,
             table,
+            joins,
             filters,
             limit,
         })
@@ -292,7 +329,7 @@ impl Parser {
                     cols.push("*".to_string());
                     self.advance();
                 }
-                Token::Identifier(name) => {
+                Token::Identifier(name) => { let name = name.clone();
                     cols.push(name.clone());
                     self.advance();
                 }
@@ -314,7 +351,7 @@ impl Parser {
 
         loop {
             let col = match &self.current_token {
-                Token::Identifier(name) => {
+                Token::Identifier(name) => { let name = name.clone();
                     let c = name.clone();
                     self.advance();
                     c
@@ -358,6 +395,97 @@ impl Parser {
         }
 
         Ok(filters)
+    }
+
+    fn parse_joins(&mut self) -> Result<Vec<JoinClause>, String> {
+        let mut joins = Vec::new();
+
+        while self.current_token == Token::Join 
+            || self.current_token == Token::Inner 
+            || self.current_token == Token::Left 
+            || self.current_token == Token::Right {
+            
+            let join_type = if self.current_token == Token::Inner {
+                self.advance();
+                if self.current_token != Token::Join {
+                    return Err("Expected JOIN after INNER".to_string());
+                }
+                JoinType::Inner
+            } else if self.current_token == Token::Left {
+                self.advance();
+                if self.current_token != Token::Join {
+                    return Err("Expected JOIN after LEFT".to_string());
+                }
+                JoinType::Left
+            } else if self.current_token == Token::Right {
+                self.advance();
+                if self.current_token != Token::Join {
+                    return Err("Expected JOIN after RIGHT".to_string());
+                }
+                JoinType::Right
+            } else {
+                JoinType::Inner
+            };
+
+            self.advance(); // Skip JOIN token
+
+            // Parse table name
+            let join_table = match &self.current_token {
+                Token::Identifier(name) => { let name = name.clone();
+                    let t = name.clone();
+                    self.advance();
+                    t
+                }
+                _ => return Err("Expected table name after JOIN".to_string()),
+            };
+
+            // Expect ON
+            if self.current_token != Token::On {
+                return Err("Expected ON after JOIN table".to_string());
+            }
+            self.advance();
+
+            // Parse ON condition (e.g., table1.id = table2.id)
+            let left_col = self.parse_qualified_column()?;
+            
+            if self.current_token != Token::Equal {
+                return Err("Expected = in JOIN ON condition".to_string());
+            }
+            self.advance();
+
+            let right_col = self.parse_qualified_column()?;
+
+            joins.push(JoinClause {
+                join_type,
+                table: join_table,
+                left_col,
+                right_col,
+            });
+        }
+
+        Ok(joins)
+    }
+
+    fn parse_qualified_column(&mut self) -> Result<String, String> {
+        let col = match &self.current_token {
+            Token::Identifier(name) => name.clone(),
+            _ => return Err("Expected column name".to_string()),
+        };
+        self.advance();
+
+        // Handle table.column format
+        if self.current_token == Token::Dot {
+            self.advance();
+            match &self.current_token {
+                Token::Identifier(name) => { let name = name.clone();
+                    self.advance();
+                    Ok(format!("{}.{}", col, name))
+                }
+                _ => Err("Expected column name after dot".to_string()),
+            }
+        } else {
+            Ok(col)
+        }
     }
 }
 
@@ -478,11 +606,41 @@ mod tests {
         let query = Query {
             select_cols: vec!["name".to_string()],
             table: "users".to_string(),
+            joins: vec![],
             filters: vec![],
             limit: None,
         };
 
         let results = QueryExecutor::execute(&query, data);
         assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_parser_with_join() {
+        let mut parser = Parser::new("SELECT col1 FROM table1 INNER JOIN table2 ON table1.id = table2.id");
+        let query = parser.parse().unwrap();
+        assert_eq!(query.joins.len(), 1);
+        assert_eq!(query.joins[0].table, "table2");
+        assert_eq!(query.joins[0].join_type, JoinType::Inner);
+    }
+
+    #[test]
+    fn test_parser_with_left_join() {
+        let mut parser = Parser::new("SELECT * FROM users LEFT JOIN orders ON users.id = orders.user_id");
+        let query = parser.parse().unwrap();
+        assert_eq!(query.joins.len(), 1);
+        assert_eq!(query.joins[0].join_type, JoinType::Left);
+        assert_eq!(query.joins[0].left_col, "users.id");
+        assert_eq!(query.joins[0].right_col, "orders.user_id");
+    }
+
+    #[test]
+    fn test_lexer_join_tokens() {
+        let mut lexer = Lexer::new("JOIN INNER LEFT RIGHT ON");
+        assert_eq!(lexer.next_token(), Token::Join);
+        assert_eq!(lexer.next_token(), Token::Inner);
+        assert_eq!(lexer.next_token(), Token::Left);
+        assert_eq!(lexer.next_token(), Token::Right);
+        assert_eq!(lexer.next_token(), Token::On);
     }
 }
