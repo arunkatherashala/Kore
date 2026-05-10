@@ -5,6 +5,7 @@ pub mod kore;
 pub mod kore_v2;
 pub mod kore_query;
 pub mod kore_txn;
+pub mod gorilla;
 
 #[cfg(feature = "kore_lite_compat")]
 pub mod kore_lite;
