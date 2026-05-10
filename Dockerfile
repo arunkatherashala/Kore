@@ -36,13 +36,16 @@ RUN cd rust-bindings && cargo build --release
 RUN cd hadoop && mvn clean package -DskipTests
 
 # Build Spark DataSourceV2
-RUN cd spark-scala && sbt clean package
+RUN cd language-bindings/spark && cargo build --release
+
+# Build AWS Glue Connector
+RUN cd language-bindings/aws-glue && cargo build --release
 
 # Build Go bindings
 RUN cd language-bindings/go && go build ./kore
 
 # Build Java JNI
-RUN cd language-bindings/java && javac -d . io/kore/bindings/*.java
+RUN cd language-bindings/java && cargo build --release
 
 # Install Python package
 RUN pip install -e .

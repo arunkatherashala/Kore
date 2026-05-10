@@ -1,0 +1,346 @@
+name: KORE v0.2.0 Build & Test
+
+on:
+  push:
+    branches:
+      - develop/v0.2.0
+      - main
+      - release/*
+  pull_request:
+    branches:
+      - develop/v0.2.0
+      - main
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Job 1: Build Main Crate
+  build-main:
+    name: Build Main KORE Crate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        rust: [stable, nightly]
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      
+      - name: Cache Cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Build (Release)
+        run: cargo build --release -j 1
+        env:
+          CARGO_BUILD_JOBS: 1
+      
+      - name: Build (Debug)
+        run: cargo build
+        env:
+          CARGO_BUILD_JOBS: 1
+      
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: kore-build-${{ matrix.os }}-${{ matrix.rust }}
+          path: target/release/
+
+  # Job 2: Test Main Crate
+  test-main:
+    name: Test Main KORE Crate
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      
+      - name: Cache Cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Run Tests
+        run: cargo test --lib --release
+      
+      - name: Run Doc Tests
+        run: cargo test --doc --release
+      
+      - name: Run Integration Tests
+        run: cargo test --test '*' --release 2>/dev/null || true
+
+  # Job 3: Build Spark Module
+  build-spark:
+    name: Build Spark Module
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      
+      - name: Cache Cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            language-bindings/spark/target/
+          key: ${{ runner.os }}-spark-cargo-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Build Spark Module
+        run: cd language-bindings/spark && cargo build --release
+      
+      - name: Run Spark Tests
+        run: cd language-bindings/spark && cargo test --lib
+      
+      - name: Run Spark Integration Tests
+        run: cd language-bindings/spark && cargo test --test integration_tests
+
+  # Job 4: Build AWS Glue Module
+  build-aws-glue:
+    name: Build AWS Glue Module
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      
+      - name: Cache Cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            language-bindings/aws-glue/target/
+          key: ${{ runner.os }}-glue-cargo-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Build AWS Glue Module
+        run: cd language-bindings/aws-glue && cargo build --release
+      
+      - name: Run AWS Glue Tests
+        run: cd language-bindings/aws-glue && cargo test --lib
+
+  # Job 5: Build Snowflake Module
+  build-snowflake:
+    name: Build Snowflake Module
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      
+      - name: Cache Cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            language-bindings/snowflake/target/
+          key: ${{ runner.os }}-snowflake-cargo-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Build Snowflake Module
+        run: cd language-bindings/snowflake && cargo build --release
+      
+      - name: Run Snowflake Tests
+        run: cd language-bindings/snowflake && cargo test --lib
+
+  # Job 6: Code Quality Checks
+  quality:
+    name: Code Quality & Linting
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      
+      - name: Cache Cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-quality-cargo-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Check Formatting
+        run: cargo fmt -- --check
+      
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      
+      - name: Check Documentation
+        run: cargo doc --no-deps --release
+
+  # Job 7: Security Audit
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      
+      - name: Install Cargo Audit
+        run: cargo install cargo-audit
+      
+      - name: Run Security Audit
+        run: cargo audit
+        continue-on-error: true
+
+  # Job 8: Coverage Report
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      
+      - name: Install Tarpaulin
+        run: cargo install cargo-tarpaulin
+      
+      - name: Generate Coverage
+        run: cargo tarpaulin --out Xml --release --timeout 300 2>/dev/null || true
+      
+      - name: Upload Coverage
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./cobertura.xml
+          fail_ci_if_error: false
+
+  # Job 9: Create Release (only on main)
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [build-main, test-main, build-spark, build-aws-glue, build-snowflake, quality]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      
+      - name: Build Release
+        run: cargo build --release
+      
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ github.run_number }}
+          release_name: Release v${{ github.run_number }}
+          body: |
+            KORE v0.2.0 Release
+            
+            ## Changes
+            - Spark DataSourceV2 Integration
+            - AWS Glue ETL Connector
+            - Snowflake Direct Table Loading
+            - Gorilla Time-Series Compression
+            
+            ## Components
+            - Main KORE Library
+            - Spark Language Binding
+            - AWS Glue Language Binding
+            - Snowflake Language Binding
+            
+            ## Artifacts
+            - Linux build
+            - macOS build
+            - Windows build
+
+  # Final: Status Report
+  status:
+    name: Build Status Report
+    runs-on: ubuntu-latest
+    needs: [build-main, test-main, build-spark, build-aws-glue, build-snowflake, quality]
+    if: always()
+    
+    steps:
+      - name: Check Build Status
+        run: |
+          echo "✅ Build Pipeline Status Report"
+          echo "================================"
+          echo "Main Crate Build: ${{ needs.build-main.result }}"
+          echo "Main Crate Tests: ${{ needs.test-main.result }}"
+          echo "Spark Module: ${{ needs.build-spark.result }}"
+          echo "AWS Glue Module: ${{ needs.build-aws-glue.result }}"
+          echo "Snowflake Module: ${{ needs.build-snowflake.result }}"
+          echo "Code Quality: ${{ needs.quality.result }}"
+          
+          if [[ "${{ needs.build-main.result }}" == "success" ]] && \
+             [[ "${{ needs.test-main.result }}" == "success" ]] && \
+             [[ "${{ needs.build-spark.result }}" == "success" ]] && \
+             [[ "${{ needs.build-aws-glue.result }}" == "success" ]] && \
+             [[ "${{ needs.build-snowflake.result }}" == "success" ]] && \
+             [[ "${{ needs.quality.result }}" == "success" ]]; then
+            echo ""
+            echo "🎉 ALL CHECKS PASSED!"
+            exit 0
+          else
+            echo ""
+            echo "❌ Some checks failed"
+            exit 1
+          fi

@@ -1,0 +1,176 @@
+name: KORE Development Build
+
+on:
+  pull_request:
+    branches:
+      - develop/v0.2.0
+  push:
+    branches:
+      - develop/v0.2.0
+  schedule:
+    - cron: '0 2 * * *'  # Nightly at 2 AM UTC
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Development Build
+  dev-build:
+    name: Development Build & Test
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      
+      - name: Cache Cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-dev-cargo-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Build All Modules
+        run: |
+          echo "🔨 Building main crate..."
+          cargo build --release -j 1
+          
+          echo "🔨 Building Spark module..."
+          cd language-bindings/spark && cargo build --release && cd ../..
+          
+          echo "🔨 Building AWS Glue module..."
+          cd language-bindings/aws-glue && cargo build --release && cd ../..
+          
+          echo "🔨 Building Snowflake module..."
+          cd language-bindings/snowflake && cargo build --release && cd ../..
+      
+      - name: Run All Tests
+        run: |
+          echo "🧪 Running main crate tests..."
+          cargo test --lib --release
+          
+          echo "🧪 Running Gorilla tests..."
+          cargo test --lib gorilla:: --release
+          
+          echo "🧪 Running Spark tests..."
+          cd language-bindings/spark && cargo test --lib && cargo test --test integration_tests && cd ../..
+          
+          echo "🧪 Running AWS Glue tests..."
+          cd language-bindings/aws-glue && cargo test --lib && cd ../..
+          
+          echo "🧪 Running Snowflake tests..."
+          cd language-bindings/snowflake && cargo test --lib && cd ../..
+      
+      - name: Benchmark
+        run: |
+          echo "⚡ Running benchmarks..."
+          # Placeholder for benchmark suite
+          echo "Benchmarks would run here"
+
+  # Format Check
+  format-check:
+    name: Format Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt
+      
+      - name: Check Format
+        run: cargo fmt -- --check
+
+  # Lint Check
+  lint:
+    name: Lint Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: clippy
+      
+      - name: Run Clippy
+        run: cargo clippy --all-targets -- -W clippy::all
+
+  # Dependency Check
+  deps:
+    name: Dependency Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Check Outdated Dependencies
+        run: |
+          cargo install cargo-outdated
+          cargo outdated || true
+      
+      - name: Check Duplicate Dependencies
+        run: |
+          cargo install cargo-deny
+          cargo deny check || true
+
+  # Documentation
+  docs:
+    name: Documentation Build
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      
+      - name: Build Docs
+        run: cargo doc --no-deps --document-private-items
+
+  # Report
+  report:
+    name: Build Report
+    runs-on: ubuntu-latest
+    needs: [dev-build, format-check, lint, deps, docs]
+    if: always()
+    
+    steps:
+      - name: Generate Report
+        run: |
+          echo "🏗️ KORE Development Build Report"
+          echo "=================================="
+          echo ""
+          echo "Build Status: ${{ needs.dev-build.result }}"
+          echo "Format Check: ${{ needs.format-check.result }}"
+          echo "Lint Check: ${{ needs.lint.result }}"
+          echo "Dependency Check: ${{ needs.deps.result }}"
+          echo "Documentation: ${{ needs.docs.result }}"
+          echo ""
+          
+          if [[ "${{ needs.dev-build.result }}" == "success" ]] && \
+             [[ "${{ needs.format-check.result }}" == "success" ]] && \
+             [[ "${{ needs.lint.result }}" == "success" ]] && \
+             [[ "${{ needs.docs.result }}" == "success" ]]; then
+            echo "✅ All development checks passed!"
+          else
+            echo "⚠️ Some checks need attention"
+          fi
