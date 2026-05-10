@@ -15,6 +15,8 @@ pub mod query_parallelization;
 pub mod memory_pooling;
 pub mod join_optimization;
 pub mod baseline_benchmarking;
+pub mod query_optimization_engine;
+pub mod realworld_benchmarking;
 
 #[cfg(feature = "kore_lite_compat")]
 pub mod kore_lite;
