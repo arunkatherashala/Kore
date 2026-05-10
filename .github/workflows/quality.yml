@@ -1,0 +1,58 @@
+name: Code Quality & Security
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  quality-checks:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+    
+    - name: Check formatting
+      run: cargo fmt -- --check
+    
+    - name: Run clippy
+      run: cargo clippy --all-targets --all-features -- -D warnings
+    
+    - name: Check for unsafe code
+      run: |
+        $unsafe_count = (cargo build --release 2>&1 | Select-String "unsafe" | Measure-Object).Count
+        if ($unsafe_count -gt 0) {
+          Write-Host "❌ Found unsafe code blocks: $unsafe_count"
+          exit 1
+        } else {
+          Write-Host "✅ No unsafe code blocks found"
+        }
+    
+    - name: Security audit
+      run: |
+        # Install cargo-audit if not present
+        cargo install cargo-audit --locked 2>$null
+        cargo audit
+      continue-on-error: true
+    
+    - name: Check dependencies
+      run: cargo tree --depth 1
+    
+    - name: Build documentation
+      run: cargo doc --no-deps --release
+    
+    - name: Test documentation examples
+      run: cargo test --doc
+    
+    - name: Upload code quality report
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: code-quality-report
+        path: target/
