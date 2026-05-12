@@ -68,6 +68,12 @@ pip install kore-fileformat
 </dependency>
 ```
 
+### Using npm (JavaScript/Node.js)
+
+```bash
+npm install kore-fileformat
+```
+
 ---
 
 ## 📚 Usage Examples
@@ -118,7 +124,29 @@ public class Main {
 }
 ```
 
----
+### JavaScript Example
+
+```javascript
+const { Kore } = require('kore-fileformat');
+
+async function main() {
+    const schema = {
+        fields: [
+            { name: 'id', type: 'int64' },
+            { name: 'value', type: 'float64' }
+        ]
+    };
+    
+    const data = [
+        { id: 1, value: 10.5 },
+        { id: 2, value: 20.3 }
+    ];
+    
+    // Write your data
+    await Kore.write('data.kore', schema, data);
+}
+
+main();
 
 ## 📊 Performance Benchmarks
 
@@ -142,7 +170,7 @@ Memory Usage   | 100 MB    | 800 MB    | 600 MB    | 2000 MB
 ```
 ┌─────────────────────────────────────┐
 │   Multi-Language SDK Layer          │
-│  Python | Java | Rust | Go | Scala  │
+│ Python | Java | Rust | Node.js | Go │
 └────────────────┬────────────────────┘
                  │
 ┌────────────────▼────────────────────┐

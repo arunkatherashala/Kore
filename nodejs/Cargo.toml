@@ -1,0 +1,27 @@
+[package]
+name = "kore-nodejs"
+version = "0.4.0"
+edition = "2021"
+description = "Node.js bindings for KORE binary file format"
+license = "MIT"
+authors = ["Katherashala Sai Arun Kumar <arunkatherashala@gmail.com>"]
+
+[dependencies]
+napi = { version = "2.14", features = ["napi6"] }
+napi-derive = "2.14"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+
+[build-dependencies]
+napi-build = "2.1"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+lto = true
+strip = true
+opt-level = 3

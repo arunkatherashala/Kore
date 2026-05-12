@@ -1,0 +1,62 @@
+name: Publish to npm
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+        registry-url: 'https://registry.npmjs.org'
+    
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+    
+    - name: Install dependencies
+      run: |
+        cd nodejs
+        npm install
+    
+    - name: Build bindings
+      run: |
+        cd nodejs
+        npm run build
+    
+    - name: Run tests
+      run: |
+        cd nodejs
+        npm test
+    
+    - name: Publish to npm
+      run: |
+        cd nodejs
+        npm publish
+      env:
+        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    
+    - name: Create Release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        body: |
+          KORE Node.js bindings v${{ github.ref_name }} published to npm!
+          
+          Install with:
+          ```bash
+          npm install kore-fileformat@${{ github.ref_name }}
+          ```
