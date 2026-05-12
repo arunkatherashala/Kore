@@ -1,9 +1,0 @@
-KORE-K
-SCHEMA name:str:dict age:int:delta salary:float:plain dept:str:dict active:bool:rle
-ROWS 5
-COL name Alice^Bob^Charlie^Diana^Eve*0,1,2,3,4
-COL age 25,5,-5,10,-7
-COL salary 90000.0,120000.0,90000.0,150000.0,95000.0
-COL dept Engineering^Management*0,1,0,1,0
-COL active 4~true,1~false
-END

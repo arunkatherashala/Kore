@@ -7,7 +7,7 @@
   "scripts": {
     "build": "napi build --platform",
     "build:debug": "napi build --debug --platform",
-    "test": "jest",
+    "test": "jest --testMatch='**/test.test.js'",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

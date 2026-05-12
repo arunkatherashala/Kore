@@ -10,9 +10,12 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
     git \
+    libssl-dev \
+    pkg-config \
     openjdk-17-jdk \
     python3 \
     python3-pip \
+    python3-dev \
     golang \
     scala \
     rustc \
@@ -27,7 +30,7 @@ WORKDIR /app
 COPY . .
 
 # Build Rust core
-RUN cargo build --release
+RUN cargo build --release --locked
 
 # Build PyO3 bindings
 RUN cd rust-bindings && cargo build --release

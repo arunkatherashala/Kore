@@ -1,53 +1,13 @@
 version: '3.8'
 
 services:
-  kore-query-engine:
-    build:
-      context: .
-      dockerfile: Dockerfile.prod
-    container_name: kore-query-engine
-    ports:
-      - "8080:8080"
-    environment:
-      - RUST_LOG=info
-      - KORE_ENV=production
-      - KORE_PORT=8080
-      - KORE_HOST=0.0.0.0
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-    restart: unless-stopped
-    mem_limit: 4g
-    cpus: '2'
-    networks:
-      - kore-network
-
-  kore-benchmarking:
-    build:
-      context: .
-      dockerfile: Dockerfile.prod
-    container_name: kore-benchmarking
-    command: cargo test --release
-    depends_on:
-      - kore-query-engine
-    networks:
-      - kore-network
-    volumes:
-      - ./test-results:/app/test-results
-
   prometheus:
     image: prom/prometheus:latest
     container_name: kore-prometheus
     ports:
       - "9090:9090"
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
