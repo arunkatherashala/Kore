@@ -7,7 +7,7 @@
 
     <groupId>io.kore</groupId>
     <artifactId>kore-hadoop</artifactId>
-    <version>0.1.0</version>
+    <version>1.0.0</version>
     <packaging>jar</packaging>
 
     <name>Kore Hadoop Integration</name>

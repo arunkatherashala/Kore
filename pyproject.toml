@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kore-fileformat"
-version = "0.1.0"
+version = "1.0.0"
 description = "KORE Binary Format - Complete 8-language ecosystem for efficient data storage and querying"
 readme = "README.md"
 requires-python = ">=3.8"

@@ -3,7 +3,7 @@ FROM ubuntu:22.04
 
 LABEL maintainer="Arun Kather Ashala <arunkatherashala@gmail.com>"
 LABEL description="KORE Binary Format - Complete 8-language ecosystem"
-LABEL version="0.1.0"
+LABEL version="1.0.0"
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y \
     openjdk-17-jdk \
     python3 \
     python3-pip \
-    golang-1.19 \
+    golang \
     scala \
     rustc \
     cargo \

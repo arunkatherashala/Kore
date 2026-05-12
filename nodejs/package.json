@@ -1,6 +1,6 @@
 {
   "name": "kore-fileformat",
-  "version": "0.4.0",
+  "version": "1.0.0",
   "description": "KORE - Killer Optimized Record Exchange: 50x faster than Parquet, 10x smaller than JSON",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
