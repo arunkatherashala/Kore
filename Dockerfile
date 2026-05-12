@@ -1,26 +1,15 @@
 # Multi-language Kore Format Runtime
-FROM ubuntu:22.04
+FROM rust:latest
 
 LABEL maintainer="Arun Kather Ashala <arunkatherashala@gmail.com>"
-LABEL description="KORE Binary Format - Complete 8-language ecosystem"
+LABEL description="KORE Binary Format - Rust Runtime"
 LABEL version="1.0.0"
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    curl \
-    git \
-    libssl-dev \
-    pkg-config \
-    openjdk-17-jdk \
     python3 \
     python3-pip \
     python3-dev \
-    golang \
-    scala \
-    rustc \
-    cargo \
-    maven \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
