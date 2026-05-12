@@ -30,31 +30,10 @@ WORKDIR /app
 COPY . .
 
 # Build Rust core
-RUN cargo build --release --locked
-
-# Build PyO3 bindings
-RUN cd rust-bindings && cargo build --release
-
-# Build Hadoop InputFormat
-RUN cd hadoop && mvn clean package -DskipTests
-
-# Build Spark DataSourceV2
-RUN cd language-bindings/spark && cargo build --release
-
-# Build AWS Glue Connector
-RUN cd language-bindings/aws-glue && cargo build --release
-
-# Build Go bindings
-RUN cd language-bindings/go && go build ./kore
-
-# Build Java JNI
-RUN cd language-bindings/java && cargo build --release
+RUN cargo build --release
 
 # Install Python package
 RUN pip install -e .
-
-# Install Python dependencies
-RUN pip install boto3 google-cloud-storage azure-storage-blob
 
 # Create entry point
 ENTRYPOINT ["/bin/bash"]
