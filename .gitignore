@@ -6,3 +6,6 @@
 *.exe
 .vscode/
 .idea/
+.venv/
+venv/
+env/
