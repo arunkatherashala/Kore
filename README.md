@@ -196,6 +196,54 @@ Memory Usage   | 100 MB    | 800 MB    | 600 MB    | 2000 MB
 
 ---
 
+## ☁️ Cloud Connectors
+
+KORE provides native cloud storage integration for seamless data access:
+
+### AWS S3 Connector
+
+Read and write KORE files directly from AWS S3 with built-in caching:
+
+```rust
+use kore_fileformat::s3_reader::S3Reader;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create S3 reader
+    let mut reader = S3Reader::new("us-east-1")?;
+    reader.with_cache("./cache")?;
+    
+    // Read from S3
+    let data = reader.read_file("my-bucket", "data/file.kore").await?;
+    
+    // Write to S3
+    reader.write_file("my-bucket", "output.kore", &data).await?;
+    
+    // List files
+    let files = reader.list_files("my-bucket", Some("data/")).await?;
+    
+    Ok(())
+}
+```
+
+**Features:**
+- ✅ Native AWS SDK integration
+- ✅ Optional local file caching
+- ✅ Async/await support
+- ✅ Comprehensive error handling
+- ✅ Multi-language bindings (Python, Java, JavaScript)
+
+**See:** [S3_CONNECTOR.md](S3_CONNECTOR.md) for complete guide
+
+### Planned Connectors
+
+- 🔜 **Azure Blob Storage** - Native Azure integration
+- 🔜 **Google Cloud Storage** - GCS native reader
+- 🔜 **Snowflake UDF** - Native Snowflake integration
+- 🔜 **Apache Hadoop** - HDFS connector
+
+---
+
 ## 🔧 Installation
 
 ### System Requirements
