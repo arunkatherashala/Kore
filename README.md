@@ -2,8 +2,16 @@
 
 [![GitHub release](https://img.shields.io/github/v/release/arunkatherashala/Kore?include_prereleases)](https://github.com/arunkatherashala/Kore/releases)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Docker Pulls](https://img.shields.io/docker/pulls/saiarunkumar/kore)](https://hub.docker.com/r/saiarunkumar/kore)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/arunkatherashala/Kore/rust.yml)](https://github.com/arunkatherashala/Kore/actions)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/arunkatherashala/Kore/ci.yml?label=build)](https://github.com/arunkatherashala/Kore/actions)
+[![Tests](https://img.shields.io/github/actions/workflow/status/arunkatherashala/Kore/test-pr.yml?label=tests)](https://github.com/arunkatherashala/Kore/actions)
+[![Security](https://img.shields.io/github/actions/workflow/status/arunkatherashala/Kore/security-scan.yml?label=security)](https://github.com/arunkatherashala/Kore/actions)
+
+**Package Registries:**
+[![PyPI](https://img.shields.io/pypi/v/kore-fileformat?label=PyPI)](https://pypi.org/project/kore-fileformat/)
+[![Maven Central](https://img.shields.io/maven-central/v/com.kore/kore-fileformat?label=Maven)](https://search.maven.org/artifact/com.kore/kore-fileformat)
+[![npm](https://img.shields.io/npm/v/kore-fileformat?label=npm)](https://www.npmjs.com/package/kore-fileformat)
+[![crates.io](https://img.shields.io/crates/v/kore_fileformat?label=crates.io)](https://crates.io/crates/kore_fileformat)
+[![Docker Pulls](https://img.shields.io/docker/pulls/saiarunkumar/kore?label=Docker)](https://hub.docker.com/r/saiarunkumar/kore)
 
 > **50x faster than Parquet. 10x smaller than JSON. Production-ready.**
 
