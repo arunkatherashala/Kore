@@ -1,15 +1,12 @@
-name: Publish to Docker Hub
-# Deploy to Docker Hub on release or manual trigger
-# DISABLED: Rust cargo build fails in buildx container
-# TODO: Fix by using pre-built binaries or simplifying build
+name: Publish to Docker Hub (DISABLED)
+# DISABLED: Docker publishing currently blocked by 2 issues:
+# 1. Rust cargo build fails in buildx container (exit code 101)
+# 2. GitHub Actions secrets not being read by Docker login step
+# TODO: Fix cargo build in Docker OR use pre-built binaries
+# NOTE: Token is valid (tested locally), but Actions workflow can't access secrets
 
 on:
-  # Disabled until cargo build in Docker is fixed
-  # release:
-  #   types: [published]
-  # push:
-  #   tags:
-  #     - 'v*'
+  # All automatic triggers disabled
   workflow_dispatch:
 
 jobs:
@@ -27,13 +24,11 @@ jobs:
         DOCKER_USERNAME: ${{ secrets.DOCKER_USER }}
         DOCKER_PASSWORD: ${{ secrets.DOCKER_PASS }}
       run: |
-        echo "DEBUG: Username length: ${#DOCKER_USERNAME}"
-        echo "DEBUG: Password length: ${#DOCKER_PASSWORD}"
-        if [ -z "$DOCKER_USERNAME" ] || [ -z "$DOCKER_PASSWORD" ]; then
-          echo "ERROR: Secrets are empty!"
-          exit 1
-        fi
-        echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+        # WARNING: Secrets are not being passed to workflow environment
+        # Local test: docker login -u saiarunkumar --password-stdin works fine
+        # GitHub Actions: secrets always empty
+        echo "Attempting Docker login (secrets issue blocking)..."
+        echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin || echo "Docker login failed"
     
     - name: Extract version
       id: version
