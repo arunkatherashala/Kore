@@ -21,8 +21,15 @@ include = [
 [features]
 default = []
 kore_lite_compat = []
+# S3 feature requires aws-sdk-s3 (requires ~500MB disk for compilation)
+# s3 = ["aws-sdk-s3", "tokio", "aws-config"]
 
 [dependencies]
+# Optional S3 support - commented out due to disk space constraints
+# Uncomment when sufficient disk space available
+# aws-sdk-s3 = { version = "1.30", optional = true }
+# aws-config = { version = "1.1", optional = true }
+# tokio = { version = "1.36", features = ["full"], optional = true }
 
 [lib]
 name = "kore_fileformat"

@@ -23,6 +23,10 @@ pub mod performance_profiling;
 pub mod advanced_features;
 pub mod documentation;
 
+// Cloud storage connectors
+#[cfg(feature = "s3")]
+pub mod s3_reader;
+
 #[cfg(feature = "kore_lite_compat")]
 pub mod kore_lite;
 
