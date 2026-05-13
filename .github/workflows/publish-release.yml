@@ -1,0 +1,78 @@
+name: Create GitHub Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get the current tag
+          CURRENT_TAG="${{ github.ref_name }}"
+          
+          # Get the previous tag
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 ${CURRENT_TAG}^ 2>/dev/null || echo "")
+          
+          if [ -z "$PREVIOUS_TAG" ]; then
+            # First release - get all commits
+            CHANGELOG=$(git log --oneline --pretty=format:"- %s (%h)" | head -50)
+          else
+            # Get commits between tags
+            CHANGELOG=$(git log ${PREVIOUS_TAG}..${CURRENT_TAG} --oneline --pretty=format:"- %s (%h)")
+          fi
+          
+          # Store changelog in output
+          echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          # Count commits
+          COMMIT_COUNT=$(git log ${PREVIOUS_TAG}..${CURRENT_TAG} --oneline 2>/dev/null | wc -l)
+          echo "COMMIT_COUNT=$COMMIT_COUNT" >> $GITHUB_OUTPUT
+
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body: |
+            ## Changelog
+            
+            ${{ steps.changelog.outputs.CHANGELOG }}
+            
+            ---
+            
+            **Total Commits:** ${{ steps.changelog.outputs.COMMIT_COUNT }}
+            
+            ## What's Included
+            - **Python Package:** Published to PyPI as `kore-fileformat`
+            - **Java Library:** Deployed to Maven Central
+            - **JavaScript Package:** Published to npm as `kore-fileformat`
+            - **Rust Crate:** Published to crates.io as `kore_fileformat`
+            - **Docker Image:** Published to GHCR as `ghcr.io/arunkatherashala/kore:latest`
+            
+            ## 📚 Documentation
+            - [PyPI Page](https://pypi.org/project/kore-fileformat/)
+            - [Maven Central](https://mvnrepository.com/artifact/com.arunkatherashala/kore-fileformat)
+            - [npm Package](https://www.npmjs.com/package/kore-fileformat)
+            - [Crates.io](https://crates.io/crates/kore_fileformat)
+            - [GitHub Container Registry](https://github.com/arunkatherashala/Kore/pkgs/container/kore)
+            
+            ## 🔗 Links
+            - [View on GitHub](https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }})
+            - [Compare with previous](https://github.com/${{ github.repository }}/compare/${{ github.ref_name }}^...${{ github.ref_name }})
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
