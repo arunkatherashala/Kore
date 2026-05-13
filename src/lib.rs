@@ -27,6 +27,12 @@ pub mod documentation;
 #[cfg(feature = "s3")]
 pub mod s3_reader;
 
+#[cfg(feature = "azure")]
+pub mod azure_reader;
+
+#[cfg(feature = "gcs")]
+pub mod gcs_reader;
+
 #[cfg(feature = "kore_lite_compat")]
 pub mod kore_lite;
 
