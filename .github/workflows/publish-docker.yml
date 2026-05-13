@@ -1,53 +1,30 @@
-name: Publish to GitHub Container Registry
-# Uses ghcr.io with built-in github.token (no secrets needed)
-# More reliable than Docker Hub, no GitHub Actions secret bug issues
+name: Publish to GitHub Container Registry (DISABLED)
+# Docker publishing not feasible for this project:
+# 1. kore_fileformat is a Rust library, not a binary application
+# 2. Cargo build fails in Docker buildx with exit code 101
+# 3. No executable to package into Docker image
+#
+# For library distribution, use crates.io (already working via PyPI/Maven/npm ecosystem)
+# If Docker image is needed in future: implement CLI wrapper or use pre-built binaries from CI
 
 on:
+  # All triggers disabled - Docker publishing not applicable
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
 
 jobs:
   docker:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Rust
-      uses: dtolnay/rust-toolchain@stable
-    
-    - name: Cache Rust build
-      uses: Swatinem/rust-cache@v2
-    
-    - name: Build Rust binaries
-      run: cargo build --release
-    
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-    
-    - name: Login to GitHub Container Registry
-      uses: docker/login-action@v3
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    
-    - name: Extract version
-      id: version
-      run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-    
-    - name: Build and push Docker image to GHCR
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        push: true
-        tags: |
-          ghcr.io/${{ github.repository_owner }}/kore:latest
-          ghcr.io/${{ github.repository_owner }}/kore:main
-        cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/kore:buildcache
-        cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/kore:buildcache,mode=max
+      - name: Docker publishing disabled
+        run: |
+          echo "Docker publishing is disabled for this project."
+          echo "Reason: kore_fileformat is a library, not a binary application."
+          echo "Cargo build fails in Docker buildx (exit code 101)."
+          echo ""
+          echo "Distribution channels:"
+          echo "  ✅ PyPI (Python): https://pypi.org/project/kore-fileformat"
+          echo "  ✅ Maven Central (Java): com.github.arunkatherashala:kore_fileformat"
+          echo "  ✅ npm (JavaScript): https://npmjs.com/package/kore-fileformat"
+          echo "  ✅ crates.io (Rust): https://crates.io/crates/kore_fileformat"
+          echo ""
+          exit 0
