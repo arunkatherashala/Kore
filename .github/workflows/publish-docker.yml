@@ -44,10 +44,10 @@ jobs:
         cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/kore:buildcache,mode=max
     
     - name: Docker Hub description
-      uses: peter-evans/dockerhub-description@v3
+      uses: peter-evans/dockerhub-description@v4
       with:
         username: ${{ secrets.DOCKER_USERNAME }}
-        password: ${{ secrets.DOCKER_PASSWORD }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
         repository: ${{ secrets.DOCKER_USERNAME }}/kore
         short-description: "KORE Binary Format - Complete 8-language ecosystem"
         readme-filepath: ./README.md
