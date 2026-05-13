@@ -1,4 +1,4 @@
-name: Publish to GitHub Container Registry
+﻿name: Publish to GitHub Container Registry
 
 on:
   release:
@@ -40,3 +40,5 @@ jobs:
           ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}
         cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
         cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=max
+
+

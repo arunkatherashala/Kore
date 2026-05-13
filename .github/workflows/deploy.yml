@@ -1,4 +1,4 @@
-name: Deploy to Production
+﻿name: Deploy to Production
 
 on:
   release:
@@ -67,7 +67,7 @@ jobs:
             $response = Invoke-WebRequest -Uri "http://localhost:8080/health" -ErrorAction SilentlyContinue
             if ($response.StatusCode -eq 200) {
               $healthy = $true
-              Write-Host "✓ Service is healthy"
+              Write-Host "âœ“ Service is healthy"
             }
           } catch {
             $attempt++
@@ -95,7 +95,7 @@ jobs:
           -ErrorAction SilentlyContinue
         
         if ($response.StatusCode -eq 200) {
-          Write-Host "✓ Query endpoint working"
+          Write-Host "âœ“ Query endpoint working"
         } else {
           throw "Query endpoint returned status $($response.StatusCode)"
         }
@@ -104,30 +104,30 @@ jobs:
       run: |
         $prometheus = Invoke-WebRequest -Uri "http://localhost:9090" -ErrorAction SilentlyContinue
         if ($prometheus.StatusCode -eq 200) {
-          Write-Host "✓ Prometheus is running"
+          Write-Host "âœ“ Prometheus is running"
         }
         
         $grafana = Invoke-WebRequest -Uri "http://localhost:3000" -ErrorAction SilentlyContinue
         if ($grafana.StatusCode -eq 200) {
-          Write-Host "✓ Grafana is running"
+          Write-Host "âœ“ Grafana is running"
         }
     
     - name: Create deployment summary
       if: always()
       run: |
         Write-Host "
-        ╔═══════════════════════════════════════╗
-        ║   DEPLOYMENT COMPLETE - v0.4.0        ║
-        ╚═══════════════════════════════════════╝
+        â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+        â•‘   DEPLOYMENT COMPLETE - v0.4.0        â•‘
+        â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
         
-        📊 Services:
-          ✓ KORE Query Engine (http://localhost:8080)
-          ✓ Prometheus Metrics  (http://localhost:9090)
-          ✓ Grafana Dashboards  (http://localhost:3000)
+        ðŸ“Š Services:
+          âœ“ KORE Query Engine (http://localhost:8080)
+          âœ“ Prometheus Metrics  (http://localhost:9090)
+          âœ“ Grafana Dashboards  (http://localhost:3000)
         
-        🧪 Tests: All passing (176/176 - 100%)
-        📈 Performance: 2.5x improvement
-        🔒 Security: Zero unsafe blocks
+        ðŸ§ª Tests: All passing (176/176 - 100%)
+        ðŸ“ˆ Performance: 2.5x improvement
+        ðŸ”’ Security: Zero unsafe blocks
         
         Next: Configure Grafana dashboards
         "
@@ -135,6 +135,8 @@ jobs:
     - name: Notify deployment
       if: success()
       run: |
-        Write-Host "✅ Production deployment successful!"
-        Write-Host "📍 Access Grafana: http://localhost:3000 (admin/admin)"
-        Write-Host "🔍 View metrics: http://localhost:9090"
+        Write-Host "âœ… Production deployment successful!"
+        Write-Host "ðŸ“ Access Grafana: http://localhost:3000 (admin/admin)"
+        Write-Host "ðŸ” View metrics: http://localhost:9090"
+
+

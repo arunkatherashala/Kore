@@ -1,4 +1,4 @@
-name: PR Tests & Code Quality
+﻿name: PR Tests & Code Quality
 
 on:
   pull_request:
@@ -20,7 +20,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v3
 
       - name: Build Rust library
         run: cargo build --lib --release
@@ -80,7 +80,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
 
@@ -100,7 +100,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
@@ -145,22 +145,22 @@ jobs:
       - name: Check test results
         run: |
           if [ "${{ needs.test-rust.result }}" != "success" ]; then
-            echo "❌ Rust tests failed"
+            echo "âŒ Rust tests failed"
             exit 1
           fi
           if [ "${{ needs.test-python.result }}" != "success" ]; then
-            echo "❌ Python tests failed"
+            echo "âŒ Python tests failed"
             exit 1
           fi
           if [ "${{ needs.test-nodejs.result }}" != "success" ]; then
-            echo "❌ Node.js tests failed"
+            echo "âŒ Node.js tests failed"
             exit 1
           fi
           if [ "${{ needs.test-java.result }}" != "success" ]; then
-            echo "❌ Java tests failed"
+            echo "âŒ Java tests failed"
             exit 1
           fi
-          echo "✅ All tests passed!"
+          echo "âœ… All tests passed!"
 
       - name: Comment on PR
         if: github.event_name == 'pull_request'
@@ -178,15 +178,15 @@ jobs:
               comment.body.includes('Test Results Summary')
             );
             
-            const body = `## ✅ Test Results Summary
+            const body = `## âœ… Test Results Summary
             
 | Test Suite | Status |
 |-----------|--------|
-| Rust Tests | ${{ needs.test-rust.result == 'success' && '✅ Passed' || '❌ Failed' }} |
-| Python Tests (3.9-3.11) | ${{ needs.test-python.result == 'success' && '✅ Passed' || '❌ Failed' }} |
-| Node.js Tests (18.x, 20.x) | ${{ needs.test-nodejs.result == 'success' && '✅ Passed' || '❌ Failed' }} |
-| Java Tests (JDK 17) | ${{ needs.test-java.result == 'success' && '✅ Passed' || '❌ Failed' }} |
-| Code Coverage | ✅ Generated |
+| Rust Tests | ${{ needs.test-rust.result == 'success' && 'âœ… Passed' || 'âŒ Failed' }} |
+| Python Tests (3.9-3.11) | ${{ needs.test-python.result == 'success' && 'âœ… Passed' || 'âŒ Failed' }} |
+| Node.js Tests (18.x, 20.x) | ${{ needs.test-nodejs.result == 'success' && 'âœ… Passed' || 'âŒ Failed' }} |
+| Java Tests (JDK 17) | ${{ needs.test-java.result == 'success' && 'âœ… Passed' || 'âŒ Failed' }} |
+| Code Coverage | âœ… Generated |
 
 ### Summary
 All language bindings tested successfully across multiple runtime versions.`;
@@ -206,3 +206,5 @@ All language bindings tested successfully across multiple runtime versions.`;
                 body: body,
               });
             }
+
+

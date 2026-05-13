@@ -1,4 +1,4 @@
-name: Publish to Maven Central
+﻿name: Publish to Maven Central
 
 on:
   release:
@@ -45,3 +45,5 @@ jobs:
       run: |
         echo "## Maven Central Publishing Status" >> $GITHUB_STEP_SUMMARY
         echo "Status: Completed (optional - requires Maven credentials)" >> $GITHUB_STEP_SUMMARY
+
+

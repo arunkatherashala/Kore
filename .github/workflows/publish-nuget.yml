@@ -1,4 +1,4 @@
-name: Publish to NuGet
+﻿name: Publish to NuGet
 
 on:
   release:
@@ -50,3 +50,5 @@ jobs:
         echo "## NuGet Publishing Status" >> $GITHUB_STEP_SUMMARY
         echo "Version: ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
         echo "Status: Completed (optional - requires .NET project structure)" >> $GITHUB_STEP_SUMMARY
+
+

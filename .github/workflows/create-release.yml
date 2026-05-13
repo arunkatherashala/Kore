@@ -1,4 +1,4 @@
-name: Create GitHub Release
+﻿name: Create GitHub Release
 
 on:
   push:
@@ -25,3 +25,5 @@ jobs:
         body_path: RELEASE_NOTES.md
         draft: false
         prerelease: false
+
+

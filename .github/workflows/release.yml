@@ -31,7 +31,7 @@ jobs:
             asset_name: kore-windows-x86_64.exe
     
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -40,7 +40,7 @@ jobs:
           targets: ${{ matrix.target }}
       
       - name: Cache Cargo
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/bin/
@@ -54,7 +54,7 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
       
       - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
           path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
@@ -66,10 +66,10 @@ jobs:
     needs: build-release
     
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       
       - name: Download Artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
       
       - name: Create Release Notes
         run: |
@@ -106,7 +106,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -140,3 +140,5 @@ jobs:
           echo "Build Status: ${{ needs.build-release.result }}"
           echo "Release Created: ${{ needs.create-release.result }}"
           echo "Published to Crates.io: ${{ needs.publish-crates.result }}"
+
+

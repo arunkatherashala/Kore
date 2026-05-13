@@ -1,4 +1,4 @@
-name: Security Scanning & Vulnerability Checks
+﻿name: Security Scanning & Vulnerability Checks
 
 on:
   push:
@@ -44,7 +44,7 @@ jobs:
         run: cargo audit --json | tee cargo-audit.json || true
 
       - name: Upload audit report
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: rust-audit-report
           path: cargo-audit.json
@@ -71,7 +71,7 @@ jobs:
         run: safety check --json | tee safety-report.json || true
 
       - name: Upload safety report
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: python-safety-report
           path: safety-report.json
@@ -83,7 +83,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: '20.x'
 
@@ -94,7 +94,7 @@ jobs:
         run: npm audit --json | tee npm-audit.json || true
 
       - name: Upload npm audit report
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: npm-audit-report
           path: npm-audit.json
@@ -106,7 +106,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up Java
-        uses: actions/setup-java@v3
+      - uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
@@ -128,15 +128,15 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v2
+        uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
 
       - name: Autobuild
-        uses: github/codeql-action/autobuild@v2
+        uses: github/codeql-action/autobuild@v4
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v2
+        uses: github/codeql-action/analyze@v4
 
   security-summary:
     name: Security Check Summary
@@ -146,18 +146,18 @@ jobs:
     steps:
       - name: Check security results
         run: |
-          echo "## 🔒 Security Scan Summary"
+          echo "## ðŸ”’ Security Scan Summary"
           echo ""
           echo "| Check | Status |"
           echo "|-------|--------|"
-          echo "| Secret Scanning | ${{ needs.secret-scanning.result == 'success' && '✅ Passed' || '⚠️ Review' }} |"
-          echo "| Rust Audit | ${{ needs.rust-security.result == 'success' && '✅ Passed' || '⚠️ Review' }} |"
-          echo "| Python Safety | ${{ needs.python-security.result == 'success' && '✅ Passed' || '⚠️ Review' }} |"
-          echo "| Node.js Audit | ${{ needs.nodejs-security.result == 'success' && '✅ Passed' || '⚠️ Review' }} |"
-          echo "| Java Dependencies | ${{ needs.java-security.result == 'success' && '✅ Passed' || '⚠️ Review' }} |"
-          echo "| CodeQL Analysis | ${{ needs.codeql-analysis.result == 'success' && '✅ Passed' || '⚠️ Review' }} |"
+          echo "| Secret Scanning | ${{ needs.secret-scanning.result == 'success' && 'âœ… Passed' || 'âš ï¸ Review' }} |"
+          echo "| Rust Audit | ${{ needs.rust-security.result == 'success' && 'âœ… Passed' || 'âš ï¸ Review' }} |"
+          echo "| Python Safety | ${{ needs.python-security.result == 'success' && 'âœ… Passed' || 'âš ï¸ Review' }} |"
+          echo "| Node.js Audit | ${{ needs.nodejs-security.result == 'success' && 'âœ… Passed' || 'âš ï¸ Review' }} |"
+          echo "| Java Dependencies | ${{ needs.java-security.result == 'success' && 'âœ… Passed' || 'âš ï¸ Review' }} |"
+          echo "| CodeQL Analysis | ${{ needs.codeql-analysis.result == 'success' && 'âœ… Passed' || 'âš ï¸ Review' }} |"
           echo ""
-          echo "📊 All scans completed. Review artifacts for detailed reports."
+          echo "ðŸ“Š All scans completed. Review artifacts for detailed reports."
 
       - name: Comment on PR
         if: github.event_name == 'pull_request'
@@ -168,5 +168,7 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `## 🔒 Security Scans Complete\n\nAll security and vulnerability checks have been performed:\n- ✅ Secret detection\n- ✅ Dependency auditing (Rust, Python, Node.js, Java)\n- ✅ Code security analysis (CodeQL)\n\nReview artifacts in the Actions tab for detailed reports.`
+              body: `## ðŸ”’ Security Scans Complete\n\nAll security and vulnerability checks have been performed:\n- âœ… Secret detection\n- âœ… Dependency auditing (Rust, Python, Node.js, Java)\n- âœ… Code security analysis (CodeQL)\n\nReview artifacts in the Actions tab for detailed reports.`
             })
+
+

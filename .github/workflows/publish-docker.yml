@@ -1,4 +1,4 @@
-name: Publish Documentation Image to GHCR
+﻿name: Publish Documentation Image to GHCR
 # Different approach: Documentation & Reference Image
 # Instead of binary packaging, provides multi-language binding reference
 # Useful for developers exploring KORE across Python/JS/Java/Rust/Go/C#/Ruby/C++
@@ -46,3 +46,5 @@ jobs:
           ${{ (startsWith(github.ref, 'refs/tags/') && format('ghcr.io/{0}/kore:{1}', github.repository_owner, steps.version.outputs.version)) || '' }}
         cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/kore:buildcache
         cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/kore:buildcache,mode=max
+
+

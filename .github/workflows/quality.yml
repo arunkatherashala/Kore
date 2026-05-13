@@ -1,4 +1,4 @@
-name: Code Quality & Security
+﻿name: Code Quality & Security
 
 on:
   push:
@@ -28,10 +28,10 @@ jobs:
       run: |
         $unsafe_count = (cargo build --release 2>&1 | Select-String "unsafe" | Measure-Object).Count
         if ($unsafe_count -gt 0) {
-          Write-Host "❌ Found unsafe code blocks: $unsafe_count"
+          Write-Host "âŒ Found unsafe code blocks: $unsafe_count"
           exit 1
         } else {
-          Write-Host "✅ No unsafe code blocks found"
+          Write-Host "âœ… No unsafe code blocks found"
         }
     
     - name: Security audit
@@ -51,8 +51,10 @@ jobs:
       run: cargo test --doc
     
     - name: Upload code quality report
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: code-quality-report
         path: target/
+
+

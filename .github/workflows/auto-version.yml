@@ -1,4 +1,4 @@
-name: Auto-Version & Release
+﻿name: Auto-Version & Release
 
 on:
   push:
@@ -139,6 +139,8 @@ jobs:
     steps:
       - name: Version updated
         run: |
-          echo "✅ Version bumped to ${{ needs.versioning.outputs.version }}"
-          echo "🏷️  Tag: ${{ needs.versioning.outputs.tag }}"
-          echo "🚀 All publishing workflows will trigger automatically"
+          echo "âœ… Version bumped to ${{ needs.versioning.outputs.version }}"
+          echo "ðŸ·ï¸  Tag: ${{ needs.versioning.outputs.tag }}"
+          echo "ðŸš€ All publishing workflows will trigger automatically"
+
+

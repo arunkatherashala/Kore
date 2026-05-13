@@ -1,4 +1,4 @@
-name: Create GitHub Release
+﻿name: Create GitHub Release
 
 on:
   push:
@@ -62,17 +62,19 @@ jobs:
             - **Rust Crate:** Published to crates.io as `kore_fileformat`
             - **Docker Image:** Published to GHCR as `ghcr.io/arunkatherashala/kore:latest`
             
-            ## 📚 Documentation
+            ## ðŸ“š Documentation
             - [PyPI Page](https://pypi.org/project/kore-fileformat/)
             - [Maven Central](https://mvnrepository.com/artifact/com.arunkatherashala/kore-fileformat)
             - [npm Package](https://www.npmjs.com/package/kore-fileformat)
             - [Crates.io](https://crates.io/crates/kore_fileformat)
             - [GitHub Container Registry](https://github.com/arunkatherashala/Kore/pkgs/container/kore)
             
-            ## 🔗 Links
+            ## ðŸ”— Links
             - [View on GitHub](https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }})
             - [Compare with previous](https://github.com/${{ github.repository }}/compare/${{ github.ref_name }}^...${{ github.ref_name }})
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
