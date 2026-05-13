@@ -1,13 +1,15 @@
-name: Publish to Docker Hub (DISABLED)
-# DISABLED: Docker publishing currently blocked by 2 issues:
-# 1. Rust cargo build fails in buildx container (exit code 101)
-# 2. GitHub Actions secrets not being read by Docker login step
-# TODO: Fix cargo build in Docker OR use pre-built binaries
-# NOTE: Token is valid (tested locally), but Actions workflow can't access secrets
+name: Publish to Docker Hub
+# NEW APPROACH: Use pre-built Rust binaries (no cargo in Docker)
+# Advantages:
+# 1. Avoids cargo build in buildx (was failing with exit code 101)
+# 2. Faster: only copy pre-built binaries instead of rebuilding in Docker
+# 3. Simpler: standard Rust toolchain instead of buildx complexity
 
 on:
-  # All automatic triggers disabled
   workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
 
 jobs:
   docker:
@@ -16,25 +18,29 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+    
+    - name: Cache Rust build
+      uses: Swatinem/rust-cache@v2
+    
+    - name: Build Rust binaries
+      run: cargo build --release
+    
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
     
     - name: Login to Docker Hub
-      env:
-        DOCKER_USERNAME: ${{ secrets.DOCKER_USER }}
-        DOCKER_PASSWORD: ${{ secrets.DOCKER_PASS }}
-      run: |
-        # WARNING: Secrets are not being passed to workflow environment
-        # Local test: docker login -u saiarunkumar --password-stdin works fine
-        # GitHub Actions: secrets always empty
-        echo "Attempting Docker login (secrets issue blocking)..."
-        echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin || echo "Docker login failed"
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USER }}
+        password: ${{ secrets.DOCKER_PASS }}
     
     - name: Extract version
       id: version
-      run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
     
-    - name: Build and push Docker image
+    - name: Build and push Docker image (pre-built binaries)
       uses: docker/build-push-action@v5
       with:
         context: .

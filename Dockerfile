@@ -1,19 +1,21 @@
-# KORE Binary Format - Rust Runtime
-FROM rust:latest
+# KORE Binary Format - Lightweight Runtime (pre-built binaries)
+FROM debian:bookworm-slim
 
 LABEL maintainer="Arun Kather Ashala <arunkatherashala@gmail.com>"
-LABEL description="KORE Binary Format - Rust Runtime"
+LABEL description="KORE Binary Format - Lightweight Runtime"
 LABEL version="1.0.0"
 
 WORKDIR /app
 
-# Copy source code
-COPY . .
-
-# Build with minimal dependencies - skip optional features
-RUN cargo build --release --no-default-features 2>&1 || cargo check
-
-# Install runtime dependencies
+# Install minimal runtime dependencies
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
-ENTRYPOINT ["/bin/bash"]
+# Copy pre-built binaries from build stage
+COPY ./target/release/kore-fileformat /usr/local/bin/kore-fileformat
+RUN chmod +x /usr/local/bin/kore-fileformat
+
+# Copy supporting files
+COPY ./src /app/src
+COPY ./README.md /app/
+
+ENTRYPOINT ["kore-fileformat"]
