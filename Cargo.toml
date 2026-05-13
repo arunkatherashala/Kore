@@ -11,6 +11,21 @@ homepage = "https://github.com/arunkatherashala/Kore"
 documentation = "https://docs.rs/kore_fileformat"
 keywords = ["columnar", "file-format", "analytics", "compression", "kore"]
 categories = ["encoding", "compression", "database-implementations"]
+exclude = [
+    "target/",
+    ".git/",
+    ".github/",
+    ".gitignore",
+    "sample_*.csv",
+    "*.kore",
+    "*.killer",
+    "tools/",
+    "kore_fileformat_killer/",
+    "CHANGELOG.md",
+    "cargo_build_output.txt",
+    "killer_*.txt",
+    "warnings_*.txt"
+]
 
 [features]
 default = []
