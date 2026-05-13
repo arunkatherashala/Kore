@@ -1,12 +1,15 @@
 name: Publish to Docker Hub
 # Deploy to Docker Hub on release or manual trigger
+# DISABLED: Rust cargo build fails in buildx container
+# TODO: Fix by using pre-built binaries or simplifying build
 
 on:
-  release:
-    types: [published]
-  push:
-    tags:
-      - 'v*'
+  # Disabled until cargo build in Docker is fixed
+  # release:
+  #   types: [published]
+  # push:
+  #   tags:
+  #     - 'v*'
   workflow_dispatch:
 
 jobs:
