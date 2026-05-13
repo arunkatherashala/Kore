@@ -27,6 +27,12 @@ jobs:
         DOCKER_USERNAME: ${{ secrets.DOCKER_USER }}
         DOCKER_PASSWORD: ${{ secrets.DOCKER_PASS }}
       run: |
+        echo "DEBUG: Username length: ${#DOCKER_USERNAME}"
+        echo "DEBUG: Password length: ${#DOCKER_PASSWORD}"
+        if [ -z "$DOCKER_USERNAME" ] || [ -z "$DOCKER_PASSWORD" ]; then
+          echo "ERROR: Secrets are empty!"
+          exit 1
+        fi
         echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
     
     - name: Extract version
