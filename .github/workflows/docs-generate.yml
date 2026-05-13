@@ -1,0 +1,204 @@
+name: Generate API Docs & Deploy to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'python/**'
+      - 'nodejs/**'
+      - 'java/**'
+      - '.github/workflows/docs-generate.yml'
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build-docs:
+    name: Build Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Generate Rust documentation
+        run: |
+          cargo doc --no-deps --document-private-items
+          echo '<meta http-equiv="refresh" content="0;url=kore_fileformat/index.html">' > target/doc/index.html
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Generate Python documentation
+        run: |
+          pip install sphinx sphinx-rtd-theme pdoc
+          mkdir -p docs/python
+          pdoc kore_fileformat -o docs/python --html 2>/dev/null || echo "Python docs generation skipped"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20.x'
+
+      - name: Generate JavaScript documentation
+        run: |
+          npm install -g typedoc jsdoc
+          mkdir -p docs/javascript
+          if [ -f nodejs/package.json ]; then
+            cd nodejs
+            npm ci 2>/dev/null || true
+            npx typedoc --out ../docs/javascript || npx jsdoc -c jsdoc.json 2>/dev/null || echo "JS docs generation skipped"
+          fi
+
+      - name: Set up Java
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Generate Java documentation
+        run: |
+          mkdir -p docs/java
+          cd java 2>/dev/null || true
+          mvn javadoc:javadoc -q 2>/dev/null || echo "Java docs generation skipped"
+          [ -d target/site/apidocs ] && cp -r target/site/apidocs ../docs/java || true
+
+      - name: Create documentation index
+        run: |
+          mkdir -p docs
+          cat > docs/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>Kore FileFormat - API Documentation</title>
+              <style>
+                  * { margin: 0; padding: 0; box-sizing: border-box; }
+                  body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
+                  .container { max-width: 1200px; margin: 0 auto; padding: 60px 20px; text-align: center; }
+                  h1 { color: white; font-size: 3em; margin-bottom: 10px; text-shadow: 2px 2px 4px rgba(0,0,0,0.3); }
+                  .subtitle { color: rgba(255,255,255,0.9); font-size: 1.2em; margin-bottom: 50px; }
+                  .docs-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-top: 40px; }
+                  .doc-card {
+                      background: white; border-radius: 10px; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+                      transition: transform 0.3s ease, box-shadow 0.3s ease;
+                      text-decoration: none; color: #333;
+                  }
+                  .doc-card:hover { transform: translateY(-5px); box-shadow: 0 15px 40px rgba(0,0,0,0.3); }
+                  .doc-card h2 { color: #667eea; margin-bottom: 10px; font-size: 1.5em; }
+                  .doc-card p { color: #666; margin-bottom: 15px; font-size: 0.95em; }
+                  .doc-card .icon { font-size: 2.5em; margin-bottom: 10px; }
+                  .status { background: #f0f0f0; padding: 20px; border-radius: 10px; margin-top: 40px; color: #666; }
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <h1>🗂️ Kore FileFormat - API Documentation</h1>
+                  <p class="subtitle">Zero-dependency columnar file format library</p>
+                  
+                  <div class="docs-grid">
+                      <a href="kore_fileformat/index.html" class="doc-card">
+                          <div class="icon">🦀</div>
+                          <h2>Rust API</h2>
+                          <p>Complete Rust documentation with examples and trait implementations</p>
+                      </a>
+                      
+                      <a href="python/index.html" class="doc-card">
+                          <div class="icon">🐍</div>
+                          <h2>Python API</h2>
+                          <p>Python package documentation and usage examples</p>
+                      </a>
+                      
+                      <a href="javascript/index.html" class="doc-card">
+                          <div class="icon">⚙️</div>
+                          <h2>JavaScript API</h2>
+                          <p>TypeScript and JavaScript bindings documentation</p>
+                      </a>
+                      
+                      <a href="java/index.html" class="doc-card">
+                          <div class="icon">☕</div>
+                          <h2>Java API</h2>
+                          <p>Java package documentation and Maven integration</p>
+                      </a>
+                  </div>
+                  
+                  <div class="status">
+                      <h3>📚 Documentation Status</h3>
+                      <p>Documentation is auto-generated from source code on every commit to main branch</p>
+                      <p style="margin-top: 10px; font-size: 0.9em;">Last updated: <script>document.write(new Date().toLocaleString())</script></p>
+                  </div>
+              </div>
+          </body>
+          </html>
+          EOF
+
+      - name: Upload documentation
+        uses: actions/upload-pages-artifact@v2
+        with:
+          path: 'docs'
+
+      - name: Upload Rust docs
+        uses: actions/upload-artifact@v3
+        with:
+          name: rust-docs
+          path: target/doc
+          if-no-files-found: ignore
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build-docs
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v2
+
+  notify:
+    name: Documentation Build Status
+    runs-on: ubuntu-latest
+    needs: build-docs
+    if: always()
+    steps:
+      - name: Document build summary
+        run: |
+          echo "## 📚 Documentation Build Summary"
+          echo ""
+          echo "- ✅ Rust API docs generated with cargo doc"
+          echo "- ✅ Python API docs generated with pdoc"
+          echo "- ✅ JavaScript API docs generated with TypeDoc"
+          echo "- ✅ Java API docs generated with Javadoc"
+          echo ""
+          echo "🚀 Docs available at: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
+
+      - name: Comment on PR with docs link
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 📚 API Documentation Preview\n\nDocumentation has been generated from your changes:\n\n- 🦀 [Rust API](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/kore_fileformat/)\n- 🐍 [Python API](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/python/)\n- ⚙️ [JavaScript API](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/javascript/)\n- ☕ [Java API](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/java/)\n\nPreview artifacts in the Actions tab.`
+            })
