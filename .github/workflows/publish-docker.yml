@@ -1,6 +1,6 @@
-name: Publish to Docker Hub
-# Using pre-built Rust binaries + docker config.json for reliable authentication
-# Workaround for GitHub Actions secret decryption issue
+name: Publish to GitHub Container Registry
+# Uses ghcr.io with built-in github.token (no secrets needed)
+# More reliable than Docker Hub, no GitHub Actions secret bug issues
 
 on:
   workflow_dispatch:
@@ -11,6 +11,9 @@ on:
 jobs:
   docker:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     
     steps:
     - uses: actions/checkout@v4
@@ -27,42 +30,24 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
     
-    - name: Create Docker config.json for authentication
-      run: |
-        mkdir -p ~/.docker
-        cat > ~/.docker/config.json << EOF
-        {
-          "auths": {
-            "https://index.docker.io/v1/": {
-              "username": "${{ secrets.DOCKER_USER }}",
-              "password": "${{ secrets.DOCKER_PASS }}",
-              "auth": "$(echo -n '${{ secrets.DOCKER_USER }}:${{ secrets.DOCKER_PASS }}' | base64)"
-            }
-          }
-        }
-        EOF
-        chmod 600 ~/.docker/config.json
-        echo "✅ Docker config created"
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     
     - name: Extract version
       id: version
       run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
     
-    - name: Build and push Docker image
-      run: |
-        docker buildx build \
-          --push \
-          --tag ${{ secrets.DOCKER_USER }}/kore:latest \
-          --tag ${{ secrets.DOCKER_USER }}/kore:${{ steps.version.outputs.version }} \
-          --cache-from type=registry,ref=${{ secrets.DOCKER_USER }}/kore:buildcache \
-          --cache-to type=registry,ref=${{ secrets.DOCKER_USER }}/kore:buildcache,mode=max \
-          .
-    
-    - name: Docker Hub description
-      uses: peter-evans/dockerhub-description@v4
+    - name: Build and push Docker image to GHCR
+      uses: docker/build-push-action@v5
       with:
-        username: ${{ secrets.DOCKER_USER }}
-        password: ${{ secrets.DOCKER_PASS }}
-        repository: ${{ secrets.DOCKER_USER }}/kore
-        short-description: "KORE Binary Format - Complete 8-language ecosystem"
-        readme-filepath: ./README.md
+        context: .
+        push: true
+        tags: |
+          ghcr.io/${{ github.repository }}:latest
+          ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}
+        cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
+        cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=max
