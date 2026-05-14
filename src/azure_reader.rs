@@ -32,6 +32,8 @@ use std::fmt;
 
 #[cfg(feature = "azure")]
 use futures_util::stream::StreamExt;
+#[cfg(feature = "azure")]
+use log;
 
 /// Azure Blob Storage Reader Configuration and Operations
 #[derive(Debug, Clone)]
@@ -252,11 +254,51 @@ impl AzureBlobReader {
     async fn read_from_azure(&self, container: &str, blob_path: &str) -> Result<Vec<u8>, AzureError> {
         #[cfg(feature = "azure")]
         {
-            // Azure SDK integration pending v1.1 (API compatibility needed)
-            // For now, return stub implementation
-            Err(AzureError::AzureError(
-                "Azure Blob Storage integration available in v1.1".to_string()
-            ))
+            use azure_storage::prelude::*;
+            use azure_storage_blobs::prelude::*;
+            
+            // Get credentials from environment variables
+            let account_key = std::env::var("AZURE_STORAGE_KEY")
+                .or_else(|_| std::env::var("AZURE_STORAGE_ACCOUNT_KEY"))
+                .map_err(|_| AzureError::AuthenticationError(
+                    "AZURE_STORAGE_KEY or AZURE_STORAGE_ACCOUNT_KEY not set".to_string()
+                ))?;
+            
+            let client = BlobServiceClient::new(
+                &self.storage_account,
+                StorageCredentials::access_key(&self.storage_account, &account_key),
+            );
+            
+            let container_client = client.container_client(container);
+            let blob_client = container_client.blob_client(blob_path);
+            
+            // Retry logic with exponential backoff
+            let mut attempt = 0;
+            const MAX_RETRIES: u32 = 3;
+            
+            loop {
+                match blob_client.get().await {
+                    Ok(response) => {
+                        let bytes = response.blob.data.into();
+                        log::info!("Successfully read {} bytes from {}/{}", 
+                            std::mem::size_of_val(&bytes), container, blob_path);
+                        return Ok(bytes);
+                    }
+                    Err(e) if attempt < MAX_RETRIES => {
+                        attempt += 1;
+                        let wait_time = std::time::Duration::from_millis(100 * 2_u64.pow(attempt));
+                        log::warn!("Azure read attempt {} failed for {}/{}: {}. Retrying in {:?}...",
+                            attempt, container, blob_path, e, wait_time);
+                        tokio::time::sleep(wait_time).await;
+                    }
+                    Err(e) => {
+                        return Err(AzureError::AzureError(
+                            format!("Failed to read blob {}/{} after {} attempts: {}", 
+                                container, blob_path, MAX_RETRIES, e)
+                        ));
+                    }
+                }
+            }
         }
         
         #[cfg(not(feature = "azure"))]
@@ -275,11 +317,55 @@ impl AzureBlobReader {
     ) -> Result<(), AzureError> {
         #[cfg(feature = "azure")]
         {
-            // Azure SDK integration pending v1.1 (API compatibility needed)
-            // For now, return stub implementation
-            Err(AzureError::AzureError(
-                "Azure Blob Storage integration available in v1.1".to_string()
-            ))
+            use azure_storage::prelude::*;
+            use azure_storage_blobs::prelude::*;
+            
+            // Get credentials
+            let account_key = std::env::var("AZURE_STORAGE_KEY")
+                .or_else(|_| std::env::var("AZURE_STORAGE_ACCOUNT_KEY"))
+                .map_err(|_| AzureError::AuthenticationError(
+                    "AZURE_STORAGE_KEY or AZURE_STORAGE_ACCOUNT_KEY not set".to_string()
+                ))?;
+            
+            let client = BlobServiceClient::new(
+                &self.storage_account,
+                StorageCredentials::access_key(&self.storage_account, &account_key),
+            );
+            
+            let container_client = client.container_client(container);
+            let blob_client = container_client.blob_client(blob_path);
+            
+            // Upload with chunking for large files (4MB chunks)
+            const CHUNK_SIZE: usize = 4 * 1024 * 1024;
+            
+            if data.len() <= CHUNK_SIZE {
+                // Single upload for small files
+                blob_client
+                    .put_block_blob(data.to_vec())
+                    .await
+                    .map_err(|e| AzureError::AzureError(format!("Upload failed: {}", e)))?;
+            } else {
+                // Block blob upload for large files
+                let mut block_ids = Vec::new();
+                
+                for (i, chunk) in data.chunks(CHUNK_SIZE).enumerate() {
+                    let block_id = format!("{:08x}", i);
+                    blob_client
+                        .put_block(block_id.clone(), chunk.to_vec())
+                        .await
+                        .map_err(|e| AzureError::AzureError(format!("Put block error: {}", e)))?;
+                    block_ids.push(block_id);
+                }
+                
+                // Finalize the block blob
+                blob_client
+                    .put_block_list(block_ids)
+                    .await
+                    .map_err(|e| AzureError::AzureError(format!("Finalize error: {}", e)))?;
+            }
+            
+            log::info!("Successfully wrote {} bytes to {}/{}", data.len(), container, blob_path);
+            Ok(())
         }
         
         #[cfg(not(feature = "azure"))]
@@ -297,11 +383,52 @@ impl AzureBlobReader {
     ) -> Result<Vec<String>, AzureError> {
         #[cfg(feature = "azure")]
         {
-            // Azure SDK integration pending v1.1 (API compatibility needed)
-            // For now, return stub implementation
-            Err(AzureError::AzureError(
-                "Azure Blob Storage integration available in v1.1".to_string()
-            ))
+            use azure_storage::prelude::*;
+            use azure_storage_blobs::prelude::*;
+            
+            // Get credentials
+            let account_key = std::env::var("AZURE_STORAGE_KEY")
+                .or_else(|_| std::env::var("AZURE_STORAGE_ACCOUNT_KEY"))
+                .map_err(|_| AzureError::AuthenticationError(
+                    "AZURE_STORAGE_KEY or AZURE_STORAGE_ACCOUNT_KEY not set".to_string()
+                ))?;
+            
+            let client = BlobServiceClient::new(
+                &self.storage_account,
+                StorageCredentials::access_key(&self.storage_account, &account_key),
+            );
+            
+            let container_client = client.container_client(container);
+            let mut list_blobs = container_client.list_blobs();
+            
+            // Apply prefix filter if provided
+            if let Some(p) = prefix {
+                if !p.is_empty() {
+                    list_blobs = list_blobs.prefix(p);
+                }
+            }
+            
+            let mut blob_names = Vec::new();
+            
+            // Paginate through results
+            let mut stream = list_blobs.into_stream();
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok(page) => {
+                        for blob in page.blobs {
+                            blob_names.push(blob.name);
+                        }
+                    }
+                    Err(e) => {
+                        return Err(AzureError::AzureError(
+                            format!("List blobs error: {}", e)
+                        ));
+                    }
+                }
+            }
+            
+            log::info!("Listed {} blobs in container {}", blob_names.len(), container);
+            Ok(blob_names)
         }
         
         #[cfg(not(feature = "azure"))]
@@ -319,11 +446,39 @@ impl AzureBlobReader {
     ) -> Result<AzureBlobMetadata, AzureError> {
         #[cfg(feature = "azure")]
         {
-            // Azure SDK integration pending v1.1 (API compatibility needed)
-            // For now, return stub implementation
-            Err(AzureError::AzureError(
-                "Azure Blob Storage integration available in v1.1".to_string()
-            ))
+            use azure_storage::prelude::*;
+            use azure_storage_blobs::prelude::*;
+            
+            // Get credentials
+            let account_key = std::env::var("AZURE_STORAGE_KEY")
+                .or_else(|_| std::env::var("AZURE_STORAGE_ACCOUNT_KEY"))
+                .map_err(|_| AzureError::AuthenticationError(
+                    "AZURE_STORAGE_KEY or AZURE_STORAGE_ACCOUNT_KEY not set".to_string()
+                ))?;
+            
+            let client = BlobServiceClient::new(
+                &self.storage_account,
+                StorageCredentials::access_key(&self.storage_account, &account_key),
+            );
+            
+            let container_client = client.container_client(container);
+            let blob_client = container_client.blob_client(blob_path);
+            
+            match blob_client.get_properties().await {
+                Ok(response) => {
+                    Ok(AzureBlobMetadata {
+                        size: response.blob.properties.content_length,
+                        last_modified: response.blob.properties.last_modified.to_rfc3339(),
+                        etag: response.blob.properties.etag.to_string(),
+                        content_type: response.blob.properties.content_type.clone(),
+                    })
+                }
+                Err(e) => {
+                    Err(AzureError::AzureError(
+                        format!("Metadata fetch error: {}", e)
+                    ))
+                }
+            }
         }
         
         #[cfg(not(feature = "azure"))]
