@@ -23,7 +23,7 @@ default = []
 kore_lite_compat = []
 # Cloud connector features (requires disk space for SDK compilation)
 s3 = ["aws-sdk-s3", "tokio", "aws-config"]
-azure = ["azure_storage", "tokio", "azure_identity"]
+azure = ["azure_storage", "tokio", "azure_identity", "futures-util"]
 gcs = ["google-cloud-storage", "tokio", "google-cloud-default"]
 # Language bindings
 pyo3 = ["pyo3/extension-module"]

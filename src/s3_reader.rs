@@ -329,11 +329,10 @@ impl S3Reader {
                 .map_err(|e| S3Error::AwsError(format!("Failed to list S3 objects: {}", e)))?;
 
             let mut objects = Vec::new();
-            if let Some(contents) = resp.contents() {
-                for obj in contents {
-                    if let Some(key) = obj.key() {
-                        objects.push(key.to_string());
-                    }
+            // resp.contents() returns &[Object], not Option
+            for obj in resp.contents() {
+                if let Some(key) = obj.key() {
+                    objects.push(key.to_string());
                 }
             }
 
