@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=77", "wheel", "build"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.5,<2", "setuptools>=77", "wheel", "build"]
+build-backend = "maturin"
 
 [project]
 name = "kore-fileformat"
@@ -32,3 +32,6 @@ Issues = "https://github.com/arunkatherashala/Kore/issues"
 [tool.setuptools]
 packages = ["kore_fileformat"]
 
+[tool.maturin]
+features = ["pyo3", "s3", "azure", "gcs"]
+module-name = "kore_cloud._core"

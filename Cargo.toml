@@ -25,6 +25,8 @@ kore_lite_compat = []
 s3 = ["aws-sdk-s3", "tokio", "aws-config"]
 azure = ["azure_storage", "tokio", "azure_identity"]
 gcs = ["google-cloud-storage", "tokio", "google-cloud-default"]
+# Python bindings
+pyo3 = ["pyo3/extension-module"]
 
 [dependencies]
 # Optional cloud storage support - commented out due to disk space constraints
@@ -47,6 +49,10 @@ tokio = { version = "1.36", features = ["full"], optional = true }
 
 # Stream utilities for Azure
 futures-util = { version = "0.3", optional = true }
+
+# Python bindings
+pyo3 = { version = "0.21", optional = true }
+maturin = { version = "1.5", optional = true }
 
 [lib]
 name = "kore_fileformat"

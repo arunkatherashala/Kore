@@ -33,6 +33,10 @@ pub mod azure_reader;
 #[cfg(feature = "gcs")]
 pub mod gcs_reader;
 
+// Python bindings for cloud connectors
+#[cfg(all(feature = "pyo3", any(feature = "s3", feature = "azure", feature = "gcs")))]
+pub mod python_bindings;
+
 #[cfg(feature = "kore_lite_compat")]
 pub mod kore_lite;
 
