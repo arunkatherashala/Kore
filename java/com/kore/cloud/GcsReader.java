@@ -1,4 +1,5 @@
 package com.kore.cloud;
+import java.io.IOException;
 
 /**
  * Java wrapper for Rust GcsReader

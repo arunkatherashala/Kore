@@ -37,12 +37,12 @@ pub mod documentation;
 #[cfg(feature = "pyo3")]
 pub mod python_bindings;
 
-// Java/JNI bindings for cloud connectors
-#[cfg(all(feature = "java", any(feature = "s3", feature = "azure", feature = "gcs")))]
+// Java/JNI bindings (function implementations conditioned by cloud features)
+#[cfg(feature = "java")]
 pub mod java_bindings;
 
-// JavaScript/NAPI bindings for cloud connectors
-#[cfg(all(feature = "napi", any(feature = "s3", feature = "azure", feature = "gcs")))]
+// JavaScript/NAPI bindings (function implementations conditioned by cloud features)
+#[cfg(feature = "napi")]
 pub mod napi_bindings;
 
 #[cfg(feature = "kore_lite_compat")]

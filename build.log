@@ -1,0 +1,139 @@
+﻿cargo : warning: unused import: `BufReader`
+At line:1 char:1
++ cargo build --release --features java 2>&1 | Out-File -FilePath build ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: unused import: `BufReade 
+   r`:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ --> src\benchmarks.rs:5:22
+  |
+5 | use std::io::{Write, BufReader, Read};
+  |                      ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Duration`
+ --> src\query_cache.rs:8:29
+  |
+8 | use std::time::{SystemTime, Duration};
+  |                             ^^^^^^^^
+
+warning: unused import: `BTreeMap`
+ --> src\index_manager.rs:4:33
+  |
+4 | use std::collections::{HashMap, BTreeMap};
+  |                                 ^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> src\query_parallelization.rs:7:5
+  |
+7 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `ParallelJoinExecutor`
+  --> src\query_optimization_engine.rs:10:44
+   |
+10 |     ParallelQueryExecutor, ParallelConfig, ParallelJoinExecutor,
+   |                                            ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+  --> src\query_optimization_engine.rs:17:5
+   |
+17 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `BaselineMetrics`, `BaselineTracker`, 
+`OptimizationComparison`, and `PerformanceMetric`
+  --> src\realworld_benchmarking.rs:10:5
+   |
+10 |     BaselineMetrics, OptimizationComparison, PerformanceMetric,
+   |     ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^
+11 |     BaselineTracker,
+   |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `OptimizedQueryResult`
+  --> src\realworld_benchmarking.rs:14:28
+   |
+14 |     OptimizedQueryContext, OptimizedQueryResult, ImprovementReport,
+   |                            ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+  --> src\comprehensive_testing.rs:11:5
+   |
+11 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Duration`
+ --> src\performance_profiling.rs:9:17
+  |
+9 | use std::time::{Duration, Instant};
+  |                 ^^^^^^^^
+
+warning: value assigned to `decoded_size` is never read
+   --> src\gorilla.rs:383:28
+    |
+383 |     let mut decoded_size = 0;
+    |                            ^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by 
+default
+
+warning: unused variable: `cardinality`
+  --> src\index_manager.rs:29:26
+   |
+29 |     pub fn estimate_size(cardinality: usize, data_size_bytes: u64) -> u64 
+{
+   |                          ^^^^^^^^^^^ help: if this is intentional, prefix 
+it with an underscore: `_cardinality`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by 
+default
+
+warning: unused variable: `right`
+   --> src\join_optimization.rs:237:13
+    |
+237 |         let right = self.get_table(right_table).unwrap();
+    |             ^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_right`
+
+warning: field `config` is never read
+   --> src\memory_pooling.rs:288:5
+    |
+285 | pub struct MemoryPoolManager {
+    |            ----------------- field in this struct
+...
+288 |     config: PoolConfig,
+    |     ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `build_table_rows` is never read
+   --> src\join_optimization.rs:287:5
+    |
+286 | pub struct HashJoinExecutor {
+    |            ---------------- field in this struct
+287 |     build_table_rows: usize,
+    |     ^^^^^^^^^^^^^^^^
+
+warning: `kore_fileformat` (lib) generated 15 warnings (run `cargo fix --lib 
+-p kore_fileformat` to apply 12 suggestions)
+warning: unused import: `BenchmarkResult`
+ --> src\bin\bench-kore.rs:4:52
+  |
+4 | use kore_fileformat::benchmarks::{BenchmarkEngine, BenchmarkResult, 
+QueryBenchmark};
+  |                                                    ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::env`
+ --> src\bin\bench-kore.rs:5:5
+  |
+5 | use std::env;
+  |     ^^^^^^^^
+
+warning: `kore_fileformat` (bin "bench-kore") generated 2 warnings (run `cargo 
+fix --bin "bench-kore" -p kore_fileformat` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.58s
