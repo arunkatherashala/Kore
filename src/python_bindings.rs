@@ -9,13 +9,13 @@ use pyo3::prelude::*;
 
 /// Kore Python module
 #[pymodule]
-fn kore_cloud(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("__version__", "1.0.0")?;
+fn kore_fileformat(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__version__", "1.1.0")?;
     m.add(
         "__doc__",
-        "Kore Columnar File Format - Python Bindings\n\nVersion 1.0.0: Core functionality with PyO3 support",
+        "Kore Binary Format - Complete 8-language ecosystem for efficient data storage and querying\n\nVersion 1.1.0: Phase A complete with 5-8x compression",
     )?;
-    m.add("__author__", "Katherashala Sai Arun Kumar")?;
+    m.add("__author__", "Sai Arun Kumar Ktherashala")?;
 
     Ok(())
 }

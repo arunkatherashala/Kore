@@ -34,4 +34,4 @@ packages = []
 
 [tool.maturin]
 features = ["pyo3"]
-module-name = "kore_fileformat._core"
+module-name = "kore_fileformat"
