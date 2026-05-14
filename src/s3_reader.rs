@@ -234,40 +234,170 @@ impl S3Reader {
 
     // Private helper methods
     async fn read_from_s3(&self, bucket: &str, key: &str) -> Result<Vec<u8>, S3Error> {
-        // Placeholder for AWS SDK implementation
-        // In production, this would use:
-        // let client = aws_sdk_s3::Client::new(&aws_config::load_defaults(BehaviorVersion::latest()).await);
-        // let resp = client.get_object().bucket(bucket).key(key).send().await?;
+        #[cfg(feature = "s3")]
+        {
+            use aws_sdk_s3::Client;
+            use aws_config::BehaviorVersion;
+            
+            let config = aws_config::load_defaults(BehaviorVersion::latest())
+                .await;
+            let client = Client::new(&config);
+
+            let resp = client
+                .get_object()
+                .bucket(bucket)
+                .key(key)
+                .send()
+                .await
+                .map_err(|e| S3Error::AwsError(format!("Failed to read from S3: {}", e)))?;
+
+            let body = resp
+                .body
+                .collect()
+                .await
+                .map_err(|e| S3Error::IoError(format!("Failed to read response body: {}", e)))?;
+
+            Ok(body.into_bytes().to_vec())
+        }
         
-        Err(S3Error::AwsError(
-            "AWS SDK integration required - configure with 'aws-sdk-s3' feature".to_string(),
-        ))
+        #[cfg(not(feature = "s3"))]
+        {
+            Err(S3Error::AwsError(
+                "AWS SDK integration not enabled - compile with 's3' feature".to_string(),
+            ))
+        }
     }
 
-    async fn write_to_s3(&self, _bucket: &str, _key: &str, _data: &[u8]) -> Result<(), S3Error> {
-        Err(S3Error::AwsError(
-            "AWS SDK integration required - configure with 'aws-sdk-s3' feature".to_string(),
-        ))
+    async fn write_to_s3(&self, bucket: &str, key: &str, data: &[u8]) -> Result<(), S3Error> {
+        #[cfg(feature = "s3")]
+        {
+            use aws_sdk_s3::Client;
+            use aws_config::BehaviorVersion;
+            use aws_sdk_s3::primitives::ByteStream;
+            
+            let config = aws_config::load_defaults(BehaviorVersion::latest())
+                .await;
+            let client = Client::new(&config);
+
+            let byte_stream = ByteStream::from(data.to_vec());
+
+            client
+                .put_object()
+                .bucket(bucket)
+                .key(key)
+                .body(byte_stream)
+                .send()
+                .await
+                .map_err(|e| S3Error::AwsError(format!("Failed to write to S3: {}", e)))?;
+
+            Ok(())
+        }
+        
+        #[cfg(not(feature = "s3"))]
+        {
+            Err(S3Error::AwsError(
+                "AWS SDK integration not enabled - compile with 's3' feature".to_string(),
+            ))
+        }
     }
 
     async fn list_s3_objects(
         &self,
-        _bucket: &str,
-        _prefix: Option<&str>,
+        bucket: &str,
+        prefix: Option<&str>,
     ) -> Result<Vec<String>, S3Error> {
-        Err(S3Error::AwsError(
-            "AWS SDK integration required - configure with 'aws-sdk-s3' feature".to_string(),
-        ))
+        #[cfg(feature = "s3")]
+        {
+            use aws_sdk_s3::Client;
+            use aws_config::BehaviorVersion;
+            
+            let config = aws_config::load_defaults(BehaviorVersion::latest())
+                .await;
+            let client = Client::new(&config);
+
+            let mut request = client
+                .list_objects_v2()
+                .bucket(bucket);
+
+            if let Some(p) = prefix {
+                request = request.prefix(p);
+            }
+
+            let resp = request
+                .send()
+                .await
+                .map_err(|e| S3Error::AwsError(format!("Failed to list S3 objects: {}", e)))?;
+
+            let mut objects = Vec::new();
+            if let Some(contents) = resp.contents() {
+                for obj in contents {
+                    if let Some(key) = obj.key() {
+                        objects.push(key.to_string());
+                    }
+                }
+            }
+
+            Ok(objects)
+        }
+        
+        #[cfg(not(feature = "s3"))]
+        {
+            Err(S3Error::AwsError(
+                "AWS SDK integration not enabled - compile with 's3' feature".to_string(),
+            ))
+        }
     }
 
     async fn fetch_s3_metadata(
         &self,
-        _bucket: &str,
-        _key: &str,
+        bucket: &str,
+        key: &str,
     ) -> Result<S3FileMetadata, S3Error> {
-        Err(S3Error::AwsError(
-            "AWS SDK integration required - configure with 'aws-sdk-s3' feature".to_string(),
-        ))
+        #[cfg(feature = "s3")]
+        {
+            use aws_sdk_s3::Client;
+            use aws_config::BehaviorVersion;
+            
+            let config = aws_config::load_defaults(BehaviorVersion::latest())
+                .await;
+            let client = Client::new(&config);
+
+            let resp = client
+                .head_object()
+                .bucket(bucket)
+                .key(key)
+                .send()
+                .await
+                .map_err(|e| S3Error::AwsError(format!("Failed to fetch S3 metadata: {}", e)))?;
+
+            let size = resp.content_length().unwrap_or(0) as u64;
+            let last_modified = resp
+                .last_modified()
+                .map(|dt| dt.to_string())
+                .unwrap_or_else(|| "Unknown".to_string());
+            let etag = resp
+                .e_tag()
+                .unwrap_or("Unknown")
+                .to_string();
+            let content_type = resp
+                .content_type()
+                .unwrap_or("application/octet-stream")
+                .to_string();
+
+            Ok(S3FileMetadata {
+                size,
+                last_modified,
+                etag,
+                content_type,
+            })
+        }
+        
+        #[cfg(not(feature = "s3"))]
+        {
+            Err(S3Error::AwsError(
+                "AWS SDK integration not enabled - compile with 's3' feature".to_string(),
+            ))
+        }
     }
 
     async fn read_from_cache(&self, _bucket: &str, _key: &str) -> Option<Vec<u8>> {

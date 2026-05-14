@@ -1,9 +1,0 @@
-// Killer script: inlined CSV sample, compress with kore_write
-print("Killer CSV→KORE builtin compression demo (sample)\n")
-
-let schema = "name:str,age:int,salary:float,dept:str"
-let data = "[[Alice,25,90000.0,Engineering],[Bob,30,120000.0,Management],[Charlie,25,90000.0,Engineering],[Del,40,80000.0,HR],[Eve,28,70000.0,Marketing],[Foo,33,33333.3,Dev],[Bar,44,44444.4,QA],[Baz,55,55555.5,Ops],[X,1,1.0,A],[Z,99,999999.9,Secret]]"
-let out_path = "sample_builtin_out.kore"
-let res = kore_write(out_path, schema, data)
-print(K"kore_write: {res}")
-print(K"Wrote compressed KORE to {out_path}\n")

@@ -232,10 +232,36 @@ impl GcsReader {
     }
 
     async fn read_from_gcs(&self, bucket: &str, object_path: &str) -> Result<Vec<u8>, GcsError> {
-        // TODO: Implement with google-cloud-storage SDK
-        Err(GcsError::GcsError(
-            "GCS SDK integration required".to_string(),
-        ))
+        #[cfg(feature = "gcs")]
+        {
+            use google_cloud_storage::client::{ClientConfig, Client};
+            
+            let config = ClientConfig::default().with_auth().await
+                .map_err(|e| GcsError::AuthenticationError(format!("Failed to authenticate: {}", e)))?;
+            
+            let client = Client::new(config);
+            let bucket_client = client.bucket(bucket);
+            
+            let mut data = Vec::new();
+            let mut reader = bucket_client
+                .object(object_path)
+                .download()
+                .await
+                .map_err(|e| GcsError::GcsError(format!("Failed to download object: {}", e)))?;
+            
+            use std::io::Read;
+            reader.read_to_end(&mut data)
+                .map_err(|e| GcsError::IoError(format!("Failed to read data: {}", e)))?;
+            
+            Ok(data)
+        }
+        
+        #[cfg(not(feature = "gcs"))]
+        {
+            Err(GcsError::GcsError(
+                "GCS SDK integration not enabled - compile with 'gcs' feature".to_string(),
+            ))
+        }
     }
 
     async fn write_to_gcs(
@@ -244,10 +270,34 @@ impl GcsReader {
         object_path: &str,
         data: &[u8],
     ) -> Result<(), GcsError> {
-        // TODO: Implement with google-cloud-storage SDK
-        Err(GcsError::GcsError(
-            "GCS SDK integration required".to_string(),
-        ))
+        #[cfg(feature = "gcs")]
+        {
+            use google_cloud_storage::client::{ClientConfig, Client};
+            use std::io::Cursor;
+            
+            let config = ClientConfig::default().with_auth().await
+                .map_err(|e| GcsError::AuthenticationError(format!("Failed to authenticate: {}", e)))?;
+            
+            let client = Client::new(config);
+            let bucket_client = client.bucket(bucket);
+            
+            let cursor = Cursor::new(data.to_vec());
+            
+            bucket_client
+                .object(object_path)
+                .upload(cursor, &Default::default())
+                .await
+                .map_err(|e| GcsError::GcsError(format!("Failed to upload object: {}", e)))?;
+            
+            Ok(())
+        }
+        
+        #[cfg(not(feature = "gcs"))]
+        {
+            Err(GcsError::GcsError(
+                "GCS SDK integration not enabled - compile with 'gcs' feature".to_string(),
+            ))
+        }
     }
 
     async fn list_gcs_objects(
@@ -255,10 +305,42 @@ impl GcsReader {
         bucket: &str,
         prefix: Option<&str>,
     ) -> Result<Vec<String>, GcsError> {
-        // TODO: Implement with google-cloud-storage SDK
-        Err(GcsError::GcsError(
-            "GCS SDK integration required".to_string(),
-        ))
+        #[cfg(feature = "gcs")]
+        {
+            use google_cloud_storage::client::{ClientConfig, Client};
+            
+            let config = ClientConfig::default().with_auth().await
+                .map_err(|e| GcsError::AuthenticationError(format!("Failed to authenticate: {}", e)))?;
+            
+            let client = Client::new(config);
+            let bucket_client = client.bucket(bucket);
+            
+            let mut list_req = bucket_client.list(&Default::default()).await
+                .map_err(|e| GcsError::GcsError(format!("Failed to list objects: {}", e)))?;
+            
+            let mut objects = Vec::new();
+            
+            for obj in list_req.iter() {
+                let name = obj.name.clone();
+                
+                if let Some(p) = prefix {
+                    if name.starts_with(p) {
+                        objects.push(name);
+                    }
+                } else {
+                    objects.push(name);
+                }
+            }
+            
+            Ok(objects)
+        }
+        
+        #[cfg(not(feature = "gcs"))]
+        {
+            Err(GcsError::GcsError(
+                "GCS SDK integration not enabled - compile with 'gcs' feature".to_string(),
+            ))
+        }
     }
 
     async fn fetch_gcs_metadata(
@@ -266,10 +348,36 @@ impl GcsReader {
         bucket: &str,
         object_path: &str,
     ) -> Result<GcsObjectMetadata, GcsError> {
-        // TODO: Implement with google-cloud-storage SDK
-        Err(GcsError::GcsError(
-            "GCS SDK integration required".to_string(),
-        ))
+        #[cfg(feature = "gcs")]
+        {
+            use google_cloud_storage::client::{ClientConfig, Client};
+            
+            let config = ClientConfig::default().with_auth().await
+                .map_err(|e| GcsError::AuthenticationError(format!("Failed to authenticate: {}", e)))?;
+            
+            let client = Client::new(config);
+            let bucket_client = client.bucket(bucket);
+            
+            let object = bucket_client
+                .object(object_path)
+                .meta()
+                .await
+                .map_err(|e| GcsError::GcsError(format!("Failed to get metadata: {}", e)))?;
+            
+            Ok(GcsObjectMetadata {
+                size: object.size as u64,
+                last_modified: object.updated.unwrap_or_default().to_rfc3339(),
+                generation: object.generation.to_string(),
+                content_type: object.content_type.clone(),
+            })
+        }
+        
+        #[cfg(not(feature = "gcs"))]
+        {
+            Err(GcsError::GcsError(
+                "GCS SDK integration not enabled - compile with 'gcs' feature".to_string(),
+            ))
+        }
     }
 
     async fn read_from_cache(

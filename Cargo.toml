@@ -22,30 +22,31 @@ include = [
 default = []
 kore_lite_compat = []
 # Cloud connector features (requires disk space for SDK compilation)
-# s3 = ["aws-sdk-s3", "tokio", "aws-config"]
-# azure = ["azure-storage-blobs", "tokio", "azure-identity"]
-# gcs = ["google-cloud-storage", "tokio", "google-cloud-default"]
+s3 = ["aws-sdk-s3", "tokio", "aws-config"]
+azure = ["azure_storage", "tokio", "azure_identity"]
+gcs = ["google-cloud-storage", "tokio", "google-cloud-default"]
 
 [dependencies]
 # Optional cloud storage support - commented out due to disk space constraints
 # Uncomment when sufficient disk space available
 
 # AWS S3
-# aws-sdk-s3 = { version = "1.30", optional = true }
-# aws-config = { version = "1.1", optional = true }
+aws-sdk-s3 = { version = "1.30", optional = true }
+aws-config = { version = "1.1", optional = true }
 
 # Azure Blob Storage
-# azure-storage-blobs = { version = "0.20", optional = true }
-# azure-identity = { version = "0.17", optional = true }
+azure_storage = { version = "0.20", optional = true }
+azure_identity = { version = "0.17", optional = true }
 
 # Google Cloud Storage
-# google-cloud-storage = { version = "0.20", optional = true }
-# google-cloud-default = { version = "0.2", optional = true }
+google-cloud-storage = { version = "0.20", optional = true }
+google-cloud-default = { version = "0.2", optional = true }
 
 # Shared async runtime
-# tokio = { version = "1.36", features = ["full"], optional = true }
-# aws-config = { version = "1.1", optional = true }
-# tokio = { version = "1.36", features = ["full"], optional = true }
+tokio = { version = "1.36", features = ["full"], optional = true }
+
+# Stream utilities for Azure
+futures-util = { version = "0.3", optional = true }
 
 [lib]
 name = "kore_fileformat"

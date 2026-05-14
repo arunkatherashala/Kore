@@ -30,6 +30,9 @@
 use std::error::Error;
 use std::fmt;
 
+#[cfg(feature = "azure")]
+use futures_util::stream::StreamExt;
+
 /// Azure Blob Storage Reader Configuration and Operations
 #[derive(Debug, Clone)]
 pub struct AzureBlobReader {
@@ -247,10 +250,43 @@ impl AzureBlobReader {
     }
 
     async fn read_from_azure(&self, container: &str, blob_path: &str) -> Result<Vec<u8>, AzureError> {
-        // TODO: Implement with azure-storage-blobs SDK
-        Err(AzureError::AzureError(
-            "Azure SDK integration required".to_string(),
-        ))
+        #[cfg(feature = "azure")]
+        {
+            use azure_storage_blobs::prelude::*;
+            
+            let connection_string = format!(
+                "DefaultEndpointsProtocol=https;AccountName={};AccountKey={};EndpointSuffix=core.windows.net",
+                self.storage_account, self.account_key
+            );
+            
+            let client = BlobServiceClient::from_connection_string(&connection_string)
+                .map_err(|e| AzureError::AzureError(format!("Failed to create client: {}", e)))?;
+            
+            let container_client = client.container_client(container);
+            let blob_client = container_client.blob_client(blob_path);
+            
+            let mut stream = blob_client
+                .get()
+                .into_stream()
+                .await
+                .map_err(|e| AzureError::AzureError(format!("Failed to read blob: {}", e)))?;
+            
+            let mut data = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk
+                    .map_err(|e| AzureError::IoError(format!("Stream error: {}", e)))?;
+                data.extend_from_slice(&chunk);
+            }
+            
+            Ok(data)
+        }
+        
+        #[cfg(not(feature = "azure"))]
+        {
+            Err(AzureError::AzureError(
+                "Azure SDK integration not enabled - compile with 'azure' feature".to_string(),
+            ))
+        }
     }
 
     async fn write_to_azure(
@@ -259,10 +295,35 @@ impl AzureBlobReader {
         blob_path: &str,
         data: &[u8],
     ) -> Result<(), AzureError> {
-        // TODO: Implement with azure-storage-blobs SDK
-        Err(AzureError::AzureError(
-            "Azure SDK integration required".to_string(),
-        ))
+        #[cfg(feature = "azure")]
+        {
+            use azure_storage_blobs::prelude::*;
+            
+            let connection_string = format!(
+                "DefaultEndpointsProtocol=https;AccountName={};AccountKey={};EndpointSuffix=core.windows.net",
+                self.storage_account, self.account_key
+            );
+            
+            let client = BlobServiceClient::from_connection_string(&connection_string)
+                .map_err(|e| AzureError::AzureError(format!("Failed to create client: {}", e)))?;
+            
+            let container_client = client.container_client(container);
+            let blob_client = container_client.blob_client(blob_path);
+            
+            blob_client
+                .put_block_blob(data)
+                .await
+                .map_err(|e| AzureError::AzureError(format!("Failed to write blob: {}", e)))?;
+            
+            Ok(())
+        }
+        
+        #[cfg(not(feature = "azure"))]
+        {
+            Err(AzureError::AzureError(
+                "Azure SDK integration not enabled - compile with 'azure' feature".to_string(),
+            ))
+        }
     }
 
     async fn list_azure_blobs(
@@ -270,10 +331,49 @@ impl AzureBlobReader {
         container: &str,
         prefix: Option<&str>,
     ) -> Result<Vec<String>, AzureError> {
-        // TODO: Implement with azure-storage-blobs SDK
-        Err(AzureError::AzureError(
-            "Azure SDK integration required".to_string(),
-        ))
+        #[cfg(feature = "azure")]
+        {
+            use azure_storage_blobs::prelude::*;
+            
+            let connection_string = format!(
+                "DefaultEndpointsProtocol=https;AccountName={};AccountKey={};EndpointSuffix=core.windows.net",
+                self.storage_account, self.account_key
+            );
+            
+            let client = BlobServiceClient::from_connection_string(&connection_string)
+                .map_err(|e| AzureError::AzureError(format!("Failed to create client: {}", e)))?;
+            
+            let container_client = client.container_client(container);
+            let mut list = container_client.list_blobs();
+            
+            if let Some(p) = prefix {
+                list = list.prefix(p);
+            }
+            
+            let mut blobs = Vec::new();
+            loop {
+                match list.next().await {
+                    Ok(Some(page)) => {
+                        for blob in page.blobs.blobs() {
+                            blobs.push(blob.name.clone());
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        return Err(AzureError::AzureError(format!("Failed to list blobs: {}", e)))
+                    }
+                }
+            }
+            
+            Ok(blobs)
+        }
+        
+        #[cfg(not(feature = "azure"))]
+        {
+            Err(AzureError::AzureError(
+                "Azure SDK integration not enabled - compile with 'azure' feature".to_string(),
+            ))
+        }
     }
 
     async fn fetch_azure_metadata(
@@ -281,10 +381,40 @@ impl AzureBlobReader {
         container: &str,
         blob_path: &str,
     ) -> Result<AzureBlobMetadata, AzureError> {
-        // TODO: Implement with azure-storage-blobs SDK
-        Err(AzureError::AzureError(
-            "Azure SDK integration required".to_string(),
-        ))
+        #[cfg(feature = "azure")]
+        {
+            use azure_storage_blobs::prelude::*;
+            
+            let connection_string = format!(
+                "DefaultEndpointsProtocol=https;AccountName={};AccountKey={};EndpointSuffix=core.windows.net",
+                self.storage_account, self.account_key
+            );
+            
+            let client = BlobServiceClient::from_connection_string(&connection_string)
+                .map_err(|e| AzureError::AzureError(format!("Failed to create client: {}", e)))?;
+            
+            let container_client = client.container_client(container);
+            let blob_client = container_client.blob_client(blob_path);
+            
+            let props = blob_client
+                .get_properties()
+                .await
+                .map_err(|e| AzureError::AzureError(format!("Failed to get properties: {}", e)))?;
+            
+            Ok(AzureBlobMetadata {
+                size: props.blob.properties.content_length,
+                last_modified: props.blob.properties.last_modified.to_rfc3339(),
+                etag: props.blob.properties.etag.to_string(),
+                content_type: props.blob.properties.content_type.clone(),
+            })
+        }
+        
+        #[cfg(not(feature = "azure"))]
+        {
+            Err(AzureError::AzureError(
+                "Azure SDK integration not enabled - compile with 'azure' feature".to_string(),
+            ))
+        }
     }
 
     async fn read_from_cache(
