@@ -65,5 +65,5 @@ napi = { version = "2.15", optional = true }
 [lib]
 name = "kore_fileformat"
 path = "src/lib.rs"
-# Generate dynamic library for JNI/NAPI bindings
-crate-type = ["cdylib"]
+# Generate dynamic library for JNI/NAPI bindings AND allow internal linking for tests/bins
+crate-type = ["cdylib", "rlib"]
