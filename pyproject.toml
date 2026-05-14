@@ -1,5 +1,5 @@
-[build-system]
-requires = ["maturin>=1.5,<2", "setuptools>=77", "wheel", "build"]
+﻿[build-system]
+requires = ["maturin>=1.5,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -30,6 +30,5 @@ Repository = "https://github.com/arunkatherashala/Kore"
 Issues = "https://github.com/arunkatherashala/Kore/issues"
 
 [tool.maturin]
-features = ["pyo3"]
+features = ["pyo3/extension-module"]
 module-name = "kore_fileformat"
-python-version = "3.8"
