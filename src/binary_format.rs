@@ -207,7 +207,7 @@ impl IncrementalEncoder {
     /// Create new incremental encoder with schema
     pub fn new(schema: Vec<ColumnType>) -> Result<Self, BinaryFormatError> {
         Ok(IncrementalEncoder {
-            column_types: schema,
+            column_types: schema.clone(),
             last_values: vec![Vec::new(); schema.len()],
         })
     }
@@ -298,6 +298,295 @@ pub struct FormatMetadata {
     pub checksum: u32,
 }
 
+/// Enhanced Delta Encoder with bit-packing
+/// 
+/// Stores deltas in minimal bits needed, reducing storage 2-5x vs standard delta.
+/// Automatically detects optimal bit width (1, 2, 4, 8, 16, 32 bits).
+#[derive(Debug)]
+pub struct BitPackedDelta;
+
+impl BitPackedDelta {
+    /// Determine minimum bits needed to represent a value
+    fn min_bits_for_value(min_val: i64, max_val: i64) -> u8 {
+        let range = (max_val as u128).wrapping_sub(min_val as u128);
+        if range == 0 {
+            1
+        } else {
+            let bits = 64 - (range as u64).leading_zeros() as u8;
+            // Round up to nearest standard size: 1, 2, 4, 8, 16, 32, 64
+            match bits {
+                0 => 1,
+                1..=1 => 1,
+                2..=2 => 2,
+                3..=4 => 4,
+                5..=8 => 8,
+                9..=16 => 16,
+                _ => 32,
+            }
+        }
+    }
+    
+    /// Encode with automatic bit-packing
+    pub fn encode(values: &[i64]) -> Result<Vec<u8>, BinaryFormatError> {
+        if values.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        // Calculate deltas
+        let mut deltas = Vec::with_capacity(values.len());
+        let mut prev = values[0];
+        // deltas.push(prev);
+        
+        for &value in &values[1..] {
+            let delta = value.wrapping_sub(prev);
+            deltas.push(delta);
+            prev = value;
+        }
+        
+        // Find min/max deltas
+        let min_delta = *deltas.iter().min().unwrap_or(&0);
+        let max_delta = *deltas.iter().max().unwrap_or(&0);
+        
+        // Determine bit width
+        let bits_needed = Self::min_bits_for_value(min_delta, max_delta);
+        
+        // Normalize to positive range (frame-of-reference technique)
+        let frame_value = min_delta;
+        let normalized: Vec<u64> = deltas
+            .iter()
+            .map(|d| d.wrapping_sub(frame_value) as u64)
+            .collect();
+        
+        // Pack into bytes
+        let mut encoded = Vec::new();
+        
+        // Header: baseline value (8 bytes) + bit width (1 byte) + frame value (8 bytes)
+        encoded.extend_from_slice(&values[0].to_le_bytes());
+        encoded.push(bits_needed);
+        encoded.extend_from_slice(&frame_value.to_le_bytes());
+        
+        // Store number of values (4 bytes)
+        encoded.extend_from_slice(&(deltas.len() as u32).to_le_bytes());
+        
+        // Pack normalized deltas
+        match bits_needed {
+            1 => Self::pack_bits(&normalized, 1, &mut encoded),
+            2 => Self::pack_bits(&normalized, 2, &mut encoded),
+            4 => Self::pack_bits(&normalized, 4, &mut encoded),
+            8 => Self::pack_bytes(&normalized, 1, &mut encoded),
+            16 => Self::pack_bytes(&normalized, 2, &mut encoded),
+            32 => Self::pack_bytes(&normalized, 4, &mut encoded),
+            _ => Self::pack_bytes(&normalized, 8, &mut encoded),
+        }
+        
+        Ok(encoded)
+    }
+    
+    /// Pack values into sub-byte boundaries
+    fn pack_bits(values: &[u64], bits: usize, output: &mut Vec<u8>) {
+        let mut byte_buffer = 0u8;
+        let mut bit_pos = 0;
+        let mask = (1u64 << bits) - 1;
+        
+        for &value in values {
+            let val = (value & mask) as u8;
+            
+            if bit_pos + bits <= 8 {
+                byte_buffer |= (val << bit_pos) as u8;
+                bit_pos += bits;
+                
+                if bit_pos == 8 {
+                    output.push(byte_buffer);
+                    byte_buffer = 0;
+                    bit_pos = 0;
+                }
+            } else {
+                // Value spans byte boundary
+                let bits_in_current = 8 - bit_pos;
+                byte_buffer |= (val << bit_pos) as u8;
+                output.push(byte_buffer);
+                
+                byte_buffer = (val >> bits_in_current) as u8;
+                bit_pos = bits - bits_in_current;
+            }
+        }
+        
+        if bit_pos > 0 {
+            output.push(byte_buffer);
+        }
+    }
+    
+    /// Pack values into byte boundaries
+    fn pack_bytes(values: &[u64], bytes: usize, output: &mut Vec<u8>) {
+        for &value in values {
+            match bytes {
+                1 => output.push(value as u8),
+                2 => output.extend_from_slice(&(value as u16).to_le_bytes()),
+                4 => output.extend_from_slice(&(value as u32).to_le_bytes()),
+                _ => output.extend_from_slice(&value.to_le_bytes()),
+            }
+        }
+    }
+    
+    /// Decode bit-packed deltas
+    pub fn decode(bytes: &[u8]) -> Result<Vec<i64>, BinaryFormatError> {
+        if bytes.len() < 21 {
+            return Err(BinaryFormatError::DecompressionError(
+                "BitPacked data too short".to_string(),
+            ));
+        }
+        
+        // Read header
+        let baseline = i64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+        ]);
+        let bits_needed = bytes[8];
+        let frame_value = i64::from_le_bytes([
+            bytes[9], bytes[10], bytes[11], bytes[12],
+            bytes[13], bytes[14], bytes[15], bytes[16],
+        ]);
+        let count = u32::from_le_bytes([bytes[17], bytes[18], bytes[19], bytes[20]]) as usize;
+        
+        let mut result = vec![baseline];
+        let mut prev = baseline;
+        
+        if count == 0 {
+            return Ok(result);
+        }
+        
+        // Unpack based on bit width
+        let packed_data = &bytes[21..];
+        match bits_needed {
+            1 => {
+                let unpacked = Self::unpack_bits(packed_data, 1, count)?;
+                for delta_norm in unpacked {
+                    let delta = (delta_norm as i64).wrapping_add(frame_value);
+                    prev = prev.wrapping_add(delta);
+                    result.push(prev);
+                }
+            }
+            2 => {
+                let unpacked = Self::unpack_bits(packed_data, 2, count)?;
+                for delta_norm in unpacked {
+                    let delta = (delta_norm as i64).wrapping_add(frame_value);
+                    prev = prev.wrapping_add(delta);
+                    result.push(prev);
+                }
+            }
+            4 => {
+                let unpacked = Self::unpack_bits(packed_data, 4, count)?;
+                for delta_norm in unpacked {
+                    let delta = (delta_norm as i64).wrapping_add(frame_value);
+                    prev = prev.wrapping_add(delta);
+                    result.push(prev);
+                }
+            }
+            8 => {
+                for i in 0..count {
+                    let delta_norm = packed_data[i] as i64;
+                    let delta = delta_norm.wrapping_add(frame_value);
+                    prev = prev.wrapping_add(delta);
+                    result.push(prev);
+                }
+            }
+            16 => {
+                for i in 0..count {
+                    let delta_norm = u16::from_le_bytes([packed_data[i * 2], packed_data[i * 2 + 1]]) as i64;
+                    let delta = delta_norm.wrapping_add(frame_value);
+                    prev = prev.wrapping_add(delta);
+                    result.push(prev);
+                }
+            }
+            _ => {
+                for i in 0..count {
+                    let delta_norm = u32::from_le_bytes([
+                        packed_data[i * 4],
+                        packed_data[i * 4 + 1],
+                        packed_data[i * 4 + 2],
+                        packed_data[i * 4 + 3],
+                    ]) as i64;
+                    let delta = delta_norm.wrapping_add(frame_value);
+                    prev = prev.wrapping_add(delta);
+                    result.push(prev);
+                }
+            }
+        }
+        
+        Ok(result)
+    }
+    
+    /// Unpack sub-byte bit-packed values
+    fn unpack_bits(data: &[u8], bits: usize, count: usize) -> Result<Vec<u64>, BinaryFormatError> {
+        let mut result = Vec::with_capacity(count);
+        let mut byte_idx = 0;
+        let mut bit_pos = 0;
+        let mask = (1u64 << bits) - 1;
+        
+        for _ in 0..count {
+            if byte_idx >= data.len() {
+                return Err(BinaryFormatError::DecompressionError(
+                    "Not enough data to unpack".to_string(),
+                ));
+            }
+            
+            let mut value = 0u64;
+            let mut bits_read = 0;
+            
+            while bits_read < bits && byte_idx < data.len() {
+                let byte_val = data[byte_idx] as u64;
+                let bits_available = 8 - bit_pos;
+                let bits_to_read = std::cmp::min(bits - bits_read, bits_available);
+                
+                let bits_mask = ((1u64 << bits_to_read) - 1) << bit_pos;
+                let bits_val = (byte_val & bits_mask) >> bit_pos;
+                value |= bits_val << bits_read;
+                
+                bits_read += bits_to_read;
+                bit_pos += bits_to_read;
+                
+                if bit_pos >= 8 {
+                    bit_pos = 0;
+                    byte_idx += 1;
+                }
+            }
+            
+            result.push(value & mask);
+        }
+        
+        Ok(result)
+    }
+}
+
+/// Zigzag encoding for efficient signed integer compression
+/// 
+/// Maps signed integers to unsigned with smaller magnitude:
+/// 0 → 0, -1 → 1, 1 → 2, -2 → 3, 2 → 4, ...
+#[derive(Debug)]
+pub struct ZigzagEncoding;
+
+impl ZigzagEncoding {
+    /// Encode signed integer to unsigned using zigzag
+    pub fn encode(n: i64) -> u64 {
+        ((n << 1) ^ (n >> 63)) as u64
+    }
+    
+    /// Decode unsigned back to signed integer
+    pub fn decode(n: u64) -> i64 {
+        ((n >> 1) as i64) ^ -((n & 1) as i64)
+    }
+    
+    /// Encode sequence of signed integers
+    pub fn encode_sequence(values: &[i64]) -> Vec<u64> {
+        values.iter().map(|&n| Self::encode(n)).collect()
+    }
+    
+    /// Decode sequence of unsigned integers
+    pub fn decode_sequence(values: &[u64]) -> Vec<i64> {
+        values.iter().map(|&n| Self::decode(n)).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,5 +633,139 @@ mod tests {
         // Same row should have less data
         let encoded2 = encoder.encode_row(&row1).unwrap();
         assert!(encoded2.len() < encoded1.len());
+    }
+    
+    // BitPackedDelta Tests
+    #[test]
+    fn test_bitpacked_delta_simple() {
+        let values = vec![100, 105, 103, 108, 110];
+        let encoded = BitPackedDelta::encode(&values).unwrap();
+        let decoded = BitPackedDelta::decode(&encoded).unwrap();
+        assert_eq!(values, decoded);
+    }
+    
+    #[test]
+    fn test_bitpacked_delta_small_deltas() {
+        // Small deltas should fit in 1-2 bits
+        let values = vec![1000, 1001, 1000, 1001, 1000, 1001];
+        let encoded = BitPackedDelta::encode(&values).unwrap();
+        let decoded = BitPackedDelta::decode(&encoded).unwrap();
+        assert_eq!(values, decoded);
+        // Should be more compressed than standard delta
+        assert!(encoded.len() < values.len() * 8);
+    }
+    
+    #[test]
+    fn test_bitpacked_delta_large_range() {
+        let values = vec![0, 1000, 2000, 3000, 4000, 5000];
+        let encoded = BitPackedDelta::encode(&values).unwrap();
+        let decoded = BitPackedDelta::decode(&encoded).unwrap();
+        assert_eq!(values, decoded);
+    }
+    
+    #[test]
+    fn test_bitpacked_delta_negative() {
+        let values = vec![-100, -95, -90, -85, -80];
+        let encoded = BitPackedDelta::encode(&values).unwrap();
+        let decoded = BitPackedDelta::decode(&encoded).unwrap();
+        assert_eq!(values, decoded);
+    }
+    
+    #[test]
+    fn test_bitpacked_delta_monotonic() {
+        // Monotonic sequence (perfect for delta)
+        let values: Vec<i64> = (0..100).collect();
+        let encoded = BitPackedDelta::encode(&values).unwrap();
+        let decoded = BitPackedDelta::decode(&encoded).unwrap();
+        assert_eq!(values, decoded);
+        // Should compress to ~1/8 of original
+        assert!(encoded.len() < values.len() * 2);
+    }
+    
+    #[test]
+    fn test_bitpacked_delta_empty() {
+        let values: Vec<i64> = vec![];
+        let encoded = BitPackedDelta::encode(&values).unwrap();
+        assert_eq!(encoded.len(), 0);
+    }
+    
+    #[test]
+    fn test_bitpacked_delta_single_value() {
+        let values = vec![42];
+        let encoded = BitPackedDelta::encode(&values).unwrap();
+        let decoded = BitPackedDelta::decode(&encoded).unwrap();
+        assert_eq!(values, decoded);
+    }
+    
+    #[test]
+    fn test_bitpacked_delta_compression_ratio() {
+        // Time-series data (ideal for delta + bit-packing)
+        let mut values = vec![];
+        let mut val = 1000000i64;
+        for _ in 0..1000 {
+            values.push(val);
+            val += 100; // Small increments
+        }
+        
+        let std_delta = DeltaEncoder::encode(&values).unwrap();
+        let bitpacked = BitPackedDelta::encode(&values).unwrap();
+        
+        // Bitpacked should be significantly smaller
+        let ratio = bitpacked.len() as f64 / std_delta.len() as f64;
+        assert!(ratio < 0.3, "Bitpacked should be <30% of standard delta, got {}", ratio);
+    }
+    
+    // Zigzag Encoding Tests
+    #[test]
+    fn test_zigzag_positive() {
+        assert_eq!(ZigzagEncoding::encode(0), 0);
+        assert_eq!(ZigzagEncoding::encode(1), 2);
+        assert_eq!(ZigzagEncoding::encode(2), 4);
+        assert_eq!(ZigzagEncoding::encode(3), 6);
+    }
+    
+    #[test]
+    fn test_zigzag_negative() {
+        assert_eq!(ZigzagEncoding::encode(-1), 1);
+        assert_eq!(ZigzagEncoding::encode(-2), 3);
+        assert_eq!(ZigzagEncoding::encode(-3), 5);
+    }
+    
+    #[test]
+    fn test_zigzag_roundtrip() {
+        let values = vec![-100, -50, -1, 0, 1, 50, 100];
+        let encoded = ZigzagEncoding::encode_sequence(&values);
+        let decoded = ZigzagEncoding::decode_sequence(&encoded);
+        assert_eq!(values, decoded);
+    }
+    
+    #[test]
+    fn test_zigzag_small_magnitude() {
+        // Zigzag makes small magnitudes have small encoded values
+        let small_neg = ZigzagEncoding::encode(-1);
+        let small_pos = ZigzagEncoding::encode(1);
+        let large_neg = ZigzagEncoding::encode(-1000);
+        let large_pos = ZigzagEncoding::encode(1000);
+        
+        assert!(small_neg < large_neg as u64);
+        assert!(small_pos < large_pos as u64);
+    }
+    
+    #[test]
+    fn test_enhanced_delta_compression_ratio() {
+        // Compare all enhancement techniques
+        let values = vec![100, 105, 103, 108, 110, 115, 113, 118, 120, 125];
+        
+        let std_delta = DeltaEncoder::encode(&values).unwrap();
+        let bitpacked = BitPackedDelta::encode(&values).unwrap();
+        
+        // Both should decompress to same result
+        let std_decoded = DeltaEncoder::decode(&std_delta).unwrap();
+        let bp_decoded = BitPackedDelta::decode(&bitpacked).unwrap();
+        assert_eq!(std_decoded, values);
+        assert_eq!(bp_decoded, values);
+        
+        // Bitpacked should be more efficient
+        assert!(bitpacked.len() < std_delta.len());
     }
 }
