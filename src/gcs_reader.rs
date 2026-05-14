@@ -240,7 +240,7 @@ impl GcsReader {
                 .map_err(|e| GcsError::AuthenticationError(format!("Failed to authenticate: {}", e)))?;
             
             let client = Client::new(config);
-            let bucket_client = client.bucket(bucket);
+            let bucket_client = client.get_bucket(bucket);
             
             let mut data = Vec::new();
             let mut reader = bucket_client
@@ -279,7 +279,7 @@ impl GcsReader {
                 .map_err(|e| GcsError::AuthenticationError(format!("Failed to authenticate: {}", e)))?;
             
             let client = Client::new(config);
-            let bucket_client = client.bucket(bucket);
+            let bucket_client = client.get_bucket(bucket);
             
             let cursor = Cursor::new(data.to_vec());
             
@@ -313,7 +313,7 @@ impl GcsReader {
                 .map_err(|e| GcsError::AuthenticationError(format!("Failed to authenticate: {}", e)))?;
             
             let client = Client::new(config);
-            let bucket_client = client.bucket(bucket);
+            let bucket_client = client.get_bucket(bucket);
             
             let mut list_req = bucket_client.list(&Default::default()).await
                 .map_err(|e| GcsError::GcsError(format!("Failed to list objects: {}", e)))?;
@@ -356,7 +356,7 @@ impl GcsReader {
                 .map_err(|e| GcsError::AuthenticationError(format!("Failed to authenticate: {}", e)))?;
             
             let client = Client::new(config);
-            let bucket_client = client.bucket(bucket);
+            let bucket_client = client.get_bucket(bucket);
             
             let object = bucket_client
                 .object(object_path)

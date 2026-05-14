@@ -23,15 +23,15 @@ pub mod performance_profiling;
 pub mod advanced_features;
 pub mod documentation;
 
-// Cloud storage connectors (commented out due to SDK API mismatches - will be fixed in v1.1)
-// #[cfg(feature = "s3")]
-// pub mod s3_reader;
+// Cloud storage connectors (API stubs enabled for v1.0, full implementation in v1.1)
+#[cfg(feature = "s3")]
+pub mod s3_reader;
 
-// #[cfg(feature = "azure")]
-// pub mod azure_reader;
+#[cfg(feature = "azure")]
+pub mod azure_reader;
 
-// #[cfg(feature = "gcs")]
-// pub mod gcs_reader;
+#[cfg(feature = "gcs")]
+pub mod gcs_reader;
 
 // Python bindings for Kore core functionality
 #[cfg(feature = "pyo3")]
