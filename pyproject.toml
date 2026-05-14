@@ -30,8 +30,8 @@ Repository = "https://github.com/arunkatherashala/Kore"
 Issues = "https://github.com/arunkatherashala/Kore/issues"
 
 [tool.setuptools]
-packages = ["kore_fileformat"]
+packages = []
 
 [tool.maturin]
 features = ["pyo3"]
-module-name = "kore_cloud._core"
+module-name = "kore_fileformat._core"
