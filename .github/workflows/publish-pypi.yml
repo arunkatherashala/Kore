@@ -41,29 +41,21 @@ jobs:
         import zipfile, os, tempfile, shutil, sys
         
         whl_files = [f for f in os.listdir('wheels') if f.endswith('.whl')]
-        print(f"Found wheels: {whl_files}")
         if not whl_files:
             print("ERROR: No wheel file found")
             sys.exit(1)
         
         whl_path = os.path.join('wheels', whl_files[0])
-        print(f"Processing: {whl_path}")
         
         temp_dir = tempfile.mkdtemp()
         try:
-            print(f"Extracting to: {temp_dir}")
             with zipfile.ZipFile(whl_path, 'r') as z:
                 z.extractall(temp_dir)
-                print(f"Extracted files: {z.namelist()}")
             
-            metadata_found = False
             for root, dirs, files in os.walk(temp_dir):
-                print(f"Checking dir: {root}")
                 for file in files:
                     if file == 'METADATA':
-                        metadata_found = True
                         metadata_path = os.path.join(root, file)
-                        print(f"Found METADATA: {metadata_path}")
                         
                         lines = [
                             "Metadata-Version: 2.1",
@@ -74,38 +66,34 @@ jobs:
                             "Author: Sai Arun Kumar Ktherashala",
                             "Author-email: arunkatherashala@gmail.com",
                             "License: Apache 2.0",
-                            "Classifier: Development Status - 5 - Production/Stable",
-                            "Classifier: Intended Audience - Developers",
-                            "Classifier: License - OSI Approved - Apache Software License",
-                            "Classifier: Programming Language - Python - 3",
-                            "Classifier: Programming Language - Python - 3.8",
-                            "Classifier: Programming Language - Python - 3.9",
-                            "Classifier: Programming Language - Python - 3.10",
-                            "Classifier: Programming Language - Python - 3.11",
-                            "Classifier: Programming Language - Python - 3.12"
+                            "Project-URL: Repository, https://github.com/arunkatherashala/Kore",
+                            "Project-URL: Issues, https://github.com/arunkatherashala/Kore/issues",
+                            "Description: KORE is a high-performance binary compression format.",
+                            "Keywords: compression,binary-format,performance,serialization",
+                            "Requires-Python: >=3.8",
+                            "Classifier: Development Status :: 5 - Production/Stable",
+                            "Classifier: Intended Audience :: Developers",
+                            "Classifier: License :: OSI Approved :: Apache Software License",
+                            "Classifier: Programming Language :: Python :: 3",
+                            "Classifier: Programming Language :: Python :: 3.8",
+                            "Classifier: Programming Language :: Python :: 3.9",
+                            "Classifier: Programming Language :: Python :: 3.10",
+                            "Classifier: Programming Language :: Python :: 3.11",
+                            "Classifier: Programming Language :: Python :: 3.12",
                         ]
                         proper_metadata = "\n".join(lines)
                         
                         with open(metadata_path, 'w') as f:
                             f.write(proper_metadata)
-                        print("METADATA replaced successfully")
             
-            if not metadata_found:
-                print("ERROR: METADATA file not found!")
-                sys.exit(1)
-            
-            print("Removing old wheel...")
             os.remove(whl_path)
-            print(f"Creating new wheel: {whl_path}")
             with zipfile.ZipFile(whl_path, 'w', zipfile.ZIP_DEFLATED) as z:
                 for root, dirs, files in os.walk(temp_dir):
                     for file in files:
                         file_path = os.path.join(root, file)
                         arcname = os.path.relpath(file_path, temp_dir)
                         z.write(file_path, arcname)
-            print("Wheel recreated successfully")
         finally:
-            print(f"Cleaning up: {temp_dir}")
             shutil.rmtree(temp_dir)
         PYEOF
     
