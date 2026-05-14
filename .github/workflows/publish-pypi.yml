@@ -1,4 +1,4 @@
-﻿name: Publish to PyPI
+name: Publish to PyPI
 
 on:
   release:
@@ -47,6 +47,7 @@ jobs:
         echo "## PyPI Publishing Status" >> $GITHUB_STEP_SUMMARY
         echo "Version: ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
         echo "Status: Completed" >> $GITHUB_STEP_SUMMARY
+
 
 
 
