@@ -37,9 +37,9 @@ jobs:
     - name: Publish to PyPI (OIDC/Trusted Publisher)
       uses: pypa/gh-action-pypi-publish@v1.10.0
       with:
-        packages-dir: dist/
-        skip-existing: true
-      continue-on-error: true
+        packages-dir: target/wheels/
+        skip-existing: false
+      continue-on-error: false
 
     - name: Publish summary
       run: |
