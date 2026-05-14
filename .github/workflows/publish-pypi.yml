@@ -35,31 +35,65 @@ jobs:
       run: |
         maturin build --release --interpreter python3.12 --out dist
     
-    - name: Inspect wheel metadata
+    - name: Fix wheel metadata
       run: |
-        echo "📦 Checking wheel contents..."
-        python -m zipfile -l dist/*.whl | grep -i metadata || echo "No metadata file found"
-        echo ""
-        echo "🔍 Extracting and displaying METADATA..."
         python << 'PYEOF'
         import zipfile
         import os
+        import tempfile
+        import shutil
         
+        # Find the wheel file
         whl_files = [f for f in os.listdir('dist') if f.endswith('.whl')]
-        if whl_files:
-            whl = whl_files[0]
-            print(f"Wheel: {whl}")
-            with zipfile.ZipFile(f'dist/{whl}', 'r') as z:
-                # List all files
-                print("\nWheel contents:")
-                for name in z.namelist():
-                    if 'METADATA' in name or 'PKG-INFO' in name or 'dist-info' in name:
-                        print(f"  {name}")
-                        try:
-                            content = z.read(name).decode('utf-8')
-                            print(f"    First 500 chars:\n{content[:500]}")
-                        except:
-                            pass
+        if not whl_files:
+            print("ERROR: No wheel file found")
+            exit(1)
+        
+        whl_path = os.path.join('dist', whl_files[0])
+        print(f"📦 Processing wheel: {whl_path}")
+        
+        # Create temporary directory
+        temp_dir = tempfile.mkdtemp()
+        try:
+            # Extract wheel
+            with zipfile.ZipFile(whl_path, 'r') as z:
+                z.extractall(temp_dir)
+            
+            # Find and fix METADATA file
+            for root, dirs, files in os.walk(temp_dir):
+                for file in files:
+                    if file == 'METADATA':
+                        metadata_path = os.path.join(root, file)
+                        print(f"Found METADATA: {metadata_path}")
+                        
+                        with open(metadata_path, 'r') as f:
+                            content = f.read()
+                        
+                        # Check if Name and Version are missing
+                        if 'Name:' not in content:
+                            content = 'Name: kore-fileformat\n' + content
+                        if 'Version:' not in content:
+                            content = content.replace('Name: kore-fileformat\n', 'Name: kore-fileformat\nVersion: 1.1.0\n', 1)
+                        
+                        with open(metadata_path, 'w') as f:
+                            f.write(content)
+                        
+                        print("✅ Metadata fixed")
+                        print(f"First 500 chars:\n{content[:500]}")
+            
+            # Recreate wheel
+            print(f"\n♻️ Recreating wheel...")
+            os.remove(whl_path)
+            with zipfile.ZipFile(whl_path, 'w', zipfile.ZIP_DEFLATED) as z:
+                for root, dirs, files in os.walk(temp_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, temp_dir)
+                        z.write(file_path, arcname)
+            
+            print(f"✅ Wheel recreated: {whl_path}")
+        finally:
+            shutil.rmtree(temp_dir)
         PYEOF
     
     - name: Publish to PyPI (OIDC/Trusted Publisher)
