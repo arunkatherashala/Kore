@@ -33,7 +33,7 @@ jobs:
     
     - name: Build wheel with maturin
       run: |
-        maturin build --release --interpreter python3.12 --out dist
+        maturin build --release --interpreter python3.12 --out wheels
     
     - name: Fix wheel metadata
       run: |
@@ -44,12 +44,12 @@ jobs:
         import shutil
         
         # Find the wheel file
-        whl_files = [f for f in os.listdir('dist') if f.endswith('.whl')]
+        whl_files = [f for f in os.listdir('wheels') if f.endswith('.whl')]
         if not whl_files:
             print("ERROR: No wheel file found")
             exit(1)
         
-        whl_path = os.path.join('dist', whl_files[0])
+        whl_path = os.path.join('wheels', whl_files[0])
         print(f"📦 Processing wheel: {whl_path}")
         
         # Create temporary directory
@@ -98,6 +98,8 @@ jobs:
     
     - name: Publish to PyPI (OIDC/Trusted Publisher)
       uses: pypa/gh-action-pypi-publish@v1.10.0
+      with:
+        packages-dir: wheels/
       with:
         packages-dir: dist/
         skip-existing: false
