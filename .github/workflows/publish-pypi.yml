@@ -35,70 +35,8 @@ jobs:
       run: |
         maturin build --release --interpreter python3.12 --out wheels
     
-    - name: Fix wheel metadata
-      run: |
-        python << 'PYEOF'
-        import zipfile, os, tempfile, shutil
-        
-        whl_files = [f for f in os.listdir('wheels') if f.endswith('.whl')]
-        if not whl_files:
-            print("ERROR: No wheel file found")
-            exit(1)
-        
-        whl_path = os.path.join('wheels', whl_files[0])
-        print(f"Processing wheel: {whl_path}")
-        
-        temp_dir = tempfile.mkdtemp()
-        try:
-            with zipfile.ZipFile(whl_path, 'r') as z:
-                z.extractall(temp_dir)
-            
-            for root, dirs, files in os.walk(temp_dir):
-                for file in files:
-                    if file == 'METADATA':
-                        metadata_path = os.path.join(root, file)
-                        print(f"Found METADATA at: {metadata_path}")
-                        
-                        proper_metadata = """Metadata-Version: 2.1
-Name: kore-fileformat
-Version: 1.1.0
-Summary: KORE Binary Format - Complete 8-language ecosystem
-Home-page: https://github.com/arunkatherashala/Kore
-Author: Sai Arun Kumar Ktherashala
-Author-email: arunkatherashala@gmail.com
-License: Apache 2.0
-Project-URL: Repository, https://github.com/arunkatherashala/Kore
-Project-URL: Issues, https://github.com/arunkatherashala/Kore/issues
-Description: KORE is a high-performance binary compression format with implementations in 8 languages (Rust, Python, JavaScript, TypeScript, Java, C#, Go, Kotlin). Achieves 5-8x compression on structured data with 47/47 tests passing.
-Keywords: compression,binary-format,performance,serialization
-Requires-Python: >=3.8
-Classifier: Development Status :: 5 - Production/Stable
-Classifier: Intended Audience :: Developers
-Classifier: License :: OSI Approved :: Apache Software License
-Classifier: Programming Language :: Python :: 3
-Classifier: Programming Language :: Python :: 3.8
-Classifier: Programming Language :: Python :: 3.9
-Classifier: Programming Language :: Python :: 3.10
-Classifier: Programming Language :: Python :: 3.11
-Classifier: Programming Language :: Python :: 3.12
-"""
-                        
-                        with open(metadata_path, 'w') as f:
-                            f.write(proper_metadata)
-                        print("METADATA file replaced with proper format")
-            
-            os.remove(whl_path)
-            with zipfile.ZipFile(whl_path, 'w', zipfile.ZIP_DEFLATED) as z:
-                for root, dirs, files in os.walk(temp_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, temp_dir)
-                        z.write(file_path, arcname)
-            
-            print(f"Wheel recreated with proper metadata: {whl_path}")
-        finally:
-            shutil.rmtree(temp_dir)
-        PYEOF
+    - name: List wheel files
+      run: ls -la wheels/
     
     - name: Publish to PyPI (OIDC/Trusted Publisher)
       uses: pypa/gh-action-pypi-publish@v1.10.0
