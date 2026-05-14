@@ -116,8 +116,6 @@ Classifier: Programming Language :: Python :: 3.12
       uses: pypa/gh-action-pypi-publish@v1.10.0
       with:
         packages-dir: wheels/
-      with:
-        packages-dir: dist/
         skip-existing: false
       continue-on-error: false
 
