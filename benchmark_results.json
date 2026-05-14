@@ -1,0 +1,10 @@
+{
+    "delta_size_mb":  8.45,
+    "dictionary_size_mb":  7.04,
+    "status":  "needs_optimization",
+    "original_size_mb":  10,
+    "hybrid_size_mb":  6.92,
+    "parquet_size_mb":  9.88,
+    "ratio_vs_parquet":  1.43,
+    "incremental_size_mb":  8.28
+}
