@@ -65,24 +65,26 @@ jobs:
                         metadata_path = os.path.join(root, file)
                         print(f"Found METADATA: {metadata_path}")
                         
-                        proper_metadata = """Metadata-Version: 2.1
-Name: kore-fileformat
-Version: 1.1.0
-Summary: KORE Binary Format - Complete 8-language ecosystem
-Home-page: https://github.com/arunkatherashala/Kore
-Author: Sai Arun Kumar Ktherashala
-Author-email: arunkatherashala@gmail.com
-License: Apache 2.0
-Classifier: Development Status :: 5 - Production/Stable
-Classifier: Intended Audience :: Developers
-Classifier: License :: OSI Approved :: Apache Software License
-Classifier: Programming Language :: Python :: 3
-Classifier: Programming Language :: Python :: 3.8
-Classifier: Programming Language :: Python :: 3.9
-Classifier: Programming Language :: Python :: 3.10
-Classifier: Programming Language :: Python :: 3.11
-Classifier: Programming Language :: Python :: 3.12
-"""
+                        lines = [
+                            "Metadata-Version: 2.1",
+                            "Name: kore-fileformat",
+                            "Version: 1.1.0",
+                            "Summary: KORE Binary Format - Complete 8-language ecosystem",
+                            "Home-page: https://github.com/arunkatherashala/Kore",
+                            "Author: Sai Arun Kumar Ktherashala",
+                            "Author-email: arunkatherashala@gmail.com",
+                            "License: Apache 2.0",
+                            "Classifier: Development Status - 5 - Production/Stable",
+                            "Classifier: Intended Audience - Developers",
+                            "Classifier: License - OSI Approved - Apache Software License",
+                            "Classifier: Programming Language - Python - 3",
+                            "Classifier: Programming Language - Python - 3.8",
+                            "Classifier: Programming Language - Python - 3.9",
+                            "Classifier: Programming Language - Python - 3.10",
+                            "Classifier: Programming Language - Python - 3.11",
+                            "Classifier: Programming Language - Python - 3.12"
+                        ]
+                        proper_metadata = "\n".join(lines)
                         
                         with open(metadata_path, 'w') as f:
                             f.write(proper_metadata)
