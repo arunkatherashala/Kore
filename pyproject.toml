@@ -29,9 +29,7 @@ Homepage = "https://github.com/arunkatherashala/Kore"
 Repository = "https://github.com/arunkatherashala/Kore"
 Issues = "https://github.com/arunkatherashala/Kore/issues"
 
-[tool.setuptools]
-packages = []
-
 [tool.maturin]
 features = ["pyo3"]
 module-name = "kore_fileformat"
+python-version = "3.8"
