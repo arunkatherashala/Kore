@@ -27,6 +27,9 @@
 use std::error::Error;
 use std::fmt;
 
+#[cfg(feature = "gcs")]
+use log;
+
 /// Google Cloud Storage Reader Configuration and Operations
 #[derive(Debug, Clone)]
 pub struct GcsReader {
@@ -234,11 +237,44 @@ impl GcsReader {
     async fn read_from_gcs(&self, bucket: &str, object_path: &str) -> Result<Vec<u8>, GcsError> {
         #[cfg(feature = "gcs")]
         {
-            // GCS SDK integration pending v1.1 (API compatibility needed)
-            // For now, return stub implementation
-            Err(GcsError::GcsError(
-                "Google Cloud Storage integration available in v1.1".to_string()
-            ))
+            use google_cloud_storage::client::{Client, ClientConfig};
+            use google_cloud_default::WithAuthExt;
+            
+            // Create client with default credentials
+            let config = ClientConfig::default().with_auth().await
+                .map_err(|e| GcsError::AuthenticationError(format!("Failed to load credentials: {}", e)))?;
+            let client = Client::new(config);
+            
+            // Get bucket and object client
+            let bucket_client = client.bucket(bucket);
+            let object_client = bucket_client.object(object_path);
+            
+            // Download with retry logic
+            let mut attempt = 0;
+            const MAX_RETRIES: u32 = 3;
+            
+            loop {
+                match object_client.download().await {
+                    Ok(bytes) => {
+                        log::info!("Successfully read {} bytes from gs://{}/{}", 
+                            bytes.len(), bucket, object_path);
+                        return Ok(bytes);
+                    }
+                    Err(e) if attempt < MAX_RETRIES => {
+                        attempt += 1;
+                        let wait_time = std::time::Duration::from_millis(100 * 2_u64.pow(attempt));
+                        log::warn!("GCS read attempt {} failed for gs://{}/{}: {}. Retrying in {:?}...",
+                            attempt, bucket, object_path, e, wait_time);
+                        tokio::time::sleep(wait_time).await;
+                    }
+                    Err(e) => {
+                        return Err(GcsError::GcsError(
+                            format!("Failed to read object gs://{}/{} after {} attempts: {}", 
+                                bucket, object_path, MAX_RETRIES, e)
+                        ));
+                    }
+                }
+            }
         }
         
         #[cfg(not(feature = "gcs"))]
@@ -257,11 +293,45 @@ impl GcsReader {
     ) -> Result<(), GcsError> {
         #[cfg(feature = "gcs")]
         {
-            // GCS SDK integration pending v1.1 (API compatibility needed)
-            // For now, return stub implementation
-            Err(GcsError::GcsError(
-                "Google Cloud Storage integration available in v1.1".to_string()
-            ))
+            use google_cloud_storage::client::{Client, ClientConfig};
+            use google_cloud_default::WithAuthExt;
+            
+            // Create client
+            let config = ClientConfig::default().with_auth().await
+                .map_err(|e| GcsError::AuthenticationError(format!("Failed to load credentials: {}", e)))?;
+            let client = Client::new(config);
+            
+            // Get bucket and object client
+            let bucket_client = client.bucket(bucket);
+            let object_client = bucket_client.object(object_path);
+            
+            // Upload with chunking for large objects
+            const CHUNK_SIZE: usize = 256 * 1024 * 1024; // 256MB chunks
+            
+            if data.len() <= CHUNK_SIZE {
+                // Single upload for small objects
+                object_client
+                    .upload(data, "application/octet-stream")
+                    .await
+                    .map_err(|e| GcsError::GcsError(format!("Upload failed: {}", e)))?;
+            } else {
+                // Multipart upload for large objects
+                let mut offset = 0;
+                while offset < data.len() {
+                    let end = std::cmp::min(offset + CHUNK_SIZE, data.len());
+                    let chunk = &data[offset..end];
+                    
+                    object_client
+                        .upload(chunk, "application/octet-stream")
+                        .await
+                        .map_err(|e| GcsError::GcsError(format!("Chunk upload error: {}", e)))?;
+                    
+                    offset = end;
+                }
+            }
+            
+            log::info!("Successfully wrote {} bytes to gs://{}/{}", data.len(), bucket, object_path);
+            Ok(())
         }
         
         #[cfg(not(feature = "gcs"))]
@@ -279,11 +349,39 @@ impl GcsReader {
     ) -> Result<Vec<String>, GcsError> {
         #[cfg(feature = "gcs")]
         {
-            // GCS SDK integration pending v1.1 (API compatibility needed)
-            // For now, return stub implementation
-            Err(GcsError::GcsError(
-                "Google Cloud Storage integration available in v1.1".to_string()
-            ))
+            use google_cloud_storage::client::{Client, ClientConfig};
+            use google_cloud_default::WithAuthExt;
+            
+            // Create client
+            let config = ClientConfig::default().with_auth().await
+                .map_err(|e| GcsError::AuthenticationError(format!("Failed to load credentials: {}", e)))?;
+            let client = Client::new(config);
+            
+            // Get bucket client
+            let bucket_client = client.bucket(bucket);
+            
+            let mut query = bucket_client.list_by_prefix("", "/").await
+                .map_err(|e| GcsError::GcsError(format!("List error: {}", e)))?;
+            
+            // Apply prefix filter if provided
+            if let Some(p) = prefix {
+                if !p.is_empty() {
+                    query = bucket_client.list_by_prefix(p, "/").await
+                        .map_err(|e| GcsError::GcsError(format!("Prefix list error: {}", e)))?;
+                }
+            }
+            
+            let mut object_names = Vec::new();
+            
+            // Extract object names from query results
+            for (prefix_result, delimiter_result) in &query {
+                for object in prefix_result {
+                    object_names.push(object.name.clone());
+                }
+            }
+            
+            log::info!("Listed {} objects in bucket gs://{}", object_names.len(), bucket);
+            Ok(object_names)
         }
         
         #[cfg(not(feature = "gcs"))]
@@ -301,11 +399,36 @@ impl GcsReader {
     ) -> Result<GcsObjectMetadata, GcsError> {
         #[cfg(feature = "gcs")]
         {
-            // GCS SDK integration pending v1.1 (API compatibility needed)
-            // For now, return stub implementation
-            Err(GcsError::GcsError(
-                "Google Cloud Storage integration available in v1.1".to_string()
-            ))
+            use google_cloud_storage::client::{Client, ClientConfig};
+            use google_cloud_default::WithAuthExt;
+            
+            // Create client
+            let config = ClientConfig::default().with_auth().await
+                .map_err(|e| GcsError::AuthenticationError(format!("Failed to load credentials: {}", e)))?;
+            let client = Client::new(config);
+            
+            // Get bucket and object client
+            let bucket_client = client.bucket(bucket);
+            let object_client = bucket_client.object(object_path);
+            
+            // Get object metadata
+            match object_client.meta().await {
+                Ok(object) => {
+                    Ok(GcsObjectMetadata {
+                        size: object.size,
+                        last_modified: object.updated
+                            .map(|t| t.to_rfc3339())
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        generation: object.generation.to_string(),
+                        content_type: Some(object.content_type.clone()),
+                    })
+                }
+                Err(e) => {
+                    Err(GcsError::GcsError(
+                        format!("Metadata fetch error: {}", e)
+                    ))
+                }
+            }
         }
         
         #[cfg(not(feature = "gcs"))]
