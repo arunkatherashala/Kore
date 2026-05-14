@@ -5,14 +5,14 @@ build-backend = "maturin"
 [project]
 name = "kore-fileformat"
 version = "1.1.0"
-description = "KORE Binary Format - Complete 8-language ecosystem for efficient data storage and querying"
+description = "KORE Binary Format - High-performance columnar compression with 5-8x compression ratio"
 readme = "README.md"
 requires-python = ">=3.8"
 authors = [
   { name = "Sai Arun Kumar Ktherashala", email = "arunkatherashala@gmail.com" }
 ]
 license-files = ["LICENSE"]
-keywords = ["kore", "binary", "format", "data", "storage"]
+keywords = ["compression", "binary-format", "performance", "serialization", "data-compression", "columnar"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
