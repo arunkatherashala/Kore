@@ -117,7 +117,6 @@ Classifier: Programming Language :: Python :: 3.12
       with:
         packages-dir: wheels/
         skip-existing: false
-      continue-on-error: false
 
     - name: Publish summary
       run: |
