@@ -29,10 +29,10 @@ jobs:
     
     - name: Install build tools
       run: |
-        python -m pip install --upgrade build
+        python -m pip install --upgrade maturin
     
-    - name: Build package
-      run: python -m build
+    - name: Build package with maturin
+      run: maturin build --release --manylinux off
     
     - name: Publish to PyPI (OIDC/Trusted Publisher)
       uses: pypa/gh-action-pypi-publish@v1.10.0
