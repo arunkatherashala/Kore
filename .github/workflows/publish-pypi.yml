@@ -35,6 +35,33 @@ jobs:
       run: |
         maturin build --release --interpreter python3.12 --out dist
     
+    - name: Inspect wheel metadata
+      run: |
+        echo "📦 Checking wheel contents..."
+        python -m zipfile -l dist/*.whl | grep -i metadata || echo "No metadata file found"
+        echo ""
+        echo "🔍 Extracting and displaying METADATA..."
+        python << 'PYEOF'
+        import zipfile
+        import os
+        
+        whl_files = [f for f in os.listdir('dist') if f.endswith('.whl')]
+        if whl_files:
+            whl = whl_files[0]
+            print(f"Wheel: {whl}")
+            with zipfile.ZipFile(f'dist/{whl}', 'r') as z:
+                # List all files
+                print("\nWheel contents:")
+                for name in z.namelist():
+                    if 'METADATA' in name or 'PKG-INFO' in name or 'dist-info' in name:
+                        print(f"  {name}")
+                        try:
+                            content = z.read(name).decode('utf-8')
+                            print(f"    First 500 chars:\n{content[:500]}")
+                        except:
+                            pass
+        PYEOF
+    
     - name: Publish to PyPI (OIDC/Trusted Publisher)
       uses: pypa/gh-action-pypi-publish@v1.10.0
       with:
