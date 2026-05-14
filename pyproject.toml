@@ -33,5 +33,5 @@ Issues = "https://github.com/arunkatherashala/Kore/issues"
 packages = ["kore_fileformat"]
 
 [tool.maturin]
-features = ["pyo3", "s3", "azure", "gcs"]
+features = ["pyo3"]
 module-name = "kore_cloud._core"
