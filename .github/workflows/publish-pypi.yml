@@ -38,35 +38,27 @@ jobs:
     - name: Fix wheel metadata
       run: |
         python << 'PYEOF'
-        import zipfile
-        import os
-        import tempfile
-        import shutil
+        import zipfile, os, tempfile, shutil
         
-        # Find the wheel file
         whl_files = [f for f in os.listdir('wheels') if f.endswith('.whl')]
         if not whl_files:
             print("ERROR: No wheel file found")
             exit(1)
         
         whl_path = os.path.join('wheels', whl_files[0])
-        print(f"📦 Processing wheel: {whl_path}")
+        print(f"Processing wheel: {whl_path}")
         
-        # Create temporary directory
         temp_dir = tempfile.mkdtemp()
         try:
-            # Extract wheel
             with zipfile.ZipFile(whl_path, 'r') as z:
                 z.extractall(temp_dir)
             
-            # Find and REPLACE METADATA file completely
             for root, dirs, files in os.walk(temp_dir):
                 for file in files:
                     if file == 'METADATA':
                         metadata_path = os.path.join(root, file)
                         print(f"Found METADATA at: {metadata_path}")
                         
-                        # Generate proper PEP 566 METADATA (Metadata-Version 2.1)
                         proper_metadata = """Metadata-Version: 2.1
 Name: kore-fileformat
 Version: 1.1.0
@@ -93,12 +85,8 @@ Classifier: Programming Language :: Python :: 3.12
                         
                         with open(metadata_path, 'w') as f:
                             f.write(proper_metadata)
-                        
-                        print("✅ METADATA completely replaced with proper format")
-                        print(f"New metadata (first 300 chars):\n{proper_metadata[:300]}")
+                        print("METADATA file replaced with proper format")
             
-            # Recreate wheel
-            print(f"\n♻️ Recreating wheel...")
             os.remove(whl_path)
             with zipfile.ZipFile(whl_path, 'w', zipfile.ZIP_DEFLATED) as z:
                 for root, dirs, files in os.walk(temp_dir):
@@ -107,7 +95,7 @@ Classifier: Programming Language :: Python :: 3.12
                         arcname = os.path.relpath(file_path, temp_dir)
                         z.write(file_path, arcname)
             
-            print(f"✅ Wheel recreated with proper metadata: {whl_path}")
+            print(f"Wheel recreated with proper metadata: {whl_path}")
         finally:
             shutil.rmtree(temp_dir)
         PYEOF
