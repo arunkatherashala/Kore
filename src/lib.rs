@@ -37,6 +37,14 @@ pub mod gcs_reader;
 #[cfg(all(feature = "pyo3", any(feature = "s3", feature = "azure", feature = "gcs")))]
 pub mod python_bindings;
 
+// Java/JNI bindings for cloud connectors
+#[cfg(all(feature = "java", any(feature = "s3", feature = "azure", feature = "gcs")))]
+pub mod java_bindings;
+
+// JavaScript/NAPI bindings for cloud connectors
+#[cfg(all(feature = "napi", any(feature = "s3", feature = "azure", feature = "gcs")))]
+pub mod napi_bindings;
+
 #[cfg(feature = "kore_lite_compat")]
 pub mod kore_lite;
 

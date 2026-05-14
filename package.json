@@ -1,0 +1,48 @@
+{
+  "name": "@kore/cloud",
+  "version": "1.0.0",
+  "description": "Cloud connectors (S3, Azure Blob, GCS) for Kore columnar file format",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "install": "napi build --release",
+    "build": "napi build --release",
+    "build:debug": "napi build",
+    "prepublishOnly": "napi prepublish -t npm",
+    "test": "node --test *.test.js",
+    "test:s3": "node --test s3.test.js",
+    "test:azure": "node --test azure.test.js",
+    "test:gcs": "node --test gcs.test.js"
+  },
+  "keywords": [
+    "kore",
+    "cloud",
+    "s3",
+    "azure",
+    "gcs",
+    "columnar",
+    "file-format"
+  ],
+  "author": "Kore Contributors",
+  "license": "MIT",
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0",
+    "@types/node": "^20.0.0"
+  },
+  "napi": {
+    "name": "kore_cloud",
+    "triples": {
+      "additional": [
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc"
+      ]
+    }
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  }
+}
