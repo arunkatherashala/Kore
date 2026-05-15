@@ -42,7 +42,6 @@ jobs:
         import os
         import tempfile
         import shutil
-        import re
         
         # Find wheel file
         whl_files = [f for f in os.listdir('wheels') if f.endswith('.whl')]
@@ -71,24 +70,29 @@ jobs:
                     
                     # Read existing metadata
                     with open(metadata_path, 'r', encoding='utf-8') as f:
-                        metadata_content = f.read()
+                        metadata_lines = f.readlines()
                     
-                    # Split header from any existing description
-                    parts = metadata_content.split('\n\n', 1)
-                    header = parts[0]
+                    # Find where headers end (first blank line)
+                    header_end = 0
+                    for i, line in enumerate(metadata_lines):
+                        if line.strip() == '':
+                            header_end = i
+                            break
                     
-                    # Ensure Name and Version are in header
-                    if 'Name:' not in header:
-                        header = 'Name: kore-fileformat\n' + header
-                    if 'Version:' not in header:
-                        header = header.replace('Name: kore-fileformat', 'Name: kore-fileformat\nVersion: 1.1.1', 1)
+                    # If no blank line found, all lines are headers
+                    if header_end == 0 and len(metadata_lines) > 0 and metadata_lines[-1].strip() != '':
+                        header_end = len(metadata_lines)
                     
-                    # Ensure Description-Content-Type is set
-                    if 'Description-Content-Type:' not in header:
-                        header = header.rstrip('\n') + '\nDescription-Content-Type: text/markdown'
+                    # Extract headers
+                    headers = metadata_lines[:header_end]
                     
-                    # Reconstruct with README as body
-                    new_metadata = header + '\n\n' + readme_content
+                    # Add Description-Content-Type if missing
+                    has_desc_type = any('Description-Content-Type:' in line for line in headers)
+                    if not has_desc_type:
+                        headers.append('Description-Content-Type: text/markdown\n')
+                    
+                    # Reconstruct metadata with README
+                    new_metadata = ''.join(headers).rstrip('\n') + '\n\n' + readme_content
                     
                     with open(metadata_path, 'w', encoding='utf-8') as f:
                         f.write(new_metadata)
