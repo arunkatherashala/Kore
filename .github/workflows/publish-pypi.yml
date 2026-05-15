@@ -64,7 +64,7 @@ jobs:
                         lines = [
                             "Metadata-Version: 2.1",
                             "Name: kore-fileformat",
-                            "Version: 1.1.1",
+                            "Version: 1.1.2",
                             "Summary: KORE Binary Format - High-performance columnar compression with 5-8x compression ratio",
                             "Home-page: https://github.com/arunkatherashala/Kore",
                             "Author: Sai Arun Kumar Ktherashala",
