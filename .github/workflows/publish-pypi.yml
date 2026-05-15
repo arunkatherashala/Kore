@@ -35,6 +35,80 @@ jobs:
       run: |
         maturin build --release --interpreter python3.12 --out wheels
     
+    - name: Inject README into wheel metadata
+      run: |
+        python3 << 'PYEOF'
+        import zipfile
+        import os
+        import tempfile
+        import shutil
+        import re
+        
+        # Find wheel file
+        whl_files = [f for f in os.listdir('wheels') if f.endswith('.whl')]
+        if not whl_files:
+            print("ERROR: No wheel file found")
+            exit(1)
+        
+        whl_path = os.path.join('wheels', whl_files[0])
+        print(f"Processing: {whl_path}")
+        
+        # Read README
+        with open('README.md', 'r', encoding='utf-8') as f:
+            readme_content = f.read()
+        
+        # Extract and modify wheel
+        temp_dir = tempfile.mkdtemp()
+        try:
+            with zipfile.ZipFile(whl_path, 'r') as z:
+                z.extractall(temp_dir)
+            
+            # Find and update METADATA file
+            for root, dirs, files in os.walk(temp_dir):
+                if 'METADATA' in files:
+                    metadata_path = os.path.join(root, 'METADATA')
+                    print(f"Found METADATA at: {metadata_path}")
+                    
+                    # Read existing metadata
+                    with open(metadata_path, 'r', encoding='utf-8') as f:
+                        metadata_content = f.read()
+                    
+                    # Split header from any existing description
+                    parts = metadata_content.split('\n\n', 1)
+                    header = parts[0]
+                    
+                    # Ensure Name and Version are in header
+                    if 'Name:' not in header:
+                        header = 'Name: kore-fileformat\n' + header
+                    if 'Version:' not in header:
+                        header = header.replace('Name: kore-fileformat', 'Name: kore-fileformat\nVersion: 1.1.1', 1)
+                    
+                    # Ensure Description-Content-Type is set
+                    if 'Description-Content-Type:' not in header:
+                        header = header.rstrip('\n') + '\nDescription-Content-Type: text/markdown'
+                    
+                    # Reconstruct with README as body
+                    new_metadata = header + '\n\n' + readme_content
+                    
+                    with open(metadata_path, 'w', encoding='utf-8') as f:
+                        f.write(new_metadata)
+                    
+                    print("METADATA updated with README content")
+            
+            # Repackage wheel
+            os.remove(whl_path)
+            with zipfile.ZipFile(whl_path, 'w', zipfile.ZIP_DEFLATED) as z:
+                for root, dirs, files in os.walk(temp_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, temp_dir)
+                        z.write(file_path, arcname)
+            
+            print("Wheel repackaged successfully")
+        finally:
+            shutil.rmtree(temp_dir)
+        PYEOF
+    
     - name: Publish to PyPI (OIDC/Trusted Publisher)
       uses: pypa/gh-action-pypi-publish@v1.10.0
       with:
