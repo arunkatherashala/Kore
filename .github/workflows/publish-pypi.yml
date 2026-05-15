@@ -47,6 +47,10 @@ jobs:
         
         whl_path = os.path.join('wheels', whl_files[0])
         
+        # Read README.md for the description body
+        with open('README.md', 'r', encoding='utf-8') as f:
+            readme_content = f.read()
+        
         temp_dir = tempfile.mkdtemp()
         try:
             with zipfile.ZipFile(whl_path, 'r') as z:
@@ -57,20 +61,20 @@ jobs:
                     if file == 'METADATA':
                         metadata_path = os.path.join(root, file)
                         
-                        lines = [
+                        # Build metadata according to PEP 566
+                        metadata_header = [
                             "Metadata-Version: 2.1",
                             "Name: kore-fileformat",
                             "Version: 1.1.0",
-                            "Summary: KORE Binary Format - Complete 8-language ecosystem",
+                            "Summary: KORE Binary Format - High-performance columnar compression with 5-8x compression ratio",
                             "Home-page: https://github.com/arunkatherashala/Kore",
                             "Author: Sai Arun Kumar Ktherashala",
                             "Author-email: arunkatherashala@gmail.com",
                             "License: Apache 2.0",
                             "Project-URL: Repository, https://github.com/arunkatherashala/Kore",
                             "Project-URL: Issues, https://github.com/arunkatherashala/Kore/issues",
-                            "Description: KORE is a binary compression format.",
-                            "Description-Content-Type: text/plain",
-                            "Keywords: compression,binary-format,performance,serialization",
+                            "Description-Content-Type: text/markdown",
+                            "Keywords: compression,binary-format,performance,serialization,data-compression,columnar",
                             "Requires-Python: >=3.8",
                             "Classifier: Development Status :: 5 - Production/Stable",
                             "Classifier: Intended Audience :: Developers",
@@ -82,9 +86,11 @@ jobs:
                             "Classifier: Programming Language :: Python :: 3.11",
                             "Classifier: Programming Language :: Python :: 3.12",
                         ]
-                        proper_metadata = "\n".join(lines)
                         
-                        with open(metadata_path, 'w') as f:
+                        # Combine header and readme with blank line separator
+                        proper_metadata = "\n".join(metadata_header) + "\n\n" + readme_content
+                        
+                        with open(metadata_path, 'w', encoding='utf-8') as f:
                             f.write(proper_metadata)
             
             os.remove(whl_path)
