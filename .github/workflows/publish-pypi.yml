@@ -35,6 +35,68 @@ jobs:
       run: |
         maturin build --release --interpreter python3.12 --out wheels
     
+    - name: Fix wheel metadata
+      run: |
+        python3 << 'PYEOF'
+        import zipfile, os, tempfile, shutil, sys
+        
+        whl_files = [f for f in os.listdir('wheels') if f.endswith('.whl')]
+        if not whl_files:
+            print("ERROR: No wheel file found")
+            sys.exit(1)
+        
+        whl_path = os.path.join('wheels', whl_files[0])
+        
+        temp_dir = tempfile.mkdtemp()
+        try:
+            with zipfile.ZipFile(whl_path, 'r') as z:
+                z.extractall(temp_dir)
+            
+            for root, dirs, files in os.walk(temp_dir):
+                for file in files:
+                    if file == 'METADATA':
+                        metadata_path = os.path.join(root, file)
+                        
+                        lines = [
+                            "Metadata-Version: 2.1",
+                            "Name: kore-fileformat",
+                            "Version: 1.1.1",
+                            "Summary: KORE Binary Format - High-performance columnar compression with 5-8x compression ratio",
+                            "Home-page: https://github.com/arunkatherashala/Kore",
+                            "Author: Sai Arun Kumar Ktherashala",
+                            "Author-email: arunkatherashala@gmail.com",
+                            "License: Apache 2.0",
+                            "Project-URL: Repository, https://github.com/arunkatherashala/Kore",
+                            "Project-URL: Issues, https://github.com/arunkatherashala/Kore/issues",
+                            "Description-Content-Type: text/plain",
+                            "Keywords: compression,binary-format,performance,serialization",
+                            "Requires-Python: >=3.8",
+                            "Classifier: Development Status :: 5 - Production/Stable",
+                            "Classifier: Intended Audience :: Developers",
+                            "Classifier: License :: OSI Approved :: Apache Software License",
+                            "Classifier: Programming Language :: Python :: 3",
+                            "Classifier: Programming Language :: Python :: 3.8",
+                            "Classifier: Programming Language :: Python :: 3.9",
+                            "Classifier: Programming Language :: Python :: 3.10",
+                            "Classifier: Programming Language :: Python :: 3.11",
+                            "Classifier: Programming Language :: Python :: 3.12",
+                        ]
+                        proper_metadata = "\n".join(lines)
+                        
+                        with open(metadata_path, 'w') as f:
+                            f.write(proper_metadata)
+            
+            os.remove(whl_path)
+            with zipfile.ZipFile(whl_path, 'w', zipfile.ZIP_DEFLATED) as z:
+                for root, dirs, files in os.walk(temp_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, temp_dir)
+                        z.write(file_path, arcname)
+        finally:
+            shutil.rmtree(temp_dir)
+        PYEOF
+    
     - name: Publish to PyPI (OIDC/Trusted Publisher)
       uses: pypa/gh-action-pypi-publish@v1.10.0
       with:
