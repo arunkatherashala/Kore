@@ -72,7 +72,7 @@ jobs:
                             "License: Apache 2.0",
                             "Project-URL: Repository, https://github.com/arunkatherashala/Kore",
                             "Project-URL: Issues, https://github.com/arunkatherashala/Kore/issues",
-                            "Description-Content-Type: text/x-rst",
+                            "Description-Content-Type: text/markdown",
                             "Keywords: compression,binary-format,performance,serialization",
                             "Requires-Python: >=3.8",
                             "Classifier: Development Status :: 5 - Production/Stable",
