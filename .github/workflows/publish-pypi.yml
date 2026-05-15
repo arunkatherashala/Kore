@@ -36,6 +36,8 @@ jobs:
         maturin build --release --interpreter python3.12 --out wheels
     
     - name: Fix wheel metadata
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
       run: |
         python3 << 'PYEOF'
         import zipfile, os, tempfile, shutil, sys
@@ -51,6 +53,9 @@ jobs:
         with open('README.md', 'r', encoding='utf-8') as f:
             readme_content = f.read()
         
+        # Get version from environment (with v prefix stripped)
+        version = os.environ.get('VERSION', '').lstrip('v')
+        
         temp_dir = tempfile.mkdtemp()
         try:
             with zipfile.ZipFile(whl_path, 'r') as z:
@@ -64,7 +69,7 @@ jobs:
                         lines = [
                             "Metadata-Version: 2.1",
                             "Name: kore-fileformat",
-                            "Version: 1.1.2",
+                            f"Version: {version}",
                             "Summary: KORE Binary Format - High-performance columnar compression with 5-8x compression ratio",
                             "Home-page: https://github.com/arunkatherashala/Kore",
                             "Author: Sai Arun Kumar Ktherashala",
