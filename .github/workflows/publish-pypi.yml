@@ -77,7 +77,8 @@ jobs:
     - name: Consolidate wheels
       run: |
         mkdir -p final-wheels
-        find all-wheels -name "*.whl" -exec cp {} final-wheels/ \;
+        VERSION="${{ steps.version.outputs.version }}"
+        find all-wheels -name "*.whl" | grep "${VERSION}" | xargs -I {} cp {} final-wheels/
     
     - name: Verify wheels
       run: |
