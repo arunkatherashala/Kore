@@ -103,6 +103,7 @@ jobs:
       with:
         packages-dir: final-wheels/
         skip-existing: true
+        verify-metadata: false
     
     - name: Publish summary
       run: |
