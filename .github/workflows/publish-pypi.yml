@@ -77,10 +77,17 @@ jobs:
     - name: Organize wheels for publish
       run: |
         mkdir -p dist
-        # Find all .whl files and copy directly (avoid corruption from consolidation)
-        find all-wheels -maxdepth 2 -name "*.whl" -exec cp {} dist/ \;
+        VERSION="${{ steps.version.outputs.version }}"
+        VERSION_NO_V="${VERSION#v}"
+        # Find and copy ONLY wheels matching current version (avoid old artifacts)
+        find all-wheels -maxdepth 2 -name "*${VERSION_NO_V}*.whl" -exec cp {} dist/ \;
         echo "Wheels ready for publish:"
         ls -lh dist/
+        echo "Wheel count: $(find dist -name '*.whl' | wc -l)"
+        if [ $(find dist -name '*.whl' | wc -l) -ne 3 ]; then
+          echo "ERROR: Expected 3 wheels, found $(find dist -name '*.whl' | wc -l)"
+          exit 1
+        fi
     
     - name: Validate wheels with twine
       run: |
