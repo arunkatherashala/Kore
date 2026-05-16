@@ -28,7 +28,17 @@ jobs:
     
     - name: Extract version
       id: version
-      run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      run: |
+        # For tag-triggered workflows, use the tag
+        # For manual workflow_dispatch, extract from Cargo.toml
+        if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          VERSION="${GITHUB_REF#refs/tags/}"
+        else
+          # Extract version from Cargo.toml
+          VERSION="v$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')"
+        fi
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Version detected: ${VERSION}"
       shell: bash
     
     - name: Install build tools
@@ -63,9 +73,21 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
+    - uses: actions/checkout@v4
+    
     - name: Extract version
       id: version
-      run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      run: |
+        # For tag-triggered workflows, use the tag
+        # For manual workflow_dispatch, extract from Cargo.toml
+        if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          VERSION="${GITHUB_REF#refs/tags/}"
+        else
+          # Extract version from Cargo.toml
+          VERSION="v$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')"
+        fi
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Version detected: ${VERSION}"
       shell: bash
     
     - name: Download all wheel artifacts (merge)
@@ -79,6 +101,7 @@ jobs:
         mkdir -p dist
         VERSION="${{ steps.version.outputs.version }}"
         VERSION_NO_V="${VERSION#v}"
+        echo "Looking for wheels matching version: ${VERSION_NO_V}"
         # Find and copy ONLY wheels matching current version (avoid old artifacts)
         find all-wheels -maxdepth 2 -name "*${VERSION_NO_V}*.whl" -exec cp {} dist/ \;
         echo "Wheels ready for publish:"
@@ -86,6 +109,7 @@ jobs:
         echo "Wheel count: $(find dist -name '*.whl' | wc -l)"
         if [ $(find dist -name '*.whl' | wc -l) -ne 3 ]; then
           echo "ERROR: Expected 3 wheels, found $(find dist -name '*.whl' | wc -l)"
+          find all-wheels -name "*.whl" | sort
           exit 1
         fi
     
@@ -102,11 +126,11 @@ jobs:
     
     - name: Publish summary
       run: |
-        echo "## PyPI Publishing Status - v1.1.4 Multi-Platform" >> $GITHUB_STEP_SUMMARY
+        echo "## PyPI Publishing Status" >> $GITHUB_STEP_SUMMARY
         echo "Version: ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-        echo "Platforms: Linux, Windows, macOS (universal2)" >> $GITHUB_STEP_SUMMARY
+        echo "Platforms: Linux, Windows, macOS" >> $GITHUB_STEP_SUMMARY
         echo "Wheels published:" >> $GITHUB_STEP_SUMMARY
-        ls -1 final-wheels/*.whl | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY
+        ls -1 dist/*.whl | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY
 
 
 
