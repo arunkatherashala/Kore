@@ -14,10 +14,7 @@ permissions:
 
 jobs:
   build:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     
     steps:
     - uses: actions/checkout@v4
@@ -29,7 +26,6 @@ jobs:
     - name: Extract version
       id: version
       run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-      shell: bash
     
     - name: Install build tools
       run: |
@@ -114,25 +110,9 @@ jobs:
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: wheels-${{ matrix.os }}
+        name: wheels
         path: wheels/
 
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
-    
-    steps:
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: all-wheels
-    
-    - name: Flatten wheels directory
-      run: |
-        mkdir -p wheels
-        find all-wheels -name "*.whl" -exec mv {} wheels/ \;
-        ls wheels/
-    
     - name: Publish to PyPI (OIDC/Trusted Publisher)
       uses: pypa/gh-action-pypi-publish@v1.10.0
       with:
@@ -142,9 +122,11 @@ jobs:
     - name: Publish summary
       run: |
         echo "## PyPI Publishing Status" >> $GITHUB_STEP_SUMMARY
-        echo "Platforms: Linux (x86_64), Windows (amd64), macOS (arm64/x86_64)" >> $GITHUB_STEP_SUMMARY
-        echo "Status: ✅ Completed" >> $GITHUB_STEP_SUMMARY
-        echo "Wheels: $(ls wheels/ | wc -l) files" >> $GITHUB_STEP_SUMMARY
+        echo "Version: ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+        echo "Status: ✅ Linux wheel published" >> $GITHUB_STEP_SUMMARY
+
+  # TODO: Add Windows and macOS builds with platform-specific maturin commands
+  # Requires: --interpreter python (not python3.12) and python (not python3)
 
 
 
