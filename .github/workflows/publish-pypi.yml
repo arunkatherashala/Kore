@@ -13,8 +13,11 @@ permissions:
   contents: read
 
 jobs:
-  pypi:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     
     steps:
     - uses: actions/checkout@v4
@@ -26,20 +29,32 @@ jobs:
     - name: Extract version
       id: version
       run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      shell: bash
     
     - name: Install build tools
       run: |
         python -m pip install --upgrade maturin setuptools wheel
     
-    - name: Build wheel with maturin
+    - name: Build wheel with maturin (Linux)
+      if: runner.os == 'Linux'
       run: |
-        maturin build --release --interpreter python3.12 --out wheels
+        maturin build --release --out wheels
+    
+    - name: Build wheel with maturin (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        maturin build --release --out wheels
+    
+    - name: Build wheel with maturin (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        maturin build --release --universal2 --out wheels
     
     - name: Fix wheel metadata
       env:
         VERSION: ${{ steps.version.outputs.version }}
+      shell: python
       run: |
-        python3 << 'PYEOF'
         import zipfile, os, tempfile, shutil, sys
         
         whl_files = [f for f in os.listdir('wheels') if f.endswith('.whl')]
@@ -105,19 +120,57 @@ jobs:
                         z.write(file_path, arcname)
         finally:
             shutil.rmtree(temp_dir)
-        PYEOF
+    
+    - name: Upload wheel artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: wheels-${{ matrix.os }}
+        path: wheels/
+        retention-days: 1
+  
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Extract version
+      id: version
+      run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      shell: bash
+    
+    - name: Download all wheel artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: all-wheels
+        pattern: wheels-*
+    
+    - name: Consolidate wheels
+      run: |
+        mkdir -p final-wheels
+        find all-wheels -name "*.whl" -exec cp {} final-wheels/ \;
+    
+    - name: Verify wheels
+      run: |
+        ls -la final-wheels/
+        if [ $(ls -1 final-wheels/*.whl 2>/dev/null | wc -l) -eq 0 ]; then
+          echo "ERROR: No wheels found"
+          exit 1
+        fi
+    
     
     - name: Publish to PyPI (OIDC/Trusted Publisher)
       uses: pypa/gh-action-pypi-publish@v1.10.0
       with:
-        packages-dir: wheels/
-        skip-existing: false
-
+        packages-dir: final-wheels/
+        skip-existing: true
+    
     - name: Publish summary
       run: |
-        echo "## PyPI Publishing Status" >> $GITHUB_STEP_SUMMARY
+        echo "## PyPI Publishing Status - v1.1.4 Multi-Platform" >> $GITHUB_STEP_SUMMARY
         echo "Version: ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-        echo "Status: Completed" >> $GITHUB_STEP_SUMMARY
+        echo "Platforms: Linux, Windows, macOS (universal2)" >> $GITHUB_STEP_SUMMARY
+        echo "Wheels published:" >> $GITHUB_STEP_SUMMARY
+        ls -1 final-wheels/*.whl | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY
 
 
 
