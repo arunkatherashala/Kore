@@ -89,6 +89,14 @@ jobs:
           exit 1
         fi
     
+    - name: Debug wheel contents
+      run: |
+        cd final-wheels
+        for wheel in *.whl; do
+          echo "=== Contents of $wheel ==="
+          unzip -l "$wheel" | head -20
+          echo ""
+        done
     
     - name: Publish to PyPI (OIDC/Trusted Publisher)
       uses: pypa/gh-action-pypi-publish@v1.10.0
