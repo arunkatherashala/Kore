@@ -78,7 +78,8 @@ jobs:
       run: |
         mkdir -p final-wheels
         VERSION="${{ steps.version.outputs.version }}"
-        find all-wheels -name "*.whl" | grep "${VERSION}" | xargs -I {} cp {} final-wheels/
+        VERSION_NO_V="${VERSION#v}"
+        find all-wheels -name "*.whl" | grep "${VERSION_NO_V}" | xargs -I {} cp {} final-wheels/
     
     - name: Verify wheels
       run: |
