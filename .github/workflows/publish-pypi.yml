@@ -48,7 +48,7 @@ jobs:
     - name: Build wheel with maturin (macOS)
       if: runner.os == 'macOS'
       run: |
-        maturin build --release --universal2 --out wheels
+        maturin build --release --out wheels
     
     - name: Fix wheel metadata
       env:
