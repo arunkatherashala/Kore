@@ -11,7 +11,6 @@ requires-python = ">=3.8"
 authors = [
   { name = "Sai Arun Kumar Ktherashala", email = "arunkatherashala@gmail.com" }
 ]
-license = { text = "Kore Use-Only Proprietary License (KUOPL) v1.1" }
 keywords = ["compression", "binary-format", "performance", "serialization", "data-compression", "columnar"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
