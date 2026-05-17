@@ -14,7 +14,6 @@ categories = ["encoding", "compression", "database-implementations"]
 include = [
     "src/",
     "Cargo.toml",
-    "LICENSE",
     "README.md"
 ]
 
