@@ -113,6 +113,68 @@ jobs:
           exit 1
         fi
     
+    - name: Fix wheels metadata (remove invalid license-file)
+      run: |
+        python << 'EOF'
+        import zipfile
+        import tempfile
+        import os
+        import shutil
+        
+        for wheel_file in os.listdir('dist'):
+            if wheel_file.endswith('.whl'):
+                wheel_path = os.path.join('dist', wheel_file)
+                print(f"Processing {wheel_file}...")
+                
+                with zipfile.ZipFile(wheel_path, 'r') as z:
+                    # Find the METADATA file
+                    metadata_name = None
+                    for name in z.namelist():
+                        if 'METADATA' in name and name.endswith('/METADATA'):
+                            metadata_name = name
+                            break
+                    
+                    if not metadata_name:
+                        print(f"  No METADATA found, skipping")
+                        continue
+                    
+                    # Read metadata
+                    metadata = z.read(metadata_name).decode('utf-8')
+                    
+                    # Check if it has license-file field
+                    if 'license-file' not in metadata.lower() and 'License-File' not in metadata:
+                        print(f"  No license-file field found")
+                        continue
+                    
+                    print(f"  Found license-file field, removing...")
+                    
+                    # Remove license-file lines
+                    lines = metadata.split('\n')
+                    fixed_lines = [l for l in lines if not l.lower().startswith('license-file:')]
+                    fixed_metadata = '\n'.join(fixed_lines)
+                    
+                    # Rewrite wheel
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        # Extract all files
+                        z.extractall(tmpdir)
+                        
+                        # Write fixed metadata
+                        metadata_path = os.path.join(tmpdir, metadata_name)
+                        with open(metadata_path, 'w', encoding='utf-8') as f:
+                            f.write(fixed_metadata)
+                        
+                        # Recreate wheel
+                        os.remove(wheel_path)
+                        with zipfile.ZipFile(wheel_path, 'w', zipfile.ZIP_DEFLATED) as zout:
+                            for root, dirs, files in os.walk(tmpdir):
+                                for file in files:
+                                    file_path = os.path.join(root, file)
+                                    arcname = os.path.relpath(file_path, tmpdir)
+                                    zout.write(file_path, arcname)
+                        
+                        print(f"  ✅ Fixed {wheel_file}")
+        EOF
+    
     - name: Validate wheels with twine
       run: |
         pip install --upgrade twine
