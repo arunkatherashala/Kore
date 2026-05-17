@@ -115,7 +115,7 @@ jobs:
     
     - name: Validate wheels with twine
       run: |
-        pip install twine
+        pip install --upgrade twine
         twine check dist/*.whl --strict
     
     - name: Publish to PyPI (OIDC/Trusted Publisher)
