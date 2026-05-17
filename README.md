@@ -11,39 +11,57 @@ Kore is a Rust-based columnar file format designed for efficient storage and ana
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Quick Start (5 Minutes)
 
-### Install (Python)
+### Step 1: Install
 ```bash
-pip install kore-fileformat
+pip install kore-fileformat==1.1.4
 ```
 
-### Verify
+### Step 2: Import
 ```python
-import kore_fileformat
-print(kore_fileformat.__version__)  # 1.0.0
+from kore_fileformat import compress_csv
+
+# Compress a CSV file (that's it!)
+original, compressed, ratio = compress_csv("data.csv", "data.kore")
+print(f"✅ Compressed {ratio:.1%}")
 ```
 
-### Use Rust
-```toml
-[dependencies]
-kore_fileformat = { version = "1.0.0", features = ["s3"] }
+### Step 3: Use It
+```python
+from kore_fileformat import get_kore_info
+
+# Get file information
+info = get_kore_info("data.kore")
+print(f"Records: {info['total_records']:,}")
 ```
 
 ---
 
-## 📖 Documentation
+## 📚 Documentation
 
+### Getting Started
+| Document | For Whom | Time |
+|----------|----------|------|
+| **[docs/INSTALLATION.md](docs/INSTALLATION.md)** | Everyone | 5 min |
+| **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** | Python users | 15 min |
+| **[docs/EXAMPLES.md](docs/EXAMPLES.md)** | Developers | 20 min |
+
+### Reference
+| Document | Coverage |
+|----------|----------|
+| **[docs/API_REFERENCE.md](docs/API_REFERENCE.md)** | Complete API documentation with examples |
+| **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** | FAQ, common issues, solutions |
+
+### Advanced Documentation
 | Guide | Purpose |
 |---|---|
-| **[PYTHON_USER_GUIDE.md](PYTHON_USER_GUIDE.md)** | Python installation, usage, examples, cloud integration |
-| **[DOCKER_EMULATORS_GUIDE.md](DOCKER_EMULATORS_GUIDE.md)** | Docker setup, LocalStack, Azurite, GCS emulator testing |
-| **[DOCUMENTATION_INDEX.md](DOCUMENTATION_INDEX.md)** | Master index, reading paths by role, feature matrix |
-| **[CI_CD_SECRETS_SETUP.md](CI_CD_SECRETS_SETUP.md)** | GitHub Actions setup, registry secrets, publishing config |
-| **[V1_1_ROADMAP.md](V1_1_ROADMAP.md)** | Next release plan, Azure/GCS implementation, timeline |
-| **[PROJECT_COMPLETION_SUMMARY.md](PROJECT_COMPLETION_SUMMARY.md)** | v1.0.0 deliverables, test results, distribution channels |
+| **[PYTHON_USER_GUIDE.md](PYTHON_USER_GUIDE.md)** | Cloud integration, advanced features |
+| **[DOCKER_EMULATORS_GUIDE.md](DOCKER_EMULATORS_GUIDE.md)** | Docker setup, LocalStack, Azurite testing |
+| **[DOCUMENTATION_INDEX.md](DOCUMENTATION_INDEX.md)** | Complete documentation index |
+| **[CI_CD_SECRETS_SETUP.md](CI_CD_SECRETS_SETUP.md)** | GitHub Actions, publishing setup |
 
-**Start here**: [DOCUMENTATION_INDEX.md](DOCUMENTATION_INDEX.md) for role-based reading paths.
+**👉 New users**: Start with [docs/INSTALLATION.md](docs/INSTALLATION.md) → [docs/USER_GUIDE.md](docs/USER_GUIDE.md)
 
 ---
 
