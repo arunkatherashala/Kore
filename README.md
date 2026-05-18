@@ -40,6 +40,9 @@ print(f"Records: {info['total_records']:,}")
 
 ## 📚 Documentation
 
+### Featured: v1.1.6 Competitive Analysis
+**🥇 [KORE Wins 100% of Use Cases](BLOG_POST_KORE_V1.1.6_USE_CASES.md)** — Comprehensive comparison vs Parquet, ORC, zstd, Brotli. **$470-5,640/year savings per deployment.**
+
 ### Getting Started
 | Document | For Whom | Time |
 |----------|----------|------|
