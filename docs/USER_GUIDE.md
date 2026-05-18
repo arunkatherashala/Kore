@@ -1,4 +1,4 @@
-# 📖 User Guide - KORE v1.1.4
+# 📖 User Guide - KORE v1.1.5
 
 Complete guide to using KORE for compressing and managing your data files.
 

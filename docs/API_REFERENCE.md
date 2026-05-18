@@ -1,4 +1,4 @@
-# 🔧 API Reference - KORE v1.1.4
+# 🔧 API Reference - KORE v1.1.5
 
 Complete API documentation for all KORE functions and classes.
 
@@ -550,7 +550,7 @@ print("✅ All operations complete!")
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 1.1.4 | 2026-05-17 | Current release |
+| 1.1.5 | 2026-05-17 | Current release |
 | 1.1.3 | 2026-05-10 | Bug fixes |
 | 1.1.0 | 2026-05-01 | Initial release |
 

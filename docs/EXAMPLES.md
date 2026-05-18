@@ -1,4 +1,4 @@
-# 💡 Code Examples - KORE v1.1.4
+# 💡 Code Examples - KORE v1.1.5
 
 Ready-to-use code examples for common KORE tasks.
 

@@ -1,4 +1,4 @@
-# 📦 Installation Guide - KORE v1.1.4
+# 📦 Installation Guide - KORE v1.1.5
 
 Complete step-by-step guide to install and setup KORE on your system.
 
@@ -50,14 +50,14 @@ source kore_env/bin/activate
 
 #### Step 3: Install KORE
 ```bash
-pip install kore-fileformat==1.1.4
+pip install kore-fileformat==1.1.5
 ```
 
 #### Step 4: Verify Installation
 ```bash
 python -c "import kore_fileformat; print(f'KORE v{kore_fileformat.__version__}')"
 ```
-Expected output: `KORE v1.1.4`
+Expected output: `KORE v1.1.5`
 
 ---
 
@@ -182,7 +182,7 @@ Expected output:
 
 ✅ File Info:
    Total Records: 3
-   Version: kore_fileformat-1.1.4
+   Version: kore_fileformat-1.1.5
 
 🎉 Installation verified successfully!
 ```
@@ -200,7 +200,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Install KORE
-RUN pip install kore-fileformat==1.1.4
+RUN pip install kore-fileformat==1.1.5
 
 # Copy your code
 COPY . .
@@ -227,7 +227,7 @@ docker run -v $(pwd):/app kore-app:latest
 # PowerShell (as Administrator)
 python -m venv kore_env
 .\kore_env\Scripts\Activate.ps1
-pip install kore-fileformat==1.1.4
+pip install kore-fileformat==1.1.5
 ```
 
 ### macOS
@@ -238,7 +238,7 @@ brew install python@3.12
 # Using venv
 python3 -m venv kore_env
 source kore_env/bin/activate
-pip install kore-fileformat==1.1.4
+pip install kore-fileformat==1.1.5
 ```
 
 ### Linux (Ubuntu/Debian)
@@ -252,7 +252,7 @@ python3.12 -m venv kore_env
 source kore_env/bin/activate
 
 # Install KORE
-pip install kore-fileformat==1.1.4
+pip install kore-fileformat==1.1.5
 ```
 
 ---
@@ -263,7 +263,7 @@ pip install kore-fileformat==1.1.4
 ```
 ✅ Solution:
 1. Verify Python version: python --version (should be 3.8+)
-2. Reinstall: pip uninstall kore-fileformat && pip install kore-fileformat==1.1.4
+2. Reinstall: pip uninstall kore-fileformat && pip install kore-fileformat==1.1.5
 3. Check pip: pip list | grep kore
 ```
 
@@ -289,10 +289,10 @@ Check your platform: python -c "import wheel.pep425tags; print(wheel.pep425tags.
 ### Issue 4: "Permission denied" on Linux/macOS
 ```bash
 # Run with sudo
-sudo pip install kore-fileformat==1.1.4
+sudo pip install kore-fileformat==1.1.5
 
 # OR use user installation
-pip install --user kore-fileformat==1.1.4
+pip install --user kore-fileformat==1.1.5
 ```
 
 ### Issue 5: Building from source fails

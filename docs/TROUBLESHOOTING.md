@@ -1,4 +1,4 @@
-# 🆘 Troubleshooting & FAQ - KORE v1.1.4
+# 🆘 Troubleshooting & FAQ - KORE v1.1.5
 
 Common issues, solutions, and frequently asked questions.
 
@@ -39,7 +39,7 @@ ModuleNotFoundError: No module named 'kore_fileformat'
 3. **Reinstall:**
    ```bash
    pip uninstall kore-fileformat -y
-   pip install kore-fileformat==1.1.4
+   pip install kore-fileformat==1.1.5
    ```
 
 4. **Check virtual environment:**
@@ -47,12 +47,12 @@ ModuleNotFoundError: No module named 'kore_fileformat'
    # Windows
    python -m venv kore_env
    .\kore_env\Scripts\activate
-   pip install kore-fileformat==1.1.4
+   pip install kore-fileformat==1.1.5
    
    # macOS/Linux
    python3 -m venv kore_env
    source kore_env/bin/activate
-   pip install kore-fileformat==1.1.4
+   pip install kore-fileformat==1.1.5
    ```
 
 ---
@@ -85,7 +85,7 @@ ERROR: Could not find a version that satisfies the requirement kore-fileformat
 4. **For ARM64 (Apple Silicon):**
    ```bash
    # Make sure you have Python 3.12 for ARM64
-   arch -arm64 python3 -m pip install kore-fileformat==1.1.4
+   arch -arm64 python3 -m pip install kore-fileformat==1.1.5
    ```
 
 ---
@@ -101,15 +101,15 @@ ERROR: Could not install packages due to an EnvironmentError: [Errno 13] Permiss
 
 ```bash
 # Option 1: Use user installation
-pip install --user kore-fileformat==1.1.4
+pip install --user kore-fileformat==1.1.5
 
 # Option 2: Use virtual environment (recommended)
 python -m venv kore_env
 source kore_env/bin/activate  # or .\kore_env\Scripts\activate on Windows
-pip install kore-fileformat==1.1.4
+pip install kore-fileformat==1.1.5
 
 # Option 3: Use sudo (not recommended)
-sudo pip install kore-fileformat==1.1.4
+sudo pip install kore-fileformat==1.1.5
 ```
 
 ---
@@ -449,7 +449,7 @@ print(f"Available topics: {topics}")
 
 ### Q1: Is KORE suitable for production use?
 
-**A:** ✅ **Yes!** KORE v1.1.4 is production-ready with:
+**A:** ✅ **Yes!** KORE v1.1.5 is production-ready with:
 - 131.9x faster compression than Parquet
 - 65.2% compression ratio
 - Proven in real-world scenarios
