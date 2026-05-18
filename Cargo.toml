@@ -5,6 +5,7 @@ edition = "2021"
 description = "KORE — Killer Optimized Record Exchange: standalone Rust crate (zero deps)"
 readme = "README.md"
 authors = ["Sai Arun Kumar Ktherashala <arunkatherashala@gmail.com>"]
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/arunkatherashala/Kore"
 homepage = "https://github.com/arunkatherashala/Kore"
 documentation = "https://docs.rs/kore_fileformat"
