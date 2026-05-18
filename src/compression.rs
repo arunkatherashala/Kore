@@ -122,9 +122,9 @@ impl DictionaryCompressor {
         let mut index_counter = 0u8;
 
         for &byte in data {
-            if !value_to_index.contains_key(&byte) {
+            if let std::collections::hash_map::Entry::Vacant(e) = value_to_index.entry(byte) {
                 dict.push(byte);
-                value_to_index.insert(byte, index_counter);
+                e.insert(index_counter);
                 index_counter += 1;
                 if index_counter == 255 {
                     break; // Max 255 dictionary entries
@@ -277,7 +277,7 @@ impl LZSSCompressor {
                 }
 
                 // Try to find match in window
-                let window_start = if pos > WINDOW_SIZE { pos - WINDOW_SIZE } else { 0 };
+                let window_start = pos.saturating_sub(WINDOW_SIZE);
                 let mut best_len = 0;
                 let mut best_offset = 0;
 

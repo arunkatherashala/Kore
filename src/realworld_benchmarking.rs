@@ -196,7 +196,7 @@ impl RealWorldBenchmarkSuite {
         } else {
             0.0
         };
-        let consistency = (1.0 / (1.0 + cv)).max(0.0).min(1.0);
+        let consistency = (1.0 / (1.0 + cv)).clamp(0.0, 1.0);
 
         BenchmarkResult {
             pattern: pattern_name,

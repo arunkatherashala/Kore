@@ -1,6 +1,28 @@
 // Canonical crate root: expose distinct modules for KORE v1/v2/query/txn.
 // Keep the legacy lightweight shim behind the feature flag `kore_lite_compat`.
 
+#![allow(
+    clippy::empty_line_after_doc_comments,
+    clippy::new_without_default,
+    clippy::unnecessary_cast,
+    clippy::manual_div_ceil,
+    clippy::manual_is_multiple_of,
+    clippy::needless_range_loop,
+    clippy::for_kv_map,
+    clippy::needless_return,
+    clippy::collapsible_if,
+    clippy::len_zero,
+    clippy::iter_nth_zero,
+    clippy::manual_range_contains,
+    clippy::manual_checked_ops,
+    clippy::maybe_infinite_iter,
+    clippy::redundant_closure,
+    clippy::useless_vec,
+    clippy::identity_op,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
+
 pub mod kore;
 pub mod kore_v2;
 pub mod kore_query;

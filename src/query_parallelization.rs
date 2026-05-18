@@ -206,10 +206,9 @@ impl ParallelJoinExecutor {
         selectivity: f64,
     ) -> usize {
         let left_chunk = end - start;
-        let estimated_matches =
-            ((left_chunk as f64) * (right_rows as f64) * selectivity)
-                as usize;
-        estimated_matches
+        
+        ((left_chunk as f64) * (right_rows as f64) * selectivity)
+                as usize
     }
 
     /// Choose JOIN strategy based on table sizes
@@ -221,9 +220,7 @@ impl ParallelJoinExecutor {
 
         if total_rows < 10000 {
             JoinStrategy::NestedLoop
-        } else if left_rows > right_rows * 100 {
-            JoinStrategy::HashJoin
-        } else if left_rows < right_rows {
+        } else if left_rows > right_rows * 100 || left_rows < right_rows {
             JoinStrategy::HashJoin
         } else {
             JoinStrategy::SortMerge

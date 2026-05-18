@@ -271,7 +271,7 @@ impl DistributedExecutor {
                 .filter_map(|col| row.get(col).cloned())
                 .collect();
             
-            groups.entry(key).or_insert_with(Vec::new).push(row.clone());
+            groups.entry(key).or_default().push(row.clone());
         }
 
         // Apply aggregations

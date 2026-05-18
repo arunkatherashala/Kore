@@ -7,7 +7,7 @@
 /// - Architecture overview
 /// - Troubleshooting guide
 
-/// API documentation
+///   API documentation
 #[derive(Clone, Debug)]
 pub struct ApiDocumentation {
     pub title: String,
