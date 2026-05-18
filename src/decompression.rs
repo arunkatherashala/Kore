@@ -391,7 +391,7 @@ mod tests {
     #[test]
     fn test_rle_decompress_single_byte_value() {
         // Single byte value, repeat 5 times
-        let mut data = vec![1, 42, 5];
+        let data = vec![1, 42, 5];
         let result = RLEDecompressor::decompress(&data).unwrap();
         assert_eq!(result, vec![42; 5]);
     }
@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn test_rle_decompress_multi_byte_value() {
         // 2-byte value (0x1234), repeat 2 times
-        let mut data = vec![2, 0x34, 0x12, 2];
+        let data = vec![2, 0x34, 0x12, 2];
         let result = RLEDecompressor::decompress(&data).unwrap();
         assert_eq!(result, vec![0x34, 0x12, 0x34, 0x12]);
     }
@@ -434,7 +434,7 @@ mod tests {
     #[test]
     fn test_rle_decompress_4byte_value() {
         // 4-byte value (little-endian), repeat 3 times
-        let mut data = vec![4, 0x01, 0x02, 0x03, 0x04, 3];
+        let data = vec![4, 0x01, 0x02, 0x03, 0x04, 3];
         let result = RLEDecompressor::decompress(&data).unwrap();
         let expected: Vec<u8> = vec![0x01, 0x02, 0x03, 0x04].repeat(3);
         assert_eq!(result, expected);
@@ -443,7 +443,7 @@ mod tests {
     #[test]
     fn test_rle_decompress_8byte_value() {
         // 8-byte value (64-bit), repeat 2 times
-        let mut data = vec![8, 1, 2, 3, 4, 5, 6, 7, 8, 2];
+        let data = vec![8, 1, 2, 3, 4, 5, 6, 7, 8, 2];
         let result = RLEDecompressor::decompress(&data).unwrap();
         assert_eq!(result.len(), 16);
         assert_eq!(result[0..8], [1, 2, 3, 4, 5, 6, 7, 8]);
@@ -460,7 +460,7 @@ mod tests {
     #[test]
     fn test_rle_decompress_single_value_once() {
         // Value 'X' repeated 1 time
-        let mut data = vec![1, b'X', 1];
+        let data = vec![1, b'X', 1];
         let result = RLEDecompressor::decompress(&data).unwrap();
         assert_eq!(result, b"X");
     }
@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn test_rle_decompress_varint_boundary_127() {
         // Count = 127 (fits in 1 byte, no continuation bit)
-        let mut data = vec![1, 99, 127];
+        let data = vec![1, 99, 127];
         let result = RLEDecompressor::decompress(&data).unwrap();
         assert_eq!(result.len(), 127);
         assert!(result.iter().all(|&b| b == 99));
@@ -477,7 +477,7 @@ mod tests {
     #[test]
     fn test_rle_decompress_varint_boundary_128() {
         // Count = 128 (requires 2 bytes: 0x80, 0x01)
-        let mut data = vec![1, 99, 0x80, 0x01];
+        let data = vec![1, 99, 0x80, 0x01];
         let result = RLEDecompressor::decompress(&data).unwrap();
         assert_eq!(result.len(), 128);
         assert!(result.iter().all(|&b| b == 99));
@@ -862,7 +862,6 @@ mod tests {
 
     #[test]
     #[ignore] // TODO: Fix FOR test data encoding
-    #[ignore] // Stub - FOR implementation has issues with test data
     fn test_for_decompress_simple() {
         // Simplest FOR: 1-bit values
         let data = vec![

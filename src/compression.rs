@@ -361,7 +361,7 @@ mod tests {
             data.push(0xAA);
             data.push(0xBB);
         }
-        let (compressed, stats) = RLECompressor::compress(&data).unwrap();
+        let (_compressed, stats) = RLECompressor::compress(&data).unwrap();
 
         // Alternating data compresses poorly with RLE
         assert!(stats.ratio > 0.8);
@@ -384,7 +384,7 @@ mod tests {
     #[test]
     fn test_dict_compress_unique() {
         let data: Vec<u8> = (0..255).collect();
-        let (compressed, stats) = DictionaryCompressor::compress(&data).unwrap();
+        let (_compressed, stats) = DictionaryCompressor::compress(&data).unwrap();
 
         assert!(stats.ratio > 0.9); // Unique data compresses poorly
     }
@@ -395,7 +395,7 @@ mod tests {
         for i in 1000u32..1100u32 {
             data.extend_from_slice(&i.to_le_bytes());
         }
-        let (compressed, stats) = FORCompressor::compress(&data).unwrap();
+        let (_compressed, stats) = FORCompressor::compress(&data).unwrap();
 
         assert!(stats.ratio < 0.5); // Should compress well
     }
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn test_lzss_compress_repetitive() {
         let data = vec![0xAB; 100];
-        let (compressed, stats) = LZSSCompressor::compress(&data).unwrap();
+        let (_compressed, stats) = LZSSCompressor::compress(&data).unwrap();
 
         assert!(stats.ratio < 0.7); // Should compress reasonably
     }
@@ -411,7 +411,7 @@ mod tests {
     #[test]
     fn test_lzss_compress_text() {
         let text = "hello world hello world hello world".as_bytes();
-        let (compressed, stats) = LZSSCompressor::compress(text).unwrap();
+        let (_compressed, stats) = LZSSCompressor::compress(text).unwrap();
 
         assert!(stats.ratio < 0.9); // Should have some compression
     }

@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn test_index_recommendation() {
-        let mut manager = IndexManager::new();
+        let manager = IndexManager::new();
         let recommendations = manager.recommend_indexes("users", &["id", "email"]);
         
         assert!(recommendations.len() > 0);

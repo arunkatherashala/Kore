@@ -1,6 +1,6 @@
 {
   "name": "@kore/cloud",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "description": "Cloud connectors (S3, Azure Blob, GCS) for Kore columnar file format",
   "main": "index.js",
   "types": "index.d.ts",

@@ -1495,7 +1495,7 @@ mod tests {
         let (decoded, _) = PrefixCompressedDict::decompress(&encoded).unwrap();
         
         // Check all values are present (order may differ due to HashMap)
-        let mut decoded_set: std::collections::HashSet<_> = decoded.into_iter().collect();
+        let decoded_set: std::collections::HashSet<_> = decoded.into_iter().collect();
         for value in values {
             assert!(decoded_set.contains(value));
         }
@@ -1510,7 +1510,7 @@ mod tests {
         let (decoded, _) = PrefixCompressedDict::decompress(&encoded).unwrap();
         
         // Check all values are present
-        let mut decoded_set: std::collections::HashSet<_> = decoded.into_iter().collect();
+        let decoded_set: std::collections::HashSet<_> = decoded.into_iter().collect();
         for value in values {
             assert!(decoded_set.contains(value));
         }
@@ -1555,8 +1555,8 @@ mod tests {
         let huffman = HuffmanCoding::build_from_frequencies(&frequencies).unwrap();
         
         // Frequent value should have short code
-        let (code0, len0) = huffman.encode(0).unwrap();
-        let (code3, len3) = huffman.encode(3).unwrap();
+        let (_code0, len0) = huffman.encode(0).unwrap();
+        let (_code3, len3) = huffman.encode(3).unwrap();
         
         // More frequent value should have equal or shorter code
         assert!(len0 <= len3);

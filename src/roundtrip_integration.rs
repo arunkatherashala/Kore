@@ -283,7 +283,8 @@ mod tests {
         // Each should have valid structure
         for comp in comparisons {
             assert!(comp.original_size > 0);
-            assert!(comp.compressed_size >= 0);
+            // Note: compressed_size can be 0 for very small data, so just check it's not negative
+            // (which is always true for unsigned types, but kept for clarity)
             assert!(comp.ratio > 0.0);
         }
     }

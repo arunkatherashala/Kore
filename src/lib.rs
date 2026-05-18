@@ -57,6 +57,10 @@ pub mod integration_tests;
 pub mod parametric_tests;
 pub mod production_validator;
 pub mod kore_writer;
+// v1.1.6 Compression Improvements
+pub mod advanced_codecs;
+pub mod column_preprocessor;
+pub mod adaptive_blocking;
 
 // Cloud storage connectors (API stubs enabled for v1.0, full implementation in v1.1)
 #[cfg(feature = "s3")]
