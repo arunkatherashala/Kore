@@ -23,6 +23,18 @@ pub mod comprehensive_testing;
 pub mod performance_profiling;
 pub mod advanced_features;
 pub mod documentation;
+pub mod decompression;
+pub mod kore_reader;
+pub mod codec_selector;
+pub mod compression_validator;
+pub mod roundtrip_validator;
+pub mod compression;
+pub mod roundtrip_integration;
+pub mod fileio_validator;
+pub mod integration_tests;
+pub mod parametric_tests;
+pub mod production_validator;
+pub mod kore_writer;
 
 // Cloud storage connectors (API stubs enabled for v1.0, full implementation in v1.1)
 #[cfg(feature = "s3")]

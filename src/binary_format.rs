@@ -17,6 +17,8 @@ pub enum BinaryFormatError {
     EncodingError(String),
     /// Invalid configuration
     InvalidConfig(String),
+    /// Invalid data encountered
+    InvalidData(String),
 }
 
 impl std::fmt::Display for BinaryFormatError {
@@ -26,6 +28,7 @@ impl std::fmt::Display for BinaryFormatError {
             BinaryFormatError::DecompressionError(e) => write!(f, "Decompression error: {}", e),
             BinaryFormatError::EncodingError(e) => write!(f, "Encoding error: {}", e),
             BinaryFormatError::InvalidConfig(e) => write!(f, "Invalid config: {}", e),
+            BinaryFormatError::InvalidData(e) => write!(f, "Invalid data: {}", e),
         }
     }
 }
