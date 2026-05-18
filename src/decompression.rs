@@ -3,7 +3,6 @@
 //! Implements RLE, Dictionary, FOR, and LZSS decompression codecs.
 //! This enables reading compressed KORE files.
 
-use std::collections::HashMap;
 use crate::binary_format::BinaryFormatError;
 
 /// Codec identifier for different compression algorithms
@@ -293,7 +292,9 @@ impl FORDecompressor {
 pub struct LZSSDecompressor;
 
 impl LZSSDecompressor {
+    #[allow(dead_code)]
     const WINDOW_SIZE: usize = 32768; // 32KB sliding window
+    #[allow(dead_code)]
     const MAX_MATCH_LEN: usize = 258;
 
     /// Decompress LZSS-encoded data

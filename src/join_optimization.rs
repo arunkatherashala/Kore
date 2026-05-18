@@ -234,7 +234,7 @@ impl JoinOptimizer {
         selectivity: f64,
     ) -> JoinCostModel {
         let left = self.get_table(left_table).unwrap();
-        let right = self.get_table(right_table).unwrap();
+        let _right = self.get_table(right_table).unwrap();
 
         let estimated_matches =
             (left.row_count as f64) * selectivity;
@@ -284,6 +284,7 @@ impl Default for JoinOptimizer {
 
 /// Hash JOIN implementation
 pub struct HashJoinExecutor {
+    #[allow(dead_code)]
     build_table_rows: usize,
     probe_table_rows: usize,
     hash_table_size: usize,

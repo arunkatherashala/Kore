@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, Duration};
+use std::time::SystemTime;
 
 /// Cached query plan
 #[derive(Debug, Clone)]

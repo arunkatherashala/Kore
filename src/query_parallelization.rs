@@ -1,10 +1,3 @@
-/// Query parallelization using multi-core execution
-///
-/// Enables parallel processing of large result sets and JOIN operations
-/// across available CPU cores. This is a zero-dependency implementation
-/// using standard Rust threading.
-
-use std::sync::Arc;
 use std::thread;
 
 /// Configuration for parallel query execution

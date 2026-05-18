@@ -8,7 +8,7 @@
 /// Validates end-to-end correctness and measures real compression ratios
 
 use crate::codec_selector::{ColumnProfile, CodecSelector};
-use crate::compression::{CompressionRegistry, CompressionStats};
+use crate::compression::CompressionRegistry;
 use crate::decompression::{CodecId, CodecRegistry};
 use crate::binary_format::BinaryFormatError;
 
@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn test_compression_stats() {
-        let stats = CompressionStats::new(1000, 500);
+        use crate::compression::CompressionStats; let stats = CompressionStats::new(1000, 500);
         assert_eq!(stats.ratio, 0.5);
         assert_eq!(stats.original_size, 1000);
         assert_eq!(stats.compressed_size, 500);

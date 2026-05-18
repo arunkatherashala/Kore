@@ -7,14 +7,13 @@
 /// - MemoryPoolManager for efficient allocations
 
 use crate::query_parallelization::{
-    ParallelQueryExecutor, ParallelConfig, ParallelJoinExecutor,
+    ParallelQueryExecutor, ParallelConfig,
 };
 use crate::join_optimization::{JoinOptimizer, TableStats};
 use crate::baseline_benchmarking::{
     BaselineTracker, OptimizationComparison, BaselineMetrics,
 };
 use crate::memory_pooling::{MemoryPoolManager, PoolConfig};
-use std::collections::HashMap;
 use std::time::Instant;
 
 /// Optimized query execution context

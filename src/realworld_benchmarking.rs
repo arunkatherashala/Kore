@@ -1,17 +1,5 @@
-/// Real-world query benchmarking suite
-///
-/// Benchmarks optimizations using realistic query patterns and data sizes.
-/// Measures performance improvements from:
-/// - Query parallelization
-/// - Memory pooling
-/// - JOIN algorithm optimization
-
-use crate::baseline_benchmarking::{
-    BaselineMetrics, OptimizationComparison, PerformanceMetric,
-    BaselineTracker,
-};
 use crate::query_optimization_engine::{
-    OptimizedQueryContext, OptimizedQueryResult, ImprovementReport,
+    OptimizedQueryContext, ImprovementReport,
 };
 use std::time::Instant;
 

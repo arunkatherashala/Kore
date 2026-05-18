@@ -2,7 +2,7 @@
 /// Comprehensive performance testing and comparison with competing formats
 
 use std::fs::{self, File};
-use std::io::{Write, BufReader, Read};
+use std::io::{Write, Read};
 use std::path::Path;
 use std::time::Instant;
 

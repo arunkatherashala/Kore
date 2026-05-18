@@ -380,6 +380,7 @@ fn varint_encode(mut value: u64) -> Vec<u8> {
 fn varint_decode(data: &[u8]) -> IoResult<(u64, usize)> {
     let mut value = 0u64;
     let mut shift = 0;
+    #[allow(unused_assignments)]
     let mut decoded_size = 0;
 
     for (i, &byte) in data.iter().enumerate() {

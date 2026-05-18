@@ -6,7 +6,7 @@
 /// - Performance baselines
 /// - Optimization recommendations
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use std::collections::HashMap;
 
 /// Performance profile for a function

@@ -8,7 +8,6 @@
 /// - Stress tests
 
 use std::time::Instant;
-use std::collections::HashMap;
 
 /// Test category
 #[derive(Clone, Debug, PartialEq)]

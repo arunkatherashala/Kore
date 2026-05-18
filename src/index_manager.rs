@@ -1,7 +1,7 @@
 /// KORE Index Management System
 /// Provides column indexing, index selection, and index-based query optimization
 
-use std::collections::{HashMap, BTreeMap};
+use std::collections::HashMap;
 
 /// Index type
 #[derive(Debug, Clone, PartialEq)]
@@ -26,7 +26,7 @@ pub struct ColumnIndex {
 
 impl ColumnIndex {
     /// Estimate index space requirement
-    pub fn estimate_size(cardinality: usize, data_size_bytes: u64) -> u64 {
+    pub fn estimate_size(_cardinality: usize, data_size_bytes: u64) -> u64 {
         // Heuristic: index is roughly 10-20% of data size
         (data_size_bytes / 10).max(1000) as u64
     }

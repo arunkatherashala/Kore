@@ -285,6 +285,7 @@ pub struct PoolUtilization {
 pub struct MemoryPoolManager {
     buffer_pool: Arc<BufferPool>,
     row_pool: Arc<RowPool>,
+    #[allow(dead_code)]
     config: PoolConfig,
 }
 

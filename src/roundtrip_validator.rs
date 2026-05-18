@@ -7,7 +7,6 @@
 /// 4. Byte-for-byte fidelity
 
 use crate::codec_selector::{ColumnProfile, CodecSelector};
-use crate::decompression::CodecRegistry;
 use crate::decompression::CodecId;
 
 /// Round-trip compression validator

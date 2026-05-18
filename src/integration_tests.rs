@@ -1,16 +1,5 @@
-/// Week 11: Comprehensive Integration Testing Framework
-/// 
-/// Tests the full pipeline with 100,000+ test cases covering:
-/// - All codec combinations
-/// - Multi-column scenarios
-/// - Real compression ratio validation
-/// - Performance profiling
-/// - Stress testing at scale
-
-use crate::codec_selector::ColumnProfile;
 use crate::fileio_validator::FileIOValidator;
-use crate::kore_writer::{ColumnData, KoreWriter};
-use std::collections::HashMap;
+use crate::kore_writer::ColumnData;
 
 /// Integration test result with detailed statistics
 #[derive(Clone, Debug)]

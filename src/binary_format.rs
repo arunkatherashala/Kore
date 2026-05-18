@@ -4,7 +4,6 @@
 //! for achieving 5-10x compression on real-world datasets.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
 /// Error types for binary format operations
 #[derive(Debug)]
@@ -774,7 +773,7 @@ impl PrefixCompressedDict {
         
         // Encode dictionary
         encoded.push(dictionary.len() as u8);
-        for (value, (prefix_id, suffix)) in &dictionary {
+        for (_value, (prefix_id, suffix)) in &dictionary {
             encoded.push(*prefix_id as u8);
             encoded.push(suffix.len() as u8);
             encoded.extend_from_slice(suffix.as_bytes());

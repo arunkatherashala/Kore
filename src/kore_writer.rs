@@ -96,7 +96,7 @@ impl KoreWriter {
             let codec = CodecSelector::select_optimal_codec(&profile);
 
             // Step 2: Compress with selected codec
-            let (compressed_data, stats) = CompressionRegistry::compress(codec, &col.data)?;
+            let (compressed_data, _stats) = CompressionRegistry::compress(codec, &col.data)?;
 
             let uncompressed_size = col.data.len() as u64;
             let compressed_size = compressed_data.len() as u64;
