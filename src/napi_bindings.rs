@@ -20,15 +20,15 @@ use napi::{
     JsObject, JsString, JsBuffer,
 };
 
-// Cloud reader imports are disabled due to SDK API mismatches (will be enabled in v1.1)
-// #[cfg(feature = "s3")]
-// use crate::s3_reader::S3Reader;
+// Cloud reader imports
+#[cfg(feature = "s3")]
+use crate::s3_reader::S3Reader;
 
-// #[cfg(feature = "azure")]
-// use crate::azure_reader::AzureBlobReader;
+#[cfg(feature = "azure")]
+use crate::azure_reader::AzureBlobReader;
 
-// #[cfg(feature = "gcs")]
-// use crate::gcs_reader::GcsReader;
+#[cfg(feature = "gcs")]
+use crate::gcs_reader::GcsReader;
 
 // ============================================================================
 // S3Reader NAPI Binding
