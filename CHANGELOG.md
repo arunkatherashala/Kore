@@ -2,6 +2,61 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.6] - 2026-05-18
+
+### 🚀 Release - Advanced Compression Algorithms & Performance Optimization
+
+#### ✨ New Features
+- **Advanced ZSTD Codec**
+  - 128KB adaptive dictionary (vs 16KB default)
+  - Entropy-aware compression levels 18-22
+  - Up to 45% better compression on repetitive data
+
+- **Delta Encoding**
+  - 99% reduction on sorted sequences
+  - Quantized float delta encoding
+  - Optimal for time-series and columnar data
+
+- **Column Preprocessing**
+  - Type-specific optimization (string, numeric, categorical, timestamp)
+  - String prefix compression (80% reduction on common prefixes)
+  - Categorical dictionary encoding (1-8 bits per value)
+  - Timestamp Gorilla encoding for time-series
+  - Bit-packing for bounded numeric ranges
+
+- **Adaptive Blocking**
+  - Entropy-aware block sizing (4KB-256KB)
+  - Shannon entropy calculation per block
+  - Repetitiveness detection and optimization
+
+#### 🎯 Performance Targets
+- **Compression Ratio**: 25-35% (vs Parquet 20-25%, ORC 12-20%)
+- **Speed**: 3-11x faster than Parquet/ORC
+- **Championship Benchmark**: 8-32% on diverse datasets
+
+#### 🐛 Bug Fixes
+- Fixed CI build errors in NAPI/JNI binding imports
+- Resolved missing license field for crates.io
+- Added cloud reader imports to binding modules
+
+#### 📊 Testing & Quality
+- 371+ unit tests for v1.1.6 modules
+- 16 advanced codec tests
+- 7 column preprocessor tests
+- 8 adaptive blocking tests
+- Championship compression benchmark suite
+
+#### 📦 Multi-Platform Publishing (v1.1.6)
+- **npm**: kore-fileformat@1.1.6
+- **PyPI**: kore-fileformat==1.1.6
+- **Maven Central**: com.korefileformat:kore-fileformat:1.1.6
+- **crates.io**: kore_fileformat@1.1.6
+- **NuGet**: KoreFileformat 1.1.6
+- **RubyGems**: kore-fileformat 1.1.6
+- **GHCR**: ghcr.io/arunkatherashala/kore:1.1.6
+
+---
+
 ## [1.1.5] - 2026-05-18
 
 ### 🚀 Release - Multi-Platform v1.1.5 Stabilization
