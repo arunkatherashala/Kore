@@ -11,8 +11,6 @@ on:
 jobs:
   nuget:
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
     
     steps:
     - uses: actions/checkout@v4
@@ -47,16 +45,20 @@ jobs:
           --output nupkg
     
     - name: Publish to NuGet
+      env:
+        NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
       run: |
+        if [ -z "$NUGET_API_KEY" ]; then
+          echo "ERROR: NUGET_API_KEY secret not configured"
+          echo "Please set NUGET_API_KEY in GitHub repository secrets"
+          exit 1
+        fi
+        
         if [ -d nupkg ] && [ "$(ls -A nupkg)" ]; then
-          # Get OIDC token from GitHub
-          TOKEN=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL?audience=nuget.org" | jq -r '.token')
-          
           for file in nupkg/*.nupkg; do
+            echo "Publishing: $file"
             dotnet nuget push "$file" \
-              --api-key "$TOKEN" \
+              --api-key "$NUGET_API_KEY" \
               --source https://api.nuget.org/v3/index.json \
               --skip-duplicate
           done
