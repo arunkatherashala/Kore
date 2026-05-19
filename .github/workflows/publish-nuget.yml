@@ -24,26 +24,40 @@ jobs:
       id: version
       run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
     
+    - name: Find C# project
+      id: find-project
+      run: |
+        PROJECT_PATH=$(find . -name "*.csproj" -type f | grep -E "csharp|dotnet|\.NET" | head -1)
+        if [ -z "$PROJECT_PATH" ]; then
+          PROJECT_PATH=$(find . -name "Kore.FileFormat.csproj" -type f | head -1)
+        fi
+        if [ -z "$PROJECT_PATH" ]; then
+          echo "error=C# project not found"
+          exit 1
+        fi
+        echo "project_path=$PROJECT_PATH" >> $GITHUB_OUTPUT
+        echo "Found project: $PROJECT_PATH"
+    
     - name: Restore dependencies
-      run: dotnet restore
-      continue-on-error: true
+      run: dotnet restore "${{ steps.find-project.outputs.project_path }}"
     
     - name: Build NuGet package
       run: |
-        dotnet pack --configuration Release --output nupkg
-      continue-on-error: true
+        dotnet pack "${{ steps.find-project.outputs.project_path }}" \
+          --configuration Release \
+          --output nupkg
     
     - name: Publish to NuGet
       run: |
-        if [ -d nupkg ]; then
+        if [ -d nupkg ] && [ "$(ls -A nupkg)" ]; then
           dotnet nuget push nupkg/*.nupkg \
             --api-key ${{ secrets.NUGET_API_KEY }} \
             --source https://api.nuget.org/v3/index.json \
             --skip-duplicate
         else
-          echo "No NuGet packages found (optional for this release)"
+          echo "No NuGet packages found to publish"
+          exit 0
         fi
-      continue-on-error: true
 
     - name: Publish summary
       run: |
