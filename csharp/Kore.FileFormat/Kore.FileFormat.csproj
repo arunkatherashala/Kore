@@ -37,7 +37,7 @@ Ideal for:
 371+ unit tests • 100% pass rate • Production ready</Description>
     <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/arunkatherashala/Kore</PackageProjectUrl>
-    <PackageIcon>logo.png</PackageIcon>
+    <!-- <PackageIcon>logo.png</PackageIcon> -->
     <RepositoryUrl>https://github.com/arunkatherashala/Kore</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageTags>compression;data-compression;zstd;codec;performance;rust;bindings;fileformat;kore;parquet;orc</PackageTags>
