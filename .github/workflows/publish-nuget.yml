@@ -49,9 +49,12 @@ jobs:
         NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
       run: |
         if [ -z "$NUGET_API_KEY" ]; then
-          echo "ERROR: NUGET_API_KEY secret not configured"
-          echo "Please set NUGET_API_KEY in GitHub repository secrets"
-          exit 1
+          echo "⚠️  NUGET_API_KEY secret not configured"
+          echo "To enable NuGet publishing:"
+          echo "1. Create API key at: https://www.nuget.org/account/apikeys"
+          echo "2. Add to GitHub secrets: gh secret set NUGET_API_KEY --body '...'"
+          echo "Skipping NuGet publish (optional)"
+          exit 0
         fi
         
         if [ -d nupkg ] && [ "$(ls -A nupkg)" ]; then
