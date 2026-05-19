@@ -2,7 +2,7 @@ name: Cloud Connectors CI/CD
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main, develop, develop-v1.1.6 ]
     paths:
       - 'src/s3_reader.rs'
       - 'src/azure_reader.rs'
