@@ -47,10 +47,9 @@ jobs:
     - name: Publish to NuGet
       run: |
         if [ -d nupkg ] && [ "$(ls -A nupkg)" ]; then
-          dotnet nuget push nupkg/*.nupkg \
-            --api-key ${{ secrets.NUGET_API_KEY }} \
-            --source https://api.nuget.org/v3/index.json \
-            --skip-duplicate
+          for file in nupkg/*.nupkg; do
+            dotnet nuget push "$file" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
+          done
         else
           echo "No NuGet packages found to publish"
           exit 0
