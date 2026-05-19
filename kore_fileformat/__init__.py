@@ -7,7 +7,7 @@ systems (Hadoop, Spark) and cloud storage platforms (S3, GCS, Azure).
 Available in: Rust, Python, Java, Go, Scala, JavaScript, Killer DSL, and more.
 """
 
-__version__ = "1.1.6"
+__version__ = "1.2.0"
 __author__ = "Sai Arun Kumar Ktherashala"
 __email__ = "arunkatherashala@gmail.com"
 

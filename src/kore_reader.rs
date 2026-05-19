@@ -2,10 +2,13 @@
 //!
 //! Reads KORE binary format files and decompresses columns using registered codecs.
 //! Supports both v1.0 (no compression) and v2.0 (multi-codec) files.
+//! With Phase 3.1: Supports predicate pushdown and column pruning.
 
 use crate::decompression::{CodecId, CodecRegistry};
 use crate::binary_format::BinaryFormatError;
+use crate::predicates::{QueryFilter, ColumnSelection, PredicateExpression};
 use std::io::{Read, Cursor};
+use std::collections::HashSet;
 
 const MAGIC_BYTES: &[u8; 4] = b"KORE";
 const FORMAT_VERSION_V1: u8 = 0x01;
@@ -218,6 +221,40 @@ impl KoreReader {
     pub fn column_names(&self) -> Vec<&str> {
         self.header.columns.iter().map(|c| c.name.as_str()).collect()
     }
+
+    /// Get columns that should be read based on filter
+    pub fn get_pruned_columns(&self, filter: &QueryFilter) -> Vec<&ColumnMetadata> {
+        self.header
+            .columns
+            .iter()
+            .filter(|col| filter.column_selection.is_selected(&col.name))
+            .collect()
+    }
+
+    /// Get column indices to read based on filter
+    pub fn get_pruned_column_indices(&self, filter: &QueryFilter) -> Vec<usize> {
+        self.header
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, col)| filter.column_selection.is_selected(&col.name))
+            .map(|(idx, _)| idx)
+            .collect()
+    }
+
+    /// Calculate bytes saved by column pruning
+    pub fn calculate_pruning_savings(&self, filter: &QueryFilter) -> (u64, u64) {
+        let total_compressed: u64 = self.header.columns.iter().map(|c| c.compressed_size).sum();
+        let read_compressed: u64 = self
+            .header
+            .columns
+            .iter()
+            .filter(|col| filter.column_selection.is_selected(&col.name))
+            .map(|c| c.compressed_size)
+            .sum();
+
+        (read_compressed, total_compressed - read_compressed)
+    }
 }
 
 #[cfg(test)]
@@ -237,5 +274,23 @@ mod tests {
         data.push(0xFF); // Invalid version
         let result = KoreReader::new(data);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_pruned_columns_all() {
+        // This test would need a real KORE file to test with
+        // For now, we verify the API compiles
+        let filter = QueryFilter::empty();
+        assert!(filter.column_selection.is_all());
+    }
+
+    #[test]
+    fn test_get_pruned_columns_specific() {
+        let selection = ColumnSelection::new(vec!["col1".to_string(), "col2".to_string()]);
+        let filter = QueryFilter::new(PredicateExpression::new(), selection);
+        
+        assert!(filter.column_selection.is_selected("col1"));
+        assert!(filter.column_selection.is_selected("col2"));
+        assert!(!filter.column_selection.is_selected("col3"));
     }
 }

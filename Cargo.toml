@@ -1,6 +1,6 @@
 [package]
 name = "kore_fileformat"
-version = "1.1.6"
+version = "1.2.0"
 edition = "2021"
 description = "KORE — Killer Optimized Record Exchange: standalone Rust crate (zero deps)"
 readme = "README.md"
@@ -60,6 +60,7 @@ jni = { version = "0.21", optional = true }
 
 # JavaScript/NAPI bindings
 napi = { version = "2.15", optional = true }
+num_cpus = "1.17.0"
 
 [lib]
 name = "kore_fileformat"

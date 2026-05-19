@@ -275,22 +275,18 @@ impl CodecSelector {
 
     /// Select best codec considering both compression and speed
     pub fn select_optimal_codec(profile: &ColumnProfile) -> CodecId {
-        // Get stats for all codecs
         let candidates = vec![
             CodecId::RLE,
             CodecId::Dictionary,
             CodecId::FOR,
-            CodecId::LZSS,
         ];
 
-        let mut best_codec = CodecId::LZSS;
+        let mut best_codec = CodecId::RLE;
         let mut best_score = 0.0;
 
         for codec in candidates {
             let stats = Self::estimate_stats(profile, codec);
             
-            // Prefer codecs with good compression AND reasonable speed
-            // Threshold: only use codec if compression ratio < 0.8 (at least 20% reduction)
             if stats.ratio < 0.8 && stats.score > best_score {
                 best_score = stats.score;
                 best_codec = codec;

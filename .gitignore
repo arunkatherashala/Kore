@@ -9,3 +9,29 @@
 .venv/
 venv/
 env/
+
+# Large test files (>100MB)
+kore_hard_tests/*.bin
+kore_hard_tests/*.csv
+kore_hard_tests/*.json
+kore_hard_tests/*.log
+kore_hard_tests/*.txt
+kore_final_benchmark/*.bin
+kore_final_benchmark/*.csv
+kore_final_benchmark/*.json
+
+# Build artifacts
+*.o
+*.rmeta
+*.so
+*.dylib
+*.dll
+
+# Test outputs
+test_out.txt
+test_results.txt
+debug_log.txt
+build_log*.txt
+final_*.txt
+killer_*.txt
+latest_*.txt

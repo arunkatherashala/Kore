@@ -247,14 +247,16 @@ pub struct LZSSCompressor;
 impl LZSSCompressor {
     /// Compress using LZSS (Lempel-Ziv-Storer-Szymanski)
     /// 
-    /// Format:
+    /// Format (matches decompressor expectations):
     /// - flags (u8): bit 0 = literal (1) or backreference (0)
     /// - for each bit:
     ///   - if literal: 1 byte of data
-    ///   - if backreference: offset (2 bytes LE) + length (1 byte)
+    ///   - if backreference: [dist_low][dist_high_and_len] = 2 bytes
+    ///     - dist_low = distance & 0xFF (bits 7-0)
+    ///     - dist_high_and_len = ((distance >> 8) & 0x0F) << 4 | ((len - 3) & 0x0F)
     /// - ... repeat for each 8-byte chunk
     /// 
-    /// Window: 32KB, Max match: 258 bytes
+    /// Window: 4KB (12-bit offset), Max match: 18 bytes (4-bit length field + 3)
     pub fn compress(data: &[u8]) -> Result<(Vec<u8>, CompressionStats), BinaryFormatError> {
         if data.is_empty() {
             return Ok((vec![], CompressionStats::new(0, 0)));
@@ -262,8 +264,8 @@ impl LZSSCompressor {
 
         let mut output = Vec::new();
         let mut pos = 0;
-        const WINDOW_SIZE: usize = 32768; // 32KB
-        const MAX_MATCH: usize = 258;
+        const WINDOW_SIZE: usize = 4096; // 4KB (12-bit offset limit)
+        const MAX_MATCH: usize = 18; // 4-bit length field: 0-15 + 3 = 3-18 bytes
         const MIN_MATCH: usize = 3;
 
         while pos < data.len() {
@@ -300,14 +302,20 @@ impl LZSSCompressor {
                 }
 
                 if best_len >= MIN_MATCH {
-                    // Backreference: offset (2 bytes) + length (1 byte)
-                    flags |= 0 << bit; // 0 = backreference
-                    chunk_data.extend_from_slice(&(best_offset as u16).to_le_bytes());
-                    chunk_data.push(best_len as u8);
+                    // Backreference: 2 bytes with packed distance and length
+                    flags |= 1 << bit; // 1 = backreference
+                    
+                    // Pack distance (12 bits) and length (4 bits) into 2 bytes
+                    let dist_low = (best_offset & 0xFF) as u8;
+                    let dist_high_and_len = (((best_offset >> 8) & 0x0F) as u8) << 4
+                        | ((best_len.saturating_sub(3)) & 0x0F) as u8;
+                    
+                    chunk_data.push(dist_low);
+                    chunk_data.push(dist_high_and_len);
                     pos += best_len;
                 } else {
                     // Literal: just the byte
-                    flags |= 1 << bit; // 1 = literal
+                    flags |= 0 << bit; // 0 = literal (no-op, bit stays 0)
                     chunk_data.push(data[pos]);
                     pos += 1;
                 }

@@ -57,6 +57,18 @@ pub mod integration_tests;
 pub mod parametric_tests;
 pub mod production_validator;
 pub mod kore_writer;
+pub mod predicates;
+pub mod query_optimization;
+pub mod statistics;
+pub mod caching;
+pub mod query_execution;
+pub mod parallel_execution;
+pub mod indexing;
+pub mod query_optimizer;
+pub mod arrow_converter;
+pub mod duckdb_connector;
+pub mod duckdb_ffi;
+
 // v1.1.6 Compression Improvements
 pub mod advanced_codecs;
 pub mod column_preprocessor;
