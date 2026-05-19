@@ -74,10 +74,11 @@ Use Cases:
     <PackageReference Include="System.Runtime.InteropServices" Version="4.3.0" Condition="'$(TargetFramework)' == 'netstandard2.1'" />
   </ItemGroup>
 
-  <!-- Native libraries inclusion -->
+  <!-- Native libraries inclusion (optional - only include if available) -->
   <ItemGroup>
-    <None Include="..\..\target\release\kore_fileformat.dll" Pack="true" PackagePath="runtimes\win-x64\native\" Condition="'$(OS)' == 'Windows_NT'" />
-    <None Include="..\..\target\release\libkore_fileformat.so" Pack="true" PackagePath="runtimes\linux-x64\native\" Condition="'$(OS)' != 'Windows_NT'" />
+    <None Include="..\..\target\release\kore_fileformat.dll" Pack="true" PackagePath="runtimes\win-x64\native\" Condition="Exists('..\..\target\release\kore_fileformat.dll')" />
+    <None Include="..\..\target\release\libkore_fileformat.so" Pack="true" PackagePath="runtimes\linux-x64\native\" Condition="Exists('..\..\target\release\libkore_fileformat.so')" />
+    <None Include="..\..\target\release\libkore_fileformat.dylib" Pack="true" PackagePath="runtimes\osx-x64\native\" Condition="Exists('..\..\target\release\libkore_fileformat.dylib')" />
   </ItemGroup>
 
 </Project>
