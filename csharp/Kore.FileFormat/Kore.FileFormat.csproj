@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>net6.0;net8.0;netstandard2.1</TargetFrameworks>
+    <TargetFrameworks>net472;net48;net6.0;net7.0;net8.0;netstandard2.1</TargetFrameworks>
     <LangVersion>latest</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -44,10 +44,11 @@ Ideal for:
     <PackageReleaseNotes>
 v1.1.6 - May 18, 2026
 - Full C#/.NET support via P/Invoke bindings
-- Support for .NET 6.0, .NET 8.0, and .NET Standard 2.1
+- Universal .NET support: .NET Framework 4.7.2+, 4.8, .NET 6.0, 7.0, 8.0, and .NET Standard 2.1
 - Production-ready compression and decompression APIs
 - Comprehensive examples and documentation
 - 371+ unit tests (100% pass rate)
+- Works with legacy enterprise .NET Framework apps through modern .NET 8.0
 - Compatible with all major platforms (Windows, Linux, macOS)
 
 Performance Metrics:

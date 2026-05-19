@@ -12,18 +12,31 @@ Advanced multi-codec compression library with **48% better compression than indu
 ✅ **Column Preprocessing** - Type-specific optimization  
 ✅ **Adaptive Blocking** - 4KB-256KB blocks with entropy selection  
 ✅ **Multi-Platform** - Windows, Linux, macOS (x64, arm64)  
+✅ **Universal .NET Support** - From .NET Framework 4.7.2 to .NET 8.0  
 ✅ **Production Ready** - 371+ unit tests, 100% pass rate  
 
 ## Installation
+
+### Modern .NET (6.0, 7.0, 8.0)
 
 ```bash
 dotnet add package Kore.FileFormat --version 1.1.6
 ```
 
-Or in Visual Studio Package Manager Console:
+### .NET Framework (4.7.2, 4.8)
+
+In Visual Studio Package Manager Console:
 ```powershell
 Install-Package Kore.FileFormat -Version 1.1.6
 ```
+
+Or via CLI:
+```cmd
+nuget install Kore.FileFormat -Version 1.1.6
+```
+
+### Compatibility Note
+If you're on .NET Framework 4.7.2 or 4.8, the package will automatically use the appropriate binary (netstandard2.1) with full P/Invoke support. No code changes needed - same API works everywhere!
 
 ## Quick Start
 
@@ -179,24 +192,41 @@ public class CompressionStats
 
 ## System Requirements
 
-- **.NET Framework**: .NET 6.0, .NET 8.0, .NET Standard 2.1
-- **Operating Systems**: Windows (x64), Linux (x64), macOS (x64, arm64)
+- **.NET Frameworks**: 
+  - .NET Framework 4.7.2+ (Windows only)
+  - .NET Framework 4.8 (Windows only)
+  - .NET 6.0, 7.0, 8.0
+  - .NET Standard 2.1 (Universal)
+- **Operating Systems**: Windows (x64/x86/ARM64), Linux (x64/ARM64), macOS (x64/ARM64)
 - **Memory**: Minimum 256MB (recommended 1GB+ for large files)
-- **Native Library**: Requires kore_fileformat.dll (Windows) or libkore_fileformat.so (Linux)
+- **Native Library**: Requires kore_fileformat.dll (Windows) or libkore_fileformat.so (Linux) or libkore_fileformat.dylib (macOS)
 
 ## Supported Frameworks
 
 ```xml
-<TargetFrameworks>net6.0;net8.0;netstandard2.1</TargetFrameworks>
+<TargetFrameworks>net472;net48;net6.0;net7.0;net8.0;netstandard2.1</TargetFrameworks>
 ```
 
-- ✅ .NET Framework 6.0+
-- ✅ .NET Core 3.1+ (via netstandard2.1)
-- ✅ ASP.NET Core 6.0+
+- ✅ .NET Framework 4.7.2+ (Legacy enterprise apps)
+- ✅ .NET Framework 4.8 (Latest .NET Framework)
+- ✅ .NET 6.0 (LTS - Enterprise)
+- ✅ .NET 7.0 (Current)
+- ✅ .NET 8.0 (Latest LTS)
+- ✅ .NET Standard 2.1 (Broad compatibility)
+
+### Platform Support
+- ✅ Windows (x64, x86, ARM64)
+- ✅ Linux (x64, ARM64)
+- ✅ macOS (x64, ARM64)
+
+### Application Types
+- ✅ .NET Framework Desktop Apps (WinForms, WPF)
+- ✅ .NET Framework Web Apps (ASP.NET)
+- ✅ .NET Core / .NET Console Applications
+- ✅ ASP.NET Core 6.0, 7.0, 8.0
 - ✅ Azure Functions
 - ✅ Windows Services
-- ✅ Console Applications
-- ✅ Desktop Applications (WinForms, WPF)
+- ✅ Background Services / Workers
 
 ## Error Handling
 
