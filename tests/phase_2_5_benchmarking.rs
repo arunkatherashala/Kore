@@ -16,6 +16,13 @@ mod tests {
     use kore_fileformat::duckdb_connector::KoreDuckDBConnector;
     use std::time::Instant;
 
+    /// Helper function to get cross-platform temp file path
+    fn temp_file(name: &str) -> String {
+        let mut path = std::env::temp_dir();
+        path.push(name);
+        path.to_string_lossy().to_string()
+    }
+
     // ========================================================================
     // PHASE 2.5.1: Round-trip Validation Tests
     // ========================================================================
@@ -34,15 +41,15 @@ mod tests {
         let col = ArrowColumn::Int64(vec![1, 2, 3, 4, 5, 100, -100, 0, i64::MAX, i64::MIN]);
         let batch = ArrowRecordBatch::new(schema.clone(), vec![col.clone()], 10);
 
-        let temp_file = "/tmp/roundtrip_int64.kore";
+        let temp_file = temp_file("roundtrip_int64.kore");
         
         // Write
-        let mut write_connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let mut write_connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let write_rows = write_connector.append_from_arrow(batch.clone()).unwrap();
         assert_eq!(write_rows, 10, "write should return row count");
 
         // Read back
-        let mut read_connector = KoreDuckDBConnector::read(temp_file).unwrap();
+        let mut read_connector = KoreDuckDBConnector::read(&temp_file).unwrap();
         let read_batch = read_connector.read_as_arrow().unwrap();
 
         // Verify
@@ -71,15 +78,15 @@ mod tests {
         ]);
         let batch = ArrowRecordBatch::new(schema.clone(), vec![col.clone()], 6);
 
-        let temp_file = "/tmp/roundtrip_float64.kore";
+        let temp_file = temp_file("roundtrip_float64.kore");
 
         // Write
-        let mut write_connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let mut write_connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let write_rows = write_connector.append_from_arrow(batch).unwrap();
         assert_eq!(write_rows, 6);
 
         // Read back
-        let mut read_connector = KoreDuckDBConnector::read(temp_file).unwrap();
+        let mut read_connector = KoreDuckDBConnector::read(&temp_file).unwrap();
         let read_batch = read_connector.read_as_arrow().unwrap();
 
         // Verify
@@ -114,15 +121,15 @@ mod tests {
         ]);
         let batch = ArrowRecordBatch::new(schema.clone(), vec![col.clone()], 5);
 
-        let temp_file = "/tmp/roundtrip_utf8.kore";
+        let temp_file = temp_file("roundtrip_utf8.kore");
 
         // Write
-        let mut write_connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let mut write_connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let write_rows = write_connector.append_from_arrow(batch).unwrap();
         assert_eq!(write_rows, 5);
 
         // Read back
-        let mut read_connector = KoreDuckDBConnector::read(temp_file).unwrap();
+        let mut read_connector = KoreDuckDBConnector::read(&temp_file).unwrap();
         let read_batch = read_connector.read_as_arrow().unwrap();
 
         // Verify
@@ -147,15 +154,15 @@ mod tests {
         let col = ArrowColumn::Boolean(vec![true, false, true, false, true]);
         let batch = ArrowRecordBatch::new(schema.clone(), vec![col.clone()], 5);
 
-        let temp_file = "/tmp/roundtrip_boolean.kore";
+        let temp_file = temp_file("roundtrip_boolean.kore");
 
         // Write
-        let mut write_connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let mut write_connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let write_rows = write_connector.append_from_arrow(batch).unwrap();
         assert_eq!(write_rows, 5);
 
         // Read back
-        let mut read_connector = KoreDuckDBConnector::read(temp_file).unwrap();
+        let mut read_connector = KoreDuckDBConnector::read(&temp_file).unwrap();
         let read_batch = read_connector.read_as_arrow().unwrap();
 
         // Verify
@@ -185,15 +192,15 @@ mod tests {
         ]);
         let batch = ArrowRecordBatch::new(schema.clone(), vec![col.clone()], 4);
 
-        let temp_file = "/tmp/roundtrip_binary.kore";
+        let temp_file = temp_file("roundtrip_binary.kore");
 
         // Write
-        let mut write_connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let mut write_connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let write_rows = write_connector.append_from_arrow(batch).unwrap();
         assert_eq!(write_rows, 4);
 
         // Read back
-        let mut read_connector = KoreDuckDBConnector::read(temp_file).unwrap();
+        let mut read_connector = KoreDuckDBConnector::read(&temp_file).unwrap();
         let read_batch = read_connector.read_as_arrow().unwrap();
 
         // Verify
@@ -243,15 +250,15 @@ mod tests {
             3,
         );
 
-        let temp_file = "/tmp/roundtrip_mixed.kore";
+        let temp_file = temp_file("roundtrip_mixed.kore");
 
         // Write
-        let mut write_connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let mut write_connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let write_rows = write_connector.append_from_arrow(batch).unwrap();
         assert_eq!(write_rows, 3);
 
         // Read back
-        let mut read_connector = KoreDuckDBConnector::read(temp_file).unwrap();
+        let mut read_connector = KoreDuckDBConnector::read(&temp_file).unwrap();
         let read_batch = read_connector.read_as_arrow().unwrap();
 
         // Verify
@@ -309,10 +316,10 @@ mod tests {
             row_count as usize,
         );
 
-        let temp_file = "/tmp/bench_write_10k.kore";
+        let temp_file = temp_file("bench_write_10k.kore");
 
         let start = Instant::now();
-        let mut connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let mut connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let rows_written = connector.append_from_arrow(batch).unwrap();
         let elapsed = start.elapsed();
 
@@ -325,7 +332,7 @@ mod tests {
         println!("Write throughput: {:.0} rows/sec", throughput_rows_per_sec);
         
         // Check file was created
-        assert!(std::path::Path::new(temp_file).exists(), "Output file should exist");
+        assert!(std::path::Path::new(&temp_file).exists(), "Output file should exist");
     }
 
     /// Benchmark read performance
@@ -343,15 +350,15 @@ mod tests {
         let col = ArrowColumn::Int64((0..row_count as i64).collect());
         let batch = ArrowRecordBatch::new(schema, vec![col], row_count as usize);
 
-        let temp_file = "/tmp/bench_read_5k.kore";
+        let temp_file = temp_file("bench_read_5k.kore");
 
         // Write first
-        let mut write_connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let mut write_connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let _ = write_connector.append_from_arrow(batch).unwrap();
 
         // Now benchmark read
         let start = Instant::now();
-        let mut read_connector = KoreDuckDBConnector::read(temp_file).unwrap();
+        let mut read_connector = KoreDuckDBConnector::read(&temp_file).unwrap();
         let read_batch = read_connector.read_as_arrow().unwrap();
         let elapsed = start.elapsed();
 
@@ -398,10 +405,10 @@ mod tests {
             row_count as usize,
         );
 
-        let temp_file = "/tmp/large_batch_100k.kore";
+        let temp_file = temp_file("large_batch_100k.kore");
 
         // Write
-        let mut write_connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let mut write_connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let write_rows = write_connector.append_from_arrow(batch).unwrap();
         assert_eq!(write_rows as usize, row_count);
 
@@ -443,13 +450,13 @@ mod tests {
             3,
         );
 
-        let temp_file = "/tmp/schema_test.kore";
+        let temp_file = temp_file("schema_test.kore");
 
-        let mut write_connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let mut write_connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let _ = write_connector.append_from_arrow(batch).unwrap();
 
         // Read back and verify schema
-        let mut read_connector = KoreDuckDBConnector::read(temp_file).unwrap();
+        let mut read_connector = KoreDuckDBConnector::read(&temp_file).unwrap();
         let read_batch = read_connector.read_as_arrow().unwrap();
 
         assert_eq!(read_batch.schema.fields.len(), 2);
@@ -472,13 +479,13 @@ mod tests {
         let col = ArrowColumn::Int64((0..row_count as i64).collect());
         let batch = ArrowRecordBatch::new(schema, vec![col], row_count as usize);
 
-        let temp_file = "/tmp/batch_slice_test.kore";
+        let temp_file = temp_file("batch_slice_test.kore");
 
-        let mut write_connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let mut write_connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let _ = write_connector.append_from_arrow(batch).unwrap();
 
         // Read with batch size
-        let mut read_connector = KoreDuckDBConnector::read(temp_file).unwrap();
+        let mut read_connector = KoreDuckDBConnector::read(&temp_file).unwrap();
         let batches = read_connector.read_batches(1000).unwrap();
 
         // Should have 10 batches of 1000 rows each
@@ -505,14 +512,14 @@ mod tests {
             3,
         );
 
-        let temp_file = "/tmp/mode_test.kore";
+        let temp_file = temp_file("mode_test.kore");
 
         // Write file
-        let mut write_connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let mut write_connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let _ = write_connector.append_from_arrow(batch.clone()).unwrap();
 
         // Try to read in write-only mode
-        let mut read_connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let mut read_connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let result = read_connector.read_as_arrow();
         
         // Should fail (can't read in write-only mode)
@@ -532,9 +539,9 @@ mod tests {
 
         let batch = ArrowRecordBatch::new(schema, vec![ArrowColumn::Int64(vec![])], 0);
 
-        let temp_file = "/tmp/empty_batch.kore";
+        let temp_file = temp_file("empty_batch.kore");
 
-        let mut connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let mut connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let rows = connector.append_from_arrow(batch).unwrap();
         
         assert_eq!(rows, 0, "Empty batch should return 0 rows written");
@@ -566,12 +573,12 @@ mod tests {
         ]);
 
         let batch = ArrowRecordBatch::new(schema, vec![col.clone()], 7);
-        let temp_file = "/tmp/extreme_int.kore";
+        let temp_file = temp_file("extreme_int.kore");
 
-        let mut write_connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let mut write_connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let _ = write_connector.append_from_arrow(batch).unwrap();
 
-        let mut read_connector = KoreDuckDBConnector::read(temp_file).unwrap();
+        let mut read_connector = KoreDuckDBConnector::read(&temp_file).unwrap();
         let read_batch = read_connector.read_as_arrow().unwrap();
 
         if let (ArrowColumn::Int64(written), ArrowColumn::Int64(read)) = (&col, &read_batch.columns[0]) {
@@ -601,12 +608,12 @@ mod tests {
         ]);
 
         let batch = ArrowRecordBatch::new(schema, vec![col.clone()], 7);
-        let temp_file = "/tmp/special_float.kore";
+        let temp_file = temp_file("special_float.kore");
 
-        let mut write_connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let mut write_connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let _ = write_connector.append_from_arrow(batch).unwrap();
 
-        let mut read_connector = KoreDuckDBConnector::read(temp_file).unwrap();
+        let mut read_connector = KoreDuckDBConnector::read(&temp_file).unwrap();
         let read_batch = read_connector.read_as_arrow().unwrap();
 
         if let (ArrowColumn::Float64(written), ArrowColumn::Float64(read)) = (&col, &read_batch.columns[0]) {
@@ -641,12 +648,12 @@ mod tests {
         ]);
 
         let batch = ArrowRecordBatch::new(schema, vec![col.clone()], 6);
-        let temp_file = "/tmp/unicode_test.kore";
+        let temp_file = temp_file("unicode_test.kore");
 
-        let mut write_connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let mut write_connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let _ = write_connector.append_from_arrow(batch).unwrap();
 
-        let mut read_connector = KoreDuckDBConnector::read(temp_file).unwrap();
+        let mut read_connector = KoreDuckDBConnector::read(&temp_file).unwrap();
         let read_batch = read_connector.read_as_arrow().unwrap();
 
         if let (ArrowColumn::Utf8(written), ArrowColumn::Utf8(read)) = (&col, &read_batch.columns[0]) {
@@ -679,3 +686,6 @@ mod tests {
         println!("=============================================================\n");
     }
 }
+
+
+
