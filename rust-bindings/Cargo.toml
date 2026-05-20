@@ -12,10 +12,6 @@ kore_fileformat = { path = ".." }
 name = "kore_native"
 crate-type = ["cdylib"]
 
-[[example]]
-name = "benchmark"
-path = "examples/benchmark.rs"
-
 [profile.release]
 opt-level = 3
 lto = true
