@@ -11,6 +11,14 @@ mod tests {
     use kore_fileformat::duckdb_connector::{
         KoreDuckDBConnector, KoreDuckDBConnectorBuilder, ConnectorMode,
     };
+    use std::path::PathBuf;
+
+    /// Helper function to get cross-platform temp file path
+    fn temp_file(name: &str) -> String {
+        let mut path = std::env::temp_dir();
+        path.push(name);
+        path.to_string_lossy().to_string()
+    }
 
     #[test]
     fn test_connector_initialization() {
@@ -299,13 +307,13 @@ mod tests {
 
         let batch = ArrowRecordBatch::new(schema, vec![col1, col2], 5);
 
-        let temp_file = "/tmp/test_write.kore";
-        let mut connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let temp_file = temp_file("test_write.kore");
+        let mut connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let rows = connector.append_from_arrow(batch).unwrap();
 
         assert_eq!(rows, 5);
         // File should exist after write
-        assert!(std::path::Path::new(temp_file).exists());
+        assert!(std::path::Path::new(&temp_file).exists());
     }
 
     // #[test]
@@ -317,12 +325,12 @@ mod tests {
     //     let col = ArrowColumn::Int64(vec![10, 20, 30, 40, 50]);
     //     let batch = ArrowRecordBatch::new(schema, vec![col], 5);
 
-    //     let temp_file = "/tmp/test_roundtrip.kore";
-    //     let mut write_conn = KoreDuckDBConnector::write(temp_file).unwrap();
+    //     let temp_file = temp_file("test_roundtrip.kore");
+    //     let mut write_conn = KoreDuckDBConnector::write(&temp_file).unwrap();
     //     write_conn.append_from_arrow(batch).unwrap();
 
     //     // Now read it back
-    //     let mut read_conn = KoreDuckDBConnector::read(temp_file).unwrap();
+    //     let mut read_conn = KoreDuckDBConnector::read(&temp_file).unwrap();
     //     let read_batch = read_conn.read_as_arrow().unwrap();
 
     //     assert_eq!(read_batch.row_count, 5);
@@ -337,8 +345,8 @@ mod tests {
         let col = ArrowColumn::Int64(vec![42]);
         let batch = ArrowRecordBatch::new(schema, vec![col], 1);
 
-        let temp_file = "/tmp/test_write_only.kore";
-        let mut connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let temp_file = temp_file("test_write_only.kore");
+        let mut connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         
         // Write should succeed
         connector.append_from_arrow(batch.clone()).unwrap();
@@ -356,8 +364,8 @@ mod tests {
         let col = ArrowColumn::Int64(vec![]);
         let batch = ArrowRecordBatch::new(schema, vec![col], 0);
 
-        let temp_file = "/tmp/test_empty.kore";
-        let mut connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let temp_file = temp_file("test_empty.kore");
+        let mut connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let rows = connector.append_from_arrow(batch).unwrap();
 
         assert_eq!(rows, 0);
@@ -376,8 +384,8 @@ mod tests {
         let col3 = ArrowColumn::Boolean(vec![true, false, true]);
 
         let batch = ArrowRecordBatch::new(schema, vec![col1, col2, col3], 3);
-        let temp_file = "/tmp/test_multi_col.kore";
-        let mut connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let temp_file = temp_file("test_multi_col.kore");
+        let mut connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let rows = connector.append_from_arrow(batch).unwrap();
 
         assert_eq!(rows, 3);
@@ -391,14 +399,14 @@ mod tests {
         let col = ArrowColumn::Int64(vec![100]);
         let batch = ArrowRecordBatch::new(schema, vec![col], 1);
 
-        let temp_file = "/tmp/test_schema.kore";
-        let mut connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let temp_file = temp_file("test_schema.kore");
+        let mut connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         
         // Write should succeed and store schema
         connector.append_from_arrow(batch).unwrap();
         
         // File should now exist with data
-        assert!(std::path::Path::new(temp_file).exists(), "File should exist after write");
+        assert!(std::path::Path::new(&temp_file).exists(), "File should exist after write");
     }
 
     #[test]
@@ -414,8 +422,8 @@ mod tests {
         ]);
         let batch = ArrowRecordBatch::new(schema, vec![col], 3);
 
-        let temp_file = "/tmp/test_binary.kore";
-        let mut connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let temp_file = temp_file("test_binary.kore");
+        let mut connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let rows = connector.append_from_arrow(batch).unwrap();
 
         assert_eq!(rows, 3);
@@ -434,8 +442,8 @@ mod tests {
         ]);
         let batch = ArrowRecordBatch::new(schema, vec![col], 3);
 
-        let temp_file = "/tmp/test_strings.kore";
-        let mut connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let temp_file = temp_file("test_strings.kore");
+        let mut connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let rows = connector.append_from_arrow(batch).unwrap();
 
         assert_eq!(rows, 3);
@@ -450,8 +458,8 @@ mod tests {
         let col = ArrowColumn::Int64((0..1000).collect());
         let batch = ArrowRecordBatch::new(schema, vec![col], 1000);
 
-        let temp_file = "/tmp/test_large.kore";
-        let mut connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let temp_file = temp_file("test_large.kore");
+        let mut connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let rows = connector.append_from_arrow(batch).unwrap();
 
         assert_eq!(rows, 1000);
@@ -472,8 +480,8 @@ mod tests {
         let col4 = ArrowColumn::Boolean(vec![true]);
 
         let batch = ArrowRecordBatch::new(schema, vec![col1, col2, col3, col4], 1);
-        let temp_file = "/tmp/test_all_types.kore";
-        let mut connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let temp_file = temp_file("test_all_types.kore");
+        let mut connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let rows = connector.append_from_arrow(batch).unwrap();
 
         assert_eq!(rows, 1);
@@ -555,7 +563,7 @@ mod tests {
         use kore_fileformat::duckdb_ffi::KoreReaderContext;
 
         // Test with non-existent file
-        let result = KoreReaderContext::new("/tmp/nonexistent_file_12345.kore");
+        let result = KoreReaderContext::new(&temp_file("nonexistent_file_12345.kore"));
         // Result may fail due to file not existing, which is expected
         let _ = result;
     }
@@ -570,7 +578,7 @@ mod tests {
     //     use kore_fileformat::duckdb_ffi::read_kore_file_to_arrow;
     //
     //     // Create a test file first
-    //     let temp_file = "/tmp/ffi_test_read.kore";
+    //     let temp_file = temp_file("ffi_test_read.kore");
     //     let schema = ArrowSchema {
     //         fields: vec![
     //             ArrowField {
@@ -590,7 +598,7 @@ mod tests {
     //     let col2 = ArrowColumn::Utf8(vec!["a".to_string(), "b".to_string(), "c".to_string()]);
     //     let batch = ArrowRecordBatch::new(schema.clone(), vec![col1, col2], 3);
     //
-    //     let mut connector = KoreDuckDBConnector::write(temp_file).unwrap();
+    //     let mut connector = KoreDuckDBConnector::write(&temp_file).unwrap();
     //     let write_result = connector.append_from_arrow(batch);
     //     assert!(write_result.is_ok());
     //
@@ -607,7 +615,7 @@ mod tests {
         use kore_fileformat::duckdb_ffi::init_kore_reader;
 
         // Test with non-existent file
-        let result = init_kore_reader("/tmp/nonexistent_12345.kore");
+        let result = init_kore_reader(&temp_file("nonexistent_12345.kore"));
         assert!(result.is_err());
         let error_msg = format!("{}", result.err().unwrap_or_default());
         assert!(error_msg.contains("not found") || error_msg.contains("error"));
@@ -618,7 +626,7 @@ mod tests {
         use kore_fileformat::duckdb_ffi::init_kore_reader;
 
         // Create a test file
-        let temp_file = "/tmp/ffi_test_init_reader.kore";
+        let temp_file = temp_file("ffi_test_init_reader.kore");
         let schema = ArrowSchema {
             fields: vec![ArrowField {
                 name: "test_col".to_string(),
@@ -630,11 +638,11 @@ mod tests {
         let col1 = ArrowColumn::Int64(vec![42]);
         let batch = ArrowRecordBatch::new(schema, vec![col1], 1);
 
-        let mut connector = KoreDuckDBConnector::write(temp_file).unwrap();
+        let mut connector = KoreDuckDBConnector::write(&temp_file).unwrap();
         let _ = connector.append_from_arrow(batch);
 
         // Now init reader
-        let result = init_kore_reader(temp_file);
+        let result = init_kore_reader(&temp_file);
         assert!(result.is_ok());
     }
 
@@ -680,4 +688,7 @@ mod tests {
         }
     }
 }
+
+
+
 
