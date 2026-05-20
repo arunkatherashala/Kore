@@ -2,7 +2,7 @@
 /// Real-world stress testing with ACTUAL KORE compression library
 /// NOT simulated - REAL compression, REAL timing, REAL data
 
-use kore_fileformat::compression::KoreCompressor;
+use kore_fileformat::compression::RLECompressor;
 use std::fs;
 use std::time::Instant;
 use std::sync::Arc;
@@ -48,7 +48,7 @@ fn hard_testing_v1_1_6_real() {
 
         // Actual KORE compression
         let compress_start = Instant::now();
-        let compressed = KoreCompressor::compress(&data).unwrap();
+        let compressed = RLECompressor::compress(&data).unwrap();
         let compress_time = compress_start.elapsed();
 
         let compressed_size = compressed.len();
@@ -63,7 +63,7 @@ fn hard_testing_v1_1_6_real() {
 
         // Verify decompression
         let decompress_start = Instant::now();
-        let decompressed = KoreCompressor::decompress(&compressed).unwrap();
+        let decompressed = RLECompressor::decompress(&compressed).unwrap();
         let decompress_time = decompress_start.elapsed();
 
         let decompress_throughput = (decompressed.len() as f64 / decompress_time.as_secs_f64()) / (1024.0 * 1024.0);
@@ -96,7 +96,7 @@ fn hard_testing_v1_1_6_real() {
                 };
 
                 let thread_start = Instant::now();
-                let compressed = KoreCompressor::compress(&data).unwrap();
+                let compressed = RLECompressor::compress(&data).unwrap();
                 let compress_time = thread_start.elapsed();
 
                 let comp_size = compressed.len();
@@ -113,7 +113,7 @@ fn hard_testing_v1_1_6_real() {
                 ));
 
                 // Verify integrity
-                let decompressed = KoreCompressor::decompress(&compressed).unwrap();
+                let decompressed = RLECompressor::decompress(&compressed).unwrap();
                 assert_eq!(data, decompressed, "Thread {} decompression mismatch!", thread_id);
             });
 
@@ -176,7 +176,7 @@ fn hard_testing_v1_1_6_real() {
             let orig_size = data.len();
             
             let comp_start = Instant::now();
-            let compressed = KoreCompressor::compress(&data).unwrap();
+            let compressed = RLECompressor::compress(&data).unwrap();
             let comp_time = comp_start.elapsed();
 
             let comp_size = compressed.len();
@@ -196,7 +196,7 @@ fn hard_testing_v1_1_6_real() {
             min_throughput = min_throughput.min(throughput);
 
             // Verify
-            let decompressed = KoreCompressor::decompress(&compressed).unwrap();
+            let decompressed = RLECompressor::decompress(&compressed).unwrap();
             assert_eq!(data, decompressed, "Round-trip failed for {}", label);
         }
 
@@ -230,7 +230,7 @@ fn hard_testing_v1_1_6_real() {
 
         for i in 0..20 {
             let iter_start = Instant::now();
-            let compressed = KoreCompressor::compress(&data).unwrap();
+            let compressed = RLECompressor::compress(&data).unwrap();
             let iter_time = iter_start.elapsed();
             
             let ratio = (compressed.len() as f64 / data.len() as f64) * 100.0;
@@ -243,7 +243,7 @@ fn hard_testing_v1_1_6_real() {
 
             // Verify every 5th iteration
             if (i + 1) % 5 == 0 {
-                let decompressed = KoreCompressor::decompress(&compressed).unwrap();
+                let decompressed = RLECompressor::decompress(&compressed).unwrap();
                 assert_eq!(data, decompressed, "Integrity check failed at iteration {}", i + 1);
             }
         }
@@ -302,7 +302,7 @@ fn hard_testing_v1_1_6_real() {
             }
 
             let comp_start = Instant::now();
-            let compressed = KoreCompressor::compress(&data).unwrap();
+            let compressed = RLECompressor::compress(&data).unwrap();
             let comp_time = comp_start.elapsed();
 
             let ratio = (compressed.len() as f64 / data.len() as f64) * 100.0;
@@ -313,7 +313,7 @@ fn hard_testing_v1_1_6_real() {
                      ratio,
                      comp_time.as_micros());
 
-            let decompressed = KoreCompressor::decompress(&compressed).unwrap();
+            let decompressed = RLECompressor::decompress(&compressed).unwrap();
             assert_eq!(data, decompressed, "Edge case {} failed!", name);
         }
 
