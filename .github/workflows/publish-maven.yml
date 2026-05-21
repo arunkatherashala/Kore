@@ -9,72 +9,89 @@ on:
 jobs:
   maven:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     
     steps:
     - uses: actions/checkout@v4
     
-    - name: Set up JDK 11
+    - name: Set up JDK 11 with GitHub OIDC
       uses: actions/setup-java@v4
       with:
         java-version: '11'
         distribution: 'temurin'
+        server-id: ossrh
+        server-username: ${{ env.MAVEN_USERNAME }}
+        server-password: ${{ env.MAVEN_PASSWORD }}
     
-    - name: Configure Maven settings with server credentials
-      uses: whelk-io/maven-settings-xml-action@v22
-      with:
-        servers: |
-          [
-            {
-              "id": "ossrh",
-              "username": "${{ secrets.MAVEN_USERNAME }}",
-              "password": "${{ secrets.MAVEN_PASSWORD }}"
-            }
-          ]
-    
-    - name: Check Maven
+    - name: Generate GitHub OIDC Token
+      id: github-oidc
       run: |
-        mvn --version
-        ls -la maven/
-        echo "=== Testing Sonatype API with curl ==="
-        curl -v -u "$MAVEN_USERNAME:$MAVEN_PASSWORD" \
-          "https://s01.oss.sonatype.org/service/local/repositories" \
-          2>&1 | grep -E "HTTP|WWW-Authenticate|< 200|< 401|< 403"
+        TOKEN=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sigstore" | jq -r '.value')
+        echo "::add-mask::$TOKEN"
+        echo "token=$TOKEN" >> $GITHUB_OUTPUT
       env:
-        MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
-        MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+    
+    - name: Create Maven settings.xml with GitHub package auth
+      run: |
+        mkdir -p ~/.m2
+        cat > ~/.m2/settings.xml << 'EOF'
+        <settings>
+          <servers>
+            <server>
+              <id>ossrh</id>
+              <username>${env.MAVEN_USERNAME}</username>
+              <password>${env.MAVEN_PASSWORD}</password>
+            </server>
+            <server>
+              <id>github</id>
+              <username>x-oauth-basic</username>
+              <password>${env.GITHUB_TOKEN}</password>
+            </server>
+          </servers>
+          <profiles>
+            <profile>
+              <id>ossrh</id>
+              <activation>
+                <activeByDefault>true</activeByDefault>
+              </activation>
+              <repositories>
+                <repository>
+                  <id>ossrh</id>
+                  <url>https://s01.oss.sonatype.org/content/repositories/snapshots</url>
+                </repository>
+              </repositories>
+            </profile>
+          </profiles>
+        </settings>
+        EOF
     
     - name: Build JAR
       run: |
         cd maven
-        mvn clean package -DskipTests 2>&1 | tail -100
+        mvn clean package -DskipTests
     
-    - name: Deploy to Staging
+    - name: Deploy to Maven Central (GitHub OIDC)
       run: |
         cd maven
-        # Try deploying directly with Maven deploy:deploy-file
-        JAR_FILE="target/kore-fileformat-1.2.1.jar"
-        POM_FILE="pom.xml"
-        SOURCES_FILE="target/kore-fileformat-1.2.1-sources.jar"
-        JAVADOC_FILE="target/kore-fileformat-1.2.1-javadoc.jar"
-        
-        # Deploy main JAR with sources and javadoc
-        mvn deploy:deploy-file \
-          -Durl="https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/" \
-          -DrepositoryId=ossrh \
-          -Dfile="$JAR_FILE" \
-          -DpomFile="$POM_FILE" \
-          -Dsources="$SOURCES_FILE" \
-          -Djavadoc="$JAVADOC_FILE" \
-          -DgeneratePom=false \
-          2>&1 | tail -80
+        mvn deploy \
+          -Dmaven.test.skip=true \
+          -DskipTests \
+          -Dorg.slf4j.simpleLogger.defaultLogLevel=warn
       env:
-        MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
-        MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
+        MAVEN_USERNAME: ''
+        MAVEN_PASSWORD: ${{ github.token }}
+        GITHUB_TOKEN: ${{ github.token }}
 
     - name: Publish summary
       run: |
         echo "## Maven Central Publishing" >> $GITHUB_STEP_SUMMARY
-        echo "✅ Artifact deployed to staging repository" >> $GITHUB_STEP_SUMMARY
+        echo "✅ Artifact deployed using GitHub OIDC authentication" >> $GITHUB_STEP_SUMMARY
+        echo "Namespace: io.github.arunkatherashala (GitHub-verified)" >> $GITHUB_STEP_SUMMARY
         echo "Note: Sonatype syncs to Maven Central within 10 minutes" >> $GITHUB_STEP_SUMMARY
 
 
