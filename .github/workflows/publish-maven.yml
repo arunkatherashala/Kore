@@ -60,6 +60,12 @@ jobs:
         cd maven
         mvn deploy -Dgpg.skip=true -DskipTests 2>&1 | tail -100
 
+    - name: Publish summary
+      run: |
+        echo "## Maven Central Publishing" >> $GITHUB_STEP_SUMMARY
+        echo "✅ Artifact deployed to staging repository" >> $GITHUB_STEP_SUMMARY
+        echo "Note: Sonatype syncs to Maven Central within 10 minutes" >> $GITHUB_STEP_SUMMARY
+
 
 
 
