@@ -37,10 +37,9 @@ jobs:
           -Dmaven.test.skip=true \
           -DskipTests \
           -Dorg.slf4j.simpleLogger.defaultLogLevel=warn \
-          -DaltDeploymentRepository=github::default::https://maven.pkg.github.com/arunkatherashala/Kore
+          -DrepositoryId=github
       env:
-        MAVEN_USERNAME: ${{ github.actor }}
-        MAVEN_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Publish summary
       run: |
