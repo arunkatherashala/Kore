@@ -78,7 +78,7 @@
                 </executions>
             </plugin>
 
-            <!-- GPG signing for Maven Central -->
+            <!-- GPG signing for Maven Central (optional - skip if key not available) -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-gpg-plugin</artifactId>
@@ -91,6 +91,7 @@
                             <goal>sign</goal>
                         </goals>
                         <configuration>
+                            <skip>${gpg.skip}</skip>
                             <gpgArguments>
                                 <arg>--pinentry-mode</arg>
                                 <arg>loopback</arg>
