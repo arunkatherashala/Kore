@@ -18,9 +18,28 @@ jobs:
       with:
         java-version: '11'
         distribution: 'temurin'
-        server-id: ossrh
-        server-username: ${{ secrets.MAVEN_USERNAME }}
-        server-password: ${{ secrets.MAVEN_PASSWORD }}
+    
+    - name: Create settings.xml with credentials
+      run: |
+        mkdir -p ~/.m2
+        cat > ~/.m2/settings.xml << 'EOF'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                  xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 
+                  http://maven.apache.org/xsd/settings-1.0.0.xsd">
+          <servers>
+            <server>
+              <id>ossrh</id>
+              <username>${env.MAVEN_USERNAME}</username>
+              <password>${env.MAVEN_PASSWORD}</password>
+            </server>
+          </servers>
+        </settings>
+        EOF
+      env:
+        MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
+        MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
     
     - name: Check Maven
       run: |
@@ -30,12 +49,15 @@ jobs:
     - name: Build JAR
       run: |
         cd maven
-        mvn clean package -DskipTests -X 2>&1 | tail -100
+        mvn clean package -DskipTests 2>&1 | tail -100
     
     - name: Deploy to Staging
       run: |
         cd maven
         mvn deploy -Dgpg.skip=true -DskipTests 2>&1 | tail -50
+      env:
+        MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
+        MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
 
     - name: Publish summary
       run: |
