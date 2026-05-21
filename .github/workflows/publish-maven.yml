@@ -36,7 +36,6 @@ jobs:
         mvn deploy \
           -Dmaven.test.skip=true \
           -DskipTests \
-          -Dgpg.skip=true \
           -Dorg.slf4j.simpleLogger.defaultLogLevel=warn
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
