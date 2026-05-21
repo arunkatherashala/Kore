@@ -57,8 +57,17 @@ jobs:
         
         echo "Settings file created: $(wc -l ~/.m2/settings.xml)"
         
+        # Verify settings.xml structure (without showing credentials)
+        cat ~/.m2/settings.xml | grep -E "server|id|username|password" | head -5
+        
         cd maven
-        mvn deploy -Dgpg.skip=true -DskipTests 2>&1 | tail -100
+        
+        # Run with full debug output
+        mvn deploy -Dgpg.skip=true -DskipTests -X 2>&1 | tee deploy.log
+        
+        # Show authentication-related errors
+        echo "=== Auth-related output ==="
+        grep -i "auth\|401\|unauthorized\|credential" deploy.log | tail -20
 
     - name: Publish summary
       run: |
