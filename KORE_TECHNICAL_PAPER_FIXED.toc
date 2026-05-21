@@ -1,0 +1,52 @@
+\babel@toc {english}{}\relax 
+\contentsline {chapter}{\numberline {1}Introduction}{3}{chapter.1}%
+\contentsline {section}{\numberline {1.1}Background}{3}{section.1.1}%
+\contentsline {subsection}{\numberline {1.1.1}The Storage Cost Problem}{3}{subsection.1.1.1}%
+\contentsline {section}{\numberline {1.2}Motivation}{3}{section.1.2}%
+\contentsline {section}{\numberline {1.3}Scope and Objectives}{4}{section.1.3}%
+\contentsline {chapter}{\numberline {2}Problem Statement}{5}{chapter.2}%
+\contentsline {section}{\numberline {2.1}Enterprise Data Challenges}{5}{section.2.1}%
+\contentsline {subsection}{\numberline {2.1.1}Challenge 1: Storage Cost Explosion}{5}{subsection.2.1.1}%
+\contentsline {subsection}{\numberline {2.1.2}Challenge 2: Multi-Technology Stack Incompatibility}{5}{subsection.2.1.2}%
+\contentsline {subsection}{\numberline {2.1.3}Challenge 3: Performance Bottlenecks}{6}{subsection.2.1.3}%
+\contentsline {subsection}{\numberline {2.1.4}Challenge 4: Metadata Lookup Overhead}{6}{subsection.2.1.4}%
+\contentsline {chapter}{\numberline {3}Technical Architecture}{7}{chapter.3}%
+\contentsline {section}{\numberline {3.1}Core Design Philosophy}{7}{section.3.1}%
+\contentsline {section}{\numberline {3.2}File Format Structure}{7}{section.3.2}%
+\contentsline {section}{\numberline {3.3}Compression Codecs}{8}{section.3.3}%
+\contentsline {subsection}{\numberline {3.3.1}RLE (Run-Length Encoding)}{8}{subsection.3.3.1}%
+\contentsline {subsection}{\numberline {3.3.2}Dictionary Compression}{8}{subsection.3.3.2}%
+\contentsline {subsection}{\numberline {3.3.3}Frame-Based Organization (FOR)}{8}{subsection.3.3.3}%
+\contentsline {subsection}{\numberline {3.3.4}LZSS}{8}{subsection.3.3.4}%
+\contentsline {chapter}{\numberline {4}Performance Analysis}{9}{chapter.4}%
+\contentsline {section}{\numberline {4.1}Benchmark Results}{9}{section.4.1}%
+\contentsline {subsection}{\numberline {4.1.1}Test Configuration}{9}{subsection.4.1.1}%
+\contentsline {subsection}{\numberline {4.1.2}Performance Metrics}{9}{subsection.4.1.2}%
+\contentsline {section}{\numberline {4.2}Scalability Analysis}{9}{section.4.2}%
+\contentsline {chapter}{\numberline {5}Real-World Use Cases}{11}{chapter.5}%
+\contentsline {section}{\numberline {5.1}Enterprise Data Warehouse}{11}{section.5.1}%
+\contentsline {subsection}{\numberline {5.1.1}Scenario}{11}{subsection.5.1.1}%
+\contentsline {subsection}{\numberline {5.1.2}KORE Solution}{11}{subsection.5.1.2}%
+\contentsline {subsection}{\numberline {5.1.3}Metrics}{12}{subsection.5.1.3}%
+\contentsline {section}{\numberline {5.2}Real-Time Data Pipeline}{12}{section.5.2}%
+\contentsline {subsection}{\numberline {5.2.1}Scenario}{12}{subsection.5.2.1}%
+\contentsline {subsection}{\numberline {5.2.2}KORE Solution}{12}{subsection.5.2.2}%
+\contentsline {subsection}{\numberline {5.2.3}Metrics}{13}{subsection.5.2.3}%
+\contentsline {chapter}{\numberline {6}Implementation Guide}{14}{chapter.6}%
+\contentsline {section}{\numberline {6.1}Python Implementation}{14}{section.6.1}%
+\contentsline {section}{\numberline {6.2}JavaScript Implementation}{14}{section.6.2}%
+\contentsline {section}{\numberline {6.3}Multi-Language Support}{15}{section.6.3}%
+\contentsline {chapter}{\numberline {7}Market Analysis}{16}{chapter.7}%
+\contentsline {section}{\numberline {7.1}Market Size}{16}{section.7.1}%
+\contentsline {subsection}{\numberline {7.1.1}Global Data Market}{16}{subsection.7.1.1}%
+\contentsline {subsection}{\numberline {7.1.2}KORE Addressable Market}{16}{subsection.7.1.2}%
+\contentsline {section}{\numberline {7.2}Competitive Positioning}{16}{section.7.2}%
+\contentsline {chapter}{\numberline {8}Conclusion}{17}{chapter.8}%
+\contentsline {section}{\numberline {8.1}Key Takeaways}{17}{section.8.1}%
+\contentsline {section}{\numberline {8.2}Production Readiness}{17}{section.8.2}%
+\contentsline {section}{\numberline {8.3}Call to Action}{17}{section.8.3}%
+\contentsline {chapter}{\numberline {A}Benchmark Data}{19}{appendix.A}%
+\contentsline {section}{\numberline {A.1}Raw Benchmark Results}{19}{section.A.1}%
+\contentsline {section}{\numberline {A.2}Statistical Analysis}{19}{section.A.2}%
+\contentsline {chapter}{\numberline {B}Test Coverage Report}{20}{appendix.B}%
+\contentsline {chapter}{\numberline {C}References}{21}{appendix.C}%

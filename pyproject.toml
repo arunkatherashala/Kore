@@ -9,7 +9,7 @@ description = "KORE Binary Format - High-performance columnar compression with 5
 readme = "README.md"
 requires-python = ">=3.8"
 authors = [
-  { name = "Sai Arun Kumar Ktherashala", email = "arunkatherashala@gmail.com" }
+  { name = "Sai Arun Kumar Katherashala", email = "arunkatherashala@gmail.com" }
 ]
 keywords = ["compression", "binary-format", "performance", "serialization", "data-compression", "columnar"]
 classifiers = [
