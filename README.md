@@ -2,6 +2,10 @@
 
 [![Crates.io](https://img.shields.io/crates/v/kore_fileformat.svg)](https://crates.io/crates/kore_fileformat)
 [![PyPI](https://img.shields.io/pypi/v/kore-fileformat.svg)](https://pypi.org/project/kore-fileformat/)
+[![NuGet](https://img.shields.io/nuget/v/kore-fileformat.svg)](https://www.nuget.org/packages/kore-fileformat/)
+[![npm](https://img.shields.io/npm/v/kore-fileformat.svg)](https://www.npmjs.com/package/kore-fileformat)
+[![Maven Central](https://img.shields.io/maven-central/v/com.korefileformat/kore-fileformat.svg)](https://mvnrepository.com/artifact/com.korefileformat/kore-fileformat)
+[![RubyGems](https://img.shields.io/gem/v/kore-fileformat.svg)](https://rubygems.org/gems/kore-fileformat)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Rust 1.70+](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 
@@ -13,43 +17,56 @@ Kore is a Rust-based columnar file format designed for efficient storage and ana
 
 ## 🚀 Quick Start (5 Minutes)
 
-### Installation by Language
+### Installation by Language — Choose Your Platform
 
-**Python:**
+**📦 All 8 Distribution Channels Ready:**
+[Python](#python) • [.NET](#net) • [Ruby](#ruby) • [Node.js](#nodejs) • [Java](#java) • [Rust](#rust) • [Docker](#docker) • [GitHub Releases](#github-releases)
+
+#### Python
 ```bash
-pip install kore-fileformat==1.1.6
+pip install kore-fileformat==1.2.1
 ```
 
-**JavaScript/Node.js:**
+#### .NET / NuGet
 ```bash
-npm install kore-fileformat@1.1.6
+dotnet add package kore-fileformat --version 1.2.1
+```
+✨ **Supports**: .NET 6.0, 7.0, 8.0 + .NET Framework 4.7.2+ + .NET Standard 2.1
+
+#### Ruby
+```bash
+gem install kore-fileformat --version 1.2.1
 ```
 
-**Java:**
+#### Node.js / JavaScript
+```bash
+npm install kore-fileformat@1.2.1
+```
+
+#### Java
 ```xml
 <dependency>
     <groupId>com.korefileformat</groupId>
     <artifactId>kore-fileformat</artifactId>
-    <version>1.1.6</version>
+    <version>1.2.1</version>
 </dependency>
 ```
 
-**C#/.NET** (NEW):
-```bash
-dotnet add package Kore.FileFormat --version 1.1.6
-```
-Supports .NET Framework 4.7.2+, 4.8, .NET 6.0, 7.0, 8.0, and .NET Standard 2.1
-
-**Rust:**
+#### Rust
 ```toml
 [dependencies]
-kore_fileformat = "1.1.6"
+kore_fileformat = "1.2.1"
 ```
 
-**Ruby:**
+#### Docker
 ```bash
-gem install kore_fileformat -v 1.1.6
+docker pull ghcr.io/arunkatherashala/kore:latest
 ```
+
+#### GitHub Releases
+Download native binaries and source: https://github.com/arunkatherashala/Kore/releases/tag/v1.2.1
+
+---
 
 ### Step 2: Use It
 
@@ -60,17 +77,35 @@ original, compressed, ratio = compress_csv("data.csv", "data.kore")
 print(f"✅ Compressed {ratio:.1%}")
 ```
 
-**C#/.NET** (NEW):
+**C#/.NET:**
 ```csharp
 using Kore.FileFormat;
 var compressor = new KoreCompressor();
 byte[] compressed = compressor.Compress(inputData);
 ```
 
+**Ruby:**
+```ruby
+require 'kore_fileformat'
+compressor = KoreFileformat.compress(data)
+```
+
 **JavaScript:**
 ```javascript
 const kore = require('kore-fileformat');
 const compressed = kore.compress(data);
+```
+
+**Java:**
+```java
+import com.korefileformat.KoreCompressor;
+byte[] compressed = new KoreCompressor().compress(inputData);
+```
+
+**Rust:**
+```rust
+use kore_fileformat::compress;
+let compressed = compress(&data)?;
 ```
 
 ### Step 3: Get Results
@@ -81,7 +116,51 @@ All languages show the same performance:
 
 ---
 
-## ✅ PRODUCTION VALIDATED (May 2026)
+## 📦 Multi-Platform Distribution
+
+Kore is distributed across **8 platforms** with automated CI/CD publishing:
+
+| Platform | Package | Registry | Install |
+|----------|---------|----------|---------|
+| **Python** | `kore-fileformat` | [PyPI](https://pypi.org/project/kore-fileformat/) | `pip install kore-fileformat==1.2.1` |
+| **.NET** | `kore-fileformat` | [NuGet](https://www.nuget.org/packages/kore-fileformat/) | `dotnet add package kore-fileformat --version 1.2.1` |
+| **Ruby** | `kore-fileformat` | [RubyGems](https://rubygems.org/gems/kore-fileformat) | `gem install kore-fileformat --version 1.2.1` |
+| **Node.js** | `kore-fileformat` | [npm](https://www.npmjs.com/package/kore-fileformat) | `npm install kore-fileformat@1.2.1` |
+| **Java** | `kore-fileformat` | [Maven Central](https://mvnrepository.com/artifact/com.korefileformat/kore-fileformat) | See pom.xml above |
+| **Rust** | `kore_fileformat` | [Crates.io](https://crates.io/crates/kore_fileformat) | `cargo add kore_fileformat@1.2.1` |
+| **Docker** | `ghcr.io/arunkatherashala/kore` | [GHCR](https://github.com/arunkatherashala/Kore/pkgs/container/kore) | `docker pull ghcr.io/arunkatherashala/kore:latest` |
+| **GitHub** | Releases + Artifacts | [Releases](https://github.com/arunkatherashala/Kore/releases) | Download binaries & source |
+
+**See [MULTI_PLATFORM_DISTRIBUTION_GUIDE.md](MULTI_PLATFORM_DISTRIBUTION_GUIDE.md) for detailed documentation on all platforms.**
+
+---
+
+## ✅ Testing & Quality Assurance
+
+Kore runs **automated regression tests** across all platforms on every push and pull request:
+
+```bash
+# GitHub Actions Workflows (CI/CD)
+.github/workflows/
+├── regression-tests.yml          # Multi-platform regression testing
+├── test.yml                       # Unit tests (primary)
+├── test-pr.yml                    # PR validation tests
+├── quality.yml                    # Code quality checks
+├── security-scan.yml              # Security scanning
+├── publish-*.yml                  # 8 platform publishers (auto-trigger on tags)
+└── deploy.yml                     # Deployment workflow
+```
+
+### Regression Test Coverage
+- ✅ **Python** (pytest)
+- ✅ **.NET** (xUnit) 
+- ✅ **Ruby** (RSpec)
+- ✅ **Node.js** (Jest)
+- ✅ **Rust** (cargo test)
+- ✅ **Java** (Maven)
+- ✅ **Cross-platform Integration Tests**
+
+**Latest Results**: [View Workflow Runs →](https://github.com/arunkatherashala/Kore/actions)
 
 **All performance claims have been verified through practical test execution:**
 
