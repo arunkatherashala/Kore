@@ -11,7 +11,7 @@
     
     <!-- NuGet Package Metadata -->
     <PackageId>Kore.FileFormat</PackageId>
-    <Version>1.1.6</Version>
+    <Version>1.2.1</Version>
     <Title>Kore FileFormat - Advanced Compression Library</Title>
     <Authors>Arun Katherashala</Authors>
     <Description>KORE v1.1.6 - Advanced multi-codec compression library with 48% better compression than industry standards (Parquet, ORC, zstd). Achieves 185 MB/s speed with intelligent 6-codec orchestration (RLE, Dictionary, FOR, LZSS, ZSTD, LZ4).

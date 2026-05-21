@@ -27,10 +27,14 @@ jobs:
     - name: Find C# project
       id: find-project
       run: |
-        PROJECT_PATH="csharp/Kore.FileFormat/Kore.FileFormat.csproj"
+        PROJECT_PATH="kore-fileformat-nuget/KoreFileFormat/KoreFileFormat.csproj"
         if [ ! -f "$PROJECT_PATH" ]; then
-          echo "error=C# project not found at $PROJECT_PATH"
-          exit 1
+          echo "Trying fallback path..."
+          PROJECT_PATH="csharp/Kore.FileFormat/Kore.FileFormat.csproj"
+          if [ ! -f "$PROJECT_PATH" ]; then
+            echo "error=C# project not found"
+            exit 1
+          fi
         fi
         echo "project_path=$PROJECT_PATH" >> $GITHUB_OUTPUT
         echo "Found project at: $PROJECT_PATH"
