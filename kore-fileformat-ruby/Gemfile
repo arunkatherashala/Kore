@@ -1,0 +1,8 @@
+source "https://rubygems.org"
+
+gem "ffi", "~> 1.15"
+
+group :development, :test do
+  gem "rspec", "~> 3.12"
+  gem "rake", "~> 13.0"
+end

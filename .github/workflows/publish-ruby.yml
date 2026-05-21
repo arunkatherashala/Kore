@@ -6,6 +6,10 @@ on:
       - 'v*'
   workflow_dispatch:
 
+defaults:
+  run:
+    working-directory: kore-fileformat-ruby
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -16,23 +20,14 @@ jobs:
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.2'
-          bundler-cache: false
-      
-      - name: Install dependencies
-        run: |
-          cd kore-fileformat-ruby
-          bundle install
+          bundler-cache: true
       
       - name: Run tests
-        run: |
-          cd kore-fileformat-ruby
-          bundle exec rspec spec/
+        run: bundle exec rspec spec/
         continue-on-error: true  # Tests may fail without native lib during CI
       
       - name: Build gem
-        run: |
-          cd kore-fileformat-ruby
-          gem build kore-fileformat.gemspec
+        run: gem build kore-fileformat.gemspec
       
       - name: Setup credentials
         run: |
@@ -40,11 +35,10 @@ jobs:
           echo ":rubygems_api_key: ${{ secrets.RUBYGEMS_API_KEY }}" > ~/.gem/credentials
           chmod 600 ~/.gem/credentials
         if: startsWith(github.ref, 'refs/tags/')
+        working-directory: ${{ github.workspace }}
       
       - name: Publish to RubyGems
-        run: |
-          cd kore-fileformat-ruby
-          gem push kore-fileformat-*.gem
+        run: gem push kore-fileformat-*.gem
         if: startsWith(github.ref, 'refs/tags/')
       
       - name: Create GitHub Release
