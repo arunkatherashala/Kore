@@ -40,37 +40,34 @@ jobs:
         
         cd maven
         
-        # Create .m2/settings.xml
+        # Create .m2/settings.xml with proper variable substitution
         mkdir -p ~/.m2
-        cat > ~/.m2/settings.xml << 'SETTINGS_EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
-  <servers>
-    <server>
-      <id>ossrh</id>
-      <username>MAVEN_USERNAME_PLACEHOLDER</username>
-      <password>MAVEN_PASSWORD_PLACEHOLDER</password>
-    </server>
-  </servers>
-</settings>
-SETTINGS_EOF
+        printf '%s\n' \
+          '<?xml version="1.0" encoding="UTF-8"?>' \
+          '<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">' \
+          '  <servers>' \
+          '    <server>' \
+          '      <id>ossrh</id>' \
+          "      <username>$MAVEN_USERNAME</username>" \
+          "      <password>$MAVEN_PASSWORD</password>" \
+          '    </server>' \
+          '  </servers>' \
+          '</settings>' > ~/.m2/settings.xml
         
-        # Replace placeholders with actual values
-        sed -i "s|MAVEN_USERNAME_PLACEHOLDER|$MAVEN_USERNAME|g" ~/.m2/settings.xml
-        sed -i "s|MAVEN_PASSWORD_PLACEHOLDER|$MAVEN_PASSWORD|g" ~/.m2/settings.xml
-        
-        echo "📦 Deploying to Maven Central..."
-        echo "(Skipping GPG signing - add GPG key to GitHub secrets for production signing)"
+        echo "✅ settings.xml created"
+        echo "📦 Deploying to Maven Central (without GPG signing)..."
         
         mvn clean deploy \
           -Dgpg.skip=true \
           -DskipTests \
-          --batch-mode \
-          -X 2>&1 | tee maven-deploy.log
+          --batch-mode 2>&1 | tee maven-deploy.log
         
         echo ""
-        echo "✅ Deployment submitted to Maven Central staging"
-        echo "   Repository will sync to Maven Central automatically within 10 minutes"
+        if grep -q "BUILD SUCCESS" maven-deploy.log; then
+          echo "✅ Deployment successful"
+        else
+          echo "⚠️  Check logs for status"
+        fi
 
     - name: Upload logs
       if: always()
