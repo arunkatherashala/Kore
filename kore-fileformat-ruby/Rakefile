@@ -1,0 +1,17 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "rake/extensiontask"
+
+Gem::Specification.load("kore-fileformat.gemspec").tap do |gem_spec|
+  Rake::ExtensionTask.new("kore_fileformat", gem_spec) do |ext|
+    ext.lib_dir = "lib/kore_fileformat"
+  end
+end
+
+require "bundler/gem_tasks"
+require "rspec/core/rake_task"
+
+RSpec::Core::RakeTask.new(:spec)
+
+task default: %i[compile spec]
