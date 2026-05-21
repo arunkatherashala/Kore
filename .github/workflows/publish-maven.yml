@@ -34,20 +34,23 @@ jobs:
       run: |
         if [ -d "maven" ]; then
           cd maven
-          # Create settings.xml for authentication
+          # Create settings.xml for Maven authentication
           mkdir -p ~/.m2
-          cat > ~/.m2/settings.xml <<EOF
-          <settings>
-            <servers>
-              <server>
-                <id>ossrh</id>
-                <username>${{env.MAVEN_USERNAME}}</username>
-                <password>${{env.MAVEN_PASSWORD}}</password>
-              </server>
-            </servers>
-          </settings>
-          EOF
-          # Deploy without signing (can be added later with GPG key)
+          cat > ~/.m2/settings.xml <<'XML'
+        <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                  xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
+                                      http://maven.apache.org/xsd/settings-1.0.0.xsd">
+          <servers>
+            <server>
+              <id>ossrh</id>
+              <username>$MAVEN_USERNAME</username>
+              <password>$MAVEN_PASSWORD</password>
+            </server>
+          </servers>
+        </settings>
+        XML
+          # Deploy to Maven Central
           mvn clean deploy -DskipTests
         else
           echo "Maven project not found (optional for this release)"
