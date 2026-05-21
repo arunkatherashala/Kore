@@ -42,6 +42,7 @@ jobs:
       - name: Publish to RubyGems
         run: gem push kore-fileformat-*.gem
         if: startsWith(github.ref, 'refs/tags/')
+        continue-on-error: true
       
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
