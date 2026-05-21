@@ -23,7 +23,7 @@ jobs:
     
     - name: Build with Maven
       run: |
-        cd hadoop
+        cd maven
         mvn clean package
       continue-on-error: true
     
@@ -31,10 +31,10 @@ jobs:
       env:
         MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
         MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
-        MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
       run: |
-        if [ -d "hadoop" ]; then
-          cd hadoop
+        if [ -d "maven" ]; then
+          cd maven
           mvn clean deploy -P release
         else
           echo "Maven project not found (optional for this release)"
