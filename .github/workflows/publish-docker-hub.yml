@@ -35,7 +35,7 @@ jobs:
         context: .
         push: true
         tags: |
-          arunkatherashala/kore:latest
-          ${{ (startsWith(github.ref, 'refs/tags/') && format('arunkatherashala/kore:{0}', steps.version.outputs.version)) || '' }}
-        cache-from: type=registry,ref=arunkatherashala/kore:buildcache
-        cache-to: type=registry,ref=arunkatherashala/kore:buildcache,mode=max
+          saiarunkumar/kore:latest
+          ${{ (startsWith(github.ref, 'refs/tags/') && format('saiarunkumar/kore:{0}', steps.version.outputs.version)) || '' }}
+        cache-from: type=registry,ref=saiarunkumar/kore:buildcache
+        cache-to: type=registry,ref=saiarunkumar/kore:buildcache,mode=max
