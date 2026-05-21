@@ -31,12 +31,14 @@ jobs:
           <servers>
             <server>
               <id>ossrh</id>
-              <username>${env.MAVEN_USERNAME}</username>
-              <password>${env.MAVEN_PASSWORD}</password>
+              <username>$MAVEN_USERNAME</username>
+              <password>$MAVEN_PASSWORD</password>
             </server>
           </servers>
         </settings>
         EOF
+        echo "=== settings.xml created ==="
+        cat ~/.m2/settings.xml | grep -A 2 "ossrh"
       env:
         MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
         MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
@@ -46,6 +48,21 @@ jobs:
         mvn --version
         ls -la maven/
     
+    - name: Verify Sonatype credentials
+      run: |
+        echo "Testing Sonatype API access..."
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -u "$MAVEN_USERNAME:$MAVEN_PASSWORD" \
+          "https://s01.oss.sonatype.org/service/local/staging/profile_evaluate")
+        echo "HTTP Response Code: $HTTP_CODE"
+        if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "400" ]; then
+          echo "✓ Credentials appear valid (API responded)"
+        else
+          echo "✗ Auth failed with code $HTTP_CODE - credentials may be invalid"
+        fi
+      env:
+        MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
+        MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
+    
     - name: Build JAR
       run: |
         cd maven
@@ -54,7 +71,11 @@ jobs:
     - name: Deploy to Staging
       run: |
         cd maven
-        mvn deploy -Dgpg.skip=true -DskipTests 2>&1 | tail -50
+        mvn deploy \
+          -Dgpg.skip=true \
+          -DskipTests \
+          -Dorg.slf4j.simpleLogger.defaultLogLevel=debug \
+          2>&1 | tail -100
       env:
         MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
         MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
