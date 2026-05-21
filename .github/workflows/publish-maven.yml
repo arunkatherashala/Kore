@@ -36,20 +36,10 @@ jobs:
           cd maven
           # Create settings.xml for Maven authentication
           mkdir -p ~/.m2
-          cat > ~/.m2/settings.xml <<'XML'
-        <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
-                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                  xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
-                                      http://maven.apache.org/xsd/settings-1.0.0.xsd">
-          <servers>
-            <server>
-              <id>ossrh</id>
-              <username>$MAVEN_USERNAME</username>
-              <password>$MAVEN_PASSWORD</password>
-            </server>
-          </servers>
-        </settings>
-        XML
+          printf '<?xml version="1.0" encoding="UTF-8"?>\n<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd">\n  <servers>\n    <server>\n      <id>ossrh</id>\n      <username>%s</username>\n      <password>%s</password>\n    </server>\n  </servers>\n</settings>\n' "$MAVEN_USERNAME" "$MAVEN_PASSWORD" > ~/.m2/settings.xml
+          # Verify settings.xml was created
+          echo "Settings file created:"
+          cat ~/.m2/settings.xml
           # Deploy to Maven Central
           mvn clean deploy -DskipTests
         else
