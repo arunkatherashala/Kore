@@ -22,14 +22,12 @@ Gem::Specification.new do |spec|
   spec.license       = "Apache-2.0"
   spec.required_ruby_version = ">= 2.7"
 
-  spec.files         = Dir.glob(["lib/**/*.rb", "ext/**/*.{rb,c}", "README.md", "LICENSE"])
+  spec.files         = Dir.glob(["lib/**/*.rb", "lib/**/*.dll", "lib/**/*.so", "lib/**/*.dylib", "README.md", "LICENSE"])
   spec.require_paths = ["lib"]
-  spec.extensions    = ["ext/kore_fileformat/extconf.rb"]
 
   spec.add_development_dependency "bundler", "~> 2.0"
   spec.add_development_dependency "rake", "~> 13.0"
   spec.add_development_dependency "rspec", "~> 3.0"
-  spec.add_development_dependency "rake-compiler", "~> 1.2"
 
   spec.add_runtime_dependency "ffi", "~> 1.15"
 end
