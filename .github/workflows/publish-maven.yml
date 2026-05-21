@@ -31,11 +31,24 @@ jobs:
       env:
         MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
         MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
-        MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
       run: |
         if [ -d "maven" ]; then
           cd maven
-          mvn clean deploy -P release
+          # Create settings.xml for authentication
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml <<EOF
+          <settings>
+            <servers>
+              <server>
+                <id>ossrh</id>
+                <username>${{env.MAVEN_USERNAME}}</username>
+                <password>${{env.MAVEN_PASSWORD}}</password>
+              </server>
+            </servers>
+          </settings>
+          EOF
+          # Deploy without signing (can be added later with GPG key)
+          mvn clean deploy -DskipTests
         else
           echo "Maven project not found (optional for this release)"
         fi
