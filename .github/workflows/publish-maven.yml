@@ -32,18 +32,23 @@ jobs:
         MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
         MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
       run: |
-        if [ -d "maven" ]; then
-          cd maven
-          # Debug: Check if credentials are set
-          echo "=== DEBUG ==="
-          [ -z "$MAVEN_USERNAME" ] && echo "❌ MAVEN_USERNAME is empty" || echo "✅ MAVEN_USERNAME is set (length: ${#MAVEN_USERNAME})"
-          [ -z "$MAVEN_PASSWORD" ] && echo "❌ MAVEN_PASSWORD is empty" || echo "✅ MAVEN_PASSWORD is set (length: ${#MAVEN_PASSWORD})"
-          
-          # Create settings.xml for Maven authentication
-          mkdir -p ~/.m2
-          cat > ~/.m2/settings.xml << SETTINGS
+        echo "=== Publish to Maven Central ==="
+        echo "Credentials check:"
+        [ -z "$MAVEN_USERNAME" ] && echo "  ❌ MAVEN_USERNAME not set" || echo "  ✅ MAVEN_USERNAME is set"
+        [ -z "$MAVEN_PASSWORD" ] && echo "  ❌ MAVEN_PASSWORD not set" || echo "  ✅ MAVEN_PASSWORD is set"
+        
+        if [ ! -d "maven" ]; then
+          echo "Maven directory not found"
+          exit 0
+        fi
+        
+        cd maven
+        
+        # Create .m2/settings.xml with variable substitution
+        mkdir -p ~/.m2
+        cat > ~/.m2/settings.xml << EOF
 <?xml version="1.0" encoding="UTF-8"?>
-<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd">
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
   <servers>
     <server>
       <id>ossrh</id>
@@ -52,15 +57,10 @@ jobs:
     </server>
   </servers>
 </settings>
-SETTINGS
-          echo "=== Settings.xml content ==="
-          cat ~/.m2/settings.xml
-          echo "=== Deploying ==="
-          # Deploy to Maven Central
-          mvn clean deploy -DskipTests -X 2>&1 | tail -100
-        else
-          echo "Maven project not found (optional for this release)"
-        fi
+EOF
+        
+        echo "Deploying to Maven Central..."
+        mvn clean deploy -DskipTests 2>&1 | tail -50
       continue-on-error: true
 
     - name: Publish summary
