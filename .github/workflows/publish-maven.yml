@@ -44,24 +44,19 @@ jobs:
         
         cd maven
         
-        # Create .m2/settings.xml with variable substitution
+        # Create .m2/settings.xml using printf
         mkdir -p ~/.m2
-        cat > ~/.m2/settings.xml << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
-  <servers>
-    <server>
-      <id>ossrh</id>
-      <username>${MAVEN_USERNAME}</username>
-      <password>${MAVEN_PASSWORD}</password>
-    </server>
-  </servers>
-</settings>
-EOF
-        
-        # Replace placeholders with actual values
-        sed -i "s/\${MAVEN_USERNAME}/$MAVEN_USERNAME/g" ~/.m2/settings.xml
-        sed -i "s/\${MAVEN_PASSWORD}/$MAVEN_PASSWORD/g" ~/.m2/settings.xml
+        printf '%s\n' \
+          '<?xml version="1.0" encoding="UTF-8"?>' \
+          '<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">' \
+          '  <servers>' \
+          '    <server>' \
+          '      <id>ossrh</id>' \
+          "      <username>$MAVEN_USERNAME</username>" \
+          "      <password>$MAVEN_PASSWORD</password>" \
+          '    </server>' \
+          '  </servers>' \
+          '</settings>' > ~/.m2/settings.xml
         
         echo "Deploying to Maven Central..."
         mvn clean deploy -DskipTests 2>&1 | tail -50
