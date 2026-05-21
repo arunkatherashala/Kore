@@ -35,7 +35,13 @@ jobs:
       run: |
         mvn --version
         ls -la maven/
-        cat ~/.m2/settings.xml
+        echo "=== Testing Sonatype API with curl ==="
+        curl -v -u "$MAVEN_USERNAME:$MAVEN_PASSWORD" \
+          "https://s01.oss.sonatype.org/service/local/repositories" \
+          2>&1 | grep -E "HTTP|WWW-Authenticate|< 200|< 401|< 403"
+      env:
+        MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
+        MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
     
     - name: Build JAR
       run: |
@@ -45,7 +51,25 @@ jobs:
     - name: Deploy to Staging
       run: |
         cd maven
-        mvn deploy -Dgpg.skip=true -DskipTests 2>&1 | tail -50
+        # Try deploying directly with Maven deploy:deploy-file
+        JAR_FILE="target/kore-fileformat-1.2.1.jar"
+        POM_FILE="pom.xml"
+        SOURCES_FILE="target/kore-fileformat-1.2.1-sources.jar"
+        JAVADOC_FILE="target/kore-fileformat-1.2.1-javadoc.jar"
+        
+        # Deploy main JAR with sources and javadoc
+        mvn deploy:deploy-file \
+          -Durl="https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/" \
+          -DrepositoryId=ossrh \
+          -Dfile="$JAR_FILE" \
+          -DpomFile="$POM_FILE" \
+          -Dsources="$SOURCES_FILE" \
+          -Djavadoc="$JAVADOC_FILE" \
+          -DgeneratePom=false \
+          2>&1 | tail -80
+      env:
+        MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
+        MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
 
     - name: Publish summary
       run: |
