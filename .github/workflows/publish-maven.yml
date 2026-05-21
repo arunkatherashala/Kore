@@ -1,8 +1,6 @@
 ﻿name: Publish to Maven Central
 
 on:
-  release:
-    types: [published]
   push:
     tags:
       - 'v*'
@@ -21,26 +19,29 @@ jobs:
         java-version: '11'
         distribution: 'temurin'
     
-    - name: Build with Maven
+    - name: Check Maven
+      run: |
+        mvn --version
+        ls -la maven/
+    
+    - name: Build JAR
       run: |
         cd maven
-        mvn clean package -DskipTests
+        mvn clean package -DskipTests -X 2>&1 | tail -100
     
-    - name: Publish to Maven Central
+    - name: Deploy to Staging
       env:
         MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
         MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
       run: |
-        echo "=== Publishing to Maven Central ==="
-        
-        if [ ! -d "maven" ]; then
-          echo "❌ Maven directory not found"
+        if [ -z "$MAVEN_USERNAME" ] || [ -z "$MAVEN_PASSWORD" ]; then
+          echo "❌ Credentials not set"
           exit 1
         fi
         
-        cd maven
+        echo "✅ Credentials available"
         
-        # Create .m2/settings.xml with proper variable substitution
+        # Create settings.xml
         mkdir -p ~/.m2
         printf '%s\n' \
           '<?xml version="1.0" encoding="UTF-8"?>' \
@@ -54,33 +55,11 @@ jobs:
           '  </servers>' \
           '</settings>' > ~/.m2/settings.xml
         
-        echo "✅ settings.xml created"
-        echo "📦 Deploying to Maven Central (without GPG signing)..."
+        echo "Settings file created: $(wc -l ~/.m2/settings.xml)"
         
-        mvn clean deploy \
-          -Dgpg.skip=true \
-          -DskipTests \
-          --batch-mode 2>&1 | tee maven-deploy.log
-        
-        echo ""
-        if grep -q "BUILD SUCCESS" maven-deploy.log; then
-          echo "✅ Deployment successful"
-        else
-          echo "⚠️  Check logs for status"
-        fi
+        cd maven
+        mvn deploy -Dgpg.skip=true -DskipTests 2>&1 | tail -100
 
-    - name: Upload logs
-      if: always()
-      uses: actions/upload-artifact@v3
-      with:
-        name: maven-deploy-logs
-        path: maven/maven-deploy.log
-
-    - name: Publish summary
-      run: |
-        echo "## Maven Central Publishing" >> $GITHUB_STEP_SUMMARY
-        echo "✅ Artifact deployed to staging repository" >> $GITHUB_STEP_SUMMARY
-        echo "Note: Sonatype auto-promotes after ~10 minutes" >> $GITHUB_STEP_SUMMARY
 
 
 
