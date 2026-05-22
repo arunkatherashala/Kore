@@ -47,23 +47,25 @@ jobs:
         cd maven
         mvn clean package -Dmaven.test.skip=true -DskipTests -Dgpg.skip=true --no-transfer-progress
         
-        # Deploy to Maven Central using Sonatype Central Portal
+        # Manual upload to Maven Central via Central Portal API using curl
         VERSION="1.2.1"
-        REPO_URL="https://central.sonatype.com/api/v1/publisher/upload"
+        USERNAME="${{ secrets.CENTRAL_PORTAL_TOKEN_USERNAME }}"
+        PASSWORD="${{ secrets.CENTRAL_PORTAL_TOKEN_PASSWORD }}"
+        API_URL="https://central.sonatype.com/api/v1/publisher/upload"
         
-        echo "=== Deploying to Maven Central via Sonatype Central Portal ==="
+        echo "=== Uploading artifacts to Maven Central ==="
         
-        mvn deploy:deploy-file \
-          -Durl="${REPO_URL}" \
-          -DrepositoryId=central-portal \
-          -Dfile=target/kore-fileformat-${VERSION}.jar \
-          -DpomFile=pom.xml \
-          -Dsources=target/kore-fileformat-${VERSION}-sources.jar \
-          -Djavadoc=target/kore-fileformat-${VERSION}-javadoc.jar \
-          -Dgpg.skip=true \
-          --no-transfer-progress
+        # Create multipart upload
+        curl -v \
+          -F "bundle=@target/kore-fileformat-${VERSION}.jar" \
+          -F "bundle=@target/kore-fileformat-${VERSION}-sources.jar" \
+          -F "bundle=@target/kore-fileformat-${VERSION}-javadoc.jar" \
+          -F "bundle=@pom.xml" \
+          --basic -u "${USERNAME}:${PASSWORD}" \
+          "${API_URL}"
         
-        echo "=== Deployment complete ==="
+        echo ""
+        echo "=== Upload complete ==="
 
     - name: Publish Summary
       if: success()
