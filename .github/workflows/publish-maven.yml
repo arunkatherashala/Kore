@@ -57,7 +57,7 @@ jobs:
           -Durl="${REPO_URL}" \
           -DrepositoryId=central-portal \
           -Dfile=target/kore-fileformat-${VERSION}.jar \
-          -DpomFile=target/kore-fileformat-${VERSION}.pom \
+          -DpomFile=pom.xml \
           -Dsources=target/kore-fileformat-${VERSION}-sources.jar \
           -Djavadoc=target/kore-fileformat-${VERSION}-javadoc.jar \
           -Dgpg.skip=true \
