@@ -21,13 +21,6 @@ jobs:
         java-version: '11'
         distribution: 'temurin'
 
-    - name: Configure GPG Key
-      run: |
-        mkdir -p ~/.gnupg
-        echo "${{ secrets.GPG_PRIVATE_KEY }}" | base64 -d | gpg --import --batch --no-tty
-        echo "pinentry-mode loopback" >> ~/.gnupg/gpg.conf
-        echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
-
     - name: Configure Maven for Central Portal
       run: |
         mkdir -p ~/.m2
@@ -45,28 +38,30 @@ jobs:
           </servers>
         </settings>
         EOF
-        # Use sed to substitute Central Portal credentials
-        sed -i 's|<username></username>|<username>'"$CENTRAL_TOKEN"'</username>|g' ~/.m2/settings.xml
-        sed -i 's|<password></password>|<password>dummy</password>|g' ~/.m2/settings.xml
+        sed -i 's|<username></username>|<username>'"$CENTRAL_USERNAME"'</username>|g' ~/.m2/settings.xml
+        sed -i 's|<password></password>|<password>'"$CENTRAL_PASSWORD"'</password>|g' ~/.m2/settings.xml
+      env:
+        CENTRAL_USERNAME: ${{ secrets.CENTRAL_PORTAL_TOKEN_USERNAME }}
+        CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PORTAL_TOKEN_PASSWORD }}
 
     - name: Build and Deploy to Maven Central
       run: |
         cd maven
-        mvn -P release clean deploy \
+        mvn clean deploy \
           -Dmaven.test.skip=true \
           -DskipTests \
-          -Dgpg.passphrase="${{ secrets.GPG_PASSPHRASE }}" \
+          -Dgpg.skip=true \
           --no-transfer-progress
       env:
-        CENTRAL_TOKEN: ${{ secrets.CENTRAL_PORTAL_TOKEN }}
-        GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        MAVEN_SETTINGS: ~/.m2/settings.xml
 
     - name: Publish Summary
+      if: success()
       run: |
         echo "## ✅ Kore Published to Maven Central" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Package:** com.github.arunkatherashala:kore-fileformat:1.2.1" >> $GITHUB_STEP_SUMMARY
-        echo "**Namespace:** com.github.arunkatherashala" >> $GITHUB_STEP_SUMMARY
         echo "**Repository:** [Maven Central](https://central.sonatype.com/artifact/com/github/arunkatherashala/kore-fileformat)" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "Access in 10-15 minutes via Maven Central search or repositories." >> $GITHUB_STEP_SUMMARY
+        echo "⏳ Artifacts available in 10-15 minutes via Maven Central search." >> $GITHUB_STEP_SUMMARY
+
