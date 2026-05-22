@@ -24,7 +24,7 @@ jobs:
     - name: Configure Maven for Central Portal
       run: |
         mkdir -p ~/.m2
-        cat > ~/.m2/settings.xml << 'EOF'
+        cat > ~/.m2/settings.xml << EOF
         <?xml version="1.0" encoding="UTF-8"?>
         <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -32,17 +32,15 @@ jobs:
           <servers>
             <server>
               <id>central</id>
-              <username></username>
-              <password></password>
+              <username>${{ secrets.CENTRAL_PORTAL_TOKEN_USERNAME }}</username>
+              <password>${{ secrets.CENTRAL_PORTAL_TOKEN_PASSWORD }}</password>
             </server>
           </servers>
         </settings>
         EOF
-        sed -i 's|<username></username>|<username>'"$CENTRAL_USERNAME"'</username>|g' ~/.m2/settings.xml
-        sed -i 's|<password></password>|<password>'"$CENTRAL_PASSWORD"'</password>|g' ~/.m2/settings.xml
-      env:
-        CENTRAL_USERNAME: ${{ secrets.CENTRAL_PORTAL_TOKEN_USERNAME }}
-        CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PORTAL_TOKEN_PASSWORD }}
+        
+        echo "=== DEBUG: Settings.xml credentials ==="
+        grep -A2 "server" ~/.m2/settings.xml | head -10
 
     - name: Build and Deploy to Maven Central
       run: |
