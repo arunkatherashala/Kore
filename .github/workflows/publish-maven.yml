@@ -21,8 +21,8 @@ jobs:
       with:
         java-version: '11'
         distribution: 'temurin'
-    
-    - name: Configure Maven for GitHub Packages
+
+    - name: Configure Maven for Maven Central
       run: |
         mkdir -p ~/.m2
         cat > ~/.m2/settings.xml << 'EOF'
@@ -30,59 +30,64 @@ jobs:
         <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                   xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd">
-          <activeProfiles>
-            <activeProfile>github</activeProfile>
-          </activeProfiles>
-          <profiles>
-            <profile>
-              <id>github</id>
-              <repositories>
-                <repository>
-                  <id>github</id>
-                  <name>GitHub Packages</name>
-                  <url>https://maven.pkg.github.com/arunkatherashala/Kore</url>
-                  <releases>
-                    <enabled>true</enabled>
-                  </releases>
-                  <snapshots>
-                    <enabled>true</enabled>
-                  </snapshots>
-                </repository>
-              </repositories>
-            </profile>
-          </profiles>
           <servers>
             <server>
-              <id>github</id>
-              <username>${{ github.actor }}</username>
-              <password>${env.GITHUB_TOKEN}</password>
+              <id>ossrh</id>
+              <username>$MAVEN_USERNAME</username>
+              <password>$MAVEN_PASSWORD</password>
             </server>
           </servers>
+          <profiles>
+            <profile>
+              <id>ossrh</id>
+              <activation>
+                <activeByDefault>true</activeByDefault>
+              </activation>
+              <properties>
+                <gpg.executable>gpg</gpg.executable>
+                <gpg.passphrase>$GPG_PASSPHRASE</gpg.passphrase>
+              </properties>
+            </profile>
+          </profiles>
+          <activeProfiles>
+            <activeProfile>ossrh</activeProfile>
+          </activeProfiles>
         </settings>
         EOF
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Substitute environment variables using sed
+        sed -i "s|\$MAVEN_USERNAME|${{ secrets.MAVEN_USERNAME }}|g" ~/.m2/settings.xml
+        sed -i "s|\$MAVEN_PASSWORD|${{ secrets.MAVEN_PASSWORD }}|g" ~/.m2/settings.xml
+        sed -i "s|\$GPG_PASSPHRASE|${{ secrets.GPG_PASSPHRASE }}|g" ~/.m2/settings.xml
     
     - name: Build JAR
       run: |
         cd maven
         mvn clean package -DskipTests
+
+    - name: Import GPG Key
+      run: |
+        echo "${{ secrets.GPG_PRIVATE_KEY }}" | base64 -d | gpg --import --batch --no-tty
+      shell: bash
     
-    - name: Deploy to GitHub Packages
+    - name: Deploy to Maven Central
       run: |
         cd maven
         mvn deploy \
           -Dmaven.test.skip=true \
           -DskipTests \
           -Dorg.slf4j.simpleLogger.defaultLogLevel=warn \
-          -DrepositoryId=github
+          -DrepositoryId=ossrh \
+          -Dgpg.passphrase="${{ secrets.GPG_PASSPHRASE }}" \
+          -Dgpg.skip=false
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
+        MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
+        GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
 
     - name: Publish summary
       run: |
-        echo "## Maven Package Published to GitHub Packages" >> $GITHUB_STEP_SUMMARY
-        echo "✅ Artifact deployed to: maven.pkg.github.com/arunkatherashala/Kore" >> $GITHUB_STEP_SUMMARY
+        echo "## Maven Package Published to Maven Central" >> $GITHUB_STEP_SUMMARY
+        echo "✅ Artifact deployed to: Maven Central Repository" >> $GITHUB_STEP_SUMMARY
         echo "Package: io.github.arunkatherashala:kore-fileformat:1.2.1" >> $GITHUB_STEP_SUMMARY
         echo "Access: https://github.com/arunkatherashala/Kore/packages" >> $GITHUB_STEP_SUMMARY
 
