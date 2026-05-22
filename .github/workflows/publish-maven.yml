@@ -22,6 +22,9 @@ jobs:
         java-version: '11'
         distribution: 'temurin'
 
+    - name: Clean up Maven cache
+      run: rm -rf ~/.m2
+
     - name: Configure Maven for Maven Central
       run: |
         mkdir -p ~/.m2
@@ -33,31 +36,20 @@ jobs:
           <servers>
             <server>
               <id>ossrh</id>
-              <username>$MAVEN_USERNAME</username>
-              <password>$MAVEN_PASSWORD</password>
+              <username></username>
+              <password></password>
             </server>
           </servers>
-          <profiles>
-            <profile>
-              <id>ossrh</id>
-              <activation>
-                <activeByDefault>true</activeByDefault>
-              </activation>
-              <properties>
-                <gpg.executable>gpg</gpg.executable>
-                <gpg.passphrase>$GPG_PASSPHRASE</gpg.passphrase>
-              </properties>
-            </profile>
-          </profiles>
-          <activeProfiles>
-            <activeProfile>ossrh</activeProfile>
-          </activeProfiles>
         </settings>
         EOF
-        # Substitute environment variables using sed
-        sed -i "s|\$MAVEN_USERNAME|${{ secrets.MAVEN_USERNAME }}|g" ~/.m2/settings.xml
-        sed -i "s|\$MAVEN_PASSWORD|${{ secrets.MAVEN_PASSWORD }}|g" ~/.m2/settings.xml
-        sed -i "s|\$GPG_PASSPHRASE|${{ secrets.GPG_PASSPHRASE }}|g" ~/.m2/settings.xml
+        # Use sed with proper escaping for credentials
+        sed -i 's|<username></username>|<username>'"$MAVEN_USERNAME"'</username>|g' ~/.m2/settings.xml
+        sed -i 's|<password></password>|<password>'"$MAVEN_PASSWORD"'</password>|g' ~/.m2/settings.xml
+        # Display settings.xml for debugging (secrets will be masked)
+        cat ~/.m2/settings.xml
+      env:
+        MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
+        MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
     
     - name: Build JAR
       run: |
@@ -68,6 +60,7 @@ jobs:
       run: |
         cd maven
         mvn deploy \
+          -s ~/.m2/settings.xml \
           -Dmaven.test.skip=true \
           -DskipTests \
           -Dorg.slf4j.simpleLogger.defaultLogLevel=warn \
