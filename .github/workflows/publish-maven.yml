@@ -11,7 +11,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
     
     steps:
     - uses: actions/checkout@v4
@@ -22,10 +21,14 @@ jobs:
         java-version: '11'
         distribution: 'temurin'
 
-    - name: Clean up Maven cache
-      run: rm -rf ~/.m2
+    - name: Configure GPG Key
+      run: |
+        mkdir -p ~/.gnupg
+        echo "${{ secrets.GPG_PRIVATE_KEY }}" | base64 -d | gpg --import --batch --no-tty
+        echo "pinentry-mode loopback" >> ~/.gnupg/gpg.conf
+        echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
 
-    - name: Configure Maven for Maven Central
+    - name: Configure Maven for Central Portal
       run: |
         mkdir -p ~/.m2
         cat > ~/.m2/settings.xml << 'EOF'
@@ -35,48 +38,35 @@ jobs:
                   xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd">
           <servers>
             <server>
-              <id>ossrh</id>
+              <id>central</id>
               <username></username>
               <password></password>
             </server>
           </servers>
         </settings>
         EOF
-        # Use sed with proper escaping for credentials
-        sed -i 's|<username></username>|<username>'"$MAVEN_USERNAME"'</username>|g' ~/.m2/settings.xml
-        sed -i 's|<password></password>|<password>'"$MAVEN_PASSWORD"'</password>|g' ~/.m2/settings.xml
-        # Display settings.xml for debugging (secrets will be masked)
-        cat ~/.m2/settings.xml
-      env:
-        MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
-        MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
-    
-    - name: Build JAR
-      run: |
-        cd maven
-        mvn clean package -DskipTests
+        # Use sed to substitute Central Portal credentials
+        sed -i 's|<username></username>|<username>'"$CENTRAL_TOKEN"'</username>|g' ~/.m2/settings.xml
+        sed -i 's|<password></password>|<password>dummy</password>|g' ~/.m2/settings.xml
 
-    - name: Deploy to Maven Central
+    - name: Build and Deploy to Maven Central
       run: |
         cd maven
-        mvn deploy \
-          -s ~/.m2/settings.xml \
+        mvn -P release clean deploy \
           -Dmaven.test.skip=true \
           -DskipTests \
-          -Dorg.slf4j.simpleLogger.defaultLogLevel=warn \
-          -DaltReleaseDeploymentRepository=ossrh::default::https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/ \
-          -Dgpg.skip=true
+          -Dgpg.passphrase="${{ secrets.GPG_PASSPHRASE }}" \
+          --no-transfer-progress
       env:
-        MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
-        MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
+        CENTRAL_TOKEN: ${{ secrets.CENTRAL_PORTAL_TOKEN }}
+        GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
 
-    - name: Publish summary
+    - name: Publish Summary
       run: |
-        echo "## Maven Package Published to Maven Central" >> $GITHUB_STEP_SUMMARY
-        echo "✅ Artifact deployed to: Maven Central Repository" >> $GITHUB_STEP_SUMMARY
-        echo "Package: io.github.arunkatherashala:kore-fileformat:1.2.1" >> $GITHUB_STEP_SUMMARY
-        echo "Access: https://github.com/arunkatherashala/Kore/packages" >> $GITHUB_STEP_SUMMARY
-
-
-
-
+        echo "## ✅ Kore Published to Maven Central" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Package:** com.github.arunkatherashala:kore-fileformat:1.2.1" >> $GITHUB_STEP_SUMMARY
+        echo "**Namespace:** com.github.arunkatherashala" >> $GITHUB_STEP_SUMMARY
+        echo "**Repository:** [Maven Central](https://central.sonatype.com/artifact/com/github/arunkatherashala/kore-fileformat)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "Access in 10-15 minutes via Maven Central search or repositories." >> $GITHUB_STEP_SUMMARY
