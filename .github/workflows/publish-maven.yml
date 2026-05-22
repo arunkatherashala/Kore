@@ -31,7 +31,7 @@ jobs:
                   xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd">
           <servers>
             <server>
-              <id>central</id>
+              <id>central-portal</id>
               <username>${{ secrets.CENTRAL_PORTAL_TOKEN_USERNAME }}</username>
               <password>${{ secrets.CENTRAL_PORTAL_TOKEN_PASSWORD }}</password>
             </server>
@@ -39,19 +39,31 @@ jobs:
         </settings>
         EOF
         
-        echo "=== DEBUG: Settings.xml credentials ==="
+        echo "=== Settings.xml configured ==="
         grep -A2 "server" ~/.m2/settings.xml | head -10
 
     - name: Build and Deploy to Maven Central
       run: |
         cd maven
-        mvn clean deploy \
-          -Dmaven.test.skip=true \
-          -DskipTests \
+        mvn clean package -Dmaven.test.skip=true -DskipTests -Dgpg.skip=true --no-transfer-progress
+        
+        # Deploy to Maven Central using Sonatype Central Portal
+        VERSION="1.2.1"
+        REPO_URL="https://central.sonatype.com/api/v1/publisher/upload"
+        
+        echo "=== Deploying to Maven Central via Sonatype Central Portal ==="
+        
+        mvn deploy:deploy-file \
+          -Durl="${REPO_URL}" \
+          -DrepositoryId=central-portal \
+          -Dfile=target/kore-fileformat-${VERSION}.jar \
+          -DpomFile=target/kore-fileformat-${VERSION}.pom \
+          -Dsources=target/kore-fileformat-${VERSION}-sources.jar \
+          -Djavadoc=target/kore-fileformat-${VERSION}-javadoc.jar \
           -Dgpg.skip=true \
           --no-transfer-progress
-      env:
-        MAVEN_SETTINGS: ~/.m2/settings.xml
+        
+        echo "=== Deployment complete ==="
 
     - name: Publish Summary
       if: success()
