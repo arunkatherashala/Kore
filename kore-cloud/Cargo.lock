@@ -687,6 +687,7 @@ dependencies = [
 name = "kore-cloud"
 version = "1.0.0"
 dependencies = [
+ "async-trait",
  "axum",
  "chrono",
  "rusoto_core",
@@ -694,6 +695,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
  "tokio",
  "tower 0.4.13",
  "tower-http",
