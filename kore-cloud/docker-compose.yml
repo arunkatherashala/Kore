@@ -1,0 +1,91 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: kore-postgres
+    environment:
+      POSTGRES_USER: kore
+      POSTGRES_PASSWORD: kore_secure_password_2024
+      POSTGRES_DB: kore
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kore -d kore"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - kore-network
+
+  # Optional: pgAdmin for database management
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: kore-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@kore.dev
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    networks:
+      - kore-network
+
+  # MinIO for S3-compatible storage (optional)
+  minio:
+    image: minio/minio:latest
+    container_name: kore-minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    networks:
+      - kore-network
+
+  # Kore Cloud API (build locally first with: cargo build --release --features postgres,s3)
+  kore-cloud:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kore-cloud-api
+    environment:
+      RUST_LOG: info
+      DATABASE_URL: postgresql://kore:kore_secure_password_2024@postgres:5432/kore
+      STORAGE_BACKEND: s3
+      AWS_S3_BUCKET: kore-bucket
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      # For local MinIO
+      AWS_ENDPOINT_URL: http://minio:9000
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    networks:
+      - kore-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  minio_data:
+    driver: local
+
+networks:
+  kore-network:
+    driver: bridge

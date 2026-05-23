@@ -32,12 +32,16 @@ thiserror = "1.0"
 rusoto_core = { version = "0.48", optional = true }
 rusoto_s3 = { version = "0.48", optional = true }
 
+# Database (optional)
+sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "macros", "uuid", "chrono"], optional = true }
+
 [dev-dependencies]
 tempfile = "3.8"
 
 [features]
 default = []
 s3 = ["rusoto_core", "rusoto_s3"]
+postgres = ["sqlx"]
 
 [profile.release]
 opt-level = 3

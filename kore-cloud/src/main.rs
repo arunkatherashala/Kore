@@ -1,5 +1,7 @@
 mod storage;
 mod error;
+#[cfg(feature = "postgres")]
+mod db;
 
 use axum::{
     extract::{Path, State, Multipart},
@@ -72,6 +74,8 @@ pub struct AppState {
     total_bytes: std::sync::atomic::AtomicU64,
     total_compressed: std::sync::atomic::AtomicU64,
     storage: Arc<dyn StorageBackend>,
+    #[cfg(feature = "postgres")]
+    database: Option<Arc<db::Database>>,
 }
 
 impl AppState {
@@ -83,6 +87,21 @@ impl AppState {
             total_bytes: std::sync::atomic::AtomicU64::new(0),
             total_compressed: std::sync::atomic::AtomicU64::new(0),
             storage,
+            #[cfg(feature = "postgres")]
+            database: None,
+        }
+    }
+
+    #[cfg(feature = "postgres")]
+    async fn with_database(storage: Arc<dyn StorageBackend>, db: db::Database) -> Self {
+        AppState {
+            start_time: std::time::Instant::now(),
+            files_count: std::sync::atomic::AtomicUsize::new(0),
+            files: Mutex::new(HashMap::new()),
+            total_bytes: std::sync::atomic::AtomicU64::new(0),
+            total_compressed: std::sync::atomic::AtomicU64::new(0),
+            storage,
+            database: Some(Arc::new(db)),
         }
     }
 
