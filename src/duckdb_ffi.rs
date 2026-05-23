@@ -363,9 +363,12 @@ pub fn register_kore_extension(
 /// Initialize DuckDB with Kore support for direct file reading
 /// 
 /// Example usage:
-/// ```rust
+/// ```no_run
+/// use kore_fileformat::duckdb_ffi::init_kore_reader;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let reader = init_kore_reader("data.kore")?;
-/// ```
+/// # Ok(())
+/// # }
 pub fn init_kore_reader(file_path: &str) -> Result<KoreReaderContext, String> {
     // Validate file exists
     if !Path::new(file_path).exists() {

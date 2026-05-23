@@ -1,0 +1,64 @@
+[package]
+name = "kore-cloud"
+version = "1.0.0"
+edition = "2021"
+authors = ["Arun Kather Ashala <arun@kore.dev>"]
+description = "Cloud storage integration for Kore file format (S3, GCS, Azure)"
+license = "KUOPL"
+repository = "https://github.com/arunkatherashala/Kore"
+
+[dependencies]
+# AWS S3
+rusoto_core = "0.48"
+rusoto_s3 = "0.48"
+tokio = { version = "1.35", features = ["full"] }
+bytes = "1.5"
+
+# Google Cloud Storage
+google-cloudkms1 = "5.0"
+google-storage1 = "5.0"
+yup-oauth2 = "8.3"
+hyper = "0.14"
+hyper-rustls = "0.24"
+
+# Azure
+azure_storage_blobs = "0.17"
+azure_identity = "0.17"
+
+# Common
+reqwest = { version = "0.11", features = ["stream", "rustls-tls"] }
+futures = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+thiserror = "1.0"
+
+# Arrow
+arrow = "48.0"
+
+[dev-dependencies]
+tempfile = "3.8"
+mockall = "0.12"
+
+[features]
+default = ["s3", "gcs", "azure"]
+s3 = []
+gcs = []
+azure = []
+all = ["s3", "gcs", "azure"]
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[[example]]
+name = "s3_reader_example"
+path = "examples/s3_reader_example.rs"
+
+[[example]]
+name = "gcs_reader_example"
+path = "examples/gcs_reader_example.rs"
+
+[[example]]
+name = "azure_reader_example"
+path = "examples/azure_reader_example.rs"

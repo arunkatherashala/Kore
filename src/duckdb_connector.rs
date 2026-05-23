@@ -36,8 +36,11 @@ impl KoreDuckDBConnector {
     /// 
     /// # Examples
     /// ```
+    /// use kore_fileformat::duckdb_connector::KoreDuckDBConnector;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let connector = KoreDuckDBConnector::new("data.kore")?;
-    /// ```
+    /// # Ok(())
+    /// # }
     pub fn new(file_path: &str) -> Result<Self, String> {
         let path = PathBuf::from(file_path);
         

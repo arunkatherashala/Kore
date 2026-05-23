@@ -120,6 +120,7 @@ impl ArrowConverter {
     /// 
     /// # Examples
     /// ```
+    /// use kore_fileformat::arrow_converter::{ArrowConverter, ArrowDataType};
     /// let arrow_type = ArrowConverter::kore_type_to_arrow("i32");
     /// assert_eq!(arrow_type, Ok(ArrowDataType::Int32));
     /// ```

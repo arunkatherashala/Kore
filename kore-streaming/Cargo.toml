@@ -1,0 +1,68 @@
+[package]
+name = "kore-streaming"
+version = "1.0.0"
+edition = "2021"
+authors = ["Arun Kather Ashala <arun@kore.dev>"]
+description = "Streaming support for Kore file format (Append-only, ACID, CDC)"
+license = "KUOPL"
+repository = "https://github.com/arunkatherashala/Kore"
+
+[dependencies]
+# Core
+tokio = { version = "1.35", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+bytes = "1.5"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+
+# Arrow (columnar format)
+arrow = "48.0"
+
+# Kafka integration
+rdkafka = { version = "0.35", optional = true }
+kafka = { version = "0.9", optional = true }
+
+# ACID support
+uuid = { version = "1.6", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Utilities
+log = "0.4"
+thiserror = "1.0"
+parking_lot = "0.12"
+
+# Transactions
+dashmap = "5.5"
+
+[dev-dependencies]
+tempfile = "3.8"
+mockall = "0.12"
+tokio-test = "0.4"
+
+[features]
+default = ["append-only", "acid"]
+append-only = []
+acid = []
+cdc = []
+kafka = ["rdkafka"]
+all = ["append-only", "acid", "cdc", "kafka"]
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[[example]]
+name = "append_only_example"
+path = "examples/append_only_example.rs"
+
+[[example]]
+name = "acid_transactions"
+path = "examples/acid_transactions.rs"
+
+[[example]]
+name = "cdc_streaming"
+path = "examples/cdc_streaming.rs"
