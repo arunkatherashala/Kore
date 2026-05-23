@@ -1,0 +1,12 @@
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-cloud\target\debug\deps\sha2-e1b270cfdcec1760.d: C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\lib.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\consts.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\sha256.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\sha512.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\sha256\soft.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\sha256\x86.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\sha512\soft.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\sha512\x86.rs
+
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-cloud\target\debug\deps\libsha2-e1b270cfdcec1760.rmeta: C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\lib.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\consts.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\sha256.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\sha512.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\sha256\soft.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\sha256\x86.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\sha512\soft.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\sha512\x86.rs
+
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\lib.rs:
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\consts.rs:
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\sha256.rs:
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\sha512.rs:
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\sha256\soft.rs:
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\sha256\x86.rs:
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\sha512\soft.rs:
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\sha2-0.9.9\src\sha512\x86.rs:

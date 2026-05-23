@@ -1,0 +1,1 @@
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-cloud\target\debug\kore-cloud.exe: C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-cloud\src\lib.rs C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-cloud\src\main.rs

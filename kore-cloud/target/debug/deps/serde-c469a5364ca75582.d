@@ -1,0 +1,14 @@
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-cloud\target\debug\deps\serde-c469a5364ca75582.d: C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-cloud\target\debug\build\serde-1132760bfdc6cb9c\out/private.rs
+
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-cloud\target\debug\deps\libserde-c469a5364ca75582.rlib: C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-cloud\target\debug\build\serde-1132760bfdc6cb9c\out/private.rs
+
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-cloud\target\debug\deps\libserde-c469a5364ca75582.rmeta: C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-cloud\target\debug\build\serde-1132760bfdc6cb9c\out/private.rs
+
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs:
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs:
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs:
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs:
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs:
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-cloud\target\debug\build\serde-1132760bfdc6cb9c\out/private.rs:
+
+# env-dep:OUT_DIR=C:\\Users\\ksak_\\OneDrive\\Desktop\\dbt_prep\\Kore\\kore-cloud\\target\\debug\\build\\serde-1132760bfdc6cb9c\\out

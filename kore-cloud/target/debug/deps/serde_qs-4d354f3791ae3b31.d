@@ -1,0 +1,11 @@
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-cloud\target\debug\deps\serde_qs-4d354f3791ae3b31.d: C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_qs-0.8.5\src\lib.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_qs-0.8.5\src\de\mod.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_qs-0.8.5\src\de\parse.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_qs-0.8.5\src\error.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_qs-0.8.5\src\ser.rs
+
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-cloud\target\debug\deps\libserde_qs-4d354f3791ae3b31.rlib: C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_qs-0.8.5\src\lib.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_qs-0.8.5\src\de\mod.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_qs-0.8.5\src\de\parse.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_qs-0.8.5\src\error.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_qs-0.8.5\src\ser.rs
+
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-cloud\target\debug\deps\libserde_qs-4d354f3791ae3b31.rmeta: C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_qs-0.8.5\src\lib.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_qs-0.8.5\src\de\mod.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_qs-0.8.5\src\de\parse.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_qs-0.8.5\src\error.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_qs-0.8.5\src\ser.rs
+
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_qs-0.8.5\src\lib.rs:
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_qs-0.8.5\src\de\mod.rs:
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_qs-0.8.5\src\de\parse.rs:
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_qs-0.8.5\src\error.rs:
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_qs-0.8.5\src\ser.rs:

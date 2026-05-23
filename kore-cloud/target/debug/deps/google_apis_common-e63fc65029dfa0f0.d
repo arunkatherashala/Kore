@@ -1,0 +1,9 @@
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-cloud\target\debug\deps\google_apis_common-e63fc65029dfa0f0.d: C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\google-apis-common-6.0.3\src\lib.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\google-apis-common-6.0.3\src\auth.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\google-apis-common-6.0.3\src\field_mask.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\google-apis-common-6.0.3\src\serde.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\google-apis-common-6.0.3\src\url.rs
+
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-cloud\target\debug\deps\libgoogle_apis_common-e63fc65029dfa0f0.rmeta: C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\google-apis-common-6.0.3\src\lib.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\google-apis-common-6.0.3\src\auth.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\google-apis-common-6.0.3\src\field_mask.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\google-apis-common-6.0.3\src\serde.rs C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\google-apis-common-6.0.3\src\url.rs
+
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\google-apis-common-6.0.3\src\lib.rs:
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\google-apis-common-6.0.3\src\auth.rs:
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\google-apis-common-6.0.3\src\field_mask.rs:
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\google-apis-common-6.0.3\src\serde.rs:
+C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\google-apis-common-6.0.3\src\url.rs:
