@@ -1,0 +1,13 @@
+# Azure Terraform Configuration Example
+# Copy this to terraform.tfvars and fill in your values
+
+azure_subscription_id = "12345678-1234-1234-1234-123456789012"  # Your Azure subscription ID
+azure_region          = "eastus"  # or other Azure regions
+
+environment = "prod"  # or "staging", "dev"
+
+# Database
+db_password = "your-secure-password-here"  # Use: openssl rand -base64 32
+
+# Application
+log_level = "info"  # debug, info, warn, error

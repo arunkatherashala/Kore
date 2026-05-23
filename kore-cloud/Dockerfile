@@ -1,37 +1,44 @@
-# Multi-stage build for Kore Cloud API
-
 # Stage 1: Builder
-FROM rust:1.75-alpine as builder
+FROM ubuntu:24.04 AS builder
+
+# Install rustup and dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    postgresql-client \
+    libpq-dev \
+    libssl-dev \
+    pkg-config \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly \
+    && . $HOME/.cargo/env
 
 WORKDIR /app
-
-# Install dependencies
-RUN apk add --no-cache \
-    build-base \
-    postgresql-dev \
-    openssl-dev \
-    ca-certificates
 
 # Copy manifest and source
 COPY Cargo.toml Cargo.lock ./
 COPY src/ ./src/
 
+# Set cargo env
+ENV PATH="/root/.cargo/bin:${PATH}"
+
 # Build with all features
-RUN cargo build --release --features postgres,s3
+RUN cargo +nightly build --release --features postgres,s3
 
 # Stage 2: Runtime
-FROM alpine:3.18
+FROM debian:bookworm-slim
 
 # Install runtime dependencies
-RUN apk add --no-cache \
+RUN apt-get update && apt-get install -y \
     ca-certificates \
     postgresql-client \
     libssl3 \
-    libcrypto3
+    && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
-RUN addgroup -g 1001 kore && \
-    adduser -u 1001 -G kore -h /app -s /sbin/nologin -D kore
+RUN groupadd -g 1001 kore && \
+    useradd -u 1001 -g kore -m -s /usr/sbin/nologin kore
 
 WORKDIR /app
 
@@ -40,8 +47,6 @@ COPY --from=builder /app/target/release/kore-cloud /usr/local/bin/kore-cloud
 
 # Copy documentation
 COPY README.md /app/
-COPY CONTRIBUTING.md /app/
-COPY LICENSE /app/
 
 # Set ownership
 RUN chown -R kore:kore /app

@@ -1,0 +1,19 @@
+# GCP Terraform Configuration Example
+# Copy this to terraform.tfvars and fill in your values
+
+gcp_project_id = "my-project-123456"  # Your GCP project ID
+gcp_region     = "us-central1"  # or other GCP regions
+
+environment = "prod"  # or "staging", "dev"
+
+# Database
+db_password = "your-secure-password-here"  # Use: openssl rand -base64 32
+
+# Application
+log_level = "info"  # debug, info, warn, error
+
+# Monitoring
+alert_email = "alerts@example.com"
+
+# DNS
+gcp_domain = "example.com"

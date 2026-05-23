@@ -1,0 +1,70 @@
+name: Publish Go Package
+
+on:
+  push:
+    tags:
+      - 'go-v*'
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  publish-go:
+    name: Publish to pkg.go.dev
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Validate module
+        working-directory: ./language-bindings/go
+        run: |
+          go mod tidy
+          go mod verify
+          go test ./...
+          go vet ./...
+
+      - name: Tag for pkg.go.dev
+        run: |
+          TAG=$(echo $GITHUB_REF | sed 's|refs/tags/||')
+          echo "Publishing tag: $TAG to pkg.go.dev"
+          
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            language-bindings/go/README.md
+            language-bindings/go/go.mod
+          body: |
+            # Kore Go Package v${{ github.ref_name }}
+            
+            Pure Go implementation of the Kore columnar file format.
+            
+            ## Installation
+            ```bash
+            go get github.com/arunkatherashala/kore-go@${{ github.ref_name }}
+            ```
+            
+            ## Features
+            - Read/Write Kore files
+            - Column-based access
+            - Zero dependencies
+            - Production-ready
+            
+            For full documentation, visit https://pkg.go.dev/github.com/arunkatherashala/kore-go
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify pkg.go.dev
+        run: |
+          TAG=$(echo $GITHUB_REF | sed 's|refs/tags/||')
+          echo "Go package will be automatically indexed by pkg.go.dev"
+          echo "View at: https://pkg.go.dev/github.com/arunkatherashala/kore-go@$TAG"
