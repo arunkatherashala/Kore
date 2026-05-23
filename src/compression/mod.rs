@@ -149,27 +149,38 @@ impl CompressionRegistry {
     }
 
     /// Compress data using specified codec
-    /// Returns (compressed_data, compression_stats) tuple
-    pub fn compress(codec: CodecId, data: &[u8]) -> Result<(Vec<u8>, CompressionStats), Box<dyn std::error::Error>> {
+    /// Returns (compressed_data, actual_codec_used, compression_stats) tuple
+    /// If compression is not beneficial, actual_codec_used = CodecId::None
+    pub fn compress(codec: CodecId, data: &[u8]) -> Result<(Vec<u8>, CodecId, CompressionStats), Box<dyn std::error::Error>> {
         // Map codec to compression algorithm
-        let compressed_data = match codec {
-            CodecId::None => data.to_vec(),
+        let (compressed_data, actual_codec) = match codec {
+            CodecId::None => (data.to_vec(), CodecId::None),
             CodecId::RLE => {
                 // Try RLE compression, fallback to uncompressed
-                Self::try_rle_compress(data).unwrap_or_else(|| data.to_vec())
+                match Self::try_rle_compress(data) {
+                    Some(compressed) => (compressed, CodecId::RLE),
+                    None => (data.to_vec(), CodecId::None),  // Not beneficial, use uncompressed
+                }
             }
             CodecId::Dictionary => {
                 // Try RLE compression for dictionary codec
-                Self::try_rle_compress(data).unwrap_or_else(|| data.to_vec())
+                // If RLE works, return CodecId::RLE (not Dictionary, since data is RLE-encoded)
+                match Self::try_rle_compress(data) {
+                    Some(compressed) => (compressed, CodecId::RLE),  // Return RLE, not Dictionary!
+                    None => (data.to_vec(), CodecId::None),
+                }
             }
             CodecId::FOR => {
                 // Frame-of-Reference encoding (passthrough for now)
-                data.to_vec() // TODO: Implement FOR encoding
+                (data.to_vec(), CodecId::None) // TODO: Implement FOR encoding
             }
             CodecId::LZSS => {
                 // Zstandard compression (mapped to LZSS)
                 let compressor = ZstdCompressor::default_balanced();
-                compressor.compress(data).unwrap_or_else(|_| data.to_vec())
+                match compressor.compress(data) {
+                    Ok(compressed) if compressed.len() < data.len() => (compressed, CodecId::LZSS),
+                    _ => (data.to_vec(), CodecId::None),  // Not beneficial or failed
+                }
             }
         };
 
@@ -179,7 +190,7 @@ impl CompressionRegistry {
             ratio: (compressed_data.len() as f32) / (data.len().max(1) as f32),
         };
 
-        Ok((compressed_data, stats))
+        Ok((compressed_data, actual_codec, stats))
     }
 }
 

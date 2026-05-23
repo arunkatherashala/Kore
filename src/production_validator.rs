@@ -116,7 +116,7 @@ impl ProductionValidator {
 
         // Measure compression
         let start = Instant::now();
-        let (compressed, stats) = CompressionRegistry::compress(codec, &data)
+        let (compressed, _actual_codec, stats) = CompressionRegistry::compress(codec, &data)
             .map_err(|e| format!("Compression failed: {}", e))?;
         let compression_time = start.elapsed().as_micros();
 
@@ -225,7 +225,7 @@ impl ProductionValidator {
         let profile = crate::codec_selector::ColumnProfile::analyze(&test_data)
             .map_err(|e| format!("Profile analysis failed: {}", e))?;
         let codec = CodecSelector::select_optimal_codec(&profile);
-        let (kore_compressed, _stats) = CompressionRegistry::compress(codec, &test_data)
+        let (kore_compressed, _actual_codec, _stats) = CompressionRegistry::compress(codec, &test_data)
             .map_err(|e| format!("Compression failed: {}", e))?;
         let kore_time = kore_start.elapsed();
 
@@ -256,7 +256,7 @@ impl ProductionValidator {
         let codec = CodecSelector::select_optimal_codec(&profile);
 
         let start = Instant::now();
-        let (compressed, _stats) = CompressionRegistry::compress(codec, &data_1mb)
+        let (compressed, _actual_codec, _stats) = CompressionRegistry::compress(codec, &data_1mb)
             .map_err(|e| format!("1MB compression failed: {}", e))?;
         let time = start.elapsed();
         let ratio = compressed.len() as f32 / data_1mb.len() as f32;
@@ -284,9 +284,9 @@ impl ProductionValidator {
         let codec = CodecSelector::select_optimal_codec(&profile);
 
         // Compress twice
-        let (compressed1, _) = CompressionRegistry::compress(codec, &data)
+        let (compressed1, _, _) = CompressionRegistry::compress(codec, &data)
             .map_err(|e| format!("Compression 1 failed: {}", e))?;
-        let (compressed2, _) = CompressionRegistry::compress(codec, &data)
+        let (compressed2, _, _) = CompressionRegistry::compress(codec, &data)
             .map_err(|e| format!("Compression 2 failed: {}", e))?;
 
         // Should be identical

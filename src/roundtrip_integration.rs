@@ -40,13 +40,13 @@ impl RoundTripEngine {
         let estimated_stats = CodecSelector::estimate_stats(&profile, codec);
 
         // Step 2: Compress
-        let (compressed_data, compression_stats) =
+        let (compressed_data, actual_codec, compression_stats) =
             CompressionRegistry::compress(codec, data)
                 .map_err(|e| BinaryFormatError::CompressionError(e.to_string()))?;
 
-        // Step 3: Decompress
+        // Step 3: Decompress (use actual codec, not requested codec)
         let decompressed_data =
-            CodecRegistry::decompress(codec, &compressed_data)?;
+            CodecRegistry::decompress(actual_codec, &compressed_data)?;
 
         // Step 4: Verify byte fidelity
         let byte_fidelity = decompressed_data == data;
@@ -64,7 +64,7 @@ impl RoundTripEngine {
             original_data: data.to_vec(),
             compressed_data,
             decompressed_data,
-            codec,
+            codec: actual_codec,  // Store actual codec used
             compression_ratio: actual_ratio,
             byte_fidelity,
             estimated_ratio,
@@ -121,7 +121,7 @@ impl RoundTripEngine {
 
             let _profile = ColumnProfile::analyze(&test_data)
                 .map_err(|e| BinaryFormatError::InvalidData(e))?;
-            let (compressed, stats) = CompressionRegistry::compress(codec, &test_data)
+            let (compressed, _actual_codec, stats) = CompressionRegistry::compress(codec, &test_data)
                 .map_err(|e| BinaryFormatError::CompressionError(e.to_string()))?;
 
             // Note: We measure compression but skip decompression validation
@@ -154,7 +154,7 @@ impl RoundTripEngine {
 
         for codec in codecs {
             match CompressionRegistry::compress(codec, data) {
-                Ok((compressed, stats)) => {
+                Ok((compressed, _actual_codec, stats)) => {
                     // Note: We measure compression but skip decompression validation
                     // Full round-trip testing requires format alignment
                     comparisons.push(CodecComparison {
@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn test_compression_registry_rle() {
         let data = vec![0xAA; 100];
-        let (compressed, stats) = CompressionRegistry::compress(CodecId::RLE, &data)
+        let (compressed, _actual_codec, stats) = CompressionRegistry::compress(CodecId::RLE, &data)
             .expect("RLE compression should work");
         
         assert!(compressed.len() > 0);
@@ -251,7 +251,7 @@ mod tests {
         for _ in 0..20 {
             data.extend_from_slice(&[1u8, 2, 3, 4, 5]);
         }
-        let (compressed, _stats) = CompressionRegistry::compress(CodecId::Dictionary, &data)
+        let (compressed, _actual_codec, _stats) = CompressionRegistry::compress(CodecId::Dictionary, &data)
             .expect("Dictionary compression should work");
         
         assert!(compressed.len() > 0);
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn test_compression_registry_lzss() {
         let data = b"hello world".to_vec();
-        let (compressed, _stats) = CompressionRegistry::compress(CodecId::LZSS, &data)
+        let (compressed, _actual_codec, _stats) = CompressionRegistry::compress(CodecId::LZSS, &data)
             .expect("LZSS compression should work");
         
         assert!(compressed.len() > 0);
@@ -368,7 +368,7 @@ mod tests {
         let data = vec![0xFF; 100];
         
         // RLE compression works
-        let (compressed, _) = CompressionRegistry::compress(CodecId::RLE, &data).unwrap();
+        let (compressed, _, _) = CompressionRegistry::compress(CodecId::RLE, &data).unwrap();
         assert!(compressed.len() > 0);
     }
 }
