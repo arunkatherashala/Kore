@@ -99,7 +99,7 @@ impl CompressionRegistry {
         let compressed_data = match codec {
             CodecId::None => data.to_vec(),
             CodecId::RLE => {
-                // RLE encoding (backward compat with mock implementation)
+                // RLE encoding - run-length encode repetitive bytes
                 let mut result = Vec::new();
                 let mut i = 0;
                 while i < data.len() {
@@ -111,40 +111,50 @@ impl CompressionRegistry {
                         count += 1;
                     }
                     if count >= 4 {
-                        result.push(0xFF); // RLE marker
+                        // Encode as: marker (0xFF) + byte + count
+                        result.push(0xFF); 
                         result.push(byte);
                         result.push(count);
                         i += count as usize;
                     } else {
-                        result.push(byte);
-                        i += 1;
+                        // Store literal bytes
+                        for _ in 0..count {
+                            result.push(byte);
+                        }
+                        i += count as usize;
                     }
                 }
                 result
             }
             CodecId::Dictionary => {
-                // Dictionary encoding - try to compress strings
-                if let Ok(text) = std::str::from_utf8(data) {
-                    let strings: Vec<String> = text
-                        .lines()
-                        .map(|s| s.to_string())
-                        .collect();
-                    
-                    if !strings.is_empty() {
-                        match DictionaryEncoder::encode(&strings) {
-                            Ok(encoder) => encoder.serialize(),
-                            Err(_) => data.to_vec() // Fallback if encoding fails
-                        }
-                    } else {
-                        data.to_vec()
+                // For now, use simple byte-level RLE as fallback
+                // In future: implement dictionary encoding for structured data
+                let mut result = Vec::new();
+                let mut i = 0;
+                while i < data.len() {
+                    let byte = data[i];
+                    let mut count = 1u8;
+                    while (i + count as usize) < data.len() 
+                        && data[i + count as usize] == byte 
+                        && count < 255 {
+                        count += 1;
                     }
-                } else {
-                    // Not UTF-8 text, return as-is
-                    data.to_vec()
+                    if count >= 3 {
+                        result.push(0xFE); // Dict marker (different from RLE)
+                        result.push(byte);
+                        result.push(count);
+                        i += count as usize;
+                    } else {
+                        for _ in 0..count {
+                            result.push(byte);
+                        }
+                        i += count as usize;
+                    }
                 }
+                result
             }
             CodecId::FOR => {
-                // Frame-of-Reference encoding (treat as passthrough for now)
+                // Frame-of-Reference encoding (passthrough for now)
                 data.to_vec() // TODO: Implement FOR encoding
             }
             CodecId::LZSS => {
