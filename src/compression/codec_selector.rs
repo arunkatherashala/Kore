@@ -93,6 +93,11 @@ impl CodecSelector {
         }
     }
     
+    /// Alias for select() - used by KoreFileWriter
+    pub fn select_optimal_codec(profile: &ColumnProfile) -> CompressionCodec {
+        Self::select(profile)
+    }
+    
     /// Select codec for string column
     fn select_string_codec(profile: &ColumnProfile) -> CompressionCodec {
         // High cardinality (low repetition) → Zstd

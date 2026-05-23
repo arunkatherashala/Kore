@@ -2,10 +2,6 @@
 
 [![Crates.io](https://img.shields.io/crates/v/kore_fileformat.svg)](https://crates.io/crates/kore_fileformat)
 [![PyPI](https://img.shields.io/pypi/v/kore-fileformat.svg)](https://pypi.org/project/kore-fileformat/)
-[![NuGet](https://img.shields.io/nuget/v/kore-fileformat.svg)](https://www.nuget.org/packages/kore-fileformat/)
-[![npm](https://img.shields.io/npm/v/kore-fileformat.svg)](https://www.npmjs.com/package/kore-fileformat)
-[![Maven Central](https://img.shields.io/maven-central/v/com.korefileformat/kore-fileformat.svg)](https://mvnrepository.com/artifact/com.korefileformat/kore-fileformat)
-[![RubyGems](https://img.shields.io/gem/v/kore-fileformat.svg)](https://rubygems.org/gems/kore-fileformat)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Rust 1.70+](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 
@@ -17,177 +13,38 @@ Kore is a Rust-based columnar file format designed for efficient storage and ana
 
 ## 🚀 Quick Start (5 Minutes)
 
-### Installation by Language — Choose Your Platform
-
-**📦 All 8 Distribution Channels Ready:**
-[Python](#python) • [.NET](#net) • [Ruby](#ruby) • [Node.js](#nodejs) • [Java](#java) • [Rust](#rust) • [Docker](#docker) • [GitHub Releases](#github-releases)
-
-#### Python
+### Step 1: Install
 ```bash
-pip install kore-fileformat==1.2.1
+pip install kore-fileformat==1.1.4
 ```
 
-#### .NET / NuGet
-```bash
-dotnet add package kore-fileformat --version 1.2.1
-```
-✨ **Supports**: .NET 6.0, 7.0, 8.0 + .NET Framework 4.7.2+ + .NET Standard 2.1
-
-#### Ruby
-```bash
-gem install kore-fileformat --version 1.2.1
-```
-
-#### Node.js / JavaScript
-```bash
-npm install kore-fileformat@1.2.1
-```
-
-#### Java
-```xml
-<dependency>
-    <groupId>com.korefileformat</groupId>
-    <artifactId>kore-fileformat</artifactId>
-    <version>1.2.1</version>
-</dependency>
-```
-
-#### Rust
-```toml
-[dependencies]
-kore_fileformat = "1.2.1"
-```
-
-#### Docker
-```bash
-docker pull ghcr.io/arunkatherashala/kore:latest
-```
-
-#### GitHub Releases
-Download native binaries and source: https://github.com/arunkatherashala/Kore/releases/tag/v1.2.1
-
----
-
-### Step 2: Use It
-
-**Python:**
+### Step 2: Import
 ```python
 from kore_fileformat import compress_csv
+
+# Compress a CSV file (that's it!)
 original, compressed, ratio = compress_csv("data.csv", "data.kore")
 print(f"✅ Compressed {ratio:.1%}")
 ```
 
-**C#/.NET:**
-```csharp
-using Kore.FileFormat;
-var compressor = new KoreCompressor();
-byte[] compressed = compressor.Compress(inputData);
+### Step 3: Use It
+```python
+from kore_fileformat import get_kore_info
+
+# Get file information
+info = get_kore_info("data.kore")
+print(f"Records: {info['total_records']:,}")
 ```
-
-**Ruby:**
-```ruby
-require 'kore_fileformat'
-compressor = KoreFileformat.compress(data)
-```
-
-**JavaScript:**
-```javascript
-const kore = require('kore-fileformat');
-const compressed = kore.compress(data);
-```
-
-**Java:**
-```java
-import com.korefileformat.KoreCompressor;
-byte[] compressed = new KoreCompressor().compress(inputData);
-```
-
-**Rust:**
-```rust
-use kore_fileformat::compress;
-let compressed = compress(&data)?;
-```
-
-### Step 3: Get Results
-All languages show the same performance:
-- ✅ **48% better compression** than Parquet/ORC
-- ✅ **185 MB/s speed**
-- ✅ **$5,640/year savings** per database backup
-
----
-
-## 📦 Multi-Platform Distribution
-
-Kore is distributed across **8 platforms** with automated CI/CD publishing:
-
-| Platform | Package | Registry | Install |
-|----------|---------|----------|---------|
-| **Python** | `kore-fileformat` | [PyPI](https://pypi.org/project/kore-fileformat/) | `pip install kore-fileformat==1.2.1` |
-| **.NET** | `kore-fileformat` | [NuGet](https://www.nuget.org/packages/kore-fileformat/) | `dotnet add package kore-fileformat --version 1.2.1` |
-| **Ruby** | `kore-fileformat` | [RubyGems](https://rubygems.org/gems/kore-fileformat) | `gem install kore-fileformat --version 1.2.1` |
-| **Node.js** | `kore-fileformat` | [npm](https://www.npmjs.com/package/kore-fileformat) | `npm install kore-fileformat@1.2.1` |
-| **Java** | `kore-fileformat` | [Maven Central](https://mvnrepository.com/artifact/com.korefileformat/kore-fileformat) | See pom.xml above |
-| **Rust** | `kore_fileformat` | [Crates.io](https://crates.io/crates/kore_fileformat) | `cargo add kore_fileformat@1.2.1` |
-| **Docker** | `ghcr.io/arunkatherashala/kore` | [GHCR](https://github.com/arunkatherashala/Kore/pkgs/container/kore) | `docker pull ghcr.io/arunkatherashala/kore:latest` |
-| **GitHub** | Releases + Artifacts | [Releases](https://github.com/arunkatherashala/Kore/releases) | Download binaries & source |
-
-**See [MULTI_PLATFORM_DISTRIBUTION_GUIDE.md](MULTI_PLATFORM_DISTRIBUTION_GUIDE.md) for detailed documentation on all platforms.**
-
----
-
-## ✅ Testing & Quality Assurance
-
-Kore runs **automated regression tests** across all platforms on every push and pull request:
-
-```bash
-# GitHub Actions Workflows (CI/CD)
-.github/workflows/
-├── regression-tests.yml          # Multi-platform regression testing
-├── test.yml                       # Unit tests (primary)
-├── test-pr.yml                    # PR validation tests
-├── quality.yml                    # Code quality checks
-├── security-scan.yml              # Security scanning
-├── publish-*.yml                  # 8 platform publishers (auto-trigger on tags)
-└── deploy.yml                     # Deployment workflow
-```
-
-### Regression Test Coverage
-- ✅ **Python** (pytest)
-- ✅ **.NET** (xUnit) 
-- ✅ **Ruby** (RSpec)
-- ✅ **Node.js** (Jest)
-- ✅ **Rust** (cargo test)
-- ✅ **Java** (Maven)
-- ✅ **Cross-platform Integration Tests**
-
-**Latest Results**: [View Workflow Runs →](https://github.com/arunkatherashala/Kore/actions)
-
-**All performance claims have been verified through practical test execution:**
-
-### Test Results
-- ✅ **896 tests PASSED** (99.67% pass rate)
-- ✅ **19.1 GB/s throughput** measured (claimed 19+ GB/s)
-- ✅ **8.4 GB/s compression** (claimed 600-1000 MB/s)
-- ✅ **0.05-0.12 ms latency** (claimed <1ms)
-- ✅ **42.1% compression ratio** (claimed 35-65%)
-- ✅ **100% data integrity** (638,750 message stress test)
-- ✅ **Outperforms competitors**: Zstd +35%, LZ4 +8%
-
-**[See detailed validation report →](PRACTICAL_VALIDATION_RESULTS.md)**
 
 ---
 
 ## 📚 Documentation
-
-### Featured: v1.1.6 Competitive Analysis
-**🥇 [KORE Wins 100% of Use Cases](BLOG_POST_KORE_V1.1.6_USE_CASES.md)** — Comprehensive comparison vs Parquet, ORC, zstd, Brotli. **$470-5,640/year savings per deployment.**
 
 ### Getting Started
 | Document | For Whom | Time |
 |----------|----------|------|
 | **[docs/INSTALLATION.md](docs/INSTALLATION.md)** | Everyone | 5 min |
 | **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** | Python users | 15 min |
-| **[csharp/Kore.FileFormat/README.md](csharp/Kore.FileFormat/README.md)** | C#/.NET users | 10 min |
 | **[docs/EXAMPLES.md](docs/EXAMPLES.md)** | Developers | 20 min |
 
 ### Reference
@@ -222,12 +79,9 @@ Kore runs **automated regression tests** across all platforms on every push and 
 - ⏳ **Google Cloud Storage**: Full implementation coming in v1.1.0
 
 ### Language Bindings
-- ✅ **Python**: PyO3 wheel for Python 3.9-3.12 (PyPI)
-- ✅ **JavaScript/Node.js**: NAPI module (npm)
-- ✅ **Java**: JNI bindings (Maven Central)
-- ✅ **Rust**: Native crate (Crates.io)
-- ✅ **Ruby**: FFI bindings (RubyGems)
-- ✅ **.NET/C#**: P/Invoke bindings, supports .NET Framework 4.7.2+ through .NET 8.0 (NuGet) — *NEW in v1.1.6*
+- ✅ **Python**: PyO3 wheel for Python 3.9-3.12
+- ✅ **Java**: JNI bindings and Maven package
+- ✅ **JavaScript**: NAPI module for Node.js
 - ⏳ **Go**: Coming in v1.2.0
 
 ### DevOps & CI/CD
@@ -313,37 +167,12 @@ kore_fileformat = { version = "1.0.0", features = ["s3", "azure", "gcs"] }
 
 ---
 
-## 📊 Performance — Benchmarked Against Industry Leaders
+## 📊 Performance
 
-### Real-World Benchmarks (v1.1.6)
-
-KORE has been tested against industry-standard compression libraries and columnar formats across 10 real-world data scenarios. Results show:
-
-**Speed Championship 🏆**
-- **KORE**: 55-250ms avg | 500-900 MB/s compression
-- **Parquet**: 480-1100ms | 40-100 MB/s (2.8-9x slower)
-- **ORC**: 550-1400ms | 40-90 MB/s (5-8x slower)
-- **Avro**: 650-1600ms | 30-75 MB/s (7-11x slower)
-- **zstd**: 241-2186ms | faster than gzip but slower than KORE
-- **gzip**: 907-8199ms | 3-5x slower than KORE
-
-**Use Case Performance**
-| Scenario | KORE | Winner | Trade-off |
-|----------|------|--------|-----------|
-| **CSV (Tabular Data)** | 85ms @ 55% | KORE (7.6x faster) | ORC 20% vs KORE 55% |
-| **JSON (API/Nested)** | 55ms @ 50% | KORE (8.7x faster) | Parquet 20% vs KORE 50% |
-| **Repetitive Data** | Sub-1ms @ 1% | KORE (instant) | RLE optimal |
-| **Logs (Semi-structured)** | 95ms @ 35% | KORE (11.6x faster) | ORC 14% vs KORE 35% |
-| **Random Data** | 120ms @ 95% | KORE (10x faster) | All ~100% at worst |
-
-**Verdict**: KORE is the **fastest columnar compression in production today**. Trade compression ratio for speed—ORC gets 12-20% vs KORE's 35-55%, but takes 8-10x longer. For real-time operations, APIs, and time-sensitive data, KORE is the clear winner.
-
----
-
-### Compression Details
-- **Compression**: 300-560 MB/s actual throughput (not theoretical)
-- **Decompression**: 1000-2000 MB/s (up to 4x faster than compression)
-- **Typical Ratios**: 1-70% depending on data type
+Kore is designed for analytics workloads:
+- **Compression**: 5-10x reduction on typical datasets
+- **Query Speed**: Columnar format enables fast aggregations
+- **Storage**: 10-50 MB files with millions of rows
 - **Cloud**: Direct S3/Azure/GCS integration (no intermediate files)
 
 

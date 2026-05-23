@@ -11,6 +11,7 @@
 use crate::binary_format::BinaryFormatError;
 use crate::codec_selector::{ColumnProfile, CodecSelector};
 use crate::compression::CompressionRegistry;
+use crate::compression::codec_selector::CompressionCodec;
 use crate::decompression::CodecId;
 
 /// Column data to write
@@ -93,10 +94,23 @@ impl KoreWriter {
             // Step 1: Analyze column to select codec
             let profile = ColumnProfile::analyze(&col.data)
                 .map_err(|e| BinaryFormatError::InvalidData(e))?;
-            let codec = CodecSelector::select_optimal_codec(&profile);
+            let codec_choice = CodecSelector::select_optimal_codec(&profile);
+            
+            // Step 2: Map CompressionCodec to CodecId  
+            let codec_id = match codec_choice {
+                CompressionCodec::Dictionary => CodecId::Dictionary,
+                CompressionCodec::ZstdLevel1 => CodecId::LZSS,
+                CompressionCodec::ZstdLevel3 => CodecId::LZSS,
+                CompressionCodec::ZstdLevel6 => CodecId::LZSS,
+                CompressionCodec::RLE => CodecId::RLE,
+                CompressionCodec::Delta => CodecId::FOR,
+                CompressionCodec::BitPack => CodecId::FOR,
+                CompressionCodec::None => CodecId::None,
+            };
 
-            // Step 2: Compress with selected codec
-            let (compressed_data, _stats) = CompressionRegistry::compress(codec, &col.data)?;
+            // Step 3: Compress with selected codec
+            let (compressed_data, _stats) = CompressionRegistry::compress(codec_id, &col.data)
+                .map_err(|e| BinaryFormatError::CompressionError(e.to_string()))?;
 
             let uncompressed_size = col.data.len() as u64;
             let compressed_size = compressed_data.len() as u64;
@@ -104,12 +118,12 @@ impl KoreWriter {
             total_original += uncompressed_size;
             total_compressed += compressed_size;
 
-            // Step 3: Record metadata (but don't write yet - save for header)
+            // Step 4: Record metadata (but don't write yet - save for header)
             column_metadata.push((
                 ColumnMetadata {
                     name: col.name.clone(),
                     data_type: col.data_type,
-                    codec_id: codec,
+                    codec_id,
                     offset: current_offset,
                     compressed_size,
                     uncompressed_size,

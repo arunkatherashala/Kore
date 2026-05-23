@@ -41,7 +41,8 @@ impl RoundTripEngine {
 
         // Step 2: Compress
         let (compressed_data, compression_stats) =
-            CompressionRegistry::compress(codec, data)?;
+            CompressionRegistry::compress(codec, data)
+                .map_err(|e| BinaryFormatError::CompressionError(e.to_string()))?;
 
         // Step 3: Decompress
         let decompressed_data =
@@ -120,7 +121,8 @@ impl RoundTripEngine {
 
             let _profile = ColumnProfile::analyze(&test_data)
                 .map_err(|e| BinaryFormatError::InvalidData(e))?;
-            let (compressed, stats) = CompressionRegistry::compress(codec, &test_data)?;
+            let (compressed, stats) = CompressionRegistry::compress(codec, &test_data)
+                .map_err(|e| BinaryFormatError::CompressionError(e.to_string()))?;
 
             // Note: We measure compression but skip decompression validation
             // Full round-trip testing requires format alignment in future work

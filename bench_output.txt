@@ -1,0 +1,855 @@
+﻿cargo : warning: unused imports: `ColumnSelection` and `PredicateExpression`
+At line:1 char:1
++ cargo test real_file_compression --release -- --nocapture 2>&1 | Out- ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: unused...cateExpression` 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ --> src\kore_reader.rs:9:38
+  |
+9 | use crate::predicates::{QueryFilter, ColumnSelection, PredicateExpression};
+  |                                      ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::collections::HashSet`
+  --> src\kore_reader.rs:11:5
+   |
+11 | use std::collections::HashSet;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `BTreeMap`
+ --> src\statistics.rs:6:33
+  |
+6 | use std::collections::{HashMap, BTreeMap};
+  |                                 ^^^^^^^^
+
+warning: unused imports: `ColumnSelection` and `PredicateExpression`
+ --> src\query_execution.rs:1:38
+  |
+1 | use crate::predicates::{QueryFilter, PredicateExpression, ColumnSelection};
+  |                                      ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+
+warning: unused import: `BlockMetadata`
+ --> src\query_execution.rs:2:60
+  |
+2 | use crate::statistics::{ColumnStatistics, TableStatistics, BlockMetadata};
+  |                                                            ^^^^^^^^^^^^^
+
+warning: unnecessary parentheses around assigned value
+   --> src\query_execution.rs:202:44
+    |
+202 |             plan.estimated_cost.io_cost *= (1.0 - io_reduction);
+    |                                            ^                  ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+202 -             plan.estimated_cost.io_cost *= (1.0 - io_reduction);
+202 +             plan.estimated_cost.io_cost *= 1.0 - io_reduction ;
+    |
+
+warning: unused import: `crate::statistics::TableStatistics`
+ --> src\parallel_execution.rs:6:5
+  |
+6 | use crate::statistics::TableStatistics;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `ExecutionPlan` and `QueryCost`
+ --> src\parallel_execution.rs:7:30
+  |
+7 | use crate::query_execution::{ExecutionPlan, QueryPlanner, QueryCost};
+  |                              ^^^^^^^^^^^^^                ^^^^^^^^^
+
+warning: unused import: `Mutex`
+ --> src\parallel_execution.rs:8:22
+  |
+8 | use std::sync::{Arc, Mutex};
+  |                      ^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> src\arrow_converter.rs:6:5
+  |
+6 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `ArrowConverter`
+ --> src\duckdb_connector.rs:7:61
+  |
+7 | use crate::arrow_converter::{ArrowSchema, ArrowRecordBatch, 
+ArrowConverter, ArrowDataType, ArrowField, ArrowColumn};
+  |                                                             ^^^^^^^^^^^^^^
+
+warning: unexpected `cfg` condition value: `duckdb-ffi`
+  --> src\duckdb_ffi.rs:89:7
+   |
+89 | #[cfg(feature = "duckdb-ffi")]
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: expected values for `feature` are: `aws-config`, `aws-sdk-s3`, 
+`azure`, `azure_identity`, `azure_storage`, `default`, `futures-util`, `gcs`, 
+`google-cloud-default`, `google-cloud-storage`, `java`, `jni`, 
+`kore_lite_compat`, `maturin`, `napi`, `pyo3`, `s3`, and `tokio`
+   = help: consider adding `duckdb-ffi` as a feature in `Cargo.toml`
+   = note: see 
+<https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for 
+more information about checking conditional configuration
+   = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition value: `duckdb-ffi`
+   --> src\duckdb_ffi.rs:156:7
+    |
+156 | #[cfg(feature = "duckdb-ffi")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `aws-config`, `aws-sdk-s3`, 
+`azure`, `azure_identity`, `azure_storage`, `default`, `futures-util`, `gcs`, 
+`google-cloud-default`, `google-cloud-storage`, `java`, `jni`, 
+`kore_lite_compat`, `maturin`, `napi`, `pyo3`, `s3`, and `tokio`
+    = help: consider adding `duckdb-ffi` as a feature in `Cargo.toml`
+    = note: see 
+<https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for 
+more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `duckdb-ffi`
+   --> src\duckdb_ffi.rs:162:7
+    |
+162 | #[cfg(feature = "duckdb-ffi")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `aws-config`, `aws-sdk-s3`, 
+`azure`, `azure_identity`, `azure_storage`, `default`, `futures-util`, `gcs`, 
+`google-cloud-default`, `google-cloud-storage`, `java`, `jni`, 
+`kore_lite_compat`, `maturin`, `napi`, `pyo3`, `s3`, and `tokio`
+    = help: consider adding `duckdb-ffi` as a feature in `Cargo.toml`
+    = note: see 
+<https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for 
+more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `duckdb-ffi`
+   --> src\duckdb_ffi.rs:237:7
+    |
+237 | #[cfg(feature = "duckdb-ffi")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `aws-config`, `aws-sdk-s3`, 
+`azure`, `azure_identity`, `azure_storage`, `default`, `futures-util`, `gcs`, 
+`google-cloud-default`, `google-cloud-storage`, `java`, `jni`, 
+`kore_lite_compat`, `maturin`, `napi`, `pyo3`, `s3`, and `tokio`
+    = help: consider adding `duckdb-ffi` as a feature in `Cargo.toml`
+    = note: see 
+<https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for 
+more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `duckdb-ffi`
+   --> src\duckdb_ffi.rs:319:7
+    |
+319 | #[cfg(feature = "duckdb-ffi")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `aws-config`, `aws-sdk-s3`, 
+`azure`, `azure_identity`, `azure_storage`, `default`, `futures-util`, `gcs`, 
+`google-cloud-default`, `google-cloud-storage`, `java`, `jni`, 
+`kore_lite_compat`, `maturin`, `napi`, `pyo3`, `s3`, and `tokio`
+    = help: consider adding `duckdb-ffi` as a feature in `Cargo.toml`
+    = note: see 
+<https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for 
+more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `duckdb-ffi`
+   --> src\duckdb_ffi.rs:350:7
+    |
+350 | #[cfg(feature = "duckdb-ffi")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `aws-config`, `aws-sdk-s3`, 
+`azure`, `azure_identity`, `azure_storage`, `default`, `futures-util`, `gcs`, 
+`google-cloud-default`, `google-cloud-storage`, `java`, `jni`, 
+`kore_lite_compat`, `maturin`, `napi`, `pyo3`, `s3`, and `tokio`
+    = help: consider adding `duckdb-ffi` as a feature in `Cargo.toml`
+    = note: see 
+<https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for 
+more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `duckdb-ffi`
+   --> src\duckdb_ffi.rs:391:7
+    |
+391 | #[cfg(feature = "duckdb-ffi")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `aws-config`, `aws-sdk-s3`, 
+`azure`, `azure_identity`, `azure_storage`, `default`, `futures-util`, `gcs`, 
+`google-cloud-default`, `google-cloud-storage`, `java`, `jni`, 
+`kore_lite_compat`, `maturin`, `napi`, `pyo3`, `s3`, and `tokio`
+    = help: consider adding `duckdb-ffi` as a feature in `Cargo.toml`
+    = note: see 
+<https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for 
+more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `duckdb-ffi`
+   --> src\duckdb_ffi.rs:448:7
+    |
+448 | #[cfg(feature = "duckdb-ffi")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `aws-config`, `aws-sdk-s3`, 
+`azure`, `azure_identity`, `azure_storage`, `default`, `futures-util`, `gcs`, 
+`google-cloud-default`, `google-cloud-storage`, `java`, `jni`, 
+`kore_lite_compat`, `maturin`, `napi`, `pyo3`, `s3`, and `tokio`
+    = help: consider adding `duckdb-ffi` as a feature in `Cargo.toml`
+    = note: see 
+<https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for 
+more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `duckdb-ffi`
+   --> src\duckdb_ffi.rs:523:7
+    |
+523 | #[cfg(feature = "duckdb-ffi")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `aws-config`, `aws-sdk-s3`, 
+`azure`, `azure_identity`, `azure_storage`, `default`, `futures-util`, `gcs`, 
+`google-cloud-default`, `google-cloud-storage`, `java`, `jni`, 
+`kore_lite_compat`, `maturin`, `napi`, `pyo3`, `s3`, and `tokio`
+    = help: consider adding `duckdb-ffi` as a feature in `Cargo.toml`
+    = note: see 
+<https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for 
+more information about checking conditional configuration
+
+warning: unused imports: `CStr` and `CString`
+  --> src\duckdb_ffi.rs:16:16
+   |
+16 | use std::ffi::{CStr, CString};
+   |                ^^^^  ^^^^^^^
+
+warning: unused import: `std::ptr`
+  --> src\duckdb_ffi.rs:19:5
+   |
+19 | use std::ptr;
+   |     ^^^^^^^^
+
+warning: unused imports: `ArrowColumn`, `ArrowDataType`, and `ArrowField`
+  --> src\duckdb_ffi.rs:21:30
+   |
+21 | use crate::arrow_converter::{ArrowColumn, ArrowRecordBatch, ArrowSchema, 
+ArrowField, ArrowDataType};
+   |                              ^^^^^^^^^^^                                 
+^^^^^^^^^^  ^^^^^^^^^^^^^
+
+warning: value assigned to `result_vec` is never read
+   --> src\compression\zstd_compression.rs:138:30
+    |
+138 |         let mut result_vec = Vec::new();
+    |                              ^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by 
+default
+
+warning: unused variable: `profile`
+   --> src\compression\codec_selector.rs:135:30
+    |
+135 |     fn select_temporal_codec(profile: &ColumnProfile) -> 
+CompressionCodec {
+    |                              ^^^^^^^ help: if this is intentional, 
+prefix it with an underscore: `_profile`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by 
+default
+
+warning: unused variable: `filter`
+   --> src\query_execution.rs:260:38
+    |
+260 |     pub fn compare_strategies(&self, filter: &QueryFilter, total_rows: 
+u64) -> Vec<(ExecutionStrategy, QueryCost)> {
+    |                                      ^^^^^^ help: if this is 
+intentional, prefix it with an underscore: `_filter`
+
+warning: unused variable: `total_rows`
+   --> src\parallel_execution.rs:270:9
+    |
+270 |         total_rows: u64,
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_total_rows`
+
+warning: unused variable: `worker_count`
+   --> src\parallel_execution.rs:272:13
+    |
+272 |         let worker_count = 
+self.thread_pool.worker_count().min(partitions.len());
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_worker_count`
+
+warning: unused variable: `i`
+   --> src\parallel_execution.rs:276:14
+    |
+276 |         for (i, partition) in partitions.into_iter().enumerate() {
+    |              ^ help: if this is intentional, prefix it with an 
+underscore: `_i`
+
+warning: unused variable: `filter`
+   --> src\parallel_execution.rs:278:17
+    |
+278 |             let filter = filter.clone();
+    |                 ^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_filter`
+
+warning: unused variable: `planner`
+   --> src\parallel_execution.rs:279:17
+    |
+279 |             let planner = Arc::clone(&self.planner);
+    |                 ^^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_planner`
+
+warning: unused variable: `level`
+  --> src\advanced_codecs.rs:91:13
+   |
+91 |         let level = Self::calculate_compression_level(data);
+   |             ^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_level`
+
+warning: variable `run_count` is assigned to, but never used
+  --> src\adaptive_blocking.rs:64:13
+   |
+64 |         let mut run_count = 0;
+   |             ^^^^^^^^^^^^^
+   |
+   = note: consider using `_run_count` instead
+
+warning: value assigned to `run_count` is never read
+  --> src\adaptive_blocking.rs:82:13
+   |
+82 |             run_count += 1;
+   |             ^^^^^^^^^^^^^^
+   |
+   = help: maybe it is overwritten before being read?
+
+warning: value assigned to `run_count` is never read
+  --> src\adaptive_blocking.rs:73:21
+   |
+73 |                     run_count += 1;
+   |                     ^^^^^^^^^^^^^^
+   |
+   = help: maybe it is overwritten before being read?
+
+warning: field `column_stats` is never read
+  --> src\query_optimizer.rs:12:5
+   |
+ 8 | pub struct CostEstimator {
+   |            ------------- field in this struct
+...
+12 |     column_stats: HashMap<String, ColumnStatistics>,
+   |     ^^^^^^^^^^^^
+   |
+   = note: `CostEstimator` has derived impls for the traits `Clone` and 
+`Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `selectivity_estimator` is never read
+   --> src\query_optimizer.rs:162:5
+    |
+160 | pub struct PlanGenerator {
+    |            ------------- field in this struct
+161 |     cost_estimator: CostEstimator,
+162 |     selectivity_estimator: SelectivityEstimator,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `PlanGenerator` has derived impls for the traits `Clone` and 
+`Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `cost_estimator` is never read
+   --> src\query_optimizer.rs:357:5
+    |
+356 | pub struct AdvancedQueryOptimizer {
+    |            ---------------------- field in this struct
+357 |     cost_estimator: CostEstimator,
+    |     ^^^^^^^^^^^^^^
+    |
+    = note: `AdvancedQueryOptimizer` has derived impls for the traits `Clone` 
+and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `dictionary`, `compression_level`, and `entropy_threshold` are 
+never read
+  --> src\advanced_codecs.rs:9:5
+   |
+ 8 | pub struct AdvancedZSTDCodec {
+   |            ----------------- fields in this struct
+ 9 |     dictionary: Vec<u8>,
+   |     ^^^^^^^^^^
+10 |     compression_level: u32,
+   |     ^^^^^^^^^^^^^^^^^
+11 |     entropy_threshold: f64,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: associated constants `MIN_BLOCK_SIZE`, `MAX_BLOCK_SIZE`, and 
+`DEFAULT_BLOCK_SIZE` are never used
+  --> src\adaptive_blocking.rs:18:11
+   |
+17 | impl AdaptiveBlocker {
+   | -------------------- associated constants in this implementation
+18 |     const MIN_BLOCK_SIZE: usize = 4096;      // 4KB
+   |           ^^^^^^^^^^^^^^
+19 |     const MAX_BLOCK_SIZE: usize = 262144;    // 256KB
+   |           ^^^^^^^^^^^^^^
+20 |     const DEFAULT_BLOCK_SIZE: usize = 65536; // 64KB
+   |           ^^^^^^^^^^^^^^^^^^
+
+warning: `kore_fileformat` (lib) generated 40 warnings (run `cargo fix --lib 
+-p kore_fileformat` to apply 22 suggestions)
+warning: unused import: `std::path::Path`
+ --> tests\final_benchmark_comparison.rs:3:5
+  |
+3 | use std::path::Path;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `dataset`, `comp_ms`, and `decomp_ms` are never read
+   --> tests\final_benchmark_comparison.rs:283:5
+    |
+282 | struct BenchmarkResult {
+    |        --------------- fields in this struct
+283 |     dataset: String,
+    |     ^^^^^^^
+...
+286 |     comp_ms: f64,
+    |     ^^^^^^^
+287 |     decomp_ms: f64,
+    |     ^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::path::PathBuf`
+  --> tests\duckdb_integration_test.rs:14:9
+   |
+14 |     use std::path::PathBuf;
+   |         ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kore_fileformat` (test "final_benchmark_comparison") generated 2 
+warnings (run `cargo fix --test "final_benchmark_comparison" -p 
+kore_fileformat` to apply 1 suggestion)
+warning: `kore_fileformat` (test "duckdb_integration_test") generated 1 
+warning (run `cargo fix --test "duckdb_integration_test" -p kore_fileformat` 
+to apply 1 suggestion)
+warning: unused import: `std::collections::HashMap`
+ --> tests\ultimate_stress_test.rs:6:5
+  |
+6 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary parentheses around assigned value
+   --> tests\ultimate_stress_test.rs:436:33
+    |
+436 |                     let delta = (((data.len() * 31) % 100) as i32 - 50);
+    |                                 ^                                     ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+436 -                     let delta = (((data.len() * 31) % 100) as i32 - 50);
+436 +                     let delta = ((data.len() * 31) % 100) as i32 - 50;
+    |
+
+warning: unused variable: `highly_rep`
+   --> tests\ultimate_stress_test.rs:290:13
+    |
+290 |         let highly_rep = vec![1u8; 1000];
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_highly_rep`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by 
+default
+
+warning: unused variable: `categorical`
+   --> tests\ultimate_stress_test.rs:296:13
+    |
+296 |         let categorical: Vec<u8> = (0..10).flat_map(|i| vec![i; 
+100]).collect();
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_categorical`
+
+warning: unused variable: `numeric`
+   --> tests\ultimate_stress_test.rs:302:13
+    |
+302 |         let numeric: Vec<u8> = (0..100u8)
+    |             ^^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_numeric`
+
+warning: unused variable: `random`
+   --> tests\ultimate_stress_test.rs:310:13
+    |
+310 |         let random = self.generate_random_data(1000);
+    |             ^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_random`
+
+warning: unused import: `kore_fileformat::arrow_converter::*`
+ --> tests\phase_3_1_integration_tests.rs:9:9
+  |
+9 |     use kore_fileformat::arrow_converter::*;
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `kore_fileformat::duckdb_connector::*`
+  --> tests\phase_3_1_integration_tests.rs:10:9
+   |
+10 |     use kore_fileformat::duckdb_connector::*;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::fs`
+  --> tests\phase_3_1_integration_tests.rs:11:9
+   |
+11 |     use std::fs;
+   |         ^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+ --> tests\phase_3_final_validation.rs:4:9
+  |
+4 |     use std::collections::HashMap;
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling kore_fileformat v1.2.2 
+(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore)
+warning: unused imports: `ColumnSelection`, `PredicateExpression`, and 
+`QueryFilter`
+ --> tests\phase_3_3_integration_tests.rs:2:35
+  |
+2 | use kore_fileformat::predicates::{ColumnSelection, PredicateExpression, 
+QueryFilter};
+  |                                   ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^  
+^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> tests\phase_3_7_integration_tests.rs:197:9
+    |
+197 |     let mut plans = vec![
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `ColumnSelection` and `PredicateExpression`
+ --> tests\phase_3_4_integration_tests.rs:2:48
+  |
+2 | use kore_fileformat::predicates::{QueryFilter, PredicateExpression, 
+ColumnSelection};
+  |                                                ^^^^^^^^^^^^^^^^^^^  
+^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kore_fileformat` (test "ultimate_stress_test") generated 6 warnings 
+(run `cargo fix --test "ultimate_stress_test" -p kore_fileformat` to apply 6 
+suggestions)
+warning: `kore_fileformat` (test "phase_3_1_integration_tests") generated 3 
+warnings (run `cargo fix --test "phase_3_1_integration_tests" -p 
+kore_fileformat` to apply 3 suggestions)
+warning: `kore_fileformat` (test "phase_3_final_validation") generated 1 
+warning (run `cargo fix --test "phase_3_final_validation" -p kore_fileformat` 
+to apply 1 suggestion)
+warning: `kore_fileformat` (test "phase_3_3_integration_tests") generated 1 
+warning (run `cargo fix --test "phase_3_3_integration_tests" -p 
+kore_fileformat` to apply 1 suggestion)
+warning: `kore_fileformat` (test "phase_3_7_integration_tests") generated 1 
+warning (run `cargo fix --test "phase_3_7_integration_tests" -p 
+kore_fileformat` to apply 1 suggestion)
+warning: `kore_fileformat` (test "phase_3_4_integration_tests") generated 1 
+warning (run `cargo fix --test "phase_3_4_integration_tests" -p 
+kore_fileformat` to apply 1 suggestion)
+warning: unused variable: `data_type`
+   --> tests\v116_compression_championship.rs:130:38
+    |
+130 | fn get_baseline_results(size: usize, data_type: &str) -> 
+Vec<CompressionResult> {
+    |                                      ^^^^^^^^^ help: if this is 
+intentional, prefix it with an underscore: `_data_type`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by 
+default
+
+warning: unused import: `File`
+ --> tests\compression_championship.rs:5:21
+  |
+5 | use std::fs::{self, File};
+  |                     ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `original_size`
+   --> tests\compression_championship.rs:276:9
+    |
+276 |     let original_size = std::fs::metadata(file_path).unwrap().len() as 
+usize;
+    |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_original_size`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by 
+default
+
+warning: unnecessary parentheses around function argument
+   --> tests\hard_testing_v1_1_6.rs:126:36
+    |
+126 |                 let pattern = vec![((i % 256) as u8); chunk_size];
+    |                                    ^               ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+126 -                 let pattern = vec![((i % 256) as u8); chunk_size];
+126 +                 let pattern = vec![(i % 256) as u8; chunk_size];
+    |
+
+warning: unused import: `BenchmarkResult`
+ --> src\bin\bench-kore.rs:4:52
+  |
+4 | use kore_fileformat::benchmarks::{BenchmarkEngine, BenchmarkResult, 
+QueryBenchmark};
+  |                                                    ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::env`
+ --> src\bin\bench-kore.rs:5:5
+  |
+5 | use std::env;
+  |     ^^^^^^^^
+
+warning: unused import: `std::collections::HashSet`
+  --> tests\phase_3_1_tests.rs:12:9
+   |
+12 |     use std::collections::HashSet;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `QueryExecutor` and `Query`
+ --> tests\query_integration_tests.rs:6:41
+  |
+6 |     use kore_fileformat::query_engine::{Query, QueryExecutor, Lexer, 
+Parser};
+  |                                         ^^^^^  ^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::collections::HashMap`
+  --> tests\query_integration_tests.rs:10:9
+   |
+10 |     use std::collections::HashMap;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+  --> tests\query_integration_tests.rs:97:13
+   |
+97 |         let mut manager = IndexManager::new();
+   |             ----^^^^^^^
+   |             |
+   |             help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `query`
+   --> tests\query_integration_tests.rs:142:13
+    |
+142 |         let query = parser.parse().unwrap();
+    |             ^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_query`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by 
+default
+
+warning: unused variable: `cost`
+   --> tests\query_integration_tests.rs:156:13
+    |
+156 |         let cost = QueryOptimizer::estimate_cost(10_000_000, 0.0001, 0);
+    |             ^^^^ help: if this is intentional, prefix it with an 
+underscore: `_cost`
+
+warning: unused variable: `simple_cost`
+   --> tests\query_integration_tests.rs:167:13
+    |
+167 |         let simple_cost = QueryOptimizer::estimate_cost(1000, 1.0, 0);
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_simple_cost`
+
+warning: unnecessary parentheses around index expression
+   --> tests\practical_benchmarks.rs:140:53
+    |
+140 |             .map(|i| ((i / 4) as u32).to_le_bytes()[(i % 4)])
+    |                                                     ^     ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+140 -             .map(|i| ((i / 4) as u32).to_le_bytes()[(i % 4)])
+140 +             .map(|i| ((i / 4) as u32).to_le_bytes()[i % 4])
+    |
+
+warning: unused variable: `compressed_size`
+   --> tests\practical_benchmarks.rs:243:31
+    |
+243 | fn simulate_decompression_rle(compressed_size: usize, original_size: 
+usize) -> usize {
+    |                               ^^^^^^^^^^^^^^^ help: if this is 
+intentional, prefix it with an underscore: `_compressed_size`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by 
+default
+
+warning: unused variable: `compressed_size`
+   --> tests\practical_benchmarks.rs:267:32
+    |
+267 | fn simulate_decompression_lzss(compressed_size: usize, original_size: 
+usize) -> usize {
+    |                                ^^^^^^^^^^^^^^^ help: if this is 
+intentional, prefix it with an underscore: `_compressed_size`
+
+warning: unused variable: `compressed_size`
+   --> tests\practical_benchmarks.rs:283:32
+    |
+283 | fn simulate_decompression_dict(compressed_size: usize, original_size: 
+usize) -> usize {
+    |                                ^^^^^^^^^^^^^^^ help: if this is 
+intentional, prefix it with an underscore: `_compressed_size`
+
+warning: unused variable: `compressed_size`
+   --> tests\practical_benchmarks.rs:297:31
+    |
+297 | fn simulate_decompression_for(compressed_size: usize, original_size: 
+usize) -> usize {
+    |                               ^^^^^^^^^^^^^^^ help: if this is 
+intentional, prefix it with an underscore: `_compressed_size`
+
+warning: `kore_fileformat` (test "v116_compression_championship") generated 1 
+warning (run `cargo fix --test "v116_compression_championship" -p 
+kore_fileformat` to apply 1 suggestion)
+warning: `kore_fileformat` (test "compression_championship") generated 2 
+warnings (run `cargo fix --test "compression_championship" -p kore_fileformat` 
+to apply 2 suggestions)
+warning: `kore_fileformat` (test "hard_testing_v1_1_6") generated 1 warning 
+(run `cargo fix --test "hard_testing_v1_1_6" -p kore_fileformat` to apply 1 
+suggestion)
+warning: `kore_fileformat` (bin "bench-kore" test) generated 2 warnings (run 
+`cargo fix --bin "bench-kore" -p kore_fileformat --tests` to apply 2 
+suggestions)
+warning: `kore_fileformat` (test "phase_3_1_tests") generated 1 warning (run 
+`cargo fix --test "phase_3_1_tests" -p kore_fileformat` to apply 1 suggestion)
+warning: `kore_fileformat` (test "query_integration_tests") generated 6 
+warnings (run `cargo fix --test "query_integration_tests" -p kore_fileformat` 
+to apply 6 suggestions)
+warning: `kore_fileformat` (test "practical_benchmarks") generated 5 warnings 
+(run `cargo fix --test "practical_benchmarks" -p kore_fileformat` to apply 5 
+suggestions)
+warning: unnecessary parentheses around assigned value
+   --> tests\real_world_integration.rs:366:27
+    |
+366 |                 data[i] = ((pos as u32 % 256) as u8);  // Incremental
+    |                           ^                        ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+366 -                 data[i] = ((pos as u32 % 256) as u8);  // Incremental
+366 +                 data[i] = (pos as u32 % 256) as u8;  // Incremental
+    |
+
+warning: value assigned to `compressed_size` is never read
+   --> tests\real_world_integration.rs:396:31
+    |
+396 |     let mut compressed_size = data.len();
+    |                               ^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by 
+default
+
+warning: unused import: `std::collections::HashSet`
+  --> src\kore_reader.rs:11:5
+   |
+11 | use std::collections::HashSet;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src\query_optimizer.rs:750:13
+    |
+750 |         let mut plans = vec![
+    |             ----^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src\duckdb_connector.rs:687:13
+    |
+687 |         let mut conn = KoreDuckDBConnector::new("test.kore").unwrap();
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: associated constants `MIN_BLOCK_SIZE` and `DEFAULT_BLOCK_SIZE` are 
+never used
+  --> src\adaptive_blocking.rs:18:11
+   |
+17 | impl AdaptiveBlocker {
+   | -------------------- associated constants in this implementation
+18 |     const MIN_BLOCK_SIZE: usize = 4096;      // 4KB
+   |           ^^^^^^^^^^^^^^
+19 |     const MAX_BLOCK_SIZE: usize = 262144;    // 256KB
+20 |     const DEFAULT_BLOCK_SIZE: usize = 65536; // 64KB
+   |           ^^^^^^^^^^^^^^^^^^
+
+warning: `kore_fileformat` (bin "bench-kore") generated 2 warnings (2 
+duplicates)
+warning: `kore_fileformat` (test "real_world_integration") generated 2 
+warnings (run `cargo fix --test "real_world_integration" -p kore_fileformat` 
+to apply 1 suggestion)
+warning: `kore_fileformat` (lib test) generated 41 warnings (37 duplicates) 
+(run `cargo fix --lib -p kore_fileformat --tests` to apply 3 suggestions)
+error[E0433]: cannot find type `DictionaryDecoder` in this scope
+  --> tests\compression_integration_simple.rs:82:23
+   |
+82 |         let decoder = 
+DictionaryDecoder::deserialize(&serialized).unwrap();
+   |                       ^^^^^^^^^^^^^^^^^ use of undeclared type 
+`DictionaryDecoder`
+   |
+help: a struct with a similar name exists
+   |
+82 -         let decoder = 
+DictionaryDecoder::deserialize(&serialized).unwrap();
+82 +         let decoder = 
+DictionaryEncoder::deserialize(&serialized).unwrap();
+   |
+help: consider importing one of these structs
+   |
+ 6 +     use crate::DictionaryDecoder;
+   |
+ 6 +     use kore_fileformat::compression::DictionaryDecoder;
+   |
+
+warning: unused import: `kore_fileformat::compression::DictionaryDecoder`
+  --> tests\compression_integration_simple.rs:91:5
+   |
+91 | use kore_fileformat::compression::DictionaryDecoder;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+For more information about this error, try `rustc --explain E0433`.
+warning: `kore_fileformat` (test "compression_integration_simple") generated 1 
+warning
+error: could not compile `kore_fileformat` (test 
+"compression_integration_simple") due to 1 previous error; 1 warning emitted
+warning: build failed, waiting for other jobs to finish...

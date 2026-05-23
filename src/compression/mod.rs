@@ -123,16 +123,34 @@ impl CompressionRegistry {
                 result
             }
             CodecId::Dictionary => {
-                // Dictionary encoding
-                data.to_vec() // Placeholder - would use DictionaryEncoder
+                // Dictionary encoding - try to compress strings
+                if let Ok(text) = std::str::from_utf8(data) {
+                    let strings: Vec<String> = text
+                        .lines()
+                        .map(|s| s.to_string())
+                        .collect();
+                    
+                    if !strings.is_empty() {
+                        match DictionaryEncoder::encode(&strings) {
+                            Ok(encoder) => encoder.serialize(),
+                            Err(_) => data.to_vec() // Fallback if encoding fails
+                        }
+                    } else {
+                        data.to_vec()
+                    }
+                } else {
+                    // Not UTF-8 text, return as-is
+                    data.to_vec()
+                }
             }
             CodecId::FOR => {
-                // Frame-of-Reference encoding
-                data.to_vec() // Placeholder
+                // Frame-of-Reference encoding (treat as passthrough for now)
+                data.to_vec() // TODO: Implement FOR encoding
             }
             CodecId::LZSS => {
-                // LZSS encoding
-                data.to_vec() // Placeholder
+                // Zstandard compression (mapped to LZSS)
+                let compressor = ZstdCompressor::default_balanced();
+                compressor.compress(data).unwrap_or_else(|_| data.to_vec())
             }
         };
 
