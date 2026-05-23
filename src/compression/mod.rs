@@ -92,6 +92,62 @@ impl CompressionStats {
 pub struct CompressionRegistry;
 
 impl CompressionRegistry {
+    /// Helper: Encode varint (7-bit encoding, continuation bit in MSB)
+    fn encode_varint(mut val: u32, buf: &mut Vec<u8>) {
+        loop {
+            let mut byte = (val & 0x7F) as u8;
+            val >>= 7;
+            if val != 0 {
+                byte |= 0x80; // Set continuation bit
+            }
+            buf.push(byte);
+            if val == 0 {
+                break;
+            }
+        }
+    }
+
+    /// Try RLE compression, return None if it expands
+    fn try_rle_compress(data: &[u8]) -> Option<Vec<u8>> {
+        let mut result = Vec::new();
+        let mut i = 0;
+        let mut compressed_any = false;
+        
+        while i < data.len() {
+            let byte = data[i];
+            let mut count = 1u32;
+            while (i + count as usize) < data.len() 
+                && data[i + count as usize] == byte 
+                && count < u32::MAX {
+                count += 1;
+            }
+            
+            if count >= 3 {
+                // Encode run: [1][byte][varint(count)]
+                result.push(1u8);
+                result.push(byte);
+                Self::encode_varint(count, &mut result);
+                compressed_any = true;
+                i += count as usize;
+            } else {
+                // Store literal: [count][byte] for each
+                for _ in 0..count {
+                    result.push(1u8);
+                    result.push(byte);
+                    Self::encode_varint(1, &mut result);
+                }
+                i += count as usize;
+            }
+        }
+        
+        // Only return if compression is actually beneficial
+        if result.len() < data.len() {
+            Some(result)
+        } else {
+            None
+        }
+    }
+
     /// Compress data using specified codec
     /// Returns (compressed_data, compression_stats) tuple
     pub fn compress(codec: CodecId, data: &[u8]) -> Result<(Vec<u8>, CompressionStats), Box<dyn std::error::Error>> {
@@ -99,59 +155,12 @@ impl CompressionRegistry {
         let compressed_data = match codec {
             CodecId::None => data.to_vec(),
             CodecId::RLE => {
-                // RLE encoding - run-length encode repetitive bytes
-                let mut result = Vec::new();
-                let mut i = 0;
-                while i < data.len() {
-                    let byte = data[i];
-                    let mut count = 1u8;
-                    while (i + count as usize) < data.len() 
-                        && data[i + count as usize] == byte 
-                        && count < 255 {
-                        count += 1;
-                    }
-                    if count >= 4 {
-                        // Encode as: marker (0xFF) + byte + count
-                        result.push(0xFF); 
-                        result.push(byte);
-                        result.push(count);
-                        i += count as usize;
-                    } else {
-                        // Store literal bytes
-                        for _ in 0..count {
-                            result.push(byte);
-                        }
-                        i += count as usize;
-                    }
-                }
-                result
+                // Try RLE compression, fallback to uncompressed
+                Self::try_rle_compress(data).unwrap_or_else(|| data.to_vec())
             }
             CodecId::Dictionary => {
-                // For now, use simple byte-level RLE as fallback
-                // In future: implement dictionary encoding for structured data
-                let mut result = Vec::new();
-                let mut i = 0;
-                while i < data.len() {
-                    let byte = data[i];
-                    let mut count = 1u8;
-                    while (i + count as usize) < data.len() 
-                        && data[i + count as usize] == byte 
-                        && count < 255 {
-                        count += 1;
-                    }
-                    if count >= 3 {
-                        result.push(0xFE); // Dict marker (different from RLE)
-                        result.push(byte);
-                        result.push(count);
-                        i += count as usize;
-                    } else {
-                        for _ in 0..count {
-                            result.push(byte);
-                        }
-                        i += count as usize;
-                    }
-                }
-                result
+                // Try RLE compression for dictionary codec
+                Self::try_rle_compress(data).unwrap_or_else(|| data.to_vec())
             }
             CodecId::FOR => {
                 // Frame-of-Reference encoding (passthrough for now)
