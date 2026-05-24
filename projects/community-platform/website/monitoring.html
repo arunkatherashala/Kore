@@ -243,6 +243,12 @@
             50% { opacity: 0.5; }
         }
 
+        .logo img {
+            height: 50px;
+            width: auto;
+            object-fit: contain;
+        }
+
         @media (max-width: 768px) {
             .charts-grid {
                 grid-template-columns: 1fr;
@@ -265,7 +271,7 @@
 <body>
     <nav class="navbar">
         <div class="container">
-            <div class="logo">Kore</div>
+            <div class="logo"><img src="assets/logo.png" alt="Kore Logo"></div>
             <ul class="nav-links">
                 <li><a href="index.html">Home</a></li>
                 <li><a href="index.html#features">Features</a></li>
