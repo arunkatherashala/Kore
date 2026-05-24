@@ -48,7 +48,7 @@ jobs:
         mvn clean package -Dmaven.test.skip=true -DskipTests -Dgpg.skip=true --no-transfer-progress
         
         # Manual upload to Maven Central via Central Portal API using curl
-        VERSION="1.2.1"
+        VERSION="1.2.3"
         USERNAME="${{ secrets.CENTRAL_PORTAL_TOKEN_USERNAME }}"
         PASSWORD="${{ secrets.CENTRAL_PORTAL_TOKEN_PASSWORD }}"
         API_URL="https://central.sonatype.com/api/v1/publisher/upload"

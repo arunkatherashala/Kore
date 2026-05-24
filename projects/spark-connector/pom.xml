@@ -7,7 +7,7 @@
 
     <groupId>com.kore</groupId>
     <artifactId>kore-spark-connector</artifactId>
-    <version>1.0.0</version>
+    <version>1.2.3</version>
     <packaging>jar</packaging>
 
     <name>Kore Spark Connector</name>
