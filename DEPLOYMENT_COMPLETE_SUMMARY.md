@@ -214,7 +214,7 @@ Expected by end of month: 500,000+ downloads
 
 ## 🗺️ PRODUCT ROADMAP
 
-### v1.2.4 - Maintenance Release (June 2026)
+### v1.2.4 - Bug Fixes & Improvements (June 2026)
 **Timeline:** 2-3 weeks after v1.2.3
 
 **Focus:** Bug fixes and improvements based on user feedback
@@ -232,8 +232,19 @@ Expected improvements:
 - Documentation expanded
 - Performance 5-10% better
 
-### v1.3.0 - Feature Release (July-August 2026)
-**Timeline:** 6-8 weeks after v1.2.3
+### v1.2.5+ - Continued Maintenance
+**Timeline:** Ongoing (as needed)
+
+**Focus:** Continuous improvements and patch releases
+
+Process:
+- [ ] Track user feedback daily
+- [ ] Release patches as issues found
+- [ ] Maintain stability and compatibility
+- [ ] Build toward 1.3.0
+
+### v1.3.0 - Feature Release (Later 2026)
+**Timeline:** Later this year
 
 **Focus:** New features + ecosystem expansion
 
@@ -249,8 +260,8 @@ Languages:
 - [ ] Add Node.js native binding
 - [ ] Improve performance across all languages
 
-### v2.0.0 - Major Release (Q4 2026)
-**Timeline:** 6+ months away
+### v2.0.0 - Major Release (Future)
+**Timeline:** Future (after 1.3.0 stable)
 
 **Focus:** Next generation features
 
