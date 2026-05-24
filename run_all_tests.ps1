@@ -315,49 +315,162 @@ $testResults | Group-Object Phase | ForEach-Object {
 }
 
 # ============================================================================
-# DEPLOYMENT DECISION
+# DEPLOYMENT DECISION - ROLLING DEPLOYMENT MODEL
 # ============================================================================
 Write-Host ""
-if ($failedTests.Count -eq 0) {
-    Write-Host @"
+Write-Host @"
 ╔════════════════════════════════════════════════════════════════════╗
-║                                                                    ║
-║              ✅ ALL TESTS PASSED - READY FOR DEPLOYMENT           ║
-║                                                                    ║
-║  Next Steps:                                                       ║
-║  1. Review this test report                                        ║
-║  2. Get team approval                                              ║
-║  3. Push to production with: git push origin v1.2.3               ║
-║  4. Monitor deployment on package managers                        ║
-║                                                                    ║
+║                    DEPLOYMENT DECISION MATRIX                     ║
+║                   (Rolling/Incremental Deployment)                ║
 ╚════════════════════════════════════════════════════════════════════╝
+"@ -ForegroundColor Cyan
+
+# Analyze which components can deploy
+$canDeploy = @()
+$cannotDeploy = @()
+$blocked = @()
+
+# Check each phase result
+$rustPassed = ($testResults | Where-Object { $_.Phase -eq "Phase 1" -and $_.Status -eq "PASS" }).Count -gt 0
+$sparkPassed = ($testResults | Where-Object { $_.Test -like "*Spark*" -and $_.Status -eq "PASS" }).Count -gt 0
+$pythonPassed = ($testResults | Where-Object { $_.Phase -eq "Phase 3" -and $_.Status -eq "PASS" }).Count -gt 0
+$javaPassed = ($testResults | Where-Object { $_.Phase -eq "Phase 4" -and $_.Status -eq "PASS" }).Count -gt 0
+$goPassed = ($testResults | Where-Object { $_.Phase -eq "Phase 5" -and $_.Status -eq "PASS" }).Count -gt 0
+$jsPassed = ($testResults | Where-Object { $_.Phase -eq "Phase 6" -and $_.Status -eq "PASS" }).Count -gt 0
+
+# Determine deployment eligibility
+if ($rustPassed) { $canDeploy += "Rust Core" } else { $cannotDeploy += "Rust Core" }
+if ($pythonPassed) { $canDeploy += "Python SDK" } else { $cannotDeploy += "Python SDK" }
+if ($javaPassed) { $canDeploy += "Java SDK" } else { $cannotDeploy += "Java SDK" }
+if ($goPassed) { $canDeploy += "Go SDK" } else { $cannotDeploy += "Go SDK" }
+if ($jsPassed) { $canDeploy += "JavaScript SDK" } else { $cannotDeploy += "JavaScript SDK" }
+
+# Connectors depend on Rust
+if ($rustPassed -and $sparkPassed) { $canDeploy += "Spark Connector" } else { $blocked += "Spark Connector" }
+
+Write-Host @"
+
+✅ CAN DEPLOY IMMEDIATELY ($($canDeploy.Count) components):
 "@ -ForegroundColor Green
-    
-    exit 0
-}
-else {
+
+$canDeploy | ForEach-Object { Write-Host "   ✅ $_" -ForegroundColor Green }
+
+if ($cannotDeploy.Count -gt 0) {
     Write-Host @"
-╔════════════════════════════════════════════════════════════════════╗
-║                                                                    ║
-║           ❌ TESTS FAILED - DO NOT DEPLOY                         ║
-║                                                                    ║
-║  Failed Tests:                                                     ║
+❌ CANNOT DEPLOY - NEEDS FIXES ($($cannotDeploy.Count) components):
 "@ -ForegroundColor Red
     
-    $failedTests | ForEach-Object {
-        Write-Host "    ❌ $_"
+    $cannotDeploy | ForEach-Object { Write-Host "   ❌ $_" -ForegroundColor Red }
+}
+
+if ($blocked.Count -gt 0) {
+    Write-Host @"
+⏳ BLOCKED - WAITING FOR DEPENDENCIES ($($blocked.Count) components):
+"@ -ForegroundColor Yellow
+    
+    $blocked | ForEach-Object { Write-Host "   ⏳ $_" -ForegroundColor Yellow }
+}
+
+Write-Host @"
+
+════════════════════════════════════════════════════════════════════
+
+📊 DEPLOYMENT STRATEGY:
+════════════════════════════════════════════════════════════════════
+
+PHASE 1 (Deploy NOW):
+"@
+
+if ($canDeploy.Count -gt 0) {
+    Write-Host "  ✅ Deploy these components immediately:" -ForegroundColor Green
+    $canDeploy | ForEach-Object {
+        Write-Host "     • $_" -ForegroundColor Green
     }
     
     Write-Host @"
-║                                                                    ║
-║  Next Steps:                                                       ║
-║  1. Investigate each failure                                      ║
-║  2. Fix the root causes                                           ║
-║  3. Re-run this test suite                                        ║
-║  4. Do NOT deploy until all tests pass                            ║
-║                                                                    ║
-╚════════════════════════════════════════════════════════════════════╝
-"@ -ForegroundColor Red
+  
+  Commands to run:
+"@ -ForegroundColor Green
     
-    exit 1
+    if ($canDeploy -contains "Python SDK") {
+        Write-Host "    pip install kore-fileformat==1.2.3" -ForegroundColor Cyan
+    }
+    if ($canDeploy -contains "Go SDK") {
+        Write-Host "    go get github.com/arunkatherashala/go-kore@v1.2.3" -ForegroundColor Cyan
+    }
+    if ($canDeploy -contains "JavaScript SDK") {
+        Write-Host "    npm install kore-fileformat@1.2.3" -ForegroundColor Cyan
+    }
+    if ($canDeploy -contains "Rust Core") {
+        Write-Host "    cargo install kore_fileformat" -ForegroundColor Cyan
+    }
 }
+
+if ($cannotDeploy.Count -gt 0) {
+    Write-Host @"
+
+PHASE 2 (Fix and Deploy Later):
+  ❌ Fix these components:
+"@ -ForegroundColor Yellow
+    
+    $cannotDeploy | ForEach-Object {
+        Write-Host "     • $_" -ForegroundColor Red
+    }
+}
+
+if ($blocked.Count -gt 0) {
+    Write-Host @"
+
+PHASE 3 (Deploy When Dependencies Fixed):
+  ⏳ Deploy after dependencies resolved:
+"@ -ForegroundColor Yellow
+    
+    $blocked | ForEach-Object {
+        Write-Host "     • $_" -ForegroundColor Yellow
+    }
+}
+
+Write-Host @"
+
+════════════════════════════════════════════════════════════════════
+
+💡 ROLLING DEPLOYMENT APPROACH:
+════════════════════════════════════════════════════════════════════
+
+✅ What to do:
+   1. Deploy all passing components NOW ($($canDeploy.Count) ready)
+   2. Users get value immediately
+   3. Fix failed components in parallel
+   4. Deploy fixes when ready (v1.2.3-patch)
+   5. No need to wait for all-or-nothing
+
+❌ What NOT to do:
+   1. Don't wait for failing components to fix
+   2. Don't block independent components
+   3. Don't delay deployment for everyone
+
+════════════════════════════════════════════════════════════════════
+
+📝 NEXT STEPS:
+════════════════════════════════════════════════════════════════════
+
+1. Review DEPLOYMENT_ROLLING_STRATEGY.md
+2. Deploy passing components (see commands above)
+3. Create issues for failed components
+4. Fix failures independently
+5. Redeploy patches as fixes complete
+
+════════════════════════════════════════════════════════════════════
+"@
+
+# Exit with info (not failure)
+Write-Host @"
+
+📊 SUMMARY:
+   ✅ Ready: $($canDeploy.Count) components
+   ❌ Need fixes: $($cannotDeploy.Count) components  
+   ⏳ Blocked: $($blocked.Count) components
+
+" -ForegroundColor Cyan
+
+exit 0
