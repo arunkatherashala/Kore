@@ -1,1 +1,0 @@
-cargo:rustc-env=AZSDK_RUSTC_VERSION=1.96.0-nightly

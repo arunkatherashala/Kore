@@ -24,7 +24,7 @@ class KoreBatch(
 
   override def createReaderFactory(): PartitionReaderFactory = {
     new PartitionReaderFactory {
-      override def createReader(partition: InputPartition): PartitionReader[org.apache.spark.sql.vectorized.ColumnarBatch] = {
+      override def createReader(partition: InputPartition): PartitionReader[org.apache.spark.sql.catalyst.InternalRow] = {
         val korePartition = partition.asInstanceOf[KoreInputPartition]
         new KorePartitionReader(korePartition.path, korePartition.schema, korePartition.filters)
       }

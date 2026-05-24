@@ -1,8 +1,9 @@
 package com.kore.spark
 
-import org.apache.spark.sql.connector.read.Batch
 import org.apache.spark.sql.connector.read.Scan
 import org.apache.spark.sql.connector.read.ScanBuilder
+import org.apache.spark.sql.connector.read.SupportsPushDownFilters
+import org.apache.spark.sql.connector.read.SupportsPushDownRequiredColumns
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
@@ -13,21 +14,19 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 class KoreScanBuilder(
     val path: String,
     val schema: StructType,
-    val options: CaseInsensitiveStringMap) extends ScanBuilder {
+    val options: CaseInsensitiveStringMap) 
+    extends ScanBuilder 
+    with SupportsPushDownFilters 
+    with SupportsPushDownRequiredColumns {
 
   private var filters: Array[Filter] = Array()
-  private var projection: Array[Array[Int]] = Array()
+  private var projection: StructType = schema
 
   /**
    * Push column projection to reduce I/O
    */
-  override def pushProjection(projection: Array[Array[Int]]): Boolean = {
-    if (projection != null && projection.nonEmpty) {
-      this.projection = projection
-      true
-    } else {
-      false
-    }
+  override def pruneColumns(requiredSchema: StructType): Unit = {
+    this.projection = requiredSchema
   }
 
   /**
@@ -42,6 +41,8 @@ class KoreScanBuilder(
     this.filters = pushable
     unpushable
   }
+
+  override def pushedFilters(): Array[Filter] = this.filters
 
   /**
    * Determine if a filter is pushable to Kore
@@ -67,6 +68,6 @@ class KoreScanBuilder(
   }
 
   override def build(): Scan = {
-    new KoreScan(path, schema, projection, filters, options)
+    new KoreScan(path, projection, Array(), filters, options)
   }
 }

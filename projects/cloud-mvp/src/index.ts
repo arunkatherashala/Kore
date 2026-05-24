@@ -48,36 +48,43 @@ app.use(helmet());
 app.use(cors());
 app.use(compression());
 app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Health check endpoint
-app.get('/health', (req: Request, res: Response) => {
-    res.json({
-        status: 'ok',
+// ========== HEALTH ENDPOINTS ==========
+
+// GET /health - Basic health check
+app.get('/health', (_req: Request, res: Response) => {
+    return res.json({
+        status: 'healthy',
         timestamp: new Date().toISOString(),
-        version: '1.0.0',
         uptime: process.uptime(),
         files: files.size,
         queries: queries.size
     });
 });
 
-// Status endpoint
-app.get('/status', (req: Request, res: Response) => {
-    res.json({
+// GET /status - Service status with metrics
+app.get('/status', (_req: Request, res: Response) => {
+    const fileList = Array.from(files.values());
+    const totalSize = fileList.reduce((sum, f) => sum + f.size, 0);
+    
+    return res.json({
+        status: 'operational',
         service: 'kore-cloud-mvp',
-        status: 'running',
-        uptime: process.uptime(),
-        environment: process.env.NODE_ENV || 'development',
-        filesStored: files.size,
-        queriesProcessed: queries.size
+        version: '1.0.0',
+        timestamp: new Date().toISOString(),
+        metrics: {
+            files: files.size,
+            queries: queries.size,
+            totalDataSize: totalSize,
+            uptime: Math.round(process.uptime())
+        }
     });
 });
 
 // ========== FILE ENDPOINTS ==========
 
 // GET /api/v1/files - List all files with metadata
-app.get('/api/v1/files', (req: Request, res: Response) => {
+app.get('/api/v1/files', (_req: Request, res: Response) => {
     try {
         const fileList = Array.from(files.values());
         const totalSize = fileList.reduce((sum, f) => sum + f.size, 0);
@@ -85,7 +92,7 @@ app.get('/api/v1/files', (req: Request, res: Response) => {
             ? fileList.reduce((sum, f) => sum + f.compressionRatio, 0) / fileList.length
             : 0;
         
-        res.json({
+        return res.json({
             status: 'success',
             files: fileList,
             count: fileList.length,
@@ -93,7 +100,7 @@ app.get('/api/v1/files', (req: Request, res: Response) => {
             averageCompressionRatio: avgRatio.toFixed(4)
         });
     } catch (error) {
-        res.status(500).json({ error: 'Failed to list files', message: String(error) });
+        return res.status(500).json({ error: 'Failed to list files', message: String(error) });
     }
 });
 
@@ -104,9 +111,9 @@ app.get('/api/v1/files/:id', (req: Request, res: Response) => {
         if (!file) {
             return res.status(404).json({ error: 'File not found' });
         }
-        res.json({ status: 'success', file });
+        return res.json({ status: 'success', file });
     } catch (error) {
-        res.status(500).json({ error: 'Failed to get file', message: String(error) });
+        return res.status(500).json({ error: 'Failed to get file', message: String(error) });
     }
 });
 
@@ -141,14 +148,14 @@ app.post('/api/v1/files/upload', (req: Request, res: Response) => {
         const filePath = path.join(fileStorage, `${fileId}.bin`);
         fs.writeFileSync(filePath, data);
         
-        res.status(201).json({
+        return res.status(201).json({
             status: 'success',
             file: metadata,
             compressedSize: Math.round(compressedSize),
             savingsPercent: ((1 - compressionRatio) * 100).toFixed(2)
         });
     } catch (error) {
-        res.status(500).json({ error: 'Upload failed', message: String(error) });
+        return res.status(500).json({ error: 'Upload failed', message: String(error) });
     }
 });
 
@@ -157,7 +164,7 @@ app.post('/api/v1/files/upload', (req: Request, res: Response) => {
 // POST /api/v1/query - Execute query on file
 app.post('/api/v1/query', (req: Request, res: Response) => {
     try {
-        const { fileId, query, filter } = req.body;
+        const { fileId, query } = req.body;
         
         if (!fileId || !query) {
             return res.status(400).json({ error: 'Missing required fields: fileId, query' });
@@ -169,7 +176,6 @@ app.post('/api/v1/query', (req: Request, res: Response) => {
         }
         
         const queryId = uuidv4();
-        const startTime = Date.now();
         
         // Simulate query execution
         const result: QueryResult = {
@@ -185,14 +191,14 @@ app.post('/api/v1/query', (req: Request, res: Response) => {
         
         queries.set(queryId, result);
         
-        res.status(202).json({
+        return res.status(202).json({
             status: 'success',
             queryId,
             message: 'Query queued for processing',
             estimatedTime: '100-500ms'
         });
     } catch (error) {
-        res.status(500).json({ error: 'Query execution failed', message: String(error) });
+        return res.status(500).json({ error: 'Query execution failed', message: String(error) });
     }
 });
 
@@ -204,7 +210,7 @@ app.get('/api/v1/query/:id', (req: Request, res: Response) => {
             return res.status(404).json({ error: 'Query not found' });
         }
         
-        res.json({
+        return res.json({
             status: 'success',
             query,
             data: {
@@ -213,7 +219,7 @@ app.get('/api/v1/query/:id', (req: Request, res: Response) => {
             }
         });
     } catch (error) {
-        res.status(500).json({ error: 'Failed to get query result', message: String(error) });
+        return res.status(500).json({ error: 'Failed to get query result', message: String(error) });
     }
 });
 
@@ -250,26 +256,26 @@ app.post('/api/v1/batch/upload', (req: Request, res: Response) => {
             return { id: fileId, name, size: originalSize };
         });
         
-        res.status(201).json({
+        return res.status(201).json({
             status: 'success',
             uploaded: results.length,
             files: results
         });
     } catch (error) {
-        res.status(500).json({ error: 'Batch upload failed', message: String(error) });
+        return res.status(500).json({ error: 'Batch upload failed', message: String(error) });
     }
 });
 
 // ========== STATISTICS ==========
 
 // GET /api/v1/stats - Get API statistics
-app.get('/api/v1/stats', (req: Request, res: Response) => {
+app.get('/api/v1/stats', (_req: Request, res: Response) => {
     try {
         const fileList = Array.from(files.values());
         const totalSize = fileList.reduce((sum, f) => sum + f.size, 0);
         const totalCompressed = fileList.reduce((sum, f) => sum + (f.size * f.compressionRatio), 0);
         
-        res.json({
+        return res.json({
             status: 'success',
             files: {
                 count: files.size,
@@ -287,30 +293,43 @@ app.get('/api/v1/stats', (req: Request, res: Response) => {
             uptime: process.uptime()
         });
     } catch (error) {
-        res.status(500).json({ error: 'Failed to get statistics', message: String(error) });
+        return res.status(500).json({ error: 'Failed to get statistics', message: String(error) });
     }
 });
 
+// ========== ERROR HANDLING ==========
+
+// 404 handler for undefined routes
+app.use((_req: Request, res: Response) => {
+    return res.status(404).json({
+        error: 'Not Found',
+        message: 'The requested endpoint does not exist'
+    });
+});
+
 // Error handling middleware
-app.use((err: any, req: Request, res: Response) => {
+app.use((err: any, _req: Request, res: Response) => {
     console.error('Error:', err);
-    res.status(500).json({
+    return res.status(500).json({
         error: 'Internal Server Error',
         message: err.message
     });
 });
 
-// 404 handler
-app.use((req: Request, res: Response) => {
-    res.status(404).json({
-        error: 'Not Found',
-        path: req.path
-    });
-});
+// ========== SERVER STARTUP ==========
 
+// Start server
 app.listen(port, () => {
-    console.log(`🚀 Kore Cloud MVP API running on http://localhost:${port}`);
-    console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`🗄️  Database: ${process.env.DB_HOST}:${process.env.DB_PORT}/${process.env.DB_NAME}`);
-    console.log(`📦 S3 Endpoint: ${process.env.AWS_ENDPOINT}`);
+    console.log(`✅ Kore Cloud MVP API running on port ${port}`);
+    console.log(`🚀 Base URL: http://localhost:${port}`);
+    console.log(`📊 Endpoints:`);
+    console.log(`   - GET    /health`);
+    console.log(`   - GET    /status`);
+    console.log(`   - GET    /api/v1/files`);
+    console.log(`   - POST   /api/v1/files/upload`);
+    console.log(`   - GET    /api/v1/files/:id`);
+    console.log(`   - POST   /api/v1/query`);
+    console.log(`   - GET    /api/v1/query/:id`);
+    console.log(`   - POST   /api/v1/batch/upload`);
+    console.log(`   - GET    /api/v1/stats`);
 });
