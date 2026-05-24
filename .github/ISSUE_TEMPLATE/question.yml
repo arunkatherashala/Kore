@@ -1,0 +1,83 @@
+name: Question / Help
+description: Ask a question about using Kore
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Welcome! We're happy to help. If you're getting started with Kore, this is the place to ask questions.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: What language/component are you using?
+      options:
+        - Python
+        - Java
+        - Go
+        - JavaScript/TypeScript
+        - C# / .NET
+        - Ruby
+        - Rust
+        - Spark
+        - Hadoop
+        - Hive
+        - DuckDB
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      placeholder: |
+        What would you like to know about Kore?
+        - How do I...?
+        - I don't understand...
+        - How does... work?
+      description: Ask your question clearly
+    validations:
+      required: true
+
+  - type: textarea
+    id: code
+    attributes:
+      label: Code example (if applicable)
+      placeholder: |
+        ```python
+        import kore_fileformat
+        # Your code here
+        ```
+      description: Show us what you're trying to do (optional)
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      placeholder: |
+        - What have you already tried?
+        - What documentation have you read?
+        - Links to relevant pages?
+        - Is there an error message?
+      description: Help us understand your situation
+
+  - type: checkboxes
+    id: resources
+    attributes:
+      label: Have you checked?
+      options:
+        - label: "README.md"
+        - label: "Documentation on GitHub"
+        - label: "Similar GitHub issues"
+        - label: "Stack Overflow with [kore-fileformat] tag"
+
+  - type: checkboxes
+    id: help
+    attributes:
+      label: How can we help?
+      options:
+        - label: "Answer my question"
+        - label: "Point me to documentation"
+        - label: "Help me with my code"
+        - label: "Show an example"
