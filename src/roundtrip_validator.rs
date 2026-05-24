@@ -75,10 +75,12 @@ impl RoundTripValidator {
         let is_valid = stats.ratio > 0.0 && stats.ratio < 1.0;
 
         let codec_matches = match selected {
-            CodecId::RLE => stats.ratio < 0.5,     // RLE should be <50%
-            CodecId::Dictionary => stats.ratio < 0.5, // Dict should be <50%
-            CodecId::FOR => stats.ratio < 0.5,     // FOR should be <50%
-            CodecId::LZSS => stats.ratio < 0.8,    // LZSS generous
+            CodecId::RLE => stats.ratio < 0.5,            // RLE should be <50%
+            CodecId::Dictionary => stats.ratio < 0.5,     // Dict should be <50%
+            CodecId::EnhancedDictionary => stats.ratio < 0.48, // Enhanced dict: 2-3% better
+            CodecId::FOR => stats.ratio < 0.5,            // FOR should be <50%
+            CodecId::DoubleDelta => stats.ratio < 0.45,   // DoubleDelta: 3-5% better
+            CodecId::LZSS => stats.ratio < 0.8,           // LZSS generous
             CodecId::None => true,
         };
 

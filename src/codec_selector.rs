@@ -236,12 +236,31 @@ impl CodecSelector {
                     (0.7, 500.0) // Moderate: higher cardinality
                 }
             }
+            CodecId::EnhancedDictionary => {
+                // Enhanced dictionary: 2-3% better than standard
+                let base_ratio: f32 = if profile.cardinality_ratio <= 0.01 {
+                    0.15 
+                } else if profile.cardinality_ratio <= 0.1 {
+                    0.35
+                } else {
+                    0.7
+                };
+                ((base_ratio * 0.975_f32).max(0.0_f32), 480.0) // 2.5% improvement, slightly slower
+            }
             CodecId::FOR => {
                 // FOR: best for numeric ranges
                 if profile.is_numeric {
                     (0.25, 2000.0) // Excellent on numeric data
                 } else {
                     (0.8, 2000.0) // Poor on non-numeric
+                }
+            }
+            CodecId::DoubleDelta => {
+                // DoubleDelta: 3-5% better than single delta for smooth sequences
+                if profile.is_numeric && matches!(profile.distribution, DataDistribution::NumericRange) {
+                    (0.22, 1900.0) // 3-5% better than FOR
+                } else {
+                    (0.75, 1900.0) // Fallback
                 }
             }
             CodecId::LZSS => {

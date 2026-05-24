@@ -228,7 +228,9 @@ impl CodecId {
             CodecId::None => 0,
             CodecId::RLE => 1,
             CodecId::Dictionary => 2,
+            CodecId::EnhancedDictionary => 5,
             CodecId::FOR => 3,
+            CodecId::DoubleDelta => 6,
             CodecId::LZSS => 4,
         }
     }

@@ -95,10 +95,11 @@ impl MultiLevelDictionary {
             result.extend(encoded);
         }
 
-        stats.original_size += data.iter().map(|v| v.len()).sum::<usize>() as u64;
-        stats.compressed_size += result.len() as u64;
+        let original_total: usize = data.iter().map(|v| v.len()).sum();
+        stats.original_size += original_total;
+        stats.compressed_size += result.len();
 
-        if result.len() >= data.iter().map(|v| v.len()).sum::<usize>() {
+        if result.len() >= original_total {
             return None; // Expansion detected
         }
 

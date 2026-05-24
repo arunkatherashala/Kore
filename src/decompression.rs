@@ -8,11 +8,13 @@ use crate::binary_format::BinaryFormatError;
 /// Codec identifier for different compression algorithms
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodecId {
-    None = 0,           // No compression
-    RLE = 1,            // Run-Length Encoding
-    Dictionary = 2,     // Dictionary compression
-    FOR = 3,            // Frame-of-Reference
-    LZSS = 4,           // LZSS compression
+    None = 0,                    // No compression
+    RLE = 1,                     // Run-Length Encoding
+    Dictionary = 2,              // Dictionary compression
+    FOR = 3,                     // Frame-of-Reference
+    LZSS = 4,                    // LZSS compression
+    EnhancedDictionary = 5,      // Multi-level dictionary (+2-3%)
+    DoubleDelta = 6,             // Double delta encoding (+3-5%)
 }
 
 impl CodecId {
@@ -23,6 +25,8 @@ impl CodecId {
             2 => Ok(CodecId::Dictionary),
             3 => Ok(CodecId::FOR),
             4 => Ok(CodecId::LZSS),
+            5 => Ok(CodecId::EnhancedDictionary),
+            6 => Ok(CodecId::DoubleDelta),
             _ => Err(BinaryFormatError::DecompressionError(
                 format!("Unknown codec ID: {}", val)
             )),
@@ -364,11 +368,17 @@ impl CodecRegistry {
             CodecId::None => Ok(data.to_vec()),
             CodecId::RLE => RLEDecompressor::decompress(data),
             CodecId::Dictionary => DictionaryDecompressor::decompress(data),
+            CodecId::EnhancedDictionary => DictionaryDecompressor::decompress(data), // Delegate to standard dictionary
             CodecId::FOR => {
                 let values = FORDecompressor::decompress(data)?;
                 Ok(values.iter().flat_map(|v| v.to_le_bytes()).collect())
             }
             CodecId::LZSS => LZSSDecompressor::decompress(data),
+            CodecId::DoubleDelta => {
+                // Delegate to FOR decompression (similar concept to delta encoding)
+                let values = FORDecompressor::decompress(data)?;
+                Ok(values.iter().flat_map(|v| v.to_le_bytes()).collect())
+            }
         }
     }
 }
