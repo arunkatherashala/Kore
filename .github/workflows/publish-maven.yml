@@ -61,18 +61,12 @@ jobs:
         echo "Bundle contents:"
         ls -la "$BUNDLE_STAGING"
         
-        # Create SHA256 checksums for each artifact (Maven Central validates these)
-        echo "Creating checksums..."
-        cd "$BUNDLE_STAGING"
-        sha256sum *.jar *.pom > checksums.txt
-        cat checksums.txt
-        cd - > /dev/null
-        
         # Create ZIP bundle with all artifacts in root (Sonatype requirement)
+        # Maven Central only accepts: .jar, .pom, -sources.jar, -javadoc.jar, .asc (signatures)
         BUNDLE_ZIP="${BUNDLE_DIR}/bundle.zip"
         cd "$BUNDLE_STAGING"
         # Use -j flag to strip directory prefixes, ensuring all files are in ZIP root
-        zip -j "bundle.zip" *.jar *.pom checksums.txt
+        zip -j "bundle.zip" kore-fileformat-${VERSION}.jar kore-fileformat-${VERSION}.pom kore-fileformat-${VERSION}-sources.jar kore-fileformat-${VERSION}-javadoc.jar
         mv "bundle.zip" "$BUNDLE_ZIP"
         cd - > /dev/null
         
