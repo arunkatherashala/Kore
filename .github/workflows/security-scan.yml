@@ -109,7 +109,7 @@ jobs:
       - name: Set up Java
       - uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '21'
           distribution: 'temurin'
 
       - name: Run Maven Dependency Check

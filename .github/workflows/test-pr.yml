@@ -100,10 +100,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '21'
           distribution: 'temurin'
 
       - name: Build Java library
@@ -186,7 +186,7 @@ jobs:
 | Rust Tests | ${{ needs.test-rust.result == 'success' && 'âœ… Passed' || 'âŒ Failed' }} |
 | Python Tests (3.9-3.11) | ${{ needs.test-python.result == 'success' && 'âœ… Passed' || 'âŒ Failed' }} |
 | Node.js Tests (18.x, 20.x) | ${{ needs.test-nodejs.result == 'success' && 'âœ… Passed' || 'âŒ Failed' }} |
-| Java Tests (JDK 17) | ${{ needs.test-java.result == 'success' && 'âœ… Passed' || 'âŒ Failed' }} |
+| Java Tests (JDK 21) | ${{ needs.test-java.result == 'success' && 'âœ… Passed' || 'âŒ Failed' }} |
 | Code Coverage | âœ… Generated |
 
 ### Summary

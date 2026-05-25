@@ -1,1 +1,0 @@
-memberSearchIndex = [{"p":"io.github.arunkatherashala.kore","c":"KoreFileFormat","l":"getVersion()"},{"p":"io.github.arunkatherashala.kore","c":"KoreFileFormat","l":"isNativeLibraryAvailable()"},{"p":"io.github.arunkatherashala.kore","c":"KoreFileFormat","l":"KoreFileFormat()","u":"%3Cinit%3E()"}];updateSearchResults();
