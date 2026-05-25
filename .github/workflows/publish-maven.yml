@@ -32,8 +32,8 @@ jobs:
           <servers>
             <server>
               <id>central</id>
-              <username>${{ secrets.CENTRAL_PORTAL_TOKEN_USERNAME }}</username>
-              <password>${{ secrets.CENTRAL_PORTAL_TOKEN_PASSWORD }}</password>
+              <username>${{ secrets.MAVEN_USERNAME }}</username>
+              <password>${{ secrets.MAVEN_PASSWORD }}</password>
             </server>
           </servers>
         </settings>
