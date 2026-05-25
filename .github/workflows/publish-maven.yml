@@ -21,7 +21,7 @@ jobs:
         java-version: '21'
         distribution: 'temurin'
 
-    - name: Configure Maven for Central Portal API
+    - name: Configure Maven for OSSRH
       run: |
         mkdir -p ~/.m2
         cat > ~/.m2/settings.xml << 'EOF'
@@ -38,7 +38,7 @@ jobs:
           </servers>
         </settings>
         EOF
-        echo "✓ Maven settings configured for Central Portal API"
+        echo "✓ Maven settings configured for OSSRH"
 
     - name: Build and Deploy to Maven Central
       run: |
@@ -48,7 +48,8 @@ jobs:
         echo "Building and deploying to Maven Central"
         echo "========================================"
         
-        # Deploy to Maven Central using Central Portal API (no GPG needed)
+        # Deploy to Maven Central via OSSRH staging repository
+        # Uses Central Portal credentials with standard Maven deploy
         mvn clean deploy \
           -DskipTests \
           --no-transfer-progress
