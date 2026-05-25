@@ -24,13 +24,13 @@ jobs:
     - name: Install and Configure GPG
       run: |
         # Import GPG key from secret
-        echo "${{ secrets.MAVEN_GPG_PRIVATE_KEY }}" | base64 -d | gpg --import --batch --no-tty
+        echo "${{ secrets.GPG_PRIVATE_KEY }}" | base64 -d | gpg --import --batch --no-tty
         echo ""
         echo "✓ GPG key imported"
 
     - name: Configure Maven and GPG
       env:
-        MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+        MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
       run: |
         mkdir -p ~/.m2
         cat > ~/.m2/settings.xml << EOF
@@ -54,7 +54,7 @@ jobs:
       env:
         MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
         MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
-        MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+        MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
       run: |
         cd maven
         
