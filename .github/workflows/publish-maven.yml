@@ -49,52 +49,89 @@ jobs:
         
         # Create temporary directory for bundle
         BUNDLE_DIR=$(mktemp -d)
-        BUNDLE_STAGING="${BUNDLE_DIR}/kore-fileformat-${VERSION}"
-        mkdir -p "$BUNDLE_STAGING"
-        
-        # Copy all artifacts to bundle directory
-        cp target/kore-fileformat-${VERSION}.jar "$BUNDLE_STAGING/"
-        cp target/kore-fileformat-${VERSION}-sources.jar "$BUNDLE_STAGING/"
-        cp target/kore-fileformat-${VERSION}-javadoc.jar "$BUNDLE_STAGING/"
-        cp pom.xml "$BUNDLE_STAGING/kore-fileformat-${VERSION}.pom"
-        
-        echo "Bundle contents:"
-        ls -la "$BUNDLE_STAGING"
-        
-        # Create ZIP bundle with all artifacts in root (Sonatype requirement)
-        # Maven Central only accepts: .jar, .pom, -sources.jar, -javadoc.jar, .asc (signatures)
-        BUNDLE_ZIP="${BUNDLE_DIR}/bundle.zip"
+        BUNDLE_STAGING="$BUNDLE_DIR"
         cd "$BUNDLE_STAGING"
-        # Use -j flag to strip directory prefixes, ensuring all files are in ZIP root
-        zip -j "bundle.zip" kore-fileformat-${VERSION}.jar kore-fileformat-${VERSION}.pom kore-fileformat-${VERSION}-sources.jar kore-fileformat-${VERSION}-javadoc.jar
-        mv "bundle.zip" "$BUNDLE_ZIP"
-        cd - > /dev/null
+        
+        # Copy all artifacts to bundle directory (ROOT LEVEL - no subdirectories!)
+        cp $OLDPWD/target/kore-fileformat-${VERSION}.jar .
+        cp $OLDPWD/target/kore-fileformat-${VERSION}-sources.jar .
+        cp $OLDPWD/target/kore-fileformat-${VERSION}-javadoc.jar .
+        cp $OLDPWD/pom.xml ./kore-fileformat-${VERSION}.pom
+        
+        echo "Generating MD5 and SHA1 checksums..."
+        # Generate MD5 checksums for each file
+        md5sum kore-fileformat-${VERSION}.jar > kore-fileformat-${VERSION}.jar.md5
+        md5sum kore-fileformat-${VERSION}.pom > kore-fileformat-${VERSION}.pom.md5
+        md5sum kore-fileformat-${VERSION}-sources.jar > kore-fileformat-${VERSION}-sources.jar.md5
+        md5sum kore-fileformat-${VERSION}-javadoc.jar > kore-fileformat-${VERSION}-javadoc.jar.md5
+        
+        # Generate SHA1 checksums for each file
+        sha1sum kore-fileformat-${VERSION}.jar > kore-fileformat-${VERSION}.jar.sha1
+        sha1sum kore-fileformat-${VERSION}.pom > kore-fileformat-${VERSION}.pom.sha1
+        sha1sum kore-fileformat-${VERSION}-sources.jar > kore-fileformat-${VERSION}-sources.jar.sha1
+        sha1sum kore-fileformat-${VERSION}-javadoc.jar > kore-fileformat-${VERSION}-javadoc.jar.sha1
+        
+        echo "✓ Checksums generated"
+        ls -la | grep -E "\.(jar|pom|md5|sha1)"
+        
+        # Create ZIP bundle with all artifacts and checksums in root
+        BUNDLE_ZIP="${BUNDLE_DIR}/bundle.zip"
+        zip -j "$BUNDLE_ZIP" \
+          kore-fileformat-${VERSION}.jar \
+          kore-fileformat-${VERSION}.jar.md5 \
+          kore-fileformat-${VERSION}.jar.sha1 \
+          kore-fileformat-${VERSION}.pom \
+          kore-fileformat-${VERSION}.pom.md5 \
+          kore-fileformat-${VERSION}.pom.sha1 \
+          kore-fileformat-${VERSION}-sources.jar \
+          kore-fileformat-${VERSION}-sources.jar.md5 \
+          kore-fileformat-${VERSION}-sources.jar.sha1 \
+          kore-fileformat-${VERSION}-javadoc.jar \
+          kore-fileformat-${VERSION}-javadoc.jar.md5 \
+          kore-fileformat-${VERSION}-javadoc.jar.sha1
         
         echo ""
         echo "✓ ZIP bundle created: $BUNDLE_ZIP"
         ls -lh "$BUNDLE_ZIP"
         
-        # CRITICAL: Verify ZIP contents structure
+        # CRITICAL: Verify ZIP contents structure (all files at root, no subdirectories)
         echo ""
         echo "=== ZIP Structure Validation (Sonatype requirement) ==="
         UNZIP_OUTPUT=$(unzip -l "$BUNDLE_ZIP")
         echo "$UNZIP_OUTPUT"
         
-        # Verify required files exist in ZIP root (not in subdirectories)
-        if ! echo "$UNZIP_OUTPUT" | grep -q "kore-fileformat-${VERSION}.jar"; then
-          echo "❌ ERROR: JAR file not in ZIP root!"
+        # Verify required files exist at ZIP root (NOT in subdirectories with ./)
+        if ! echo "$UNZIP_OUTPUT" | grep -E "^\s+[0-9]+\s+[0-9-]+\s+[0-9:]+\s+kore-fileformat-${VERSION}\.jar$"; then
+          echo "❌ ERROR: JAR file not in ZIP root or has wrong path!"
           exit 1
         fi
-        if ! echo "$UNZIP_OUTPUT" | grep -q "kore-fileformat-${VERSION}.pom"; then
-          echo "❌ ERROR: POM file not in ZIP root!"
+        if ! echo "$UNZIP_OUTPUT" | grep -E "^\s+[0-9]+\s+[0-9-]+\s+[0-9:]+\s+kore-fileformat-${VERSION}\.pom$"; then
+          echo "❌ ERROR: POM file not in ZIP root or has wrong path!"
           exit 1
         fi
+        # Count MD5 checksums (should be 4: jar, pom, sources.jar, javadoc.jar)
+        MD5_COUNT=$(echo "$UNZIP_OUTPUT" | grep -c "\.md5$")
+        if [ "$MD5_COUNT" -lt 4 ]; then
+          echo "❌ ERROR: Missing MD5 checksums in ZIP! Found: $MD5_COUNT, Expected: 4"
+          exit 1
+        fi
+        # Count SHA1 checksums (should be 4)
+        SHA1_COUNT=$(echo "$UNZIP_OUTPUT" | grep -c "\.sha1$")
+        if [ "$SHA1_COUNT" -lt 4 ]; then
+          echo "❌ ERROR: Missing SHA1 checksums in ZIP! Found: $SHA1_COUNT, Expected: 4"
+          exit 1
+        fi
+        echo "✓ All required checksums present (MD5: $MD5_COUNT, SHA1: $SHA1_COUNT)"
         
-        echo "✓ Bundle structure validated"
+        echo "✓ Bundle structure validated with all required checksums"
         
         # Publish using Central Portal API
         echo ""
+        echo "========================================"
         echo "Uploading bundle to Central Portal..."
+        echo "========================================"
+        echo "Bundle: $BUNDLE_ZIP"
+        echo "Files: $(unzip -l "$BUNDLE_ZIP" | grep -c "kore-fileformat")"
         
         curl -v -X POST \
           -u "${{ secrets.CENTRAL_PORTAL_TOKEN_USERNAME }}:${{ secrets.CENTRAL_PORTAL_TOKEN_PASSWORD }}" \
