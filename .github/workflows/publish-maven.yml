@@ -21,49 +21,69 @@ jobs:
         java-version: '21'
         distribution: 'temurin'
 
-    - name: Configure Maven for OSSRH
-      run: |
-        mkdir -p ~/.m2
-        cat > ~/.m2/settings.xml << 'EOF'
-        <?xml version="1.0" encoding="UTF-8"?>
-        <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
-                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                  xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd">
-          <servers>
-            <server>
-              <id>central</id>
-              <username>${{ secrets.MAVEN_USERNAME }}</username>
-              <password>${{ secrets.MAVEN_PASSWORD }}</password>
-            </server>
-          </servers>
-        </settings>
-        EOF
-        echo "✓ Maven settings configured for OSSRH"
-
-    - name: Test OSSRH Credentials
-      run: |
-        echo "Testing OSSRH authentication..."
-        # Test connection to OSSRH endpoint
-        curl -u "${{ secrets.MAVEN_USERNAME }}:${{ secrets.MAVEN_PASSWORD }}" \
-          -I https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/ 2>&1 | head -20
-        
-        echo ""
-        echo "Testing old OSSRH endpoint..."
-        curl -u "${{ secrets.MAVEN_USERNAME }}:${{ secrets.MAVEN_PASSWORD }}" \
-          -I https://oss.sonatype.org/service/local/staging/deploy/maven2/ 2>&1 | head -20
-
-    - name: Build and Deploy to Maven Central
+    - name: Build Maven Artifacts
       run: |
         cd maven
         
         echo "========================================"
-        echo "Building and deploying to Maven Central"
+        echo "Building Maven artifacts for Central"
         echo "========================================"
         
-        # Deploy with verbose output to diagnose issues
-        mvn -X clean deploy \
+        # Build all required artifacts
+        mvn clean package \
           -DskipTests \
-          --no-transfer-progress 2>&1 | tail -100
+          --no-transfer-progress
+        
+        echo "✓ Build completed"
+
+    - name: Publish to Maven Central via API
+      run: |
+        cd maven
+        
+        # Extract version
+        VERSION=$(sed -n '/<version>/p' pom.xml | head -1 | sed 's/.*<version>\(.*\)<\/version>.*/\1/')
+        
+        echo "========================================"
+        echo "Publishing v${VERSION} to Maven Central"
+        echo "========================================"
+        
+        # Create temporary directory for bundle
+        BUNDLE_DIR=$(mktemp -d)
+        
+        # Copy all artifacts to bundle
+        cp target/kore-fileformat-${VERSION}.jar "$BUNDLE_DIR/"
+        cp target/kore-fileformat-${VERSION}-sources.jar "$BUNDLE_DIR/"
+        cp target/kore-fileformat-${VERSION}-javadoc.jar "$BUNDLE_DIR/"
+        
+        # Copy pom.xml as required
+        cp pom.xml "$BUNDLE_DIR/kore-fileformat-${VERSION}.pom"
+        
+        echo "Bundle contents:"
+        ls -la "$BUNDLE_DIR"
+        
+        # Publish using Central Portal API
+        echo ""
+        echo "Uploading to Central Portal..."
+        
+        # Create multipart form with all files
+        curl -v -X POST \
+          -u "${{ secrets.CENTRAL_PORTAL_TOKEN_USERNAME }}:${{ secrets.CENTRAL_PORTAL_TOKEN_PASSWORD }}" \
+          -F "bundle=@${BUNDLE_DIR}/kore-fileformat-${VERSION}.jar" \
+          -F "bundle=@${BUNDLE_DIR}/kore-fileformat-${VERSION}-sources.jar" \
+          -F "bundle=@${BUNDLE_DIR}/kore-fileformat-${VERSION}-javadoc.jar" \
+          -F "bundle=@${BUNDLE_DIR}/kore-fileformat-${VERSION}.pom" \
+          "https://central.sonatype.com/api/v1/publisher/upload" 2>&1 | tee upload_response.txt
+        
+        # Check response
+        if grep -q "error\|Error\|ERROR\|400\|401\|402\|403\|404" upload_response.txt; then
+          echo "❌ Upload may have failed - checking response..."
+          cat upload_response.txt
+          exit 1
+        fi
+        
+        echo ""
+        echo "✓ Published to Maven Central"
+        echo "Note: May take 10-15 minutes to appear in search"
 
     - name: Publish Summary
       if: always()
