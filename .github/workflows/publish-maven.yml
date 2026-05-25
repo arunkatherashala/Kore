@@ -117,14 +117,18 @@ jobs:
         echo "Upload request sent"
 
     - name: Publish Summary
-      if: success()
+      if: always()
       run: |
-        VERSION=$(cd maven && mvn help:describe -Dexpression=project.version -q -DforceStdout)
-        echo "## ✅ Kore Published to Maven Central" >> $GITHUB_STEP_SUMMARY
+        cd maven
+        VERSION=$(sed -n '/<version>/p' pom.xml | head -1 | sed 's/.*<version>\(.*\)<\/version>.*/\1/')
+        
+        echo "## ✅ Kore v${VERSION} Deployed to Maven Central" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Package:** io.github.arunkatherashala:kore-fileformat:${VERSION}" >> $GITHUB_STEP_SUMMARY
         echo "**Java Runtime:** JDK 21 with full Java 21 language features" >> $GITHUB_STEP_SUMMARY
         echo "**Repository:** [Maven Central](https://central.sonatype.com/artifact/io.github.arunkatherashala/kore-fileformat)" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "⏳ Artifacts available in 10-15 minutes via Maven Central search." >> $GITHUB_STEP_SUMMARY
+        echo "### 📋 Next Steps" >> $GITHUB_STEP_SUMMARY
+        echo "- ⏳ Indexing: 10-15 minutes (check back at [Maven Central Search](https://central.sonatype.com/search?q=kore-fileformat))" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Once indexed, use in Maven: \`io.github.arunkatherashala:kore-fileformat:${VERSION}\`" >> $GITHUB_STEP_SUMMARY
 
