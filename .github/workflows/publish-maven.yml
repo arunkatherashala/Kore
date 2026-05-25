@@ -47,20 +47,46 @@ jobs:
         cd maven
         mvn clean package -Dmaven.test.skip=true -DskipTests -Dgpg.skip=true --no-transfer-progress
         
-        # Manual upload to Maven Central via Central Portal API using curl
-        VERSION="1.2.3"
+        # Extract version from pom.xml
+        VERSION=$(mvn help:describe -Dexpression=project.version -q -DforceStdout)
+        ARTIFACT_ID="kore-fileformat"
+        GROUP_ID="io.github.arunkatherashala"
+        BUNDLE_DIR="bundle"
+        BUNDLE_JAR="${BUNDLE_DIR}/${ARTIFACT_ID}-${VERSION}-bundle.jar"
+        
+        echo "=== Creating Maven Bundle ==="
+        echo "Version: ${VERSION}"
+        echo "GroupId: ${GROUP_ID}"
+        echo "ArtifactId: ${ARTIFACT_ID}"
+        
+        # Create bundle directory structure
+        mkdir -p ${BUNDLE_DIR}
+        cd ${BUNDLE_DIR}
+        
+        # Create META-INF/maven structure
+        mkdir -p META-INF/maven/${GROUP_ID}/${ARTIFACT_ID}
+        
+        # Copy files with proper naming
+        cp ../target/${ARTIFACT_ID}-${VERSION}.jar .
+        cp ../target/${ARTIFACT_ID}-${VERSION}-sources.jar .
+        cp ../target/${ARTIFACT_ID}-${VERSION}-javadoc.jar .
+        cp ../pom.xml META-INF/maven/${GROUP_ID}/${ARTIFACT_ID}/
+        cp ../pom.xml .
+        
+        # Create the bundle JAR
+        jar cvf ${BUNDLE_JAR} ${ARTIFACT_ID}-${VERSION}.jar ${ARTIFACT_ID}-${VERSION}-sources.jar ${ARTIFACT_ID}-${VERSION}-javadoc.jar pom.xml META-INF/
+        
+        echo "=== Bundle created: ${BUNDLE_JAR} ==="
+        
+        # Upload bundle to Maven Central
         USERNAME="${{ secrets.CENTRAL_PORTAL_TOKEN_USERNAME }}"
         PASSWORD="${{ secrets.CENTRAL_PORTAL_TOKEN_PASSWORD }}"
         API_URL="https://central.sonatype.com/api/v1/publisher/upload"
         
-        echo "=== Uploading artifacts to Maven Central ==="
+        echo "=== Uploading bundle to Maven Central ==="
         
-        # Create multipart upload
         curl -v \
-          -F "bundle=@target/kore-fileformat-${VERSION}.jar" \
-          -F "bundle=@target/kore-fileformat-${VERSION}-sources.jar" \
-          -F "bundle=@target/kore-fileformat-${VERSION}-javadoc.jar" \
-          -F "bundle=@pom.xml" \
+          -F "bundle=@${BUNDLE_JAR}" \
           --basic -u "${USERNAME}:${PASSWORD}" \
           "${API_URL}"
         
@@ -70,10 +96,12 @@ jobs:
     - name: Publish Summary
       if: success()
       run: |
+        VERSION=$(cd maven && mvn help:describe -Dexpression=project.version -q -DforceStdout)
         echo "## ✅ Kore Published to Maven Central" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Package:** com.github.arunkatherashala:kore-fileformat:1.2.1" >> $GITHUB_STEP_SUMMARY
-        echo "**Repository:** [Maven Central](https://central.sonatype.com/artifact/com/github/arunkatherashala/kore-fileformat)" >> $GITHUB_STEP_SUMMARY
+        echo "**Package:** io.github.arunkatherashala:kore-fileformat:${VERSION}" >> $GITHUB_STEP_SUMMARY
+        echo "**Java Runtime:** JDK 21 with full Java 21 language features" >> $GITHUB_STEP_SUMMARY
+        echo "**Repository:** [Maven Central](https://central.sonatype.com/artifact/io.github.arunkatherashala/kore-fileformat)" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "⏳ Artifacts available in 10-15 minutes via Maven Central search." >> $GITHUB_STEP_SUMMARY
 
