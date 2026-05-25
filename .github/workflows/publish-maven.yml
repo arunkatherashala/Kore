@@ -40,6 +40,18 @@ jobs:
         EOF
         echo "✓ Maven settings configured for OSSRH"
 
+    - name: Test OSSRH Credentials
+      run: |
+        echo "Testing OSSRH authentication..."
+        # Test connection to OSSRH endpoint
+        curl -u "${{ secrets.MAVEN_USERNAME }}:${{ secrets.MAVEN_PASSWORD }}" \
+          -I https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/ 2>&1 | head -20
+        
+        echo ""
+        echo "Testing old OSSRH endpoint..."
+        curl -u "${{ secrets.MAVEN_USERNAME }}:${{ secrets.MAVEN_PASSWORD }}" \
+          -I https://oss.sonatype.org/service/local/staging/deploy/maven2/ 2>&1 | head -20
+
     - name: Build and Deploy to Maven Central
       run: |
         cd maven
@@ -48,14 +60,10 @@ jobs:
         echo "Building and deploying to Maven Central"
         echo "========================================"
         
-        # Deploy to Maven Central via OSSRH staging repository
-        # Uses Central Portal credentials with standard Maven deploy
-        mvn clean deploy \
+        # Deploy with verbose output to diagnose issues
+        mvn -X clean deploy \
           -DskipTests \
-          --no-transfer-progress
-        
-        echo ""
-        echo "✓ Deployment completed successfully"
+          --no-transfer-progress 2>&1 | tail -100
 
     - name: Publish Summary
       if: always()
