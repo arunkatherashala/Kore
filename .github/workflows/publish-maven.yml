@@ -47,17 +47,24 @@ jobs:
         cd maven
         mvn clean package -Dmaven.test.skip=true -DskipTests -Dgpg.skip=true --no-transfer-progress
         
-        # Extract version from pom.xml
-        VERSION=$(mvn help:describe -Dexpression=project.version -q -DforceStdout)
+        # Extract version from pom.xml using grep (no Maven dependency)
+        VERSION=$(grep -oP '(?<=<version>)[^<]+' pom.xml | head -1)
+        echo "✓ Extracted Version: $VERSION"
+        
+        if [ -z "$VERSION" ]; then
+          echo "❌ Failed to extract version from pom.xml"
+          exit 1
+        fi
+        
         ARTIFACT_ID="kore-fileformat"
         GROUP_ID="io.github.arunkatherashala"
         BUNDLE_DIR="bundle"
         BUNDLE_JAR="${BUNDLE_DIR}/${ARTIFACT_ID}-${VERSION}-bundle.jar"
         
         echo "=== Creating Maven Bundle ==="
-        echo "Version: ${VERSION}"
-        echo "GroupId: ${GROUP_ID}"
-        echo "ArtifactId: ${ARTIFACT_ID}"
+        echo "  Version: ${VERSION}"
+        echo "  GroupId: ${GROUP_ID}"
+        echo "  ArtifactId: ${ARTIFACT_ID}"
         
         # Create bundle directory structure
         mkdir -p ${BUNDLE_DIR}
@@ -67,53 +74,45 @@ jobs:
         mkdir -p META-INF/maven/${GROUP_ID}/${ARTIFACT_ID}
         
         # Copy files with proper naming
-        cp ../target/${ARTIFACT_ID}-${VERSION}.jar .
-        cp ../target/${ARTIFACT_ID}-${VERSION}-sources.jar .
-        cp ../target/${ARTIFACT_ID}-${VERSION}-javadoc.jar .
+        cp ../target/${ARTIFACT_ID}-${VERSION}.jar . || (echo "❌ Main JAR not found"; exit 1)
+        cp ../target/${ARTIFACT_ID}-${VERSION}-sources.jar . || (echo "❌ Sources JAR not found"; exit 1)
+        cp ../target/${ARTIFACT_ID}-${VERSION}-javadoc.jar . || (echo "❌ Javadoc JAR not found"; exit 1)
         cp ../pom.xml META-INF/maven/${GROUP_ID}/${ARTIFACT_ID}/
         cp ../pom.xml .
         
         # Create the bundle JAR
         jar cvf ${BUNDLE_JAR} ${ARTIFACT_ID}-${VERSION}.jar ${ARTIFACT_ID}-${VERSION}-sources.jar ${ARTIFACT_ID}-${VERSION}-javadoc.jar pom.xml META-INF/
         
-        echo "=== Bundle created: ${BUNDLE_JAR} ==="
+        echo "✓ Bundle created: ${BUNDLE_JAR}"
         
         # Upload bundle to Maven Central
         USERNAME="${{ secrets.CENTRAL_PORTAL_TOKEN_USERNAME }}"
         PASSWORD="${{ secrets.CENTRAL_PORTAL_TOKEN_PASSWORD }}"
         API_URL="https://central.sonatype.com/api/v1/publisher/upload"
         
-        echo "=== Uploading bundle to Maven Central ==="
-        echo "Bundle JAR: ${BUNDLE_JAR}"
-        echo "Checking bundle exists:"
-        ls -lh "${BUNDLE_JAR}"
-        
         echo ""
-        echo "Uploading to: ${API_URL}"
+        echo "=== Uploading to Maven Central ==="
+        echo "  Endpoint: ${API_URL}"
+        echo "  Bundle: ${BUNDLE_JAR}"
         
-        # Upload with full output and error checking
-        RESPONSE=$(curl -w "\n%{http_code}" -v \
+        # Upload with full error handling
+        HTTP_RESPONSE=$(curl -i -X POST \
           -F "bundle=@${BUNDLE_JAR}" \
           --basic -u "${USERNAME}:${PASSWORD}" \
           "${API_URL}" 2>&1)
         
-        HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-        BODY=$(echo "$RESPONSE" | head -n -1)
+        echo "$HTTP_RESPONSE"
         
-        echo ""
-        echo "HTTP Response Code: ${HTTP_CODE}"
-        echo ""
-        echo "Response Body:"
-        echo "$BODY"
-        
-        if [ "$HTTP_CODE" != "201" ]; then
+        # Check for success
+        if echo "$HTTP_RESPONSE" | grep -q "201"; then
           echo ""
-          echo "❌ Upload failed! Expected HTTP 201, got ${HTTP_CODE}"
+          echo "✅ Upload successful (HTTP 201)"
+        else
+          echo ""
+          echo "❌ Upload failed! Response:"
+          echo "$HTTP_RESPONSE"
           exit 1
         fi
-        
-        echo ""
-        echo "=== ✅ Upload complete (HTTP 201) ==="
 
     - name: Publish Summary
       if: success()
