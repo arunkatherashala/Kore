@@ -6,7 +6,7 @@
 
     <groupId>io.github.arunkatherashala</groupId>
     <artifactId>kore-fileformat</artifactId>
-    <version>1.2.2</version>
+    <version>1.2.3</version>
     <packaging>jar</packaging>
 
     <name>KORE - Killer Optimized Record Exchange</name>
@@ -33,6 +33,17 @@
         <developerConnection>scm:git:https://github.com/arunkatherashala/Kore.git</developerConnection>
         <url>https://github.com/arunkatherashala/Kore</url>
     </scm>
+
+    <distributionManagement>
+        <repository>
+            <id>ossrh</id>
+            <url>https://oss.sonatype.org/service/local/staging/deploy/maven2/</url>
+        </repository>
+        <snapshotRepository>
+            <id>ossrh</id>
+            <url>https://oss.sonatype.org/content/repositories/snapshots</url>
+        </snapshotRepository>
+    </distributionManagement>
 
     <properties>
         <maven.compiler.source>21</maven.compiler.source>
@@ -105,6 +116,28 @@
                         <goals>
                             <goal>jar</goal>
                         </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- GPG Signing Plugin -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-gpg-plugin</artifactId>
+                <version>3.1.0</version>
+                <executions>
+                    <execution>
+                        <id>sign-artifacts</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>sign</goal>
+                        </goals>
+                        <configuration>
+                            <gpgArguments>
+                                <arg>--pinentry-mode</arg>
+                                <arg>loopback</arg>
+                            </gpgArguments>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>
