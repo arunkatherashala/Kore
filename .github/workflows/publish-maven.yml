@@ -84,14 +84,36 @@ jobs:
         API_URL="https://central.sonatype.com/api/v1/publisher/upload"
         
         echo "=== Uploading bundle to Maven Central ==="
-        
-        curl -v \
-          -F "bundle=@${BUNDLE_JAR}" \
-          --basic -u "${USERNAME}:${PASSWORD}" \
-          "${API_URL}"
+        echo "Bundle JAR: ${BUNDLE_JAR}"
+        echo "Checking bundle exists:"
+        ls -lh "${BUNDLE_JAR}"
         
         echo ""
-        echo "=== Upload complete ==="
+        echo "Uploading to: ${API_URL}"
+        
+        # Upload with full output and error checking
+        RESPONSE=$(curl -w "\n%{http_code}" -v \
+          -F "bundle=@${BUNDLE_JAR}" \
+          --basic -u "${USERNAME}:${PASSWORD}" \
+          "${API_URL}" 2>&1)
+        
+        HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+        BODY=$(echo "$RESPONSE" | head -n -1)
+        
+        echo ""
+        echo "HTTP Response Code: ${HTTP_CODE}"
+        echo ""
+        echo "Response Body:"
+        echo "$BODY"
+        
+        if [ "$HTTP_CODE" != "201" ]; then
+          echo ""
+          echo "❌ Upload failed! Expected HTTP 201, got ${HTTP_CODE}"
+          exit 1
+        fi
+        
+        echo ""
+        echo "=== ✅ Upload complete (HTTP 201) ==="
 
     - name: Publish Summary
       if: success()
