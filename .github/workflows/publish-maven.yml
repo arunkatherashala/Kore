@@ -49,29 +49,62 @@ jobs:
         
         # Create temporary directory for bundle
         BUNDLE_DIR=$(mktemp -d)
+        BUNDLE_STAGING="${BUNDLE_DIR}/kore-fileformat-${VERSION}"
+        mkdir -p "$BUNDLE_STAGING"
         
-        # Copy all artifacts to bundle
-        cp target/kore-fileformat-${VERSION}.jar "$BUNDLE_DIR/"
-        cp target/kore-fileformat-${VERSION}-sources.jar "$BUNDLE_DIR/"
-        cp target/kore-fileformat-${VERSION}-javadoc.jar "$BUNDLE_DIR/"
-        
-        # Copy pom.xml as required
-        cp pom.xml "$BUNDLE_DIR/kore-fileformat-${VERSION}.pom"
+        # Copy all artifacts to bundle directory
+        cp target/kore-fileformat-${VERSION}.jar "$BUNDLE_STAGING/"
+        cp target/kore-fileformat-${VERSION}-sources.jar "$BUNDLE_STAGING/"
+        cp target/kore-fileformat-${VERSION}-javadoc.jar "$BUNDLE_STAGING/"
+        cp pom.xml "$BUNDLE_STAGING/kore-fileformat-${VERSION}.pom"
         
         echo "Bundle contents:"
-        ls -la "$BUNDLE_DIR"
+        ls -la "$BUNDLE_STAGING"
+        
+        # Create SHA256 checksums for each artifact (Maven Central validates these)
+        echo "Creating checksums..."
+        cd "$BUNDLE_STAGING"
+        sha256sum *.jar *.pom > checksums.txt
+        cat checksums.txt
+        cd - > /dev/null
+        
+        # Create ZIP bundle with all artifacts in root (Sonatype requirement)
+        BUNDLE_ZIP="${BUNDLE_DIR}/bundle.zip"
+        cd "$BUNDLE_STAGING"
+        # Use -j flag to strip directory prefixes, ensuring all files are in ZIP root
+        zip -j "bundle.zip" *.jar *.pom checksums.txt
+        mv "bundle.zip" "$BUNDLE_ZIP"
+        cd - > /dev/null
+        
+        echo ""
+        echo "✓ ZIP bundle created: $BUNDLE_ZIP"
+        ls -lh "$BUNDLE_ZIP"
+        
+        # CRITICAL: Verify ZIP contents structure
+        echo ""
+        echo "=== ZIP Structure Validation (Sonatype requirement) ==="
+        UNZIP_OUTPUT=$(unzip -l "$BUNDLE_ZIP")
+        echo "$UNZIP_OUTPUT"
+        
+        # Verify required files exist in ZIP root (not in subdirectories)
+        if ! echo "$UNZIP_OUTPUT" | grep -q "kore-fileformat-${VERSION}.jar"; then
+          echo "❌ ERROR: JAR file not in ZIP root!"
+          exit 1
+        fi
+        if ! echo "$UNZIP_OUTPUT" | grep -q "kore-fileformat-${VERSION}.pom"; then
+          echo "❌ ERROR: POM file not in ZIP root!"
+          exit 1
+        fi
+        
+        echo "✓ Bundle structure validated"
         
         # Publish using Central Portal API
         echo ""
-        echo "Uploading to Central Portal..."
+        echo "Uploading bundle to Central Portal..."
         
-        # Create multipart form with all files
         curl -v -X POST \
           -u "${{ secrets.CENTRAL_PORTAL_TOKEN_USERNAME }}:${{ secrets.CENTRAL_PORTAL_TOKEN_PASSWORD }}" \
-          -F "bundle=@${BUNDLE_DIR}/kore-fileformat-${VERSION}.jar" \
-          -F "bundle=@${BUNDLE_DIR}/kore-fileformat-${VERSION}-sources.jar" \
-          -F "bundle=@${BUNDLE_DIR}/kore-fileformat-${VERSION}-javadoc.jar" \
-          -F "bundle=@${BUNDLE_DIR}/kore-fileformat-${VERSION}.pom" \
+          -F "bundle=@${BUNDLE_ZIP}" \
           "https://central.sonatype.com/api/v1/publisher/upload" 2>&1 | tee upload_response.txt
         
         # Check response
