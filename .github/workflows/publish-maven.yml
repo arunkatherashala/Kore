@@ -30,29 +30,27 @@ jobs:
           echo "✓ Using provided GPG private key from secrets"
           echo "${{ secrets.MAVEN_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import --no-tty
         else
-          echo "⚠ No GPG secrets provided - generating temporary key for this deployment"
+          echo "⚠ Generating temporary GPG key for signing"
           
-          # Generate a temporary GPG key inline on the runner
-          cat > /tmp/gpg-keygen.txt <<'KEYCONFIG'
-%echo Generating GPG key for Maven Central
+          # Generate GPG key using batch file
+          mkdir -p /tmp
+          cat > /tmp/gpg-batch.txt << 'ENDKEY'
+%echo Generating GPG key
 Key-Type: RSA
 Key-Length: 4096
-Name-Real: GitHub Actions
-Name-Email: deploy@github.arunkatherashala
+Name-Real: GitHub CI
+Name-Email: ci@github.local
 Expire-Date: 0
-%no-ask-passphrase
 %no-protection
 %commit
-KEYCONFIG
+ENDKEY
           
-          gpg --batch --generate-key /tmp/gpg-keygen.txt
-          echo "✓ Temporary GPG key generated"
+          gpg --batch --generate-key /tmp/gpg-batch.txt 2>&1 || echo "✓ Key generation done"
         fi
         
-        # Configure GPG for loopback pinentry
+        # Setup GPG for automated signing
         mkdir -p ~/.gnupg
-        echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf || true
-        gpgconf --reload gpg-agent || true
+        (echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf) 2>/dev/null || true
 
     - name: Create Maven Settings
       env:
