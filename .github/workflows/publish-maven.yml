@@ -58,6 +58,7 @@ jobs:
       env:
         MAVEN_USERNAME: ${{ secrets.CENTRAL_PORTAL_TOKEN_USERNAME }}
         MAVEN_PASSWORD: ${{ secrets.CENTRAL_PORTAL_TOKEN_PASSWORD }}
+        MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
       run: |
         cd maven
         
@@ -65,12 +66,20 @@ jobs:
         echo "Publishing to Maven Central"
         echo "========================================"
         
+        # Determine if GPG signing should be used
+        if [ -n "$MAVEN_GPG_PASSPHRASE" ]; then
+          echo "✓ GPG signing enabled"
+          PROFILE_ARG="-P release"
+        else
+          echo "⚠ GPG signing disabled (secret not set)"
+          PROFILE_ARG=""
+        fi
+        
         # Deploy directly with Maven (handles all artifacts, POM, sources, javadoc, signatures)
         mvn clean deploy \
-          -P release \
+          $PROFILE_ARG \
           -DskipTests \
-          --no-transfer-progress \
-          -Dgpg.passphrase="${{ secrets.MAVEN_GPG_PASSPHRASE }}"
+          --no-transfer-progress
         
         echo ""
         echo "✓ Published to Maven Central"
