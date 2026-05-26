@@ -22,27 +22,29 @@ jobs:
         distribution: 'temurin'
 
     - name: Set up GPG Key for Signing
+      env:
+        MAVEN_GPG_PRIVATE_KEY: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
       run: |
         echo "Setting up GPG key for Maven Central signing..."
         
-        # Check if user provided their own key
-        if [ -n "${{ secrets.MAVEN_GPG_PRIVATE_KEY }}" ]; then
-          echo "✓ Using provided GPG private key from secrets"
-          echo "${{ secrets.MAVEN_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import --no-tty
-        else
-          echo "⚠ Generating temporary GPG key for signing"
-          
-          # Generate GPG key using printf (more reliable than here-doc in GH Actions)
-          mkdir -p /tmp
-          printf '%%echo Generating GPG key\nKey-Type: RSA\nKey-Length: 4096\nName-Real: GitHub CI\nName-Email: ci@github.local\nExpire-Date: 0\n%%no-protection\n%%commit\n' | gpg --batch --generate-key --quiet --verbose
-          
-          echo "✓ Key generation completed"
+        # Decode and import the private key from secrets
+        if [ -z "$MAVEN_GPG_PRIVATE_KEY" ]; then
+          echo "❌ ERROR: MAVEN_GPG_PRIVATE_KEY secret not set!"
+          exit 1
         fi
+        
+        echo "✓ Importing GPG private key from GitHub secrets..."
+        echo "$MAVEN_GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import --no-tty 2>&1 | grep -E "^gpg:|key|imported" || echo "✓ Key imported successfully"
         
         # Setup GPG for automated signing
         mkdir -p ~/.gnupg
         printf 'allow-loopback-pinentry\n' >> ~/.gnupg/gpg-agent.conf
-        echo "✓ GPG agent configured"
+        echo "✓ GPG configured for non-interactive signing"
+        
+        # List imported keys to verify
+        echo ""
+        echo "Imported GPG keys:"
+        gpg --list-keys --keyid-format short 2>&1 | head -10 || true
 
     - name: Create Maven Settings
       env:
