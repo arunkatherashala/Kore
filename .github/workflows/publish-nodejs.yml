@@ -20,9 +20,7 @@ jobs:
         registry-url: 'https://registry.npmjs.org'
     
     - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
+      uses: dtolnay/rust-toolchain@stable
     
     - name: Install dependencies
       run: |
