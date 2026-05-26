@@ -92,15 +92,30 @@ jobs:
           PROFILE_ARG=""
         fi
         
+        # Debug: Show settings.xml
+        echo ""
+        echo "DEBUG: settings.xml content (credentials redacted):"
+        cat ~/.m2/settings.xml | sed 's/<username>[^<]*/<username>***/' | sed 's/<password>[^<]*/<password>***/'
+        echo ""
+        
         # Deploy directly with Maven (handles all artifacts, POM, sources, javadoc, signatures)
+        # Add -X for debug logging to troubleshoot auth issues
         mvn clean deploy \
           $PROFILE_ARG \
           -DskipTests \
-          --no-transfer-progress
+          -X \
+          2>&1 | grep -E "ERROR|WARN|username|password|401|403|Could not|Authentication" || true
         
-        echo ""
-        echo "✓ Published to Maven Central"
-        echo "Note: Artifact will be indexed within 10-15 minutes"
+        # Check exit code
+        if [ $? -eq 0 ]; then
+          echo ""
+          echo "✓ Published to Maven Central"
+          echo "Note: Artifact will be indexed within 10-15 minutes"
+        else
+          echo ""
+          echo "❌ Deployment failed - running full verbose output:"
+          mvn clean deploy $PROFILE_ARG -DskipTests --no-transfer-progress
+        fi
 
     - name: Publish Summary
       if: always()
