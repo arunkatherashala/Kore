@@ -32,25 +32,17 @@ jobs:
         else
           echo "⚠ Generating temporary GPG key for signing"
           
-          # Generate GPG key using batch file
+          # Generate GPG key using printf (more reliable than here-doc in GH Actions)
           mkdir -p /tmp
-          cat > /tmp/gpg-batch.txt << 'ENDKEY'
-%echo Generating GPG key
-Key-Type: RSA
-Key-Length: 4096
-Name-Real: GitHub CI
-Name-Email: ci@github.local
-Expire-Date: 0
-%no-protection
-%commit
-ENDKEY
+          printf '%%echo Generating GPG key\nKey-Type: RSA\nKey-Length: 4096\nName-Real: GitHub CI\nName-Email: ci@github.local\nExpire-Date: 0\n%%no-protection\n%%commit\n' | gpg --batch --generate-key --quiet --verbose
           
-          gpg --batch --generate-key /tmp/gpg-batch.txt 2>&1 || echo "✓ Key generation done"
+          echo "✓ Key generation completed"
         fi
         
         # Setup GPG for automated signing
         mkdir -p ~/.gnupg
-        (echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf) 2>/dev/null || true
+        printf 'allow-loopback-pinentry\n' >> ~/.gnupg/gpg-agent.conf
+        echo "✓ GPG agent configured"
 
     - name: Create Maven Settings
       env:
