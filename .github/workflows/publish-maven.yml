@@ -22,19 +22,24 @@ jobs:
         distribution: 'temurin'
 
     - name: Set up GPG Key
-      if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
       run: |
         echo "Setting up GPG key for signing..."
         
-        # Import GPG private key from secrets
-        if [ -n "${{ secrets.MAVEN_GPG_PRIVATE_KEY }}" ]; then
-          # Decode the base64-encoded GPG key and import it
-          echo "${{ secrets.MAVEN_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import --no-tty
-          echo "✓ GPG key imported successfully"
-        else
-          echo "⚠ WARNING: MAVEN_GPG_PRIVATE_KEY not set - deployment may fail!"
-          echo "   To enable signing, add your GPG private key to GitHub Secrets"
+        # Check if we have GPG credentials
+        if [ -z "${{ secrets.MAVEN_GPG_PRIVATE_KEY }}" ] || [ -z "${{ secrets.MAVEN_GPG_PASSPHRASE }}" ]; then
+          echo "⚠ WARNING: GPG secrets not configured!"
+          echo "   Add these secrets to GitHub:"
+          echo "   - MAVEN_GPG_PRIVATE_KEY: base64-encoded GPG private key"
+          echo "   - MAVEN_GPG_PASSPHRASE: your GPG passphrase"
+          exit 1
         fi
+        
+        # Import the GPG private key
+        echo "${{ secrets.MAVEN_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import --no-tty
+        echo "✓ GPG key imported successfully"
+        
+        # Configure GPG to use passphrase from environment
+        echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
 
     - name: Create Maven Settings
       env:
@@ -83,14 +88,8 @@ jobs:
         echo "Publishing to Maven Central"
         echo "========================================"
         
-        # Determine if GPG signing should be used
-        if [ -n "$MAVEN_GPG_PASSPHRASE" ]; then
-          echo "✓ GPG signing enabled"
-          PROFILE_ARG="-P release"
-        else
-          echo "⚠ GPG signing disabled (secret not set)"
-          PROFILE_ARG=""
-        fi
+        # Always use release profile for GPG signing
+        echo "✓ GPG signing enabled"
         
         # Debug: Show settings.xml
         echo ""
@@ -98,23 +97,24 @@ jobs:
         cat ~/.m2/settings.xml | sed 's/<username>[^<]*/<username>***/' | sed 's/<password>[^<]*/<password>***/'
         echo ""
         
-        # Deploy directly with Maven (handles all artifacts, POM, sources, javadoc, signatures)
-        # Add -X for debug logging to troubleshoot auth issues
+        # Deploy with GPG signing enabled (release profile)
+        # -Dgpg.passphrase injects passphrase from environment variable
         mvn clean deploy \
-          $PROFILE_ARG \
+          -P release \
+          -Dgpg.passphrase="${MAVEN_GPG_PASSPHRASE}" \
           -DskipTests \
           -X \
-          2>&1 | grep -E "ERROR|WARN|username|password|401|403|Could not|Authentication" || true
+          2>&1 | grep -E "ERROR|WARN|username|password|401|403|Could not|Authentication|gpg|sign" || true
         
         # Check exit code
         if [ $? -eq 0 ]; then
           echo ""
-          echo "✓ Published to Maven Central"
+          echo "✓ Published to Maven Central with GPG signatures"
           echo "Note: Artifact will be indexed within 10-15 minutes"
         else
           echo ""
           echo "❌ Deployment failed - running full verbose output:"
-          mvn clean deploy $PROFILE_ARG -DskipTests --no-transfer-progress
+          mvn clean deploy -P release -Dgpg.passphrase="${MAVEN_GPG_PASSPHRASE}" -DskipTests --no-transfer-progress
         fi
 
     - name: Publish Summary
