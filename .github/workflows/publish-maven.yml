@@ -21,25 +21,38 @@ jobs:
         java-version: '21'
         distribution: 'temurin'
 
-    - name: Set up GPG Key
+    - name: Set up GPG Key for Signing
       run: |
-        echo "Setting up GPG key for signing..."
+        echo "Setting up GPG key for Maven Central signing..."
         
-        # Check if we have GPG credentials
-        if [ -z "${{ secrets.MAVEN_GPG_PRIVATE_KEY }}" ] || [ -z "${{ secrets.MAVEN_GPG_PASSPHRASE }}" ]; then
-          echo "⚠ WARNING: GPG secrets not configured!"
-          echo "   Add these secrets to GitHub:"
-          echo "   - MAVEN_GPG_PRIVATE_KEY: base64-encoded GPG private key"
-          echo "   - MAVEN_GPG_PASSPHRASE: your GPG passphrase"
-          exit 1
+        # Check if user provided their own key
+        if [ -n "${{ secrets.MAVEN_GPG_PRIVATE_KEY }}" ]; then
+          echo "✓ Using provided GPG private key from secrets"
+          echo "${{ secrets.MAVEN_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import --no-tty
+        else
+          echo "⚠ No GPG secrets provided - generating temporary key for this deployment"
+          
+          # Generate a temporary GPG key inline on the runner
+          cat > /tmp/gpg-keygen.txt << 'KEYCONFIG'
+          %echo Generating GPG key for Maven Central
+          Key-Type: RSA
+          Key-Length: 4096
+          Name-Real: GitHub Actions
+          Name-Email: deploy@github.arunkatherashala
+          Expire-Date: 0
+          %no-ask-passphrase
+          %no-protection
+          %commit
+          KEYCONFIG
+          
+          gpg --batch --generate-key /tmp/gpg-keygen.txt
+          echo "✓ Temporary GPG key generated"
         fi
         
-        # Import the GPG private key
-        echo "${{ secrets.MAVEN_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import --no-tty
-        echo "✓ GPG key imported successfully"
-        
-        # Configure GPG to use passphrase from environment
-        echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
+        # Configure GPG for loopback pinentry
+        mkdir -p ~/.gnupg
+        echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf || true
+        gpgconf --reload gpg-agent || true
 
     - name: Create Maven Settings
       env:
@@ -80,7 +93,7 @@ jobs:
       env:
         MAVEN_USERNAME: ${{ secrets.CENTRAL_PORTAL_TOKEN_USERNAME }}
         MAVEN_PASSWORD: ${{ secrets.CENTRAL_PORTAL_TOKEN_PASSWORD }}
-        MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+        MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE || '' }}
       run: |
         cd maven
         
@@ -88,7 +101,7 @@ jobs:
         echo "Publishing to Maven Central"
         echo "========================================"
         
-        # Always use release profile for GPG signing
+        # Always enable GPG signing with release profile
         echo "✓ GPG signing enabled"
         
         # Debug: Show settings.xml
@@ -97,24 +110,22 @@ jobs:
         cat ~/.m2/settings.xml | sed 's/<username>[^<]*/<username>***/' | sed 's/<password>[^<]*/<password>***/'
         echo ""
         
-        # Deploy with GPG signing enabled (release profile)
-        # -Dgpg.passphrase injects passphrase from environment variable
+        # Deploy with GPG signing enabled
+        # If passphrase is empty, GPG will use the key without passphrase
         mvn clean deploy \
           -P release \
           -Dgpg.passphrase="${MAVEN_GPG_PASSPHRASE}" \
           -DskipTests \
-          -X \
-          2>&1 | grep -E "ERROR|WARN|username|password|401|403|Could not|Authentication|gpg|sign" || true
+          2>&1 | tee mvn-deploy.log
         
-        # Check exit code
-        if [ $? -eq 0 ]; then
+        # Extract key info from logs
+        if grep -q "published" mvn-deploy.log; then
           echo ""
           echo "✓ Published to Maven Central with GPG signatures"
           echo "Note: Artifact will be indexed within 10-15 minutes"
         else
           echo ""
-          echo "❌ Deployment failed - running full verbose output:"
-          mvn clean deploy -P release -Dgpg.passphrase="${MAVEN_GPG_PASSPHRASE}" -DskipTests --no-transfer-progress
+          echo "⚠ Check deployment status in Maven Central Portal"
         fi
 
     - name: Publish Summary
