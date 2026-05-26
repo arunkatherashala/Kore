@@ -37,8 +37,24 @@ jobs:
         fi
 
     - name: Create Maven Settings
+      env:
+        MAVEN_USERNAME: ${{ secrets.CENTRAL_PORTAL_TOKEN_USERNAME }}
+        MAVEN_PASSWORD: ${{ secrets.CENTRAL_PORTAL_TOKEN_PASSWORD }}
       run: |
         mkdir -p ~/.m2
+        
+        # Debug: check if credentials exist
+        if [ -z "$MAVEN_USERNAME" ]; then
+          echo "❌ ERROR: CENTRAL_PORTAL_TOKEN_USERNAME secret not set!"
+          exit 1
+        fi
+        if [ -z "$MAVEN_PASSWORD" ]; then
+          echo "❌ ERROR: CENTRAL_PORTAL_TOKEN_PASSWORD secret not set!"
+          exit 1
+        fi
+        
+        echo "✓ Credentials found (username length: ${#MAVEN_USERNAME})"
+        
         cat > ~/.m2/settings.xml << 'EOF'
         <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
