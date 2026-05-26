@@ -33,17 +33,17 @@ jobs:
           echo "⚠ No GPG secrets provided - generating temporary key for this deployment"
           
           # Generate a temporary GPG key inline on the runner
-          cat > /tmp/gpg-keygen.txt << 'KEYCONFIG'
-          %echo Generating GPG key for Maven Central
-          Key-Type: RSA
-          Key-Length: 4096
-          Name-Real: GitHub Actions
-          Name-Email: deploy@github.arunkatherashala
-          Expire-Date: 0
-          %no-ask-passphrase
-          %no-protection
-          %commit
-          KEYCONFIG
+          cat > /tmp/gpg-keygen.txt <<'KEYCONFIG'
+%echo Generating GPG key for Maven Central
+Key-Type: RSA
+Key-Length: 4096
+Name-Real: GitHub Actions
+Name-Email: deploy@github.arunkatherashala
+Expire-Date: 0
+%no-ask-passphrase
+%no-protection
+%commit
+KEYCONFIG
           
           gpg --batch --generate-key /tmp/gpg-keygen.txt
           echo "✓ Temporary GPG key generated"
