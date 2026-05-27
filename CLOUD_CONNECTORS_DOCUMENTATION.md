@@ -1,8 +1,8 @@
 # KORE Cloud Connectors - Complete Integration Suite
 
-**Status:** PRODUCTION READY v1.0  
+**Status:** PRODUCTION READY v1.1  
 **Date:** May 26, 2026  
-**Platforms:** BigQuery, Redshift (AWS), more coming  
+**Platforms:** BigQuery, Redshift (AWS), Snowflake, more coming  
 
 ---
 
@@ -12,8 +12,8 @@ KORE Cloud Connectors provide seamless bi-directional integration between KORE c
 
 - **Google BigQuery** ↔ KORE
 - **Amazon Redshift** ↔ KORE
-- **Snowflake** (coming Phase 2)
-- **Databricks** (coming Phase 2)
+- **Snowflake** ↔ KORE (NEW!)
+- **Databricks** (coming Phase 3)
 
 ---
 
@@ -36,6 +36,9 @@ pip install google-cloud-bigquery redshift-connector pandas
 # From source
 cd kore_connectors
 pip install -r requirements.txt
+
+# Or install specific connectors
+pip install google-cloud-bigquery redshift-connector snowflake-connector-python
 ```
 
 ---
@@ -496,6 +499,149 @@ bq_connector.write_kore_to_bigquery(
     kore_path="/tmp/analysis.kore",
     table_id="product_analysis"
 )
+```
+
+---
+
+## ❄️ Snowflake Connector
+
+### Features
+- ✅ Read Snowflake tables → KORE format
+- ✅ Write KORE → Snowflake tables
+- ✅ Streaming ingestion (batch mode)
+- ✅ Auto schema detection & table creation
+- ✅ Bulk loading from internal stages
+- ✅ Clustering & performance optimization
+- ✅ Connection pooling with retry logic
+
+### Basic Usage
+
+#### 1. Read Snowflake → KORE
+
+```python
+from kore_snowflake_connector import KoreSnowflakeConnector
+
+# Initialize
+connector = KoreSnowflakeConnector(
+    account="xy12345.us-east-1",
+    user="analytics_user",
+    password="your-password",
+    database="analytics_db",
+    warehouse="compute_wh",
+    schema="raw",
+    role="analyst"
+)
+
+# Read table to KORE
+result = connector.read_snowflake_to_kore(
+    table="sales_data",
+    output_path="/tmp/sales.kore",
+    batch_size=100000
+)
+
+print(f"✓ Read {result['row_count']:,} rows in {result['duration']:.2f}s")
+```
+
+#### 2. Write KORE → Snowflake
+
+```python
+# Write KORE to Snowflake
+result = connector.write_kore_to_snowflake(
+    kore_path="/tmp/sales.kore",
+    table="sales_data_kore",
+    write_disposition="APPEND"
+)
+
+print(f"✓ Inserted {result['inserted_rows']:,} rows")
+```
+
+#### 3. Stream Real-Time (Batch Mode)
+
+```python
+# Stream with batches
+result = connector.stream_kore_to_snowflake(
+    kore_path="/tmp/events.kore",
+    table="events_stream",
+    batch_size=5000
+)
+
+print(f"✓ Streamed {result['total_rows']:,} rows")
+```
+
+#### 4. Create Optimized Table
+
+```python
+# Create clustered table for performance
+stmt = connector.create_kore_table(
+    table="sales_optimized",
+    columns={
+        "sale_id": "NUMBER",
+        "sale_date": "DATE",
+        "amount": "FLOAT",
+        "region": "VARCHAR"
+    },
+    cluster_keys=["sale_date", "region"]
+)
+
+print(f"✓ Table created with clustering")
+```
+
+#### 5. Get Table Statistics
+
+```python
+# Monitor table
+stats = connector.get_table_stats("sales_data")
+print(f"Rows: {stats['row_count']:,}")
+print(f"Size: {stats['size_mb']:.2f} MB")
+print(f"Columns: {stats['column_count']}")
+```
+
+### Configuration Options
+
+```python
+# Using SSO (External Browser Auth)
+connector = KoreSnowflakeConnector(
+    account="xy12345.us-east-1",
+    user="user@company.com",
+    database="analytics_db",
+    warehouse="compute_wh",
+    authenticator="externalbrowser"
+)
+
+# Using environment variables
+import os
+connector = KoreSnowflakeConnector(
+    account=os.getenv("SNOWFLAKE_ACCOUNT"),
+    user=os.getenv("SNOWFLAKE_USER"),
+    password=os.getenv("SNOWFLAKE_PASSWORD"),
+    database=os.getenv("SNOWFLAKE_DATABASE"),
+    warehouse=os.getenv("SNOWFLAKE_WAREHOUSE")
+)
+```
+
+### Advanced Features
+
+#### Bulk Load from Internal Stage
+
+```python
+# Load multiple KORE files from Snowflake stage
+result = connector.bulk_load_kore_from_stage(
+    stage_path="@sales_stage/2024/",
+    table="sales_monthly",
+    file_pattern="*.parquet"
+)
+```
+
+#### Execute Custom Queries
+
+```python
+# Run arbitrary SQL and get results
+results = connector.execute_query(
+    "SELECT * FROM sales_data WHERE amount > 1000"
+)
+
+for row in results:
+    print(row)
 ```
 
 ---

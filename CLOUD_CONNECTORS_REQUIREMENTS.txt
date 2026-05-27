@@ -14,6 +14,10 @@ redshift-connector>=2.0.910
 boto3>=1.26.0
 botocore>=1.29.0
 
+# Snowflake
+snowflake-connector-python>=3.1.0
+snowflake-sqlalchemy>=1.5.0
+
 # Data Format Support
 pyarrow>=12.0.0
 pyparquet>=0.3.0
