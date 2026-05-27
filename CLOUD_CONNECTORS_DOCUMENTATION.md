@@ -1,8 +1,8 @@
 # KORE Cloud Connectors - Complete Integration Suite
 
-**Status:** PRODUCTION READY v1.1  
+**Status:** PRODUCTION READY v1.2  
 **Date:** May 26, 2026  
-**Platforms:** BigQuery, Redshift (AWS), Snowflake, more coming  
+**Platforms:** BigQuery, Redshift (AWS), Snowflake, Databricks  
 
 ---
 
@@ -12,8 +12,8 @@ KORE Cloud Connectors provide seamless bi-directional integration between KORE c
 
 - **Google BigQuery** ↔ KORE
 - **Amazon Redshift** ↔ KORE
-- **Snowflake** ↔ KORE (NEW!)
-- **Databricks** (coming Phase 3)
+- **Snowflake** ↔ KORE
+- **Databricks** ↔ KORE (NEW!)
 
 ---
 
@@ -642,6 +642,181 @@ results = connector.execute_query(
 
 for row in results:
     print(row)
+```
+
+---
+
+## 🧬 Databricks Connector
+
+### Features
+- ✅ Read Databricks Delta tables → KORE format
+- ✅ Write KORE → Databricks Delta tables
+- ✅ Delta Lake optimization (OPTIMIZE, Z-ordering)
+- ✅ Unity Catalog support (catalog.schema.table)
+- ✅ Time travel (Delta version history)
+- ✅ Spark integration & MLflow compatibility
+- ✅ Partition & clustering optimization
+- ✅ Streaming ingestion (batch mode)
+
+### Basic Usage
+
+#### 1. Read Databricks → KORE
+
+```python
+from kore_databricks_connector import KoreDatabricksConnector
+
+# Initialize
+connector = KoreDatabricksConnector(
+    host="dbc-abc123def456-ghij.cloud.databricks.com",
+    token="dapi1234567890abcdefghijklmnop",
+    warehouse_id="abc123def456ghij",
+    catalog="main",
+    schema="analytics"
+)
+
+# Read table to KORE
+result = connector.read_databricks_to_kore(
+    table="main.analytics.sales",
+    output_path="/tmp/sales.kore",
+    limit=1000000
+)
+
+print(f"✓ Read {result['row_count']:,} rows in {result['duration']:.2f}s")
+```
+
+#### 2. Write KORE → Databricks (with Auto-Optimization)
+
+```python
+# Write KORE to Databricks with Delta optimization
+result = connector.write_kore_to_databricks(
+    kore_path="/tmp/sales.kore",
+    table="main.analytics.sales_processed",
+    optimize_table=True  # Auto-optimize after write
+)
+
+print(f"✓ Inserted {result['inserted_rows']:,} rows")
+```
+
+#### 3. Create Optimized Delta Table
+
+```python
+# Create table with partitioning & Z-ordering
+stmt = connector.create_kore_table(
+    table="main.analytics.sales_opt",
+    columns={
+        "sale_id": "LONG",
+        "sale_date": "DATE",
+        "amount": "DOUBLE",
+        "region": "STRING"
+    },
+    partition_cols=["sale_date"],      # Partition by date
+    z_order_cols=["region"]             # Z-order by region
+)
+
+print("✓ Optimized table created")
+```
+
+#### 4. Optimize for Performance
+
+```python
+# Run OPTIMIZE and Z-ordering
+result = connector.optimize_table(
+    table="main.analytics.sales",
+    z_order_cols=["sale_date", "region"]
+)
+
+print(f"✓ Optimization complete ({result['duration']:.2f}s)")
+```
+
+#### 5. Time Travel (Read Historical Versions)
+
+```python
+# Read from specific Delta version
+result = connector.time_travel_table(
+    table="main.analytics.sales",
+    version=5  # Read from version 5
+)
+
+print(f"✓ Retrieved {result['row_count']} rows from version {result['version']}")
+
+# Or read from specific timestamp
+result = connector.time_travel_table(
+    table="main.analytics.sales",
+    timestamp="2026-05-01"  # Read from this date
+)
+```
+
+#### 6. Get Table History
+
+```python
+# View Delta Lake version history
+history = connector.get_table_history("main.analytics.sales", limit=10)
+
+for version in history:
+    print(f"Version {version['version']}: {version['operation']} by {version['user_name']}")
+```
+
+### Configuration Options
+
+```python
+# Unity Catalog namespace
+connector = KoreDatabricksConnector(
+    host="dbc-abc123def456-ghij.cloud.databricks.com",
+    token="dapi1234567890abcdefghijklmnop",
+    warehouse_id="abc123def456ghij",
+    catalog="prod_catalog",       # Unity Catalog name
+    schema="analytics"             # Schema within catalog
+)
+
+# Using environment variables
+import os
+connector = KoreDatabricksConnector(
+    host=os.getenv("DATABRICKS_HOST"),
+    token=os.getenv("DATABRICKS_TOKEN"),
+    warehouse_id=os.getenv("DATABRICKS_WAREHOUSE_ID"),
+    catalog=os.getenv("DATABRICKS_CATALOG", "main"),
+    schema=os.getenv("DATABRICKS_SCHEMA", "default")
+)
+```
+
+### Advanced Features
+
+#### Stream with Real-Time Batch Processing
+
+```python
+# Stream KORE data with batching
+result = connector.stream_kore_to_databricks(
+    kore_path="/tmp/events.kore",
+    table="main.analytics.events_stream",
+    batch_size=10000
+)
+
+print(f"Streamed {result['total_rows']} rows in {result['batches_processed']} batches")
+```
+
+#### Monitor Table Performance
+
+```python
+# Get comprehensive table statistics
+stats = connector.get_table_stats("main.analytics.sales")
+print(f"Rows: {stats['row_count']:,}")
+print(f"Columns: {stats['column_count']}")
+print(f"Format: {stats['format']}")
+```
+
+#### MLflow Integration (Future)
+
+```python
+# Log KORE transfer as MLflow experiment
+import mlflow
+
+with mlflow.start_run():
+    result = connector.read_databricks_to_kore(
+        table="main.analytics.sales",
+        output_path="/tmp/sales.kore"
+    )
+    mlflow.log_metric("rows_exported", result['row_count'])
+    mlflow.log_param("table", "main.analytics.sales")
 ```
 
 ---
