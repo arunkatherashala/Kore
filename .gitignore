@@ -8,6 +8,7 @@
 .idea/
 .venv/
 venv/
+venv_build/
 env/
 
 # Large test files (>100MB)
