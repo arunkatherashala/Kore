@@ -62,6 +62,7 @@ jni = { version = "0.21", optional = true }
 
 # JavaScript/NAPI bindings
 napi = { version = "2.15", optional = true }
+chrono = "0.4.44"
 
 [lib]
 name = "kore_fileformat"

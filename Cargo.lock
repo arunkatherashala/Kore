@@ -2924,12 +2924,13 @@ dependencies = [
 
 [[package]]
 name = "kore_fileformat"
-version = "1.2.8"
+version = "1.2.9"
 dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "azure_identity",
  "azure_storage",
+ "chrono",
  "futures-util",
  "google-cloud-default",
  "google-cloud-storage",

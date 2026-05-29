@@ -90,14 +90,14 @@ mod tests {
 
     #[test]
     fn test_numeric_detection() {
-        let numeric = vec![b"12345", b"67890", b"123.45"];
+        let numeric = vec![b"12345".as_ref(), b"67890".as_ref(), b"123.45".as_ref()];
         let profile = VariableZstdCompressor::detect_profile(&numeric);
         assert!(matches!(profile, DataProfile::Numeric));
     }
 
     #[test]
     fn test_categorical_detection() {
-        let categorical = vec![b"active", b"inactive", b"pending"];
+        let categorical = vec![b"active".as_ref(), b"inactive".as_ref(), b"pending".as_ref()];
         let profile = VariableZstdCompressor::detect_profile(&categorical);
         assert!(matches!(profile, DataProfile::Categorical));
     }

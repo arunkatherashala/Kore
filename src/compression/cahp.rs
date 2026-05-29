@@ -107,7 +107,7 @@ impl CAHPCompressor {
                         // Check if next byte matches prediction
                         if i + n_gram_size < data.len() && data[i + n_gram_size] == best_next {
                             // Use substitution: replace with low byte + prediction marker
-                            let marker = (255 - ((*freq as u16 % 128) as u8)).min(254);
+                            let marker = (255 - ((freq as u16 % 128) as u8)).min(254);
                             encoded.push(marker);
                             encoded.push(context[0]);
                             substitution_map.push(marker);
@@ -140,11 +140,12 @@ impl CAHPCompressor {
             // Check if this is a substitution marker (high bytes)
             if byte >= 128 {
                 if i + 1 < encoded.len() {
-                    let context = encoded[i + 1];
+                    let context_byte = encoded[i + 1];
+                    let context_vec = vec![context_byte];
 
-                    if let Some(predictions) = self.predictor.get(&[context]) {
+                    if let Some(predictions) = self.predictor.get(&context_vec) {
                         if !predictions.is_empty() {
-                            decoded.push(context);
+                            decoded.push(context_byte);
                             decoded.push(predictions[0].0); // Restore predicted byte
                             i += 2;
                             continue;
