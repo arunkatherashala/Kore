@@ -74,6 +74,9 @@ pub mod advanced_codecs;
 pub mod column_preprocessor;
 pub mod adaptive_blocking;
 
+// v1.2.4 Monitoring & Observability
+pub mod monitoring;
+
 // Cloud storage connectors (API stubs enabled for v1.0, full implementation in v1.1)
 #[cfg(feature = "s3")]
 pub mod s3_reader;

@@ -16,6 +16,7 @@ pub mod codec_selector;
 pub mod enhanced_dict;
 pub mod delta_encoding;
 pub mod variable_zstd;
+pub mod cahp;
 
 pub use dictionary::{DictionaryEncoder, DictionaryDecoder};
 pub use zstd_compression::{ZstdCompressor, ZstdDecompressor};
@@ -23,6 +24,7 @@ pub use codec_selector::{CompressionCodec, CodecSelector};
 pub use enhanced_dict::MultiLevelDictionary;
 pub use delta_encoding::DeltaEncoder;
 pub use variable_zstd::VariableZstdCompressor;
+pub use cahp::CAHPCompressor;
 pub use crate::decompression::CodecId;
 
 use std::fmt;

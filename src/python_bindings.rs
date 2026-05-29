@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 use std::fs::File;
 use std::io::{Read, Write};
 use crate::kore_v2::{KoreWriter, KoreReader, KVal};
+use crate::monitoring::{PerformanceMonitor, KoreMetrics};
 
 /// Compress CSV data into KORE format
 #[pyfunction]
@@ -99,6 +100,93 @@ impl PyKoreReader {
     }
 }
 
+/// Performance Monitor Python wrapper
+#[pyclass]
+pub struct PyPerformanceMonitor {
+    inner: PerformanceMonitor,
+}
+
+#[pymethods]
+impl PyPerformanceMonitor {
+    #[new]
+    fn new() -> Self {
+        PyPerformanceMonitor {
+            inner: PerformanceMonitor::new(),
+        }
+    }
+
+    fn record_read(&self, bytes: u64, duration_ms: f64) {
+        self.inner.record_read(bytes, duration_ms);
+    }
+
+    fn record_write(&self, bytes: u64, duration_ms: f64) {
+        self.inner.record_write(bytes, duration_ms);
+    }
+
+    fn record_compression(&self, original_bytes: u64, compressed_bytes: u64) {
+        self.inner.record_compression(original_bytes, compressed_bytes);
+    }
+
+    fn record_rows_columns(&self, rows: u64, columns: u64) {
+        self.inner.record_rows_columns(rows, columns);
+    }
+
+    fn update_memory(&self, current: u64, peak: u64) {
+        self.inner.update_memory(current, peak);
+    }
+
+    fn update_cache_stats(&self, hit_rate: f64) {
+        self.inner.update_cache_stats(hit_rate);
+    }
+
+    fn record_error(&self) {
+        self.inner.record_error();
+    }
+
+    fn get_metrics(&self) -> PyResult<String> {
+        Ok(self.inner.export_json())
+    }
+
+    fn get_metrics_dict(&self) -> PyResult<PyObject> {
+        let metrics = self.inner.get_metrics();
+        Python::with_gil(|py| {
+            let dict = pyo3::types::PyDict::new_bound(py);
+            dict.set_item("total_bytes_read", metrics.total_bytes_read)?;
+            dict.set_item("total_bytes_written", metrics.total_bytes_written)?;
+            dict.set_item("read_operations", metrics.read_operations)?;
+            dict.set_item("write_operations", metrics.write_operations)?;
+            dict.set_item("avg_read_latency_ms", metrics.avg_read_latency_ms)?;
+            dict.set_item("avg_write_latency_ms", metrics.avg_write_latency_ms)?;
+            dict.set_item("read_throughput_mbps", metrics.read_throughput_mbps())?;
+            dict.set_item("write_throughput_mbps", metrics.write_throughput_mbps())?;
+            dict.set_item("compression_ratio", metrics.compression_ratio)?;
+            dict.set_item("current_memory_bytes", metrics.current_memory_bytes)?;
+            dict.set_item("peak_memory_bytes", metrics.peak_memory_bytes)?;
+            dict.set_item("rows_processed", metrics.rows_processed)?;
+            dict.set_item("columns_processed", metrics.columns_processed)?;
+            dict.set_item("cache_hit_rate", metrics.cache_hit_rate)?;
+            dict.set_item("active_operations", metrics.active_operations)?;
+            dict.set_item("total_errors", metrics.total_errors)?;
+            dict.set_item("timestamp", metrics.timestamp)?;
+            Ok(dict.into())
+        })
+    }
+
+    fn get_alerts(&self) -> PyResult<String> {
+        let alerts = self.inner.get_alerts();
+        let json = serde_json::to_string(&alerts).unwrap_or_default();
+        Ok(json)
+    }
+
+    fn clear_alerts(&self) {
+        self.inner.clear_alerts();
+    }
+
+    fn export_prometheus(&self) -> PyResult<String> {
+        Ok(self.inner.export_prometheus())
+    }
+}
+
 /// Kore Python module
 #[pymodule]
 fn kore_fileformat(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -116,6 +204,7 @@ fn kore_fileformat(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Add classes
     m.add_class::<PyKoreWriter>()?;
     m.add_class::<PyKoreReader>()?;
+    m.add_class::<PyPerformanceMonitor>()?;
 
     Ok(())
 }

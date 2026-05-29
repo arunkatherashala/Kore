@@ -1,0 +1,10 @@
+%echo Generating key
+Key-Type: RSA
+Key-Length: 4096
+Name-Real: Kore FileFormat Release
+Name-Email: release@arunkatherashala.github.io
+Name-Comment: Maven Central Signing Key
+Expire-Date: 0
+Passphrase: KoreRelease2026!
+%commit
+%echo done

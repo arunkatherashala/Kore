@@ -1,0 +1,174 @@
+{
+  "timestamp": "2026-05-26T07:54:52.242893",
+  "kore_version": "1.2.3",
+  "sections": {
+    "1\ufe0f\u20e3  PLATFORM AVAILABILITY & VERSIONING": {
+      "tests": [
+        {
+          "name": "PyPI: kore-fileformat v1.2.3",
+          "passed": false,
+          "details": "Name: kore-fileformat\nVersion: 1.2.1\nSummary: KORE Binary Format - High-performance columnar compres"
+        },
+        {
+          "name": "Maven Central: io.github.arunkatherashala:kore-fileformat v1.2.3",
+          "passed": true,
+          "details": "pom.xml verified"
+        },
+        {
+          "name": "npm: @kore/cloud v1.2.3",
+          "passed": true,
+          "details": "package.json verified"
+        },
+        {
+          "name": "crates.io: kore_fileformat v1.2.3",
+          "passed": true,
+          "details": "Cargo.toml verified"
+        },
+        {
+          "name": "Python __init__.py: version 1.2.3",
+          "passed": true,
+          "details": "Verified"
+        }
+      ],
+      "passed": 4,
+      "failed": 1
+    },
+    "2\ufe0f\u20e3  PYTHON IMPORT & BASIC FUNCTIONALITY": {
+      "tests": [
+        {
+          "name": "Python: Import kore_fileformat",
+          "passed": false,
+          "details": "Failed to import KORE bindings: cannot import name 'kore_fileformat' from partially initialized module 'kore_fileformat' (most likely due to a circular import) (C:\\Users\\ksak_\\OneDrive\\Desktop\\dbt_prep\\Kore\\kore_fileformat\\__init__.py). Make sure you've built the wheel with: maturin build --release"
+        }
+      ],
+      "passed": 0,
+      "failed": 1
+    },
+    "3\ufe0f\u20e3  COMPRESSION TESTING": {
+      "tests": [
+        {
+          "name": "Compression tests",
+          "passed": false,
+          "details": "Failed to import KORE bindings: cannot import name 'kore_fileformat' from partially initialized modu"
+        }
+      ],
+      "passed": 0,
+      "failed": 1
+    },
+    "4\ufe0f\u20e3  DATA INTEGRITY & EDGE CASES": {
+      "tests": [
+        {
+          "name": "Edge case tests",
+          "passed": false,
+          "details": "Failed to import KORE bindings: cannot import name 'kore_fileformat' from partially initialized modu"
+        }
+      ],
+      "passed": 0,
+      "failed": 1
+    },
+    "5\ufe0f\u20e3  PERFORMANCE BENCHMARKS": {
+      "tests": [
+        {
+          "name": "Performance benchmarks",
+          "passed": false,
+          "details": "Failed to import KORE bindings: cannot import name 'kore_fileformat' from partially initialized modu"
+        }
+      ],
+      "passed": 0,
+      "failed": 1
+    },
+    "6\ufe0f\u20e3  GITHUB WORKFLOWS STATUS": {
+      "tests": [
+        {
+          "name": "Workflow: PyPI deployment",
+          "passed": true,
+          "details": "File exists: publish-pypi.yml"
+        },
+        {
+          "name": "Workflow: Maven Central deployment",
+          "passed": true,
+          "details": "File exists: publish-maven.yml"
+        },
+        {
+          "name": "Workflow: npm deployment",
+          "passed": true,
+          "details": "File exists: publish-nodejs.yml"
+        },
+        {
+          "name": "Workflow: Docker/GHCR deployment",
+          "passed": true,
+          "details": "File exists: publish-docker.yml"
+        }
+      ],
+      "passed": 4,
+      "failed": 0
+    },
+    "7\ufe0f\u20e3  FILE INTEGRITY CHECKS": {
+      "tests": [
+        {
+          "name": "File: Rust package manifest",
+          "passed": true,
+          "details": "2.2 KB"
+        },
+        {
+          "name": "File: Python package manifest",
+          "passed": true,
+          "details": "1.1 KB"
+        },
+        {
+          "name": "File: Node.js package manifest",
+          "passed": true,
+          "details": "1.2 KB"
+        },
+        {
+          "name": "File: Maven package manifest",
+          "passed": true,
+          "details": "6.4 KB"
+        },
+        {
+          "name": "File: Root Maven manifest",
+          "passed": true,
+          "details": "5.5 KB"
+        },
+        {
+          "name": "File: Documentation",
+          "passed": true,
+          "details": "12.5 KB"
+        },
+        {
+          "name": "File: License file",
+          "passed": false,
+          "details": "Not found: LICENSE"
+        },
+        {
+          "name": "File: Source code directory",
+          "passed": true,
+          "details": "Directory with 57 items"
+        }
+      ],
+      "passed": 7,
+      "failed": 1
+    },
+    "8\ufe0f\u20e3  CONFIGURATION VALIDATION": {
+      "tests": [
+        {
+          "name": "Git: Remote URL",
+          "passed": true,
+          "details": "Correctly configured"
+        },
+        {
+          "name": "Git: Release tag v1.2.3",
+          "passed": true,
+          "details": "Tag exists"
+        },
+        {
+          "name": "GitHub: Secrets configured",
+          "passed": true,
+          "details": "MAVEN/NPM/PYPI tokens should be set"
+        }
+      ],
+      "passed": 3,
+      "failed": 0
+    }
+  }
+}
