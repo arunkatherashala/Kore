@@ -7,6 +7,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, Duration, Instant};
 use std::collections::HashMap;
+use serde::{Serialize, Deserialize};
 
 /// Performance metrics for KORE operations
 #[derive(Debug, Clone)]
@@ -113,7 +114,7 @@ pub struct PerformanceMonitor {
 }
 
 /// Performance alert thresholds exceeded
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlertEvent {
     pub alert_type: AlertType,
     pub message: String,
@@ -122,7 +123,7 @@ pub struct AlertEvent {
     pub threshold: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlertType {
     HighLatency,
     LowThroughput,
