@@ -200,7 +200,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Install KORE
-RUN pip install kore-fileformat==1.1.4
+RUN pip install kore-fileformat==1.2.9
 
 # Copy your code
 COPY . .
@@ -263,7 +263,7 @@ pip install kore-fileformat==1.1.4
 ```
 ✅ Solution:
 1. Verify Python version: python --version (should be 3.8+)
-2. Reinstall: pip uninstall kore-fileformat && pip install kore-fileformat==1.1.4
+2. Reinstall: pip uninstall kore-fileformat && pip install kore-fileformat==1.2.9
 3. Check pip: pip list | grep kore
 ```
 
@@ -289,7 +289,7 @@ Check your platform: python -c "import wheel.pep425tags; print(wheel.pep425tags.
 ### Issue 4: "Permission denied" on Linux/macOS
 ```bash
 # Run with sudo
-sudo pip install kore-fileformat==1.1.4
+sudo pip install kore-fileformat==1.2.9
 
 # OR use user installation
 pip install --user kore-fileformat==1.1.4

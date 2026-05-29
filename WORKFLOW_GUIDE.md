@@ -85,12 +85,12 @@ git push origin v1.1.5
 
 ### Scenario 4: **UPGRADING/DOWNGRADING** (When Needed)
 ```bash
-# Example: Test if v1.1.4 works, then upgrade to v1.1.5
+# Example: Test if v1.2.9 works
 
-# Step 1: Install v1.1.4
-pip install kore-fileformat==1.1.4
+# Step 1: Install v1.2.9
+pip install kore-fileformat==1.2.9
 
-# Step 2: Test v1.1.4
+# Step 2: Test v1.2.9
 python test_kore_install.py
 
 # Step 3: Upgrade (NOT uninstall + reinstall)

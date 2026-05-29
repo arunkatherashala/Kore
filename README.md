@@ -15,7 +15,7 @@ Kore is a Rust-based columnar file format designed for efficient storage and ana
 
 ### Step 1: Install
 ```bash
-pip install kore-fileformat==1.1.4
+pip install kore-fileformat==1.2.9
 ```
 
 ### Step 2: Import

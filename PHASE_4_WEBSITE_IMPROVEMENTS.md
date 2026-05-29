@@ -357,10 +357,10 @@ Display for Each Language:
   ✅ Release notes
 
 Example:
-  Python:  pip install kore-fileformat==1.1.4
-  Node:    npm install kore-fileformat@1.1.4
-  Maven:   <dependency> ... 1.1.4 ... </dependency>
-  Cargo:   kore-fileformat = "1.1.4"
+  Python:  pip install kore-fileformat==1.2.9
+  Node:    npm install kore-fileformat@1.2.9
+  Maven:   <dependency> ... 1.2.9 ... </dependency>
+  Cargo:   kore-fileformat = "1.2.9"
 ```
 
 ### Package Statistics

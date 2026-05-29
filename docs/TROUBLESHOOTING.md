@@ -39,7 +39,7 @@ ModuleNotFoundError: No module named 'kore_fileformat'
 3. **Reinstall:**
    ```bash
    pip uninstall kore-fileformat -y
-   pip install kore-fileformat==1.1.4
+   pip install kore-fileformat==1.2.9
    ```
 
 4. **Check virtual environment:**
@@ -47,12 +47,12 @@ ModuleNotFoundError: No module named 'kore_fileformat'
    # Windows
    python -m venv kore_env
    .\kore_env\Scripts\activate
-   pip install kore-fileformat==1.1.4
+   pip install kore-fileformat==1.2.9
    
    # macOS/Linux
    python3 -m venv kore_env
    source kore_env/bin/activate
-   pip install kore-fileformat==1.1.4
+   pip install kore-fileformat==1.2.9
    ```
 
 ---
@@ -85,7 +85,7 @@ ERROR: Could not find a version that satisfies the requirement kore-fileformat
 4. **For ARM64 (Apple Silicon):**
    ```bash
    # Make sure you have Python 3.12 for ARM64
-   arch -arm64 python3 -m pip install kore-fileformat==1.1.4
+   arch -arm64 python3 -m pip install kore-fileformat==1.2.9
    ```
 
 ---
@@ -101,15 +101,15 @@ ERROR: Could not install packages due to an EnvironmentError: [Errno 13] Permiss
 
 ```bash
 # Option 1: Use user installation
-pip install --user kore-fileformat==1.1.4
+pip install --user kore-fileformat==1.2.9
 
 # Option 2: Use virtual environment (recommended)
 python -m venv kore_env
 source kore_env/bin/activate  # or .\kore_env\Scripts\activate on Windows
-pip install kore-fileformat==1.1.4
+pip install kore-fileformat==1.2.9
 
 # Option 3: Use sudo (not recommended)
-sudo pip install kore-fileformat==1.1.4
+sudo pip install kore-fileformat==1.2.9
 ```
 
 ---
