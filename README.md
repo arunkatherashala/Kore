@@ -1,5 +1,8 @@
-# Kore — Killer Optimized Record Exchange
+# 🚀 Kore — Killer Optimized Record Exchange
 
+![Kore Logo](vscode-kore-viewer/logo.jpg)
+
+[![VS Code Extension](https://img.shields.io/visual-studio-marketplace/v/arunkatherashala.kore-viewer?label=VS%20Code%20Extension&color=0078d4&logo=visualstudiocode)](https://marketplace.visualstudio.com/items?itemName=arunkatherashala.kore-viewer)
 [![Crates.io](https://img.shields.io/crates/v/kore_fileformat.svg)](https://crates.io/crates/kore_fileformat)
 [![PyPI](https://img.shields.io/pypi/v/kore-fileformat.svg)](https://pypi.org/project/kore-fileformat/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
@@ -38,11 +41,75 @@ print(f"Records: {info['total_records']:,}")
 
 ---
 
+## 🎨 View .kore Files in VS Code
+
+**NEW**: Install the official **Kore File Viewer** extension for VS Code!
+
+[![Install from VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/arunkatherashala.kore-viewer?label=Install%20Extension&color=0078d4)](https://marketplace.visualstudio.com/items?itemName=arunkatherashala.kore-viewer)
+
+### Features:
+- ✅ **Auto-detection**: Opens .kore files automatically in VS Code
+- ✅ **Table display**: View data in an organized table format
+- ✅ **Light/Dark theme**: Automatic theme detection
+- ✅ **Database import**: Connect to PostgreSQL, MySQL, SQLite, MongoDB, and more
+- ✅ **Multi-format export**: Export to CSV, JSON, Parquet, Apache Arrow
+
+**Install now**: https://marketplace.visualstudio.com/items?itemName=arunkatherashala.kore-viewer
+
+---
+
+## 👀 How to View .kore Files (Other Methods)
+
+### Option 1: CLI (No Coding Required!)
+```bash
+# See file metadata in terminal
+kore inspect data.kore
+
+# Convert to viewable format (Excel, JSON, etc.)
+kore convert data.kore data.csv --format csv
+# Now open data.csv in Excel, Notepad, Sheets, etc.
+```
+
+**📌 Full CLI Guide:** [docs/CLI_GUIDE.md](docs/CLI_GUIDE.md) - All commands, examples, workflows
+
+### Option 2: Notepad/Notepad++ (Windows Only)
+**Direct support** - Set up once, then right-click any `.kore` file for:
+- View Metadata
+- Convert to CSV
+- Convert to JSON
+
+**📌 Windows Setup Guide:** [notepad-plugin/SETUP_GUIDE.md](notepad-plugin/SETUP_GUIDE.md) - Integration in 1-10 minutes
+
+### Option 3: Python (Programmatic)
+```python
+from kore_fileformat import read_kore, get_kore_info
+
+# View metadata
+info = get_kore_info("data.kore")
+print(f"Columns: {info['columns']}, Records: {info['total_records']:,}")
+
+# Export to DataFrame (view in notebook)
+df = read_kore("data.kore")
+print(df.head())
+
+# Export to CSV/JSON
+df.to_csv("data.csv")
+```
+
+**📌 Python API Reference:** [docs/PYTHON_API.md](docs/PYTHON_API.md) - Complete functions and workflows
+
+---
+
+**Note:** `.kore` files are binary format (like `.zip`, `.png`). Use the tools above to view contents. See [notepad-plugin/SETUP_GUIDE.md](notepad-plugin/SETUP_GUIDE.md) for Notepad integration details.
+
+---
+
 ## 📚 Documentation
 
 ### Getting Started
 | Document | For Whom | Time |
 |----------|----------|------|
+| **[docs/CLI_GUIDE.md](docs/CLI_GUIDE.md)** | Everyone (no coding!) | 10 min |
 | **[docs/INSTALLATION.md](docs/INSTALLATION.md)** | Everyone | 5 min |
 | **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** | Python users | 15 min |
 | **[docs/EXAMPLES.md](docs/EXAMPLES.md)** | Developers | 20 min |
@@ -51,7 +118,11 @@ print(f"Records: {info['total_records']:,}")
 | Document | Coverage |
 |----------|----------|
 | **[docs/API_REFERENCE.md](docs/API_REFERENCE.md)** | Complete API documentation with examples |
+| **[docs/PYTHON_API.md](docs/PYTHON_API.md)** | Python functions, classes, workflows |
 | **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** | FAQ, common issues, solutions |
+| **[notepad-plugin/SETUP_GUIDE.md](notepad-plugin/SETUP_GUIDE.md)** | Notepad/Notepad++ integration for Windows |
+| **[WEB_VIEWER_PLAN.md](WEB_VIEWER_PLAN.md)** | Web viewer architecture & roadmap (v1.3.0) |
+| **[vscode-kore-viewer/](vscode-kore-viewer/)** | VS Code extension source code |
 
 ### Advanced Documentation
 | Guide | Purpose |
