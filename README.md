@@ -5,7 +5,7 @@
 [![VS Code Extension](https://img.shields.io/visual-studio-marketplace/v/arunkatherashala.kore-viewer?label=VS%20Code%20Extension&color=0078d4&logo=visualstudiocode)](https://marketplace.visualstudio.com/items?itemName=arunkatherashala.kore-viewer)
 [![Crates.io](https://img.shields.io/crates/v/kore_fileformat.svg)](https://crates.io/crates/kore_fileformat)
 [![PyPI](https://img.shields.io/pypi/v/kore-fileformat.svg)](https://pypi.org/project/kore-fileformat/)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-KUOPL%20v1.1-blue.svg)](KUOPL-LICENSE)
 [![Rust 1.70+](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 
 **A high-performance, columnar file format for analytics with cloud storage connectors.**
@@ -408,23 +408,16 @@ Please email: **arunkatherashala@gmail.com**
 
 ## 📄 License
 
-Kore is licensed under the Apache License 2.0.
+Kore is licensed under the **Kore Use-Only Proprietary License (KUOPL) v1.1**.
 
-```
-Copyright 2024-2026 Sai Arun Kumar Ktherashala
+✅ You can use Kore freely for personal, educational, research, and commercial purposes.
+❌ You cannot modify, fork, or redistribute modified versions.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+See [KUOPL-LICENSE](KUOPL-LICENSE) for full details.
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-```
+### Commercial Licensing
+For custom licensing, enterprise features, or permission to modify: 
+[Contact: arunkatherashala@gmail.com](mailto:arunkatherashala@gmail.com)
 
 ---
 
