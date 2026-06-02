@@ -1,7 +1,7 @@
 Package: korefileformat
 Type: Package
 Title: KORE High-Performance File Compression Format
-Version: 1.3.1
+Version: 1.3.2
 Authors@R: person("Sai Arun Kumar", "Katherashala",
     email = "arunkatherashala@gmail.com",
     role = c("aut", "cre"))
