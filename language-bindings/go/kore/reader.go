@@ -1,7 +1,6 @@
 package kore
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -234,7 +233,7 @@ func (w *Writer) WriteData(columns [][]string) error {
 		}
 	}
 
-	// Write header
+	// Write header (64 bytes to match reader expectation)
 	w.header = &Header{
 		Version:   KoreVersion,
 		NumCols:   uint16(len(columns)),
@@ -242,14 +241,14 @@ func (w *Writer) WriteData(columns [][]string) error {
 		NumChunks: uint32((numRows + ChunkRows - 1) / ChunkRows),
 	}
 
-	headerBuf := new(bytes.Buffer)
-	headerBuf.WriteString(KoreMagic)
-	headerBuf.WriteByte(w.header.Version)
-	headerBuf.WriteByte(w.header.Reserved)
-	binary.Write(headerBuf, binary.LittleEndian, w.header.NumCols)
-	binary.Write(headerBuf, binary.LittleEndian, w.header.NumRows)
+	headerBuf := make([]byte, 64)
+	copy(headerBuf[0:4], []byte(KoreMagic))
+	headerBuf[4] = w.header.Version
+	headerBuf[5] = w.header.Reserved
+	binary.LittleEndian.PutUint16(headerBuf[6:8], w.header.NumCols)
+	binary.LittleEndian.PutUint64(headerBuf[8:16], w.header.NumRows)
 
-	if _, err := w.file.Write(headerBuf.Bytes()); err != nil {
+	if _, err := w.file.Write(headerBuf); err != nil {
 		return err
 	}
 
@@ -262,22 +261,18 @@ func (w *Writer) WriteData(columns [][]string) error {
 	}
 
 	for _, col := range w.columns {
-		colBuf := new(bytes.Buffer)
-		binary.Write(colBuf, binary.LittleEndian, uint16(len(col.Name)))
-		colBuf.WriteString(col.Name)
-		// Padding to align with expected format
-		for colBuf.Len() < 66 {
-			colBuf.WriteByte(0)
+		// Write 256-byte column metadata entry to match reader expectation
+		colBuf := make([]byte, 256)
+		binary.LittleEndian.PutUint16(colBuf[0:2], uint16(len(col.Name)))
+		copy(colBuf[2:66], []byte(col.Name))
+		copy(colBuf[66:130], []byte(col.Type))
+		binary.LittleEndian.PutUint64(colBuf[130:138], col.Offset)
+		binary.LittleEndian.PutUint32(colBuf[138:142], col.Length)
+		if col.Encoded {
+			colBuf[142] = 1
 		}
-		colBuf.WriteString(col.Type)
-		for colBuf.Len() < 130 {
-			colBuf.WriteByte(0)
-		}
-		binary.Write(colBuf, binary.LittleEndian, col.Offset)
-		binary.Write(colBuf, binary.LittleEndian, col.Length)
-		colBuf.WriteByte(0) // Encoded flag
-		
-		if _, err := w.file.Write(colBuf.Bytes()); err != nil {
+
+		if _, err := w.file.Write(colBuf); err != nil {
 			return err
 		}
 	}
