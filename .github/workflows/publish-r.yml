@@ -1,0 +1,80 @@
+name: Publish R Package
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+    paths:
+      - 'kore-fileformat-r/**'
+  release:
+    types: [published]
+
+jobs:
+  check:
+    name: R CMD check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: kore-fileformat-r
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - name: Install dependencies
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          working-directory: kore-fileformat-r
+          extra-packages: |
+            any::rcmdcheck
+            any::testthat
+
+      - name: Run R CMD check
+        uses: r-lib/actions/check-r-package@v2
+        with:
+          working-directory: kore-fileformat-r
+          args: 'c("--no-manual", "--as-cran")'
+          error-on: '"error"'
+
+  build-artifact:
+    name: Build CRAN tarball
+    needs: check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: kore-fileformat-r
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - name: Install devtools
+        run: install.packages("devtools")
+        shell: Rscript {0}
+
+      - name: Build package tarball
+        run: devtools::build(path = ".", binary = FALSE, quiet = FALSE)
+        shell: Rscript {0}
+
+      - name: Upload CRAN-ready artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: korefileformat-cran
+          path: kore-fileformat-r/*.tar.gz
+          retention-days: 30
+
+      - name: Next steps for CRAN
+        run: |
+          echo "Tarball artifact uploaded."
+          echo "Download from GitHub Actions artifacts and submit at:"
+          echo "  https://cran.r-project.org/submit.html"
+          echo "Or run locally: devtools::submit_cran()"
