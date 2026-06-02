@@ -31,40 +31,45 @@ jobs:
           go vet ./...
 
       - name: Tag for pkg.go.dev
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           TAG=$(echo $GITHUB_REF | sed 's|refs/tags/||')
           echo "Publishing tag: $TAG to pkg.go.dev"
-          
+
       - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
           files: |
             language-bindings/go/README.md
             language-bindings/go/go.mod
           body: |
-            # Kore Go Package v${{ github.ref_name }}
-            
+            # Kore Go Package
+
             Pure Go implementation of the Kore columnar file format.
-            
+
             ## Installation
             ```bash
-            go get github.com/arunkatherashala/kore-go@${{ github.ref_name }}
+            go get github.com/arunkatherashala/kore-go
             ```
-            
+
             ## Features
             - Read/Write Kore files
             - Column-based access
             - Zero dependencies
             - Production-ready
-            
-            For full documentation, visit https://pkg.go.dev/github.com/arunkatherashala/kore-go
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Notify pkg.go.dev
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           TAG=$(echo $GITHUB_REF | sed 's|refs/tags/||')
-          echo "Go package will be automatically indexed by pkg.go.dev"
+          echo "Go package indexed by pkg.go.dev"
           echo "View at: https://pkg.go.dev/github.com/arunkatherashala/kore-go@$TAG"
+
+      - name: Validation complete
+        if: github.event_name == 'workflow_dispatch'
+        run: echo "Module validated successfully. Push a go-v* tag to publish a release."
