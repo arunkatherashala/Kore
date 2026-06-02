@@ -3,7 +3,6 @@ package kore
 import (
 	"os"
 	"testing"
-	"tempfile"
 )
 
 func TestNewReaderInvalidFile(t *testing.T) {
