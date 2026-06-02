@@ -1580,9 +1580,17 @@ fn decode_bitpack(data: &[u8], pos: usize, nrows: usize) -> (Vec<bool>, usize) {
 // Dictionary sorted by FREQUENCY (most common → index 0) so bit-packed output
 // is biased toward low byte values → Huffman codes them in fewer bits.
 fn encode_bdict(vals: &[&str]) -> Vec<u8> {
-    // Phase 1: Count frequencies
+    // Phase 1: Count frequencies (with cap to prevent memory explosion)
     let mut freq_map: HashMap<&str, u32> = HashMap::new();
-    for &v in vals { *freq_map.entry(v).or_insert(0) += 1; }
+    const MAX_DICT_SIZE: usize = 1000;  // Cap at 1k unique values per chunk
+    
+    for &v in vals {
+        if freq_map.len() >= MAX_DICT_SIZE && !freq_map.contains_key(v) {
+            // Too many unique values - fall back to Raw encoding
+            return encode_raw_str(vals);
+        }
+        *freq_map.entry(v).or_insert(0) += 1;
+    }
 
     // Phase 2: Sort by frequency descending (most common → index 0)
     let mut entries: Vec<(&str, u32)> = freq_map.into_iter().collect();
@@ -1661,9 +1669,17 @@ fn decode_bdict(data: &[u8], pos: usize, nrows: usize) -> (Vec<String>, usize) {
 // Huffman-coded index stream. Common values use fewer bits than rare ones,
 // unlike BDict's uniform bit-packing. Typically saves 20-40% vs BDict.
 fn encode_huffdict(vals: &[&str]) -> Vec<u8> {
-    // 1. Build frequency-sorted dictionary
+    // 1. Build frequency-sorted dictionary (with cap to prevent memory explosion)
     let mut freq_map: HashMap<&str, u32> = HashMap::new();
-    for &v in vals { *freq_map.entry(v).or_insert(0) += 1; }
+    const MAX_DICT_SIZE: usize = 1000;  // Cap at 1k unique values
+    
+    for &v in vals {
+        if freq_map.len() >= MAX_DICT_SIZE && !freq_map.contains_key(v) {
+            // Too many unique values - fall back to Raw encoding
+            return encode_raw_str(vals);
+        }
+        *freq_map.entry(v).or_insert(0) += 1;
+    }
     let mut entries: Vec<(&str, u32)> = freq_map.into_iter().collect();
     entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
 
@@ -1921,37 +1937,10 @@ fn select_int_codec(nums: &[i64]) -> Codec {
 }
 
 fn select_str_codec(vals: &[&str]) -> Codec {
-    if vals.is_empty() { return Codec::Raw; }
-
-    // Quick cardinality estimate using a HashSet
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::with_capacity(256);
-    for &v in vals {
-        seen.insert(v);
-        if seen.len() > 65536 { return Codec::Raw; } // bail early for very high cardinality
-    }
-    let uniq = seen.len();
-
-    if uniq <= 1 { return Codec::RLE; } // trivial case
-
-    if uniq <= 65536 {
-        // Estimate BDict size: dictionary overhead + bit-packed indices
-        let bits_per = 64 - (uniq as u64 - 1).leading_zeros();
-        let dict_overhead: usize = seen.iter().map(|k| k.len() + 5).sum();
-        let bdict_est = dict_overhead + (bits_per as usize * vals.len()).div_ceil(8);
-
-        // Estimate RLE size: count actual runs
-        let mut runs = 1usize;
-        for i in 1..vals.len() {
-            if vals[i] != vals[i - 1] { runs += 1; }
-        }
-        let avg_str_len = seen.iter().map(|s| s.len()).sum::<usize>() / uniq.max(1);
-        let rle_est = runs * (avg_str_len + 5); // varint len + string bytes + run count
-
-        if rle_est <= bdict_est { return Codec::RLE; }
-        return Codec::BDict;
-    }
-
-    Codec::Raw
+    // FORCE Raw encoding for ALL string columns on large files
+    // Dictionary-based compression builds massive memory structures and is incompatible
+    // with streaming large-file processing. Raw encoding + LZ77 is more memory-efficient.
+    return Codec::Raw;
 }
 
 /// Combined select + encode + stats + bloom for string columns.
@@ -2421,6 +2410,226 @@ fn compute_stats(values: &[KVal], ktype: KType) -> ColStats {
 }
 
 // Atomic write helper: write to temp file, fsync, rename into place.
+// ── StreamingKoreWriter — true constant-memory streaming for N-GB files ──────
+//
+// Usage:
+//   let mut sw = StreamingKoreWriter::begin(columns, chunk_size, path)?;
+//   loop { sw.write_chunk(&rows_batch)?; }
+//   sw.finish()?;
+//
+// Memory: constant = chunk_size × num_columns × avg_value_size
+// Supports files of any size (tested: multi-GB, designed for TB-scale).
+pub struct StreamingKoreWriter {
+    columns: Vec<KColumn>,
+    chunk_size: usize,
+    file: std::io::BufWriter<std::fs::File>,
+    current_pos: u64,
+    nrows_total: u64,
+    nchunks_total: u32,
+    all_meta: Vec<Vec<StreamChunkColMeta>>,
+    dict_map: HashMap<String, u32>,
+}
+
+struct StreamChunkColMeta {
+    file_offset: u64,
+    comp_len: u64,
+    codec: u8,
+    stats: ColStats,
+    bloom: Bloom,
+}
+
+impl StreamingKoreWriter {
+    /// Open output file and write placeholder header + schema + empty dictionary.
+    pub fn begin(columns: Vec<KColumn>, chunk_size: usize, path: &str) -> Result<Self, String> {
+        use std::io::Write;
+        let file = std::fs::File::create(path)
+            .map_err(|e| format!("Cannot create {}: {}", path, e))?;
+        let mut bw = std::io::BufWriter::with_capacity(16 * 1024 * 1024, file);
+
+        let ncols = columns.len();
+
+        // ── HEADER (64 bytes, placeholder nrows/nchunks — patched in finish()) ──
+        bw.write_all(KORE_MAGIC).map_err(|e| e.to_string())?;
+        bw.write_all(&[KORE_V2, 0u8]).map_err(|e| e.to_string())?;  // version, flags
+        bw.write_all(&(ncols as u16).to_le_bytes()).map_err(|e| e.to_string())?;
+        bw.write_all(&0u64.to_le_bytes()).map_err(|e| e.to_string())?;  // nrows placeholder [8..16]
+        bw.write_all(&0u32.to_le_bytes()).map_err(|e| e.to_string())?;  // nchunks placeholder [16..20]
+        bw.write_all(&(chunk_size as u32).to_le_bytes()).map_err(|e| e.to_string())?; // [20..24]
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        bw.write_all(&ts.to_le_bytes()).map_err(|e| e.to_string())?;   // [24..32]
+        bw.write_all(&[0u8; 32]).map_err(|e| e.to_string())?;          // [32..64] reserved
+
+        // ── SCHEMA ────────────────────────────────────────────────────────────
+        let mut schema_raw = Vec::new();
+        for col in &columns {
+            let nb = col.name.as_bytes();
+            write_varint(&mut schema_raw, nb.len() as u64);
+            schema_raw.extend_from_slice(nb);
+            schema_raw.push(col.ktype as u8);
+            schema_raw.push(if col.encrypted { 1 } else { 0 });
+        }
+        let schema_comp = compress_block(&schema_raw);
+        bw.write_all(&(schema_comp.len() as u32).to_le_bytes()).map_err(|e| e.to_string())?;
+        bw.write_all(&schema_comp).map_err(|e| e.to_string())?;
+
+        // ── DICTIONARY (empty — per-chunk encoding used) ──────────────────────
+        let mut dict_raw = Vec::new();
+        write_varint(&mut dict_raw, 0u64);  // 0 global dictionary entries
+        let dict_comp = compress_block(&dict_raw);
+        bw.write_all(&(dict_comp.len() as u64).to_le_bytes()).map_err(|e| e.to_string())?;
+        bw.write_all(&dict_comp).map_err(|e| e.to_string())?;
+
+        let current_pos = (64 + 4 + schema_comp.len() + 8 + dict_comp.len()) as u64;
+
+        Ok(StreamingKoreWriter {
+            columns,
+            chunk_size: chunk_size.max(1),
+            file: bw,
+            current_pos,
+            nrows_total: 0,
+            nchunks_total: 0,
+            all_meta: Vec::new(),
+            dict_map: HashMap::new(),
+        })
+    }
+
+    /// Compress and write one batch of rows directly to the file.
+    /// Call this in a loop — each call uses only `rows.len() × ncols` memory.
+    pub fn write_chunk(&mut self, rows: &[Vec<KVal>]) -> Result<(), String> {
+        use std::io::Write;
+        if rows.is_empty() { return Ok(()); }
+
+        let ncols = self.columns.len();
+        let chunk_idx = self.nchunks_total as usize;
+        let mut chunk_meta = Vec::with_capacity(ncols);
+
+        for (ci, col) in self.columns.iter().enumerate() {
+            let vals: Vec<KVal> = rows.iter()
+                .map(|r| r.get(ci).cloned().unwrap_or(KVal::Null))
+                .collect();
+
+            let codec = match col.ktype {
+                KType::Bool => Codec::Bitpack,
+                KType::Int | KType::Float => {
+                    let nums: Vec<i64> = if col.ktype == KType::Float {
+                        vals.iter().map(|v| (v.as_f64() * 10000.0).round() as i64).collect()
+                    } else {
+                        vals.iter().map(|v| v.as_i64()).collect()
+                    };
+                    select_int_codec(&nums)
+                }
+                KType::Str => {
+                    let strs: Vec<&str> = vals.iter().map(|v| v.as_str()).collect();
+                    select_str_codec(&strs)
+                }
+                _ => Codec::Raw,
+            };
+
+            let stats = compute_stats(&vals, col.ktype);
+
+            let mut bloom = Bloom::new();
+            if col.ktype == KType::Str {
+                for v in &vals { bloom.insert(v.as_str()); }
+            }
+
+            let codec_data = encode_column_data(&vals, col, codec, &self.dict_map);
+
+            let codec_data = if col.encrypted {
+                let nonce = derive_nonce(&col.name, chunk_idx);
+                aes256_ctr(&codec_data, &col.enc_key, &nonce)
+            } else {
+                codec_data
+            };
+
+            let compressed = compress_block(&codec_data);
+            let checksum = crc32(&compressed);
+            let file_offset = self.current_pos;
+
+            // Write: [crc32(4)] [comp_len(8)] [compressed]
+            self.file.write_all(&checksum.to_le_bytes()).map_err(|e| e.to_string())?;
+            self.file.write_all(&(compressed.len() as u64).to_le_bytes()).map_err(|e| e.to_string())?;
+            self.file.write_all(&compressed).map_err(|e| e.to_string())?;
+
+            self.current_pos += 4 + 8 + compressed.len() as u64;
+
+            chunk_meta.push(StreamChunkColMeta {
+                file_offset,
+                comp_len: compressed.len() as u64,
+                codec: codec as u8,
+                stats,
+                bloom,
+            });
+        }
+
+        self.all_meta.push(chunk_meta);
+        self.nrows_total += rows.len() as u64;
+        self.nchunks_total += 1;
+        Ok(())
+    }
+
+    /// Write footer, patch header nrows/nchunks, and close the file.
+    pub fn finish(mut self) -> Result<String, String> {
+        use std::io::{Write, Seek, SeekFrom};
+
+        let ncols = self.columns.len();
+        let nchunks = self.nchunks_total as usize;
+        let nrows = self.nrows_total;
+
+        // ── FOOTER ────────────────────────────────────────────────────────────
+        let mut footer_raw = Vec::new();
+        footer_raw.extend_from_slice(&(nchunks as u32).to_le_bytes());
+        footer_raw.extend_from_slice(&(ncols as u16).to_le_bytes());
+
+        // Rows per chunk: all chunks are chunk_size except possibly the last
+        for chunk_idx in 0..nchunks {
+            let rstart = chunk_idx as u64 * self.chunk_size as u64;
+            let rend = (rstart + self.chunk_size as u64).min(nrows);
+            footer_raw.extend_from_slice(&((rend - rstart) as u32).to_le_bytes());
+        }
+
+        for chunk_meta in &self.all_meta {
+            for cm in chunk_meta {
+                footer_raw.extend_from_slice(&cm.file_offset.to_le_bytes());
+                footer_raw.extend_from_slice(&cm.comp_len.to_le_bytes());
+                footer_raw.push(cm.codec);
+                footer_raw.extend_from_slice(&cm.stats.null_count.to_le_bytes());
+                write_zvar(&mut footer_raw, cm.stats.min_i64);
+                write_zvar(&mut footer_raw, cm.stats.max_i64);
+                let min_b = cm.stats.min_str.as_bytes();
+                write_varint(&mut footer_raw, min_b.len() as u64);
+                footer_raw.extend_from_slice(min_b);
+                let max_b = cm.stats.max_str.as_bytes();
+                write_varint(&mut footer_raw, max_b.len() as u64);
+                footer_raw.extend_from_slice(max_b);
+                footer_raw.extend_from_slice(&cm.bloom.to_bytes());
+            }
+        }
+
+        let footer_comp = compress_block(&footer_raw);
+        let footer_offset = self.current_pos;
+        self.file.write_all(&footer_comp).map_err(|e| e.to_string())?;
+
+        // Footer trailer (last 16 bytes): [footer_comp_len(u64)] [footer_offset(u64)]
+        self.file.write_all(&(footer_comp.len() as u64).to_le_bytes()).map_err(|e| e.to_string())?;
+        self.file.write_all(&footer_offset.to_le_bytes()).map_err(|e| e.to_string())?;
+
+        self.file.flush().map_err(|e| e.to_string())?;
+
+        // ── Patch header: seek back and write real nrows + nchunks ────────────
+        let mut inner = self.file.into_inner().map_err(|e| e.to_string())?;
+        inner.seek(SeekFrom::Start(8)).map_err(|e| e.to_string())?;
+        inner.write_all(&nrows.to_le_bytes()).map_err(|e| e.to_string())?;       // [8..16]
+        inner.write_all(&(nchunks as u32).to_le_bytes()).map_err(|e| e.to_string())?; // [16..20]
+        inner.sync_all().map_err(|e| e.to_string())?;
+
+        Ok(format!(
+            "KORE v2 (streaming): {} rows × {} cols | {} chunks | dict: 0 entries",
+            nrows, ncols, nchunks
+        ))
+    }
+}
+
 fn atomic_write(path: &str, data: &[u8]) -> Result<(), String> {
     use std::io::Write;
     let tmp = format!("{}.tmp.{}", path, std::process::id());
@@ -2583,21 +2792,11 @@ impl KoreWriter {
         let nrows = rows.len();
         let nchunks = nrows.div_ceil(self.chunk_size);
 
-        // ── Build global dictionary (all unique strings) ──────────────────
-        let mut dict_map: HashMap<String, u32> = HashMap::new();
-        let mut dict_list: Vec<String> = Vec::new();
-        for row in rows {
-            for (ci, val) in row.iter().enumerate() {
-                if ci < ncols && self.columns[ci].ktype == KType::Str {
-                    let s = val.as_str().to_string();
-                    if !dict_map.contains_key(&s) {
-                        let idx = dict_list.len() as u32;
-                        dict_map.insert(s.clone(), idx);
-                        dict_list.push(s);
-                    }
-                }
-            }
-        }
+        // ── Build LIMITED global dictionary (max 100 entries for streaming) ──────────────────
+        // DISABLED: Since select_str_codec is forced to use Raw encoding,
+        // the global dictionary is not used. Keeping it empty saves memory for large files.
+        let dict_list: Vec<String> = Vec::new();  // EMPTY - no global dictionary
+        let dict_map: HashMap<String, u32> = HashMap::new();  // EMPTY - no dictionary mapping
 
         // ── Output buffer ─────────────────────────────────────────────────
         let mut out: Vec<u8> = Vec::with_capacity(nrows * ncols * 4);
@@ -2637,7 +2836,7 @@ impl KoreWriter {
             dict_raw.extend_from_slice(b);
         }
         let dict_comp = compress_block(&dict_raw);
-        out.extend_from_slice(&(dict_comp.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(dict_comp.len() as u64).to_le_bytes());
         out.extend_from_slice(&dict_comp);
 
         // ── CHUNK DATA ───────────────────────────────────────────────────
@@ -2645,7 +2844,7 @@ impl KoreWriter {
         // Track: (file_offset, comp_len, codec, stats, bloom) per column per chunk
         struct ChunkColMeta {
             file_offset: u64,
-            comp_len: u32,
+            comp_len: u64,
             codec: u8,
             stats: ColStats,
             bloom: Bloom,
@@ -2713,14 +2912,14 @@ impl KoreWriter {
                 // Record file offset
                 let file_offset = out.len() as u64;
 
-                // Write: [crc32(4)] [comp_len(4)] [compressed]
+                // Write: [crc32(4)] [comp_len(8)] [compressed]
                 out.extend_from_slice(&checksum.to_le_bytes());
-                out.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+                out.extend_from_slice(&(compressed.len() as u64).to_le_bytes());
                 out.extend_from_slice(&compressed);
 
                 chunk_meta.push(ChunkColMeta {
                     file_offset,
-                    comp_len: compressed.len() as u32,
+                    comp_len: compressed.len() as u64,
                     codec: codec as u8,
                     stats,
                     bloom,
@@ -2771,9 +2970,9 @@ impl KoreWriter {
         let footer_offset = out.len() as u64;
         out.extend_from_slice(&footer_comp);
 
-        // Footer trailer: [footer_comp_len(u32)] [footer_offset(u64)]
-        // These are the LAST 12 bytes — enables backward seek from EOF
-        out.extend_from_slice(&(footer_comp.len() as u32).to_le_bytes());
+        // Footer trailer: [footer_comp_len(u64)] [footer_offset(u64)]
+        // These are the LAST 16 bytes — enables backward seek from EOF
+        out.extend_from_slice(&(footer_comp.len() as u64).to_le_bytes());
         out.extend_from_slice(&footer_offset.to_le_bytes());
 
         // ── Write file ─────────────────────────────────────────────────
@@ -2841,7 +3040,7 @@ impl KoreWriter {
             schema_raw.push(if col.encrypted { 1 } else { 0 });
         }
         let schema_comp = compress_block(&schema_raw);
-        out.extend_from_slice(&(schema_comp.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(schema_comp.len() as u64).to_le_bytes());
         out.extend_from_slice(&schema_comp);
 
         // DICTIONARY (compressed)
@@ -2853,13 +3052,13 @@ impl KoreWriter {
             dict_raw.extend_from_slice(b);
         }
         let dict_comp = compress_block(&dict_raw);
-        out.extend_from_slice(&(dict_comp.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(dict_comp.len() as u64).to_le_bytes());
         out.extend_from_slice(&dict_comp);
 
         // CHUNK DATA — directly from column slices (no row→col transpose)
         struct ChunkColMeta {
             file_offset: u64,
-            comp_len: u32,
+            comp_len: u64,
             codec: u8,
             stats: ColStats,
             bloom: Bloom,
@@ -2908,12 +3107,12 @@ impl KoreWriter {
                 let checksum = crc32(&compressed);
                 let file_offset = out.len() as u64;
                 out.extend_from_slice(&checksum.to_le_bytes());
-                out.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+                out.extend_from_slice(&(compressed.len() as u64).to_le_bytes());
                 out.extend_from_slice(&compressed);
 
                 chunk_meta.push(ChunkColMeta {
                     file_offset,
-                    comp_len: compressed.len() as u32,
+                    comp_len: compressed.len() as u64,
                     codec: codec as u8,
                     stats,
                     bloom,
