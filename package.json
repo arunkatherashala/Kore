@@ -1,6 +1,6 @@
 {
   "name": "@kore/cloud",
-  "version": "1.2.9",
+  "version": "1.3.2",
   "description": "Cloud connectors (S3, Azure Blob, GCS) for Kore columnar file format",
   "main": "index.js",
   "types": "index.d.ts",
@@ -44,5 +44,12 @@
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",
     "access": "public"
+  },
+  "optionalDependencies": {
+    "@kore/cloud-win32-x64-msvc": "1.2.9",
+    "@kore/cloud-darwin-x64": "1.2.9",
+    "@kore/cloud-linux-x64-gnu": "1.2.9",
+    "@kore/cloud-darwin-arm64": "1.2.9",
+    "@kore/cloud-linux-arm64-gnu": "1.2.9"
   }
 }
