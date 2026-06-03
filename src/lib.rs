@@ -77,6 +77,12 @@ pub mod adaptive_blocking;
 // v1.2.4 Monitoring & Observability
 pub mod monitoring;
 
+// v1.3.2 Phase 2, 3, 4: MCP Server, Query Engine, AI Features
+pub mod mcp_server;     // Phase 2: Model Context Protocol Server for Claude/ChatGPT integration
+pub mod query_exec_v3;  // Phase 3: Vectorized Query Execution (WHERE, SELECT, GROUP BY)
+pub mod ai_features;    // Phase 4: AI-powered codec selection and natural language parsing
+pub mod phase_integration;  // Full stack integration: Phase 2 + 3 + 4 working together
+
 // Cloud storage connectors (API stubs enabled for v1.0, full implementation in v1.1)
 #[cfg(feature = "s3")]
 pub mod s3_reader;
