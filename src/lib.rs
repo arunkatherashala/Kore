@@ -92,6 +92,14 @@ pub mod acid_transactions_v5;
 // v1.4.0 & v1.5.0 Integration: Schema Evolution + ACID working together
 pub mod schema_acid_integration_v6;
 
+// v1.6.0 Query Optimization: Cost-based planning, adaptive execution, predicate pushdown
+pub mod query_statistics_v1;      // Statistics engine for cost estimation
+pub mod query_optimizer_v1;       // Cost-based query optimizer
+pub mod join_strategies_v1;       // Multiple join algorithm implementations
+pub mod predicate_pushdown_v1;    // Predicate pushdown to chunk level
+pub mod adaptive_executor_v1;     // Adaptive query execution
+pub mod query_optimization_integration_v1; // Full v1.6.0 integration
+
 // Cloud storage connectors (API stubs enabled for v1.0, full implementation in v1.1)
 #[cfg(feature = "s3")]
 pub mod s3_reader;
