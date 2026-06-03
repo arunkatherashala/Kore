@@ -83,6 +83,15 @@ pub mod query_exec_v3;  // Phase 3: Vectorized Query Execution (WHERE, SELECT, G
 pub mod ai_features;    // Phase 4: AI-powered codec selection and natural language parsing
 pub mod phase_integration;  // Full stack integration: Phase 2 + 3 + 4 working together
 
+// v1.4.0 Schema Evolution: Add/remove/rename columns, type evolution, backward compatibility
+pub mod schema_evolution_v4;
+
+// v1.5.0 ACID Transactions: Transactions, MVCC, WAL, snapshot isolation, time-travel queries
+pub mod acid_transactions_v5;
+
+// v1.4.0 & v1.5.0 Integration: Schema Evolution + ACID working together
+pub mod schema_acid_integration_v6;
+
 // Cloud storage connectors (API stubs enabled for v1.0, full implementation in v1.1)
 #[cfg(feature = "s3")]
 pub mod s3_reader;
