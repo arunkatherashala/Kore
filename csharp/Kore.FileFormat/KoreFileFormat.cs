@@ -74,7 +74,7 @@ namespace Kore.FileFormat
                 byte[] colBuf = _binaryReader.ReadBytes(256);
                 
                 ushort nameLen = BitConverter.ToUInt16(colBuf, 0);
-                string name = Encoding.UTF8.GetString(colBuf, 2, Math.Min(nameLen, 64));
+                string name = Encoding.UTF8.GetString(colBuf, 2, Math.Min(nameLen, (ushort)64));
                 string type = Encoding.UTF8.GetString(colBuf, 66, 64).TrimEnd('\0');
                 ulong offset = BitConverter.ToUInt64(colBuf, 130);
                 uint length = BitConverter.ToUInt32(colBuf, 138);
