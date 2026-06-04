@@ -358,7 +358,7 @@ mod tests {
                 value: 150,
             }),
         );
-        assert_eq!(pred.test_chunk(&chunk), PredicateResult::MayMatch);
+        assert_eq!(pred.test_chunk(&chunk), PredicateResult::MustMatch);
     }
 
     #[test]

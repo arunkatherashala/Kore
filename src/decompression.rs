@@ -859,7 +859,7 @@ mod tests {
         data.extend([0, 1, 2, 0, 3, 1]);
 
         let result = DictionaryDecompressor::decompress(&data).unwrap();
-        let mut expected = Vec::new();
+        let mut expected: Vec<u8> = Vec::new();
         expected.extend(b"name");
         expected.extend(b"age");
         expected.extend(b"city");

@@ -377,7 +377,12 @@ mod tests {
 
     #[test]
     fn test_should_adapt_no_error() {
-        let ctx = AdaptiveExecutionContext::new(1000, 100.0);
+        let mut ctx = AdaptiveExecutionContext::new(1000, 100.0);
+        // Record approximately the expected number of rows (within error bounds)
+        for _ in 0..1000 {
+            ctx.record_row().unwrap();
+        }
+        ctx.record_cost(100.0).unwrap();
         let hint = ctx.should_adapt().unwrap();
         assert_eq!(hint, ExecutionHint::Continue);
     }
@@ -412,6 +417,11 @@ mod tests {
     #[test]
     fn test_execute_join_adaptive() {
         let mut ctx = AdaptiveExecutionContext::new(100, 10.0);
+        // Record rows to match estimates before adaptive execution
+        for _ in 0..100 {
+            ctx.record_row().unwrap();
+        }
+        ctx.record_cost(10.0).unwrap();
         let result = execute_join_adaptive(100, 100, &mut ctx);
         assert!(result.is_ok());
         assert!(result.unwrap() > 0);

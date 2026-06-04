@@ -344,7 +344,7 @@ mod tests {
             table: "users".to_string(),
         };
         let mut stats = std::collections::HashMap::new();
-        stats.insert("users".to_string(), TableStats::new("users", 1000));
+        stats.insert("users".to_string(), TableStats::new("users".to_string(), 1000));
         let context = OptimizerContext::new(stats);
 
         let result = optimize(logical, &context);
@@ -362,7 +362,7 @@ mod tests {
             predicate: "age > 18".to_string(),
         };
         let mut stats = std::collections::HashMap::new();
-        stats.insert("users".to_string(), TableStats::new("users", 1000));
+        stats.insert("users".to_string(), TableStats::new("users".to_string(), 1000));
         let context = OptimizerContext::new(stats);
 
         let result = optimize(logical, &context);
@@ -383,8 +383,8 @@ mod tests {
             join_keys: vec!["id".to_string()],
         };
         let mut stats = std::collections::HashMap::new();
-        stats.insert("t1".to_string(), TableStats::new("t1", 100));
-        stats.insert("t2".to_string(), TableStats::new("t2", 100));
+        stats.insert("t1".to_string(), TableStats::new("t1".to_string(), 100));
+        stats.insert("t2".to_string(), TableStats::new("t2".to_string(), 100));
         let context = OptimizerContext::new(stats);
 
         let result = optimize(logical, &context);
@@ -408,8 +408,8 @@ mod tests {
             join_keys: vec!["id".to_string()],
         };
         let mut stats = std::collections::HashMap::new();
-        stats.insert("t1".to_string(), TableStats::new("t1", 10_000_000));
-        stats.insert("t2".to_string(), TableStats::new("t2", 10_000_000));
+        stats.insert("t1".to_string(), TableStats::new("t1".to_string(), 10_000_000));
+        stats.insert("t2".to_string(), TableStats::new("t2".to_string(), 10_000_000));
         let context = OptimizerContext::new(stats);
 
         let result = optimize(logical, &context);
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn test_estimated_rows_scan() {
         let mut stats = std::collections::HashMap::new();
-        stats.insert("users".to_string(), TableStats::new("users", 1000));
+        stats.insert("users".to_string(), TableStats::new("users".to_string(), 1000));
 
         let scan = PhysicalExpr::SeqScan {
             table: "users".to_string(),
@@ -441,7 +441,7 @@ mod tests {
     #[test]
     fn test_estimated_rows_filter() {
         let mut stats = std::collections::HashMap::new();
-        stats.insert("users".to_string(), TableStats::new("users", 1000));
+        stats.insert("users".to_string(), TableStats::new("users".to_string(), 1000));
 
         let scan = PhysicalExpr::SeqScan {
             table: "users".to_string(),
@@ -465,7 +465,7 @@ mod tests {
             order_keys: vec!["name".to_string()],
         };
         let mut stats = std::collections::HashMap::new();
-        stats.insert("users".to_string(), TableStats::new("users", 1000));
+        stats.insert("users".to_string(), TableStats::new("users".to_string(), 1000));
         let context = OptimizerContext::new(stats);
 
         let result = optimize(logical, &context);
