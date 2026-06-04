@@ -871,19 +871,25 @@ mod tests {
     }
 
     #[test]
-    #[ignore]  // FOR codec test data format needs alignment with decompressor implementation
     fn test_for_decompress_simple() {
         // Simplest FOR: 1-bit values (base + 1-bit delta)
         let data = vec![
             1,                      // bit_width = 1
             0, 0, 0, 0, 0, 0, 0, 0, // base = 0
-            0b00000011,             // 2 bits encoded: value 0 (delta 0), value 1 (delta 1)
+            0b00000010,             // 8 bits encoded as 1-bit values: delta 0,1,0,0,0,0,0,0
         ];
 
         let result = FORDecompressor::decompress(&data).unwrap();
-        assert_eq!(result.len(), 2);
+        assert_eq!(result.len(), 8);
+        // Bits are read LSB to MSB: 0,1,0,0,0,0,0,0
         assert_eq!(result[0], 0);  // base + delta 0 = 0
         assert_eq!(result[1], 1);  // base + delta 1 = 1
+        assert_eq!(result[2], 0);  // base + delta 0 = 0
+        assert_eq!(result[3], 0);  // base + delta 0 = 0
+        assert_eq!(result[4], 0);  // base + delta 0 = 0
+        assert_eq!(result[5], 0);  // base + delta 0 = 0
+        assert_eq!(result[6], 0);  // base + delta 0 = 0
+        assert_eq!(result[7], 0);  // base + delta 0 = 0
     }
 
     #[test]
