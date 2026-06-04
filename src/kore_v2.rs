@@ -208,11 +208,11 @@ impl KoreReader {
     pub fn decode_col_block(&self, ci: usize, meta: &ColMeta, nrows: usize, chunk_idx: usize) -> Vec<KVal> {
         // Read checksum + comp_len + compressed data starting at file_offset
         let off = meta.file_offset as usize;
-        if off + 8 > self.file_data.len() { return vec![KVal::Null; nrows]; }
+        if off + 12 > self.file_data.len() { return vec![KVal::Null; nrows]; }
         let checksum = u32::from_le_bytes(self.file_data[off..off+4].try_into().unwrap_or([0;4]));
-        let comp_len = u32::from_le_bytes(self.file_data[off+4..off+8].try_into().unwrap_or([0;4]));
-        let comp_start = off + 8;
-        let comp_end = comp_start.saturating_add(comp_len as usize).min(self.file_data.len());
+        let comp_len = u64::from_le_bytes(self.file_data[off+4..off+12].try_into().unwrap_or([0;8])) as usize;
+        let comp_start = off + 12;
+        let comp_end = comp_start.saturating_add(comp_len).min(self.file_data.len());
         if comp_start >= comp_end { return vec![KVal::Null; nrows]; }
         let comp_slice = &self.file_data[comp_start..comp_end];
         // Validate checksum when possible
@@ -234,10 +234,10 @@ impl KoreReader {
     /// Open a KORE v2 file and parse header, schema, dictionary and footer metadata.
     pub fn open(path: &str) -> Result<Self, String> {
         let data = std::fs::read(path).map_err(|e| format!("Cannot read {}: {}", path, e))?;
-        if data.len() < 12 { return Err("File too small".to_string()); }
-        // Footer length and offset are in the last 12 bytes
+        if data.len() < 16 { return Err("File too small".to_string()); }
+        // Footer length and offset are in the last 16 bytes
         let len = data.len();
-        let footer_comp_len = u32::from_le_bytes(data[len-12..len-8].try_into().unwrap_or([0;4])) as usize;
+        let footer_comp_len = u64::from_le_bytes(data[len-16..len-8].try_into().unwrap_or([0;8])) as usize;
         let footer_offset = u64::from_le_bytes(data[len-8..len].try_into().unwrap_or([0;8])) as usize;
 
         // Basic header validation

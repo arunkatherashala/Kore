@@ -107,8 +107,8 @@ impl AICodecSelector {
             return DataPattern::TimeSeries;
         }
 
-        // Check for low cardinality
-        if cardinality < 0.05 {
+        // Check for low cardinality (< 25% unique values)
+        if cardinality < 0.25 {
             // Check for RLE opportunities
             if Self::has_high_repetition(values) {
                 return DataPattern::Repetitive;
@@ -222,7 +222,7 @@ impl NaturalLanguageParser {
         }
 
         // Aggregate queries
-        if lower.contains("count") && lower.contains("how many") {
+        if lower.contains("count") || lower.contains("how many") {
             return Some(QueryIntent::Aggregate("COUNT(*)".to_string()));
         }
         if lower.contains("sum") || lower.contains("total") {
