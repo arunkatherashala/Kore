@@ -129,15 +129,15 @@
         </plugins>
     </build>
 
-    <!-- Maven Central Repository (New Endpoint) -->
+    <!-- Maven Central Repository (OSSRH Legacy - Most Reliable) -->
     <distributionManagement>
         <snapshotRepository>
             <id>ossrh</id>
-            <url>https://central.sonatype.com/content/repositories/snapshots</url>
+            <url>https://oss.sonatype.org/content/repositories/snapshots</url>
         </snapshotRepository>
         <repository>
             <id>ossrh</id>
-            <url>https://central.sonatype.com/api/v1/publisher/upload</url>
+            <url>https://oss.sonatype.org/service/local/staging/deploy/maven2/</url>
         </repository>
     </distributionManagement>
 
