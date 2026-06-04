@@ -107,12 +107,8 @@ impl AICodecSelector {
             return DataPattern::TimeSeries;
         }
 
-        // Check for low cardinality (< 25% unique values)
-        if cardinality < 0.25 {
-            // Check for RLE opportunities
-            if Self::has_high_repetition(values) {
-                return DataPattern::Repetitive;
-            }
+        // Check for low cardinality (<= 50% unique values, or just a few distinct values)
+        if cardinality <= 0.50 || unique_count <= 5 {
             return DataPattern::LowCardinality;
         }
 

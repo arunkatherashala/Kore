@@ -166,7 +166,7 @@ pub struct ColStats {
 #[derive(Clone, Debug)]
 pub struct ColMeta {
     pub file_offset: u64,
-    pub comp_len: u32,
+    pub comp_len: u64,
     pub codec: u8,
 }
 
@@ -306,9 +306,9 @@ impl KoreReader {
         for _ in 0..fnchunks {
             let mut cms: Vec<ColMeta> = Vec::with_capacity(fncols);
             for _ in 0..fncols {
-                if fp + 8 + 4 + 1 > footer_raw.len() { return Err("Truncated footer meta".to_string()); }
+                if fp + 8 + 8 + 1 > footer_raw.len() { return Err("Truncated footer meta".to_string()); }
                 let file_offset = u64::from_le_bytes(footer_raw[fp..fp+8].try_into().unwrap_or([0;8])); fp += 8;
-                let comp_len = u32::from_le_bytes(footer_raw[fp..fp+4].try_into().unwrap_or([0;4])); fp += 4;
+                let comp_len = u64::from_le_bytes(footer_raw[fp..fp+8].try_into().unwrap_or([0;8])); fp += 8;
                 let codec = footer_raw[fp]; fp += 1;
                 // Skip stats: null_count(u32) + min/max zvar + min_str + max_str
                 if fp + 4 > footer_raw.len() { return Err("Truncated footer stats".to_string()); }
