@@ -1,0 +1,82 @@
+name: Version Sync Check
+
+on:
+  pull_request:
+    paths:
+      - 'pyproject.toml'
+      - 'Cargo.toml'
+      - 'README.md'
+  push:
+    branches:
+      - main
+    paths:
+      - 'pyproject.toml'
+      - 'Cargo.toml'
+      - 'README.md'
+
+jobs:
+  check-versions:
+    runs-on: ubuntu-latest
+    name: Check Version Consistency
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Extract versions
+        id: versions
+        run: |
+          PYPROJECT_VER=$(grep -oP 'version = "\K[^"]+' pyproject.toml | head -1)
+          CARGO_VER=$(grep -oP 'version = "\K[^"]+' Cargo.toml | head -1)
+          README_VER=$(grep -oP 'pip install kore-fileformat==\K[\d.]+' README.md | head -1)
+          
+          echo "pyproject_version=$PYPROJECT_VER" >> $GITHUB_OUTPUT
+          echo "cargo_version=$CARGO_VER" >> $GITHUB_OUTPUT
+          echo "readme_version=$README_VER" >> $GITHUB_OUTPUT
+          
+          echo "📋 Version Check:"
+          echo "  pyproject.toml: $PYPROJECT_VER"
+          echo "  Cargo.toml: $CARGO_VER"
+          echo "  README.md: $README_VER"
+
+      - name: Verify version consistency
+        run: |
+          PYPROJECT_VER="${{ steps.versions.outputs.pyproject_version }}"
+          CARGO_VER="${{ steps.versions.outputs.cargo_version }}"
+          README_VER="${{ steps.versions.outputs.readme_version }}"
+          
+          MISMATCH=0
+          
+          if [ "$PYPROJECT_VER" != "$CARGO_VER" ]; then
+            echo "❌ Version mismatch: pyproject.toml ($PYPROJECT_VER) != Cargo.toml ($CARGO_VER)"
+            MISMATCH=1
+          fi
+          
+          if [ "$PYPROJECT_VER" != "$README_VER" ]; then
+            echo "❌ Version mismatch: pyproject.toml ($PYPROJECT_VER) != README.md ($README_VER)"
+            MISMATCH=1
+          fi
+          
+          if [ $MISMATCH -eq 1 ]; then
+            echo ""
+            echo "🔧 Fix: Run 'python scripts/sync_versions.py' locally"
+            exit 1
+          fi
+          
+          echo "✅ All versions consistent: $PYPROJECT_VER"
+
+      - name: Auto-sync versions (on main branch)
+        if: github.ref == 'refs/heads/main' && failure()
+        run: |
+          python scripts/sync_versions.py
+
+      - name: Commit version sync (on main branch)
+        if: github.ref == 'refs/heads/main' && failure()
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: 'chore: sync version numbers across files'
+          file_pattern: 'pyproject.toml Cargo.toml README.md'

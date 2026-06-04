@@ -1,0 +1,14 @@
+#!/bin/bash
+# Pre-commit hook to sync versions before committing
+# Install: cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+
+echo "🔄 Checking version consistency..."
+
+python scripts/sync_versions.py
+if [ $? -ne 0 ]; then
+    echo "❌ Version sync failed"
+    exit 1
+fi
+
+echo "✅ Version sync passed"
+exit 0
