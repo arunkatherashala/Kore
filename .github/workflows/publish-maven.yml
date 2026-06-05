@@ -93,8 +93,7 @@ jobs:
         echo "Publishing to Maven Central"
         echo "========================================"
         
-        # Always enable GPG signing with release profile
-        echo "✓ GPG signing enabled"
+        echo "✓ Using central-publishing-maven-plugin for Central Portal deployment"
         
         # Debug: Show settings.xml
         echo ""
@@ -102,22 +101,22 @@ jobs:
         cat ~/.m2/settings.xml | sed 's/<username>[^<]*/<username>***/' | sed 's/<password>[^<]*/<password>***/'
         echo ""
         
-        # Deploy with GPG signing enabled
-        # If passphrase is empty, GPG will use the key without passphrase
+        # Use central-publishing-maven-plugin instead of deploy
+        # This plugin handles Central Portal API authentication automatically
         mvn clean deploy \
           -P release \
           -Dgpg.passphrase="${MAVEN_GPG_PASSPHRASE}" \
           -DskipTests \
           2>&1 | tee mvn-deploy.log
         
-        # Extract key info from logs
-        if grep -q "published" mvn-deploy.log; then
+        # Check for success
+        if grep -q "BUILD SUCCESS" mvn-deploy.log; then
           echo ""
-          echo "✓ Published to Maven Central with GPG signatures"
+          echo "✓ Successfully published to Maven Central Portal"
           echo "Note: Artifact will be indexed within 10-15 minutes"
         else
           echo ""
-          echo "⚠ Check deployment status in Maven Central Portal"
+          echo "⚠ Check deployment status - see logs above for details"
         fi
 
     - name: Publish Summary
