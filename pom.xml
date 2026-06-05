@@ -4,9 +4,9 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>io.github.arunkatherashala</groupId>
+    <groupId>com.katherashala</groupId>
     <artifactId>kore-fileformat</artifactId>
-    <version>1.3.3-SNAPSHOT</version>
+    <version>1.3.3</version>
     <packaging>jar</packaging>
 
     <name>Kore Cloud Connectors (Java)</name>
@@ -129,15 +129,11 @@
         </plugins>
     </build>
 
-    <!-- Maven Central Repository (OSSRH) -->
+    <!-- Maven Central Publisher API (New Endpoint) -->
     <distributionManagement>
-        <snapshotRepository>
-            <id>ossrh</id>
-            <url>https://oss.sonatype.org/content/repositories/snapshots</url>
-        </snapshotRepository>
         <repository>
-            <id>ossrh</id>
-            <url>https://oss.sonatype.org/service/local/staging/deploy/maven2/</url>
+            <id>kore-deploy-v131</id>
+            <url>https://central.sonatype.com/api/v1/publisher/upload</url>
         </repository>
     </distributionManagement>
 

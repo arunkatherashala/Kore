@@ -1,0 +1,14 @@
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\csharp\Kore.FileFormat\obj\Release\net6.0\Kore.FileFormat.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\csharp\Kore.FileFormat\obj\Release\net6.0\Kore.FileFormat.AssemblyInfoInputs.cache
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\csharp\Kore.FileFormat\obj\Release\net6.0\Kore.FileFormat.AssemblyInfo.cs
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\csharp\Kore.FileFormat\obj\Release\net6.0\Kore.FileFormat.csproj.CoreCompileInputs.cache
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\csharp\Kore.FileFormat\obj\Release\net6.0\Kore.FileFormat.sourcelink.json
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\csharp\Kore.FileFormat\bin\Release\net6.0\Kore.FileFormat.deps.json
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\csharp\Kore.FileFormat\bin\Release\net6.0\Kore.FileFormat.dll
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\csharp\Kore.FileFormat\bin\Release\net6.0\Kore.FileFormat.pdb
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\csharp\Kore.FileFormat\bin\Release\net6.0\Kore.FileFormat.xml
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\csharp\Kore.FileFormat\obj\Release\net6.0\Kore.FileFormat.dll
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\csharp\Kore.FileFormat\obj\Release\net6.0\refint\Kore.FileFormat.dll
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\csharp\Kore.FileFormat\obj\Release\net6.0\Kore.FileFormat.xml
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\csharp\Kore.FileFormat\obj\Release\net6.0\Kore.FileFormat.pdb
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\csharp\Kore.FileFormat\obj\Release\net6.0\ref\Kore.FileFormat.dll

@@ -1,0 +1,255 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>Kore.FileFormat</name>
+    </assembly>
+    <members>
+        <member name="T:KoreExamples">
+            <summary>
+            KORE C#/.NET Examples - Runnable code samples showing all major use cases
+            </summary>
+        </member>
+        <member name="M:KoreExamples.Example1_BasicCompression">
+            <summary>
+            Example 1: Basic compression and decompression with byte arrays
+            </summary>
+        </member>
+        <member name="M:KoreExamples.Example2_CompressFile">
+            <summary>
+            Example 2: Compress a file using streaming (for large files)
+            </summary>
+        </member>
+        <member name="M:KoreExamples.Example3_DecompressFile">
+            <summary>
+            Example 3: Decompress a file using streaming
+            </summary>
+        </member>
+        <member name="M:KoreExamples.Example4_DatabaseBackup">
+            <summary>
+            Example 4: Database backup compression simulation
+            </summary>
+        </member>
+        <member name="M:KoreExamples.Example5_RealTimeStreaming">
+            <summary>
+            Example 5: Real-time streaming compression
+            </summary>
+        </member>
+        <member name="M:KoreExamples.Example6_PerformanceMetrics">
+            <summary>
+            Example 6: Performance metrics
+            </summary>
+        </member>
+        <member name="M:KoreExamples.CreateTestFile(System.String,System.Int32)">
+            <summary>
+            Helper: Create test file with random data
+            </summary>
+        </member>
+        <member name="M:KoreExamples.Main">
+            <summary>
+            Run all examples
+            </summary>
+        </member>
+        <member name="T:Kore.FileFormat.KoreCompressor">
+            <summary>
+            Main compressor class for KORE v1.1.6 file format compression.
+            Provides simple APIs for compressing and decompressing data.
+            </summary>
+        </member>
+        <member name="P:Kore.FileFormat.KoreCompressor.CompressionLevel">
+            <summary>
+            Gets or sets the compression level (0-22).
+            Higher values = better compression but slower.
+            Default: 18
+            </summary>
+        </member>
+        <member name="M:Kore.FileFormat.KoreCompressor.#ctor">
+            <summary>
+            Initializes a new instance of the KoreCompressor class.
+            </summary>
+        </member>
+        <member name="M:Kore.FileFormat.KoreCompressor.Compress(System.Byte[])">
+            <summary>
+            Compresses the input byte array using KORE compression.
+            </summary>
+            <param name="inputData">The data to compress.</param>
+            <returns>Compressed byte array.</returns>
+            <exception cref="T:System.ArgumentNullException">Thrown when inputData is null.</exception>
+            <exception cref="T:System.InvalidOperationException">Thrown when compression fails.</exception>
+        </member>
+        <member name="M:Kore.FileFormat.KoreCompressor.Decompress(System.Byte[],System.Nullable{System.Int32})">
+            <summary>
+            Decompresses the input byte array that was previously compressed with KORE.
+            </summary>
+            <param name="compressedData">The compressed data.</param>
+            <param name="expectedSize">Optional: expected decompressed size (for performance optimization).</param>
+            <returns>Decompressed byte array.</returns>
+            <exception cref="T:System.ArgumentNullException">Thrown when compressedData is null.</exception>
+            <exception cref="T:System.InvalidOperationException">Thrown when decompression fails.</exception>
+        </member>
+        <member name="M:Kore.FileFormat.KoreCompressor.CompressStream(System.IO.Stream,System.IO.Stream,System.Int32)">
+            <summary>
+            Compresses data from an input stream and writes to an output stream.
+            </summary>
+            <param name="inputStream">The input stream to read from.</param>
+            <param name="outputStream">The output stream to write compressed data to.</param>
+            <param name="bufferSize">Buffer size for streaming (default: 1MB).</param>
+        </member>
+        <member name="M:Kore.FileFormat.KoreCompressor.DecompressStream(System.IO.Stream,System.IO.Stream)">
+            <summary>
+            Decompresses data from an input stream and writes to an output stream.
+            </summary>
+            <param name="inputStream">The input stream to read compressed data from.</param>
+            <param name="outputStream">The output stream to write decompressed data to.</param>
+        </member>
+        <member name="M:Kore.FileFormat.KoreCompressor.GetStats">
+            <summary>
+            Gets compression statistics for the last operation.
+            </summary>
+            <returns>A CompressionStats object with metrics.</returns>
+        </member>
+        <member name="T:Kore.FileFormat.CompressionStats">
+            <summary>
+            Contains compression statistics and metrics.
+            </summary>
+        </member>
+        <member name="P:Kore.FileFormat.CompressionStats.OriginalSize">
+            <summary>Original uncompressed size in bytes.</summary>
+        </member>
+        <member name="P:Kore.FileFormat.CompressionStats.CompressedSize">
+            <summary>Compressed size in bytes.</summary>
+        </member>
+        <member name="P:Kore.FileFormat.CompressionStats.CompressionRatio">
+            <summary>Compression ratio (compressed / original).</summary>
+        </member>
+        <member name="P:Kore.FileFormat.CompressionStats.SavingsPercent">
+            <summary>Compression savings percentage.</summary>
+        </member>
+        <member name="P:Kore.FileFormat.CompressionStats.CompressionTimeMs">
+            <summary>Time taken for compression in milliseconds.</summary>
+        </member>
+        <member name="P:Kore.FileFormat.CompressionStats.SpeedMBps">
+            <summary>Compression speed in MB/s.</summary>
+        </member>
+        <member name="T:Kore.FileFormat.KoreLibrary">
+            <summary>
+            KORE v1.1.6 Library information and constants.
+            </summary>
+        </member>
+        <member name="F:Kore.FileFormat.KoreLibrary.Version">
+            <summary>Library version.</summary>
+        </member>
+        <member name="F:Kore.FileFormat.KoreLibrary.ReleaseDate">
+            <summary>Release date.</summary>
+        </member>
+        <member name="F:Kore.FileFormat.KoreLibrary.License">
+            <summary>License information.</summary>
+        </member>
+        <member name="F:Kore.FileFormat.KoreLibrary.RepositoryUrl">
+            <summary>Project repository URL.</summary>
+        </member>
+        <member name="F:Kore.FileFormat.KoreLibrary.DocumentationUrl">
+            <summary>Documentation URL.</summary>
+        </member>
+        <member name="M:Kore.FileFormat.KoreLibrary.GetInfo">
+            <summary>Gets library information string.</summary>
+        </member>
+        <member name="T:Kore.FileFormat.KoreFileReader">
+            <summary>
+            Provides methods for reading and writing Kore columnar files.
+            </summary>
+        </member>
+        <member name="M:Kore.FileFormat.KoreFileReader.#ctor(System.String)">
+            <summary>
+            Opens a Kore file for reading.
+            </summary>
+            <param name="path">Path to the Kore file</param>
+            <exception cref="T:System.IO.FileNotFoundException">Thrown when file does not exist</exception>
+            <exception cref="T:System.InvalidOperationException">Thrown when file is not a valid Kore file</exception>
+        </member>
+        <member name="M:Kore.FileFormat.KoreFileReader.ReadHeader">
+            <summary>
+            Reads the file header and validates the Kore format.
+            </summary>
+        </member>
+        <member name="M:Kore.FileFormat.KoreFileReader.ReadAllData">
+            <summary>
+            Reads all data from the file as a list of columns (each column is a list of strings).
+            </summary>
+            <returns>List of columns, where each column contains string values</returns>
+        </member>
+        <member name="M:Kore.FileFormat.KoreFileReader.ReadColumn(System.Int32)">
+            <summary>
+            Reads a specific column from the file.
+            </summary>
+            <param name="columnIndex">The zero-based index of the column to read</param>
+            <returns>List of string values for the specified column</returns>
+        </member>
+        <member name="P:Kore.FileFormat.KoreFileReader.Header">
+            <summary>
+            Gets the file header information.
+            </summary>
+        </member>
+        <member name="P:Kore.FileFormat.KoreFileReader.Columns">
+            <summary>
+            Gets the column metadata.
+            </summary>
+        </member>
+        <member name="M:Kore.FileFormat.KoreFileReader.Dispose">
+            <summary>
+            Disposes resources used by the reader.
+            </summary>
+        </member>
+        <member name="T:Kore.FileFormat.KoreFileWriter">
+            <summary>
+            Provides methods for writing Kore columnar files.
+            </summary>
+        </member>
+        <member name="M:Kore.FileFormat.KoreFileWriter.#ctor(System.String)">
+            <summary>
+            Creates a new Kore file for writing.
+            </summary>
+            <param name="path">Path where the Kore file will be written</param>
+        </member>
+        <member name="M:Kore.FileFormat.KoreFileWriter.WriteData(System.Collections.Generic.List{System.Collections.Generic.List{System.String}})">
+            <summary>
+            Writes column-oriented data to the Kore file.
+            </summary>
+            <param name="columns">List of columns, where each column is a list of string values</param>
+        </member>
+        <member name="M:Kore.FileFormat.KoreFileWriter.Dispose">
+            <summary>
+            Disposes resources used by the writer.
+            </summary>
+        </member>
+        <member name="T:Kore.FileFormat.KoreFileHeader">
+            <summary>
+            Represents the header of a Kore file.
+            </summary>
+        </member>
+        <member name="T:Kore.FileFormat.KoreFileColumn">
+            <summary>
+            Represents metadata for a column in a Kore file.
+            </summary>
+        </member>
+        <member name="T:Kore.FileFormat.KoreFile">
+            <summary>
+            Convenience class for reading and writing Kore files.
+            </summary>
+        </member>
+        <member name="M:Kore.FileFormat.KoreFile.Read(System.String)">
+            <summary>
+            Reads an entire Kore file.
+            </summary>
+        </member>
+        <member name="M:Kore.FileFormat.KoreFile.Write(System.String,System.Collections.Generic.List{System.Collections.Generic.List{System.String}})">
+            <summary>
+            Writes an entire Kore file.
+            </summary>
+        </member>
+        <member name="P:Kore.FileFormat.KoreFile.Version">
+            <summary>
+            Gets the version of the Kore FileFormat library.
+            </summary>
+        </member>
+    </members>
+</doc>
