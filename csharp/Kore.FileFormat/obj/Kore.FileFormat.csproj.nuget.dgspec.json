@@ -8,7 +8,7 @@
       "version": "1.3.3",
       "restore": {
         "projectUniqueName": "C:\\Users\\ksak_\\OneDrive\\Desktop\\dbt_prep\\Kore\\csharp\\Kore.FileFormat\\Kore.FileFormat.csproj",
-        "projectName": "Kore.FileFormat",
+        "projectName": "kore-fileformat",
         "projectPath": "C:\\Users\\ksak_\\OneDrive\\Desktop\\dbt_prep\\Kore\\csharp\\Kore.FileFormat\\Kore.FileFormat.csproj",
         "packagesPath": "C:\\Users\\ksak_\\.nuget\\packages\\",
         "outputPath": "C:\\Users\\ksak_\\OneDrive\\Desktop\\dbt_prep\\Kore\\csharp\\Kore.FileFormat\\obj\\",
