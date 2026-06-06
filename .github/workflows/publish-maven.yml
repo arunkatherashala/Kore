@@ -104,7 +104,6 @@ jobs:
         # Use central-publishing-maven-plugin instead of deploy
         # This plugin handles Central Portal API authentication automatically
         mvn clean deploy \
-          -P release \
           -Dgpg.passphrase="${MAVEN_GPG_PASSPHRASE}" \
           -DskipTests \
           2>&1 | tee mvn-deploy.log
