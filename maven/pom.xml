@@ -133,6 +133,7 @@
                             <goal>sign</goal>
                         </goals>
                         <configuration>
+                            <keyname>707A5885947DE06A</keyname>
                             <gpgArguments>
                                 <arg>--pinentry-mode</arg>
                                 <arg>loopback</arg>
