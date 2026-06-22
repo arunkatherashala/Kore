@@ -1,0 +1,8 @@
+[package]
+name = "sql_executor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kore_fileformat = { path = "../kore_fileformat", package = "kore_fileformat_meta" }
+sql_parser = { path = "../sql_parser" }

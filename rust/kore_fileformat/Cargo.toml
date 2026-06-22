@@ -1,0 +1,31 @@
+[package]
+name = "kore_fileformat_meta"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "kore_fileformat"
+path = "src/lib.rs"
+
+[features]
+default = []
+simd-optimize = []
+timeseries-opt = []
+duckdb-ffi = []
+gpu-cuda = []
+pyo3 = ["dep:pyo3"]
+full = ["simd-optimize", "timeseries-opt", "duckdb-ffi", "gpu-cuda", "pyo3"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+byteorder = "1.4"
+tempfile = { version = "3" }
+rayon = "1.8"
+env_logger = "0.11"
+
+# Optional dependencies for features
+pyo3 = { version = "0.21", optional = true, features = ["extension-module"] }
+
+[dev-dependencies]
+criterion = "0.5"
