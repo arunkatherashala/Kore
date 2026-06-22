@@ -1,0 +1,141 @@
+name: TRACK A - Performance & SIMD Benchmarking
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Track A: Performance benchmarks
+  performance-simd:
+    name: SIMD Codec Performance
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        feature: [simd-optimize]
+        cargo-args: ["--release"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v3
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build with SIMD optimizations
+        run: |
+          cd rust/kore_fileformat
+          RUSTFLAGS="-C target-cpu=native -C opt-level=3" \
+          cargo build ${{ matrix.cargo-args }} --features "${{ matrix.feature }}"
+
+      - name: Run SIMD codec benchmarks
+        run: |
+          cd rust/kore_fileformat
+          cargo test --lib codecs_simd --release -- --nocapture
+
+      - name: Run performance regression tests
+        run: |
+          cd rust/kore_fileformat
+          cargo bench --no-run --release 2>&1 | tee perf_baseline.txt
+
+      - name: Upload performance results
+        uses: actions/upload-artifact@v3
+        with:
+          name: performance-results
+          path: rust/kore_fileformat/perf_baseline.txt
+
+  # Python bindings build
+  python-bindings:
+    name: Python Native Bindings
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install maturin
+        run: pip install maturin[pyo3]
+
+      - name: Build Python bindings
+        run: |
+          cd rust/kore_fileformat
+          maturin develop --release
+
+      - name: Test Python bindings
+        run: |
+          python3 -c "import kore_fileformat; print('Python bindings working!')"
+
+  # Parallel write optimization
+  parallel-writes:
+    name: Parallel Write Benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Test parallel write performance
+        run: |
+          cd rust/kore_fileformat
+          cargo test --lib codecs_simd --release -- --nocapture --test-threads=1
+
+  # Memory optimization tests
+  memory-opt:
+    name: Memory & mmap Optimization
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check memory usage
+        run: |
+          cd rust/kore_fileformat
+          cargo test --release -- --nocapture --include-ignored memory
+
+  # Report results
+  report:
+    name: Performance Report
+    needs: [performance-simd, python-bindings, parallel-writes, memory-opt]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - uses: actions/download-artifact@v3
+        with:
+          name: performance-results
+
+      - name: Display results
+        run: |
+          echo "=== TRACK A: Performance Results ==="
+          cat perf_baseline.txt || echo "No baseline found"
+          echo ""
+          echo "Status: Track A implementation running"

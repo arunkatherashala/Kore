@@ -11,9 +11,9 @@ pub struct MultiLevelDictionary {
     level1: Vec<Vec<u8>>,          // Top 256 values
     level2: Vec<Vec<u8>>,          // Next 65K values
     level3: Vec<Vec<u8>>,          // Rare values
-    indices_level1: Vec<u8>,       // Index into level1
-    indices_level2: Vec<u16>,      // Index into level2
-    level3_entries: Vec<(Vec<u8>, u32)>, // (value, count)
+    _indices_level1: Vec<u8>,       // Index into level1
+    _indices_level2: Vec<u16>,      // Index into level2
+    _level3_entries: Vec<(Vec<u8>, u32)>, // (value, count)
 }
 
 impl MultiLevelDictionary {
@@ -22,9 +22,9 @@ impl MultiLevelDictionary {
             level1: vec![],
             level2: vec![],
             level3: vec![],
-            indices_level1: vec![],
-            indices_level2: vec![],
-            level3_entries: vec![],
+            _indices_level1: vec![],
+            _indices_level2: vec![],
+            _level3_entries: vec![],
         }
     }
 

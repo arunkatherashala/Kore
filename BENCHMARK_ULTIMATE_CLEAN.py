@@ -8,6 +8,7 @@ KORE vs Parquet vs Arrow - Genuine Production Testing
 import os, sys, time, json, psutil
 import numpy as np, pandas as pd
 from datetime import datetime, timedelta
+import tempfile
 import tracemalloc
 from io import BytesIO
 
@@ -146,20 +147,21 @@ class Benchmark:
             
             results = []
             
+            tmp = tempfile.gettempdir()
             # Parquet
-            r = self.test_parquet(df, f"/tmp/test_p.tmp")
+            r = self.test_parquet(df, os.path.join(tmp, "test_p.tmp"))
             if r: results.append(r)
-            if os.path.exists("/tmp/test_p.tmp"): os.remove("/tmp/test_p.tmp")
+            if os.path.exists(os.path.join(tmp, "test_p.tmp")): os.remove(os.path.join(tmp, "test_p.tmp"))
             
             # CSV
-            r = self.test_csv(df, f"/tmp/test_c.tmp")
+            r = self.test_csv(df, os.path.join(tmp, "test_c.tmp"))
             if r: results.append(r)
-            if os.path.exists("/tmp/test_c.tmp"): os.remove("/tmp/test_c.tmp")
+            if os.path.exists(os.path.join(tmp, "test_c.tmp")): os.remove(os.path.join(tmp, "test_c.tmp"))
             
             # Arrow
-            r = self.test_arrow(df, f"/tmp/test_a.tmp")
+            r = self.test_arrow(df, os.path.join(tmp, "test_a.tmp"))
             if r: results.append(r)
-            if os.path.exists("/tmp/test_a.tmp"): os.remove("/tmp/test_a.tmp")
+            if os.path.exists(os.path.join(tmp, "test_a.tmp")): os.remove(os.path.join(tmp, "test_a.tmp"))
             
             self.results["tests"].append({
                 "rows": rows, "cols": cols, "kind": kind,

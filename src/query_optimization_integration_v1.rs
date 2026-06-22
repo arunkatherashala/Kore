@@ -101,7 +101,7 @@ impl QueryOptimizationEngine {
             }
 
             PhysicalExpr::Sort { input, order_keys, .. } => {
-                let mut rows = self.execute_physical_plan(input)?;
+                let rows = self.execute_physical_plan(input)?;
                 // Simplified: just return in order
                 Ok(rows)
             }

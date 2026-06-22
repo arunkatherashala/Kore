@@ -13,8 +13,9 @@ simd-optimize = []
 timeseries-opt = []
 duckdb-ffi = []
 gpu-cuda = []
+acid-transactions = []
 pyo3 = ["dep:pyo3"]
-full = ["simd-optimize", "timeseries-opt", "duckdb-ffi", "gpu-cuda", "pyo3"]
+full = ["simd-optimize", "timeseries-opt", "duckdb-ffi", "gpu-cuda", "acid-transactions", "pyo3"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -23,6 +24,8 @@ byteorder = "1.4"
 tempfile = { version = "3" }
 rayon = "1.8"
 env_logger = "0.11"
+parking_lot = "0.12"
+crc32fast = "1.3"
 
 # Optional dependencies for features
 pyo3 = { version = "0.21", optional = true, features = ["extension-module"] }

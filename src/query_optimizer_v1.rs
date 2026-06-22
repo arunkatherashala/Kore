@@ -99,7 +99,7 @@ impl PhysicalExpr {
         match self {
             PhysicalExpr::SeqScan { cost, .. } => *cost,
             PhysicalExpr::IndexScan { cost, .. } => *cost,
-            PhysicalExpr::Filter { input, selectivity, .. } => {
+            PhysicalExpr::Filter { input, selectivity: _, .. } => {
                 let child_cost = input.total_cost();
                 // Filter doesn't add I/O, just CPU (selectivity applied to child cost)
                 child_cost
@@ -137,7 +137,7 @@ impl PhysicalExpr {
                 let right_rows = right.estimated_rows(tables_stats);
                 ((left_rows as f64) * (right_rows as f64) * 0.1).ceil() as u64 // Assume 10% selectivity
             }
-            PhysicalExpr::GroupBy { input, group_keys, .. } => {
+            PhysicalExpr::GroupBy { input: _, group_keys, .. } => {
                 // Simplified: distinct values in group keys
                 // In practice, would use column statistics
                 group_keys.len() as u64 * 100 // Conservative estimate

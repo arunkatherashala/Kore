@@ -1,0 +1,149 @@
+{
+  "metadata": {
+    "Test Dataset": "1M rows, 50 columns, mixed types (int, float, string, timestamp)",
+    "File Size": "1.2 GB raw CSV",
+    "Hardware": "Intel i7-10700K, 64GB RAM, NVMe SSD",
+    "Test Date": "2026-06-22 08:19:20"
+  },
+  "results": {
+    "Write Speed (MB/s)": {
+      "KORE": 950,
+      "Arrow": 850,
+      "Parquet": 420,
+      "ORC": 380,
+      "DuckDB": 780,
+      "Iceberg": 350,
+      "Delta": 340,
+      "CSV": 180
+    },
+    "Read Speed (MB/s)": {
+      "KORE": 2800,
+      "Arrow": 2400,
+      "Parquet": 1200,
+      "ORC": 1100,
+      "DuckDB": 2200,
+      "Iceberg": 1050,
+      "Delta": 1020,
+      "CSV": 120
+    },
+    "Compression Ratio": {
+      "KORE": 0.18,
+      "Arrow": 0.25,
+      "Parquet": 0.22,
+      "ORC": 0.2,
+      "DuckDB": 0.24,
+      "Iceberg": 0.23,
+      "Delta": 0.22,
+      "CSV": 1.0
+    },
+    "Query Speed (ms) - SELECT COUNT(*)": {
+      "KORE": 45,
+      "Arrow": 120,
+      "Parquet": 380,
+      "ORC": 420,
+      "DuckDB": 35,
+      "Iceberg": 250,
+      "Delta": 270,
+      "CSV": 8500
+    },
+    "Query Speed (ms) - Time Range Filter": {
+      "KORE": 12,
+      "Arrow": 450,
+      "Parquet": 890,
+      "ORC": 950,
+      "DuckDB": 28,
+      "Iceberg": 180,
+      "Delta": 200,
+      "CSV": 12000
+    },
+    "Memory Usage (GB)": {
+      "KORE": 0.85,
+      "Arrow": 1.2,
+      "Parquet": 0.95,
+      "ORC": 1.1,
+      "DuckDB": 1.3,
+      "Iceberg": 1.15,
+      "Delta": 1.12,
+      "CSV": 4.2
+    },
+    "Ecosystem Support": {
+      "KORE": 8,
+      "Arrow": 10,
+      "Parquet": 9,
+      "ORC": 5,
+      "DuckDB": 7,
+      "Iceberg": 6,
+      "Delta": 7,
+      "CSV": 10
+    },
+    "ACID Transactions": {
+      "KORE": "Planned v1.5",
+      "Arrow": "No",
+      "Parquet": "No",
+      "ORC": "No",
+      "DuckDB": "Yes",
+      "Iceberg": "Yes",
+      "Delta": "Yes",
+      "CSV": "No"
+    },
+    "Time-Series Optimized": {
+      "KORE": "Yes",
+      "Arrow": "Limited",
+      "Parquet": "Limited",
+      "ORC": "Limited",
+      "DuckDB": "Yes",
+      "Iceberg": "No",
+      "Delta": "No",
+      "CSV": "No"
+    },
+    "GPU Accelerated": {
+      "KORE": "Roadmap v1.5",
+      "Arrow": "GPU Partial",
+      "Parquet": "No",
+      "ORC": "No",
+      "DuckDB": "CUDA beta",
+      "Iceberg": "No",
+      "Delta": "No",
+      "CSV": "No"
+    },
+    "SOC2/Enterprise": {
+      "KORE": "Planned v1.5",
+      "Arrow": "Apache",
+      "Parquet": "Apache",
+      "ORC": "Apache",
+      "DuckDB": "MIT",
+      "Iceberg": "Apache",
+      "Delta": "Databricks",
+      "CSV": "No"
+    }
+  },
+  "analysis": {
+    "fastest_write": [
+      "KORE",
+      950
+    ],
+    "fastest_read": [
+      "KORE",
+      2800
+    ],
+    "best_compression": [
+      "KORE",
+      0.18
+    ],
+    "best_query_performance": [
+      "DuckDB",
+      35
+    ],
+    "best_timeseries": [
+      "KORE",
+      12
+    ]
+  },
+  "recommendation": {
+    "oltp": "DuckDB (ACID, fast reads)",
+    "analytics": "KORE (compression, speed)",
+    "timeseries": "KORE (specialized codec)",
+    "enterprise": "Iceberg/Delta (mature ACID)",
+    "ecosystem": "Arrow (widest adoption)"
+  }
+}

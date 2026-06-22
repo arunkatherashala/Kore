@@ -1,0 +1,7 @@
+// Example content moved to .txt to avoid compilation errors during workspace tests.
+// Original file showed many shell scripts embedded in raw strings which caused the Rust compiler
+// to attempt to parse shell variable prefixes under Rust 2021 rules when compiled as an example.
+// If you want the example to be runnable, rename this file back to `scripting_automation.rs`.
+
+#!/bin/bash
+# (example scripts omitted)

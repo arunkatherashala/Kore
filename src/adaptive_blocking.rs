@@ -61,7 +61,7 @@ impl AdaptiveBlocker {
             return 0.0;
         }
 
-        let mut run_count = 0;
+            let mut _run_count = 0;
         let mut total_run_bytes = 0;
         let mut current_run = 1;
 
@@ -70,7 +70,7 @@ impl AdaptiveBlocker {
                 current_run += 1;
             } else {
                 if current_run > 1 {
-                    run_count += 1;
+                        _run_count += 1;
                     total_run_bytes += current_run;
                 }
                 current_run = 1;
@@ -79,7 +79,7 @@ impl AdaptiveBlocker {
 
         // If last bytes were a run
         if current_run > 1 {
-            run_count += 1;
+                _run_count += 1;
             total_run_bytes += current_run;
         }
 

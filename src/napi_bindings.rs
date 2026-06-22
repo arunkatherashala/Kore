@@ -15,6 +15,8 @@
 
 #![cfg(feature = "napi")]
 
+extern crate napi_derive;
+use napi_derive::napi;
 use napi::{
     bindgen_prelude::*,
     JsObject, JsString, JsBuffer,
@@ -35,16 +37,16 @@ use crate::gcs_reader::GcsReader;
 // ============================================================================
 
 #[cfg(feature = "s3")]
-#[napi]
+#[napi_derive::napi]
 pub struct JsS3Reader {
     inner: S3Reader,
 }
 
 #[cfg(feature = "s3")]
-#[napi]
+#[napi_derive::napi]
 impl JsS3Reader {
     /// Create a new S3Reader
-    #[napi(constructor)]
+    #[napi_derive::napi(constructor)]
     pub fn new(region: String) -> napi::Result<Self> {
         let inner = S3Reader::new(&region)
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
@@ -52,14 +54,15 @@ impl JsS3Reader {
     }
 
     /// Enable local caching
-    #[napi]
+    #[napi_derive::napi]
     pub fn with_cache(mut self, cache_dir: String) -> napi::Result<Self> {
-        self.inner = self.inner.with_cache(cache_dir);
+        self.inner.with_cache(&cache_dir)
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
         Ok(self)
     }
 
     /// Read file from S3 (async)
-    #[napi]
+    #[napi_derive::napi]
     pub async fn read_file(
         &self,
         bucket: String,
@@ -76,7 +79,7 @@ impl JsS3Reader {
     }
 
     /// Write file to S3 (async)
-    #[napi]
+    #[napi_derive::napi]
     pub async fn write_file(
         &self,
         bucket: String,
@@ -85,7 +88,7 @@ impl JsS3Reader {
     ) -> napi::Result<()> {
         let reader = self.inner.clone();
         tokio::spawn(async move {
-            reader.write_file(&bucket, &key, data)
+            reader.write_file(&bucket, &key, &data)
                 .await
                 .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
         })
@@ -94,7 +97,7 @@ impl JsS3Reader {
     }
 
     /// List objects in bucket (async)
-    #[napi]
+    #[napi_derive::napi]
     pub async fn list_files(
         &self,
         bucket: String,
@@ -111,7 +114,7 @@ impl JsS3Reader {
     }
 
     /// Get object metadata (async)
-    #[napi]
+    #[napi_derive::napi]
     pub async fn get_metadata(
         &self,
         bucket: String,
@@ -131,16 +134,16 @@ impl JsS3Reader {
 // ============================================================================
 
 #[cfg(feature = "azure")]
-#[napi]
+#[napi_derive::napi]
 pub struct JsAzureBlobReader {
     inner: AzureBlobReader,
 }
 
 #[cfg(feature = "azure")]
-#[napi]
+#[napi_derive::napi]
 impl JsAzureBlobReader {
     /// Create a new AzureBlobReader
-    #[napi(constructor)]
+    #[napi_derive::napi(constructor)]
     pub fn new(storage_account: String, account_key: String) -> napi::Result<Self> {
         let inner = AzureBlobReader::new(&storage_account, &account_key)
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
@@ -148,14 +151,15 @@ impl JsAzureBlobReader {
     }
 
     /// Enable local caching
-    #[napi]
+    #[napi_derive::napi]
     pub fn with_cache(mut self, cache_dir: String) -> napi::Result<Self> {
-        self.inner = self.inner.with_cache(cache_dir);
+        self.inner.with_cache(&cache_dir)
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
         Ok(self)
     }
 
     /// Read blob from Azure (async)
-    #[napi]
+    #[napi_derive::napi]
     pub async fn read_file(
         &self,
         container: String,
@@ -172,7 +176,7 @@ impl JsAzureBlobReader {
     }
 
     /// Write blob to Azure (async)
-    #[napi]
+    #[napi_derive::napi]
     pub async fn write_file(
         &self,
         container: String,
@@ -181,7 +185,7 @@ impl JsAzureBlobReader {
     ) -> napi::Result<()> {
         let reader = self.inner.clone();
         tokio::spawn(async move {
-            reader.write_file(&container, &blob_path, data)
+            reader.write_file(&container, &blob_path, &data)
                 .await
                 .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
         })
@@ -190,7 +194,7 @@ impl JsAzureBlobReader {
     }
 
     /// List blobs in container (async)
-    #[napi]
+    #[napi_derive::napi]
     pub async fn list_blobs(
         &self,
         container: String,
@@ -207,7 +211,7 @@ impl JsAzureBlobReader {
     }
 
     /// Get blob metadata (async)
-    #[napi]
+    #[napi_derive::napi]
     pub async fn get_metadata(
         &self,
         container: String,
@@ -227,16 +231,16 @@ impl JsAzureBlobReader {
 // ============================================================================
 
 #[cfg(feature = "gcs")]
-#[napi]
+#[napi_derive::napi]
 pub struct JsGcsReader {
     inner: GcsReader,
 }
 
 #[cfg(feature = "gcs")]
-#[napi]
+#[napi_derive::napi]
 impl JsGcsReader {
     /// Create a new GcsReader
-    #[napi(constructor)]
+    #[napi_derive::napi(constructor)]
     pub fn new(project_id: String) -> napi::Result<Self> {
         let inner = GcsReader::new(&project_id)
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
@@ -244,14 +248,15 @@ impl JsGcsReader {
     }
 
     /// Enable local caching
-    #[napi]
+    #[napi_derive::napi]
     pub fn with_cache(mut self, cache_dir: String) -> napi::Result<Self> {
-        self.inner = self.inner.with_cache(cache_dir);
+        self.inner.with_cache(&cache_dir)
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
         Ok(self)
     }
 
     /// Read object from GCS (async)
-    #[napi]
+    #[napi_derive::napi]
     pub async fn read_file(
         &self,
         bucket: String,
@@ -268,7 +273,7 @@ impl JsGcsReader {
     }
 
     /// Write object to GCS (async)
-    #[napi]
+    #[napi_derive::napi]
     pub async fn write_file(
         &self,
         bucket: String,
@@ -277,7 +282,7 @@ impl JsGcsReader {
     ) -> napi::Result<()> {
         let reader = self.inner.clone();
         tokio::spawn(async move {
-            reader.write_file(&bucket, &object_path, data)
+            reader.write_file(&bucket, &object_path, &data)
                 .await
                 .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
         })
@@ -286,7 +291,7 @@ impl JsGcsReader {
     }
 
     /// List objects in bucket (async)
-    #[napi]
+    #[napi_derive::napi]
     pub async fn list_objects(
         &self,
         bucket: String,
@@ -303,7 +308,7 @@ impl JsGcsReader {
     }
 
     /// Get object metadata (async)
-    #[napi]
+    #[napi_derive::napi]
     pub async fn get_metadata(
         &self,
         bucket: String,

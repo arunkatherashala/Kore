@@ -50,6 +50,7 @@ impl IntegrationTestSuite {
                 name: "test".to_string(),
                 data_type: 1,
                 data: data.clone(),
+                null_bitmap: None,
             };
 
             total_bytes += data.len() as u64;
@@ -91,11 +92,13 @@ impl IntegrationTestSuite {
                 name: "col_rle".to_string(),
                 data_type: 1,
                 data: vec![0xFF; 5000],
+                null_bitmap: None,
             },
             ColumnData {
                 name: "col_dict".to_string(),
                 data_type: 2,
                 data: (0..5).cycle().take(5000).map(|i| i as u8).collect(),
+                null_bitmap: None,
             },
         ];
 
@@ -129,6 +132,7 @@ impl IntegrationTestSuite {
                 name: "scale_test".to_string(),
                 data_type: 1,
                 data: vec![0xAA; data_size],
+                null_bitmap: None,
             };
 
             let test_id = format!("scale_{}", scale);
@@ -169,6 +173,7 @@ impl IntegrationTestSuite {
                 name: "edge_case".to_string(),
                 data_type: 1,
                 data: data.clone(),
+                null_bitmap: None,
             };
 
             let total_bytes = data.len() as u64;
@@ -210,6 +215,7 @@ impl IntegrationTestSuite {
                 name: "cardinality_test".to_string(),
                 data_type: 1,
                 data: data.clone(),
+                null_bitmap: None,
             };
 
             let total_bytes = data.len() as u64;

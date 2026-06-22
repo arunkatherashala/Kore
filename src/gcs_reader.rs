@@ -28,7 +28,7 @@ use std::error::Error;
 use std::fmt;
 
 #[cfg(feature = "gcs")]
-use log;
+use log::{info, warn, error};
 
 /// Google Cloud Storage Reader Configuration and Operations
 #[derive(Debug, Clone)]
@@ -246,7 +246,7 @@ impl GcsReader {
             let client = Client::new(config);
             
             // Get bucket and object client
-            let bucket_client = client.bucket(bucket);
+            let bucket_client = client.get_bucket(bucket);
             let object_client = bucket_client.object(object_path);
             
             // Download with retry logic
@@ -302,7 +302,7 @@ impl GcsReader {
             let client = Client::new(config);
             
             // Get bucket and object client
-            let bucket_client = client.bucket(bucket);
+            let bucket_client = client.get_bucket(bucket);
             let object_client = bucket_client.object(object_path);
             
             // Upload with chunking for large objects
@@ -358,7 +358,7 @@ impl GcsReader {
             let client = Client::new(config);
             
             // Get bucket client
-            let bucket_client = client.bucket(bucket);
+            let bucket_client = client.get_bucket(bucket);
             
             let mut query = bucket_client.list_by_prefix("", "/").await
                 .map_err(|e| GcsError::GcsError(format!("List error: {}", e)))?;
@@ -408,7 +408,7 @@ impl GcsReader {
             let client = Client::new(config);
             
             // Get bucket and object client
-            let bucket_client = client.bucket(bucket);
+            let bucket_client = client.get_bucket(bucket);
             let object_client = bucket_client.object(object_path);
             
             // Get object metadata

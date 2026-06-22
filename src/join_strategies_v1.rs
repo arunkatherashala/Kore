@@ -178,7 +178,7 @@ pub fn hash_join(
 
         if let Some(build_rows) = hash_table.get(&key) {
             for build_row in build_rows {
-                let mut merged = if build_is_left {
+                let merged = if build_is_left {
                     let mut m = build_row.clone();
                     for (k, v) in probe_row {
                         m.insert(k.clone(), v.clone());

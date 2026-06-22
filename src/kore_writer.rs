@@ -19,6 +19,8 @@ pub struct ColumnData {
     pub name: String,
     pub data_type: u8,
     pub data: Vec<u8>,
+    // Optional packed null bitmap (packed 8 nulls per byte) produced by preprocessors
+    pub null_bitmap: Option<Vec<u8>>,
 }
 
 /// Kore file writer with automatic codec selection
@@ -67,6 +69,17 @@ impl KoreWriter {
             name,
             data_type,
             data,
+            null_bitmap: None,
+        });
+    }
+
+    /// Add a column with an explicit null bitmap (packed 8 nulls per byte)
+    pub fn add_column_with_nulls(&mut self, name: String, data_type: u8, data: Vec<u8>, null_bitmap: Vec<u8>) {
+        self.columns.push(ColumnData {
+            name,
+            data_type,
+            data,
+            null_bitmap: Some(null_bitmap),
         });
     }
 
@@ -130,6 +143,50 @@ impl KoreWriter {
             output.extend_from_slice(compressed_data);
         }
 
+        // --- Build compact per-row-group binary metadata and append as footer ---
+        // Format: row_count (u64) + num_cols (u32) + [for each col: min_len (u32) + min_bytes + max_len (u32) + max_bytes + null_count (u64)]
+        let mut rg_buf: Vec<u8> = Vec::new();
+        rg_buf.extend_from_slice(&self.row_count.to_le_bytes());
+        rg_buf.extend_from_slice(&(column_metadata.len() as u32).to_le_bytes());
+        for (col_meta, _compressed) in &column_metadata {
+            let col = self.columns.iter().find(|c| c.name == col_meta.name).unwrap();
+
+            // Compute exact null_count from provided null_bitmap if available,
+            // otherwise fall back to previous heuristic (byte == 0)
+            let null_count: u64 = if let Some(bitmap) = &col.null_bitmap {
+                crate::null_bitmap::count_nulls_in_packed_bitmap(bitmap, self.row_count)
+            } else {
+                let data_bytes = &col.data;
+                data_bytes.iter().filter(|&&b| b == 0u8).count() as u64
+            };
+
+            let data_bytes = &col.data;
+            let (min_str, max_str) = if data_bytes.is_empty() {
+                (String::new(), String::new())
+            } else {
+                let mut mn = data_bytes[0];
+                let mut mx = data_bytes[0];
+                for &b in data_bytes.iter() {
+                    if b < mn { mn = b }
+                    if b > mx { mx = b }
+                }
+                (mn.to_string(), mx.to_string())
+            };
+
+            let min_bytes = min_str.as_bytes();
+            rg_buf.extend_from_slice(&(min_bytes.len() as u32).to_le_bytes());
+            rg_buf.extend_from_slice(min_bytes);
+
+            let max_bytes = max_str.as_bytes();
+            rg_buf.extend_from_slice(&(max_bytes.len() as u32).to_le_bytes());
+            rg_buf.extend_from_slice(max_bytes);
+
+            rg_buf.extend_from_slice(&null_count.to_le_bytes());
+        }
+
+        output.extend_from_slice(&rg_buf);
+        output.extend_from_slice(&(rg_buf.len() as u32).to_le_bytes());
+
         let compression_ratio = if total_original > 0 {
             total_compressed as f32 / total_original as f32
         } else {
@@ -154,6 +211,7 @@ impl KoreWriter {
         Ok((output, result))
     }
 
+    
     /// Write header to output buffer
     fn write_header(
         output: &mut Vec<u8>,

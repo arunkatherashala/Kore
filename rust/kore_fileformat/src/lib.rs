@@ -34,7 +34,13 @@ pub mod codec_timeseries;
 pub mod gpu_cuda;
 
 // ============================================================================
-// COMPREHENSIVE TRACK TESTING (All Tracks A-E)
+// TRACK F: ACID Transactions (Phase 2 Implementation)
+// ============================================================================
+#[cfg(feature = "acid-transactions")]
+pub mod transactions;
+
+// ============================================================================
+// COMPREHENSIVE TRACK TESTING (All Tracks A-F)
 // ============================================================================
 #[cfg(test)]
 mod track_tests;

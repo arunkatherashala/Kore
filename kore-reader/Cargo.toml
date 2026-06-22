@@ -1,0 +1,8 @@
+[package]
+name = "kore-reader"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kore_fileformat = { path = "..", package = "kore_fileformat" }
+anyhow = "1.0"

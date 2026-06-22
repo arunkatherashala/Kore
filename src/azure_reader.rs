@@ -33,7 +33,7 @@ use std::fmt;
 #[cfg(feature = "azure")]
 use futures_util::stream::StreamExt;
 #[cfg(feature = "azure")]
-use log;
+use log::{info, warn, error};
 
 /// Azure Blob Storage Reader Configuration and Operations
 #[derive(Debug, Clone)]
@@ -255,21 +255,22 @@ impl AzureBlobReader {
         #[cfg(feature = "azure")]
         {
             use azure_storage::prelude::*;
-            use azure_storage_blobs::prelude::*;
+            use azure_storage::clients::StorageAccountClient;
             
             // Get credentials from environment variables
             let account_key = std::env::var("AZURE_STORAGE_KEY")
-                .or_else(|_| std::env::var("AZURE_STORAGE_ACCOUNT_KEY"))
+                use azure_storage::prelude::*;
                 .map_err(|_| AzureError::AuthenticationError(
                     "AZURE_STORAGE_KEY or AZURE_STORAGE_ACCOUNT_KEY not set".to_string()
                 ))?;
             
-            let client = BlobServiceClient::new(
+            let storage_account = StorageAccountClient::new_access_key(
                 &self.storage_account,
-                StorageCredentials::access_key(&self.storage_account, &account_key),
+                account_key.as_str(),
             );
-            
-            let container_client = client.container_client(container);
+
+            let blob_service_client = storage_account.as_storage_client();
+            let container_client = blob_service_client.container_client(container);
             let blob_client = container_client.blob_client(blob_path);
             
             // Retry logic with exponential backoff
@@ -318,7 +319,7 @@ impl AzureBlobReader {
         #[cfg(feature = "azure")]
         {
             use azure_storage::prelude::*;
-            use azure_storage_blobs::prelude::*;
+            use azure_storage::clients::StorageAccountClient;
             
             // Get credentials
             let account_key = std::env::var("AZURE_STORAGE_KEY")
@@ -327,12 +328,13 @@ impl AzureBlobReader {
                     "AZURE_STORAGE_KEY or AZURE_STORAGE_ACCOUNT_KEY not set".to_string()
                 ))?;
             
-            let client = BlobServiceClient::new(
+            let storage_account = StorageAccountClient::new_access_key(
                 &self.storage_account,
-                StorageCredentials::access_key(&self.storage_account, &account_key),
+                account_key.as_str(),
             );
-            
-            let container_client = client.container_client(container);
+
+            let blob_service_client = storage_account.as_storage_client();
+            let container_client = blob_service_client.container_client(container);
             let blob_client = container_client.blob_client(blob_path);
             
             // Upload with chunking for large files (4MB chunks)
@@ -384,7 +386,7 @@ impl AzureBlobReader {
         #[cfg(feature = "azure")]
         {
             use azure_storage::prelude::*;
-            use azure_storage_blobs::prelude::*;
+            use azure_storage::clients::StorageAccountClient;
             
             // Get credentials
             let account_key = std::env::var("AZURE_STORAGE_KEY")
@@ -393,12 +395,13 @@ impl AzureBlobReader {
                     "AZURE_STORAGE_KEY or AZURE_STORAGE_ACCOUNT_KEY not set".to_string()
                 ))?;
             
-            let client = BlobServiceClient::new(
+            let storage_account = StorageAccountClient::new_access_key(
                 &self.storage_account,
-                StorageCredentials::access_key(&self.storage_account, &account_key),
+                account_key.as_str(),
             );
-            
-            let container_client = client.container_client(container);
+
+            let blob_service_client = storage_account.as_storage_client();
+            let container_client = blob_service_client.container_client(container);
             let mut list_blobs = container_client.list_blobs();
             
             // Apply prefix filter if provided
@@ -447,7 +450,6 @@ impl AzureBlobReader {
         #[cfg(feature = "azure")]
         {
             use azure_storage::prelude::*;
-            use azure_storage_blobs::prelude::*;
             
             // Get credentials
             let account_key = std::env::var("AZURE_STORAGE_KEY")
@@ -456,12 +458,13 @@ impl AzureBlobReader {
                     "AZURE_STORAGE_KEY or AZURE_STORAGE_ACCOUNT_KEY not set".to_string()
                 ))?;
             
-            let client = BlobServiceClient::new(
+            let storage_account = StorageAccountClient::new_access_key(
                 &self.storage_account,
-                StorageCredentials::access_key(&self.storage_account, &account_key),
+                account_key.as_str(),
             );
-            
-            let container_client = client.container_client(container);
+
+            let blob_service_client = storage_account.as_storage_client();
+            let container_client = blob_service_client.container_client(container);
             let blob_client = container_client.blob_client(blob_path);
             
             match blob_client.get_properties().await {

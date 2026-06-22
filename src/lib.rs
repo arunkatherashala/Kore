@@ -68,6 +68,15 @@ pub mod query_optimizer;
 pub mod arrow_converter;
 pub mod duckdb_connector;
 pub mod duckdb_ffi;
+pub mod null_bitmap;
+pub mod row_group_metadata;
+
+pub mod manifest;
+pub mod compaction;
+pub mod ddl;
+pub mod dml;
+pub mod streaming_decoder;
+pub mod block_stream_decoder;
 
 // v1.1.6 Compression Improvements
 pub mod advanced_codecs;
@@ -128,3 +137,6 @@ pub mod kore_lite;
 // Canonical top-level API points to v2 to avoid ambiguous re-exports.
 pub use kore_query::{AggFunc, FilterOp, KoreQuery, QueryResult, SelectCol, WhereClause};
 pub use kore_v2::{KColumn, KType, KVal, KoreReader, KoreWriter, KORE_MAGIC, KORE_V2};
+pub use row_group_metadata::{
+    read_row_group_metadata_from_reader, ColumnStats as RowGroupColumnStats, RowGroupMetadata,
+};

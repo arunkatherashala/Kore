@@ -162,7 +162,7 @@ impl MCPServer {
         }
 
         // Placeholder implementation - in a real scenario, would read KORE file
-        let mut rows = Vec::new();
+        let rows = Vec::new();
 
         // This would be populated by reading the actual KORE file
         // For now, return empty result

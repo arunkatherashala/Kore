@@ -88,7 +88,7 @@ impl AdvancedZSTDCodec {
     pub fn compress(&self, data: &[u8]) -> Vec<u8> {
         // In production, use zstd-rs with custom dictionary
         // For now: placeholder showing intent
-        let level = Self::calculate_compression_level(data);
+        let _level = Self::calculate_compression_level(data);
         
         // This would use zstd_rs::Codec with:
         // - dictionary: &self.dictionary

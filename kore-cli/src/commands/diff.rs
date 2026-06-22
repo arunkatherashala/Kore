@@ -102,7 +102,7 @@ impl DiffStats {
 }
 
 fn print_binary_diff(data1: &[u8], data2: &[u8]) -> Result<()> {
-    println!("\n{'Offset':<10} {'File1':<20} {'File2':<20} {'Status':<10}");
+    println!("\n{:<10} {:<20} {:<20} {:<10}", "Offset", "File1", "File2", "Status");
     println!("{}", "=".repeat(60));
 
     let min_len = std::cmp::min(data1.len(), data2.len());

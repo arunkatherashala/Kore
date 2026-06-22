@@ -1,0 +1,100 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>KoreFileFormat</name>
+    </assembly>
+    <members>
+        <member name="T:KoreFileFormat.CompressionException">
+            <summary>
+            Exception thrown during compression/decompression operations
+            </summary>
+        </member>
+        <member name="M:KoreFileFormat.CompressionException.#ctor(System.String)">
+            <summary>Create a new CompressionException with a message</summary>
+        </member>
+        <member name="M:KoreFileFormat.CompressionException.#ctor(System.String,System.Exception)">
+            <summary>Create a new CompressionException with a message and inner exception</summary>
+        </member>
+        <member name="T:KoreFileFormat.CompressionLevel">
+            <summary>
+            Compression level for quality vs speed tradeoff
+            </summary>
+        </member>
+        <member name="F:KoreFileFormat.CompressionLevel.Fast">
+            <summary>Maximum speed, lower compression ratio</summary>
+        </member>
+        <member name="F:KoreFileFormat.CompressionLevel.Balanced">
+            <summary>Default balance between speed and ratio</summary>
+        </member>
+        <member name="F:KoreFileFormat.CompressionLevel.Maximum">
+            <summary>Maximum compression ratio, slower speed</summary>
+        </member>
+        <member name="T:KoreFileFormat.Kore">
+            <summary>
+            KORE high-performance compression library main API
+            </summary>
+        </member>
+        <member name="F:KoreFileFormat.Kore.MajorVersion">
+            <summary>Library major version</summary>
+        </member>
+        <member name="F:KoreFileFormat.Kore.MinorVersion">
+            <summary>Library minor version</summary>
+        </member>
+        <member name="F:KoreFileFormat.Kore.PatchVersion">
+            <summary>Library patch version</summary>
+        </member>
+        <member name="M:KoreFileFormat.Kore.Compress(System.Byte[])">
+            <summary>
+            Compress data with default settings (Balanced)
+            </summary>
+            <param name="data">Input data to compress</param>
+            <returns>Compressed data</returns>
+            <exception cref="T:System.ArgumentNullException">Thrown if data is null</exception>
+            <exception cref="T:KoreFileFormat.CompressionException">Thrown if compression fails</exception>
+        </member>
+        <member name="M:KoreFileFormat.Kore.Compress(System.Byte[],KoreFileFormat.CompressionLevel)">
+            <summary>
+            Compress data with specified level
+            </summary>
+            <param name="data">Input data to compress</param>
+            <param name="level">Compression level (Fast, Balanced, Maximum)</param>
+            <returns>Compressed data</returns>
+            <exception cref="T:System.ArgumentNullException">Thrown if data is null</exception>
+            <exception cref="T:KoreFileFormat.CompressionException">Thrown if compression fails</exception>
+        </member>
+        <member name="M:KoreFileFormat.Kore.Decompress(System.Byte[])">
+            <summary>
+            Decompress data
+            </summary>
+            <param name="data">Compressed data to decompress</param>
+            <returns>Decompressed data</returns>
+            <exception cref="T:System.ArgumentNullException">Thrown if data is null</exception>
+            <exception cref="T:KoreFileFormat.CompressionException">Thrown if decompression fails</exception>
+        </member>
+        <member name="M:KoreFileFormat.Kore.GetLibraryVersion">
+            <summary>
+            Get library version
+            </summary>
+        </member>
+        <member name="T:KoreFileFormat.Native">
+            <summary>
+            P/Invoke declarations for native KORE library
+            </summary>
+        </member>
+        <member name="M:KoreFileFormat.Native.CompressData(System.Byte[],System.Int32,System.Byte[],System.Int32,System.Int32@,System.Int32)">
+            <summary>
+            Compress data buffer
+            </summary>
+        </member>
+        <member name="M:KoreFileFormat.Native.DecompressData(System.Byte[],System.Int32,System.Byte[],System.Int32,System.Int32@)">
+            <summary>
+            Decompress data buffer
+            </summary>
+        </member>
+        <member name="M:KoreFileFormat.Native.GetVersion(System.Int32@,System.Int32@,System.Int32@)">
+            <summary>
+            Get library version information
+            </summary>
+        </member>
+    </members>
+</doc>

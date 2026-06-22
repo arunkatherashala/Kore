@@ -1,0 +1,23 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v7.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v7.0": {
+      "KoreFileFormat/1.3.2": {
+        "runtime": {
+          "KoreFileFormat.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "KoreFileFormat/1.3.2": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}

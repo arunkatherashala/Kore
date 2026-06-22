@@ -34,7 +34,7 @@ Ideal for:
 
 371+ unit tests • 100% pass rate • Production ready")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.3.3.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.3.3+cd845204d7903d81d54dc08f7039b08b7d6d0135")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.3.3+454e860ceee36d874b16186dc34dbbef4539b5f9")]
 [assembly: System.Reflection.AssemblyProductAttribute("Kore.FileFormat")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Kore.FileFormat")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.3.3.0")]

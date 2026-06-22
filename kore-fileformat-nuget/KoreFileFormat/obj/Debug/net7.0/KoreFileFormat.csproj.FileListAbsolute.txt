@@ -1,0 +1,14 @@
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-fileformat-nuget\KoreFileFormat\bin\Debug\net7.0\KoreFileFormat.deps.json
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-fileformat-nuget\KoreFileFormat\bin\Debug\net7.0\KoreFileFormat.dll
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-fileformat-nuget\KoreFileFormat\bin\Debug\net7.0\KoreFileFormat.pdb
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-fileformat-nuget\KoreFileFormat\bin\Debug\net7.0\KoreFileFormat.xml
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-fileformat-nuget\KoreFileFormat\obj\Debug\net7.0\KoreFileFormat.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-fileformat-nuget\KoreFileFormat\obj\Debug\net7.0\KoreFileFormat.AssemblyInfoInputs.cache
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-fileformat-nuget\KoreFileFormat\obj\Debug\net7.0\KoreFileFormat.AssemblyInfo.cs
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-fileformat-nuget\KoreFileFormat\obj\Debug\net7.0\KoreFileFormat.csproj.CoreCompileInputs.cache
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-fileformat-nuget\KoreFileFormat\obj\Debug\net7.0\KoreFileFormat.sourcelink.json
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-fileformat-nuget\KoreFileFormat\obj\Debug\net7.0\KoreFileFormat.dll
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-fileformat-nuget\KoreFileFormat\obj\Debug\net7.0\refint\KoreFileFormat.dll
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-fileformat-nuget\KoreFileFormat\obj\Debug\net7.0\KoreFileFormat.xml
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-fileformat-nuget\KoreFileFormat\obj\Debug\net7.0\KoreFileFormat.pdb
+C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-fileformat-nuget\KoreFileFormat\obj\Debug\net7.0\ref\KoreFileFormat.dll

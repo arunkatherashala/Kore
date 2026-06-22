@@ -507,7 +507,21 @@ impl KoreDuckDBConnector {
             let arrow_col = &batch.columns[field_idx];
             let kore_bytes = Self::arrow_column_to_kore_bytes(arrow_col)?;
             let data_type = Self::arrow_type_to_kore_type(&field.data_type)?;
-            writer.add_column(field.name.clone(), data_type, kore_bytes);
+
+            // Build presence bitmap and pack into bytes
+            let presence = match arrow_col {
+                ArrowColumn::Null(bools) => crate::null_bitmap::build_presence_from_bools(bools, batch.row_count),
+                _ => vec![1u8; batch.row_count],
+            };
+            let packed = crate::null_bitmap::pack_presence_bits(&presence);
+
+            // If there are any nulls (zero bits), pass packed bitmap to writer
+            let has_nulls = presence.iter().any(|&b| b == 0u8);
+            if has_nulls {
+                writer.add_column_with_nulls(field.name.clone(), data_type, kore_bytes, packed);
+            } else {
+                writer.add_column(field.name.clone(), data_type, kore_bytes);
+            }
         }
 
         // Write to Kore binary format with compression
