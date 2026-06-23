@@ -10,7 +10,9 @@
 pub mod wal;
 pub mod mvcc;
 pub mod concurrent;
+pub mod conflict_resolution;
 
 pub use wal::{WalManager, WalEntry, OperationType};
 pub use mvcc::{MvccManager, Snapshot, TransactionContext};
 pub use concurrent::{TxnIdGenerator, ParallelWalWriter, ConcurrentTransactionContext, ConcurrentTransactionManager};
+pub use conflict_resolution::{ConflictResolver, RollbackableTransaction, ReadWriteSet, TransactionStatus};
