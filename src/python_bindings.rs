@@ -20,6 +20,7 @@ use crate::kore_oracle::KoreOracle;
 use crate::kore_query::KoreQuery;
 use crate::kore_flow::KoreFlow;
 use crate::kore_stream::KoreStream;
+use crate::kore_ml::KoreML;
 
 
 /// Helper: Compress a single CSV file to KORE (no chunking)
@@ -922,7 +923,80 @@ impl PyKoreStream {
         KoreStream::table_str(&headers, &rows)
     }
 }
+/// KoreML Python wrapper — Layer 8: OLS regression, K-Means, CART tree, forecasting
+#[pyclass]
+pub struct PyKoreML;
 
+#[pymethods]
+impl PyKoreML {
+    #[new]
+    fn new() -> Self { PyKoreML }
+
+    /// OLS linear regression. Returns (intercept, [(feature, coeff)], r_squared, rmse, n_samples).
+    #[staticmethod]
+    fn linear_regression(path: String, target: String, features: Vec<String>) -> PyResult<(f64, Vec<(String, f64)>, f64, f64, usize)> {
+        let refs: Vec<&str> = features.iter().map(|s| s.as_str()).collect();
+        KoreML::linear_regression(&path, &target, &refs)
+            .map(|m| (m.intercept, m.coefficients, m.r_squared, m.rmse, m.n_samples))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+
+    /// K-Means clustering. Returns (n_clusters, centroids, labels, inertia, iterations).
+    #[staticmethod]
+    fn kmeans(path: String, features: Vec<String>, k: usize, max_iters: usize) -> PyResult<(usize, Vec<Vec<f64>>, Vec<usize>, f64, usize)> {
+        let refs: Vec<&str> = features.iter().map(|s| s.as_str()).collect();
+        KoreML::kmeans(&path, &refs, k, max_iters)
+            .map(|c| (c.n_clusters, c.centroids, c.labels, c.inertia, c.iterations))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+
+    /// CART decision tree. Returns tree as formatted string.
+    #[staticmethod]
+    fn decision_tree(path: String, target: String, features: Vec<String>, max_depth: usize) -> PyResult<String> {
+        let refs: Vec<&str> = features.iter().map(|s| s.as_str()).collect();
+        KoreML::decision_tree(&path, &target, &refs, max_depth)
+            .map(|t| KoreML::tree_to_string(&t))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+
+    /// Feature importance (Pearson |r|). Returns [(feature, importance, corr)] sorted desc.
+    #[staticmethod]
+    fn feature_importance(path: String, target: String, features: Vec<String>) -> PyResult<Vec<(String, f64, f64)>> {
+        let refs: Vec<&str> = features.iter().map(|s| s.as_str()).collect();
+        KoreML::feature_importance(&path, &target, &refs)
+            .map(|v| v.into_iter().map(|f| (f.feature, f.importance, f.corr)).collect())
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+
+    /// Simple exponential smoothing forecast. Returns (history, forecast, alpha, mse).
+    #[staticmethod]
+    fn forecast(path: String, value_col: String, horizon: usize, alpha: f64) -> PyResult<(Vec<f64>, Vec<f64>, f64, f64)> {
+        KoreML::forecast(&path, &value_col, horizon, alpha)
+            .map(|f| (f.history, f.forecast, f.alpha, f.mse))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+
+    /// Min-max normalise columns. Returns (headers, rows).
+    #[staticmethod]
+    fn normalize_minmax(path: String, columns: Vec<String>) -> PyResult<(Vec<String>, Vec<Vec<String>>)> {
+        let refs: Vec<&str> = columns.iter().map(|s| s.as_str()).collect();
+        KoreML::normalize_minmax(&path, &refs)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+
+    /// Train/test split. Returns (train_headers, train_rows, test_headers, test_rows).
+    #[staticmethod]
+    fn train_test_split(path: String, test_ratio: f64) -> PyResult<(Vec<String>, Vec<Vec<String>>, Vec<String>, Vec<Vec<String>>)> {
+        KoreML::train_test_split(&path, test_ratio)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+
+    /// Render (headers, rows) as ASCII table.
+    #[staticmethod]
+    fn table_str(headers: Vec<String>, rows: Vec<Vec<String>>) -> String {
+        KoreML::table_str(&headers, &rows)
+    }
+}
 #[pymodule]
 fn kore_fileformat(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", "1.1.2")?;
@@ -947,6 +1021,7 @@ fn kore_fileformat(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyKoreQuery>()?;
     m.add_class::<PyKoreFlow>()?;
     m.add_class::<PyKoreStream>()?;
+    m.add_class::<PyKoreML>()?;
 
     Ok(())
 }
