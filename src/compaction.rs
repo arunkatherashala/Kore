@@ -27,7 +27,12 @@ pub fn compact_manifest(manifest: &Manifest, out_dir: &Path) -> std::io::Result<
     // Fallback: apply predicates locally (substring evaluator) and perform compaction
     let mut new_files: Vec<String> = Vec::new();
     for (i, fpath) in manifest.files.iter().enumerate() {
-        let compact_name = format!("compacted-{}-{}.kore", i, &manifest.commit_id[..8]);
+        let commit_id_short = if manifest.commit_id.len() >= 8 {
+            &manifest.commit_id[..8]
+        } else {
+            &manifest.commit_id
+        };
+        let compact_name = format!("compacted-{}-{}.kore", i, commit_id_short);
         let out_path = out_dir.join(&compact_name);
         let original_path = std::path::Path::new(fpath);
         if original_path.exists() {

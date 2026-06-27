@@ -24,7 +24,7 @@ using System.Reflection;
       Supports .NET 6, 7, 8 on Windows, Linux, macOS
     ")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.3.2.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.3.2+454e860ceee36d874b16186dc34dbbef4539b5f9")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.3.2+bdf81b0424b49094d0dd24a5347eac426df51763")]
 [assembly: System.Reflection.AssemblyProductAttribute("KoreFileFormat")]
 [assembly: System.Reflection.AssemblyTitleAttribute("KoreFileFormat")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.3.2.0")]

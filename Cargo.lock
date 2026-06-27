@@ -3556,7 +3556,7 @@ dependencies = [
 
 [[package]]
 name = "kore_fileformat"
-version = "1.3.0-alpha"
+version = "1.4.0"
 dependencies = [
  "aws-config",
  "aws-sdk-s3",
