@@ -27,6 +27,7 @@ try:
     KoreNerve  = _core.PyKoreNerve
     KoreOracle = _core.PyKoreOracle
     KoreQuery  = _core.PyKoreQuery
+    KoreFlow   = _core.PyKoreFlow
     
 except (ImportError, AttributeError) as e:
     raise ImportError(
@@ -53,5 +54,6 @@ __all__ = [
     "KoreNerve",
     "KoreOracle",
     "KoreQuery",
+    "KoreFlow",
     "KoreBinaryParser",
 ]

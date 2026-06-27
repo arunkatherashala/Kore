@@ -18,6 +18,7 @@ use crate::kore_mind::KoreMind;
 use crate::kore_nerve::KoreNerve;
 use crate::kore_oracle::KoreOracle;
 use crate::kore_query::KoreQuery;
+use crate::kore_flow::KoreFlow;
 
 
 /// Helper: Compress a single CSV file to KORE (no chunking)
@@ -829,6 +830,28 @@ impl PyKoreQuery {
     }
 }
 
+/// KoreFlow Python wrapper — Layer 6: Advanced SQL (JOIN + HAVING + Window Functions)
+#[pyclass]
+pub struct PyKoreFlow;
+
+#[pymethods]
+impl PyKoreFlow {
+    #[new]
+    fn new() -> Self { PyKoreFlow }
+
+    /// Execute SQL with JOINs, HAVING, window functions. Returns (headers, rows).
+    #[staticmethod]
+    fn sql(query: String) -> PyResult<(Vec<String>, Vec<Vec<String>>)> {
+        KoreFlow::sql(&query).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+
+    /// Execute SQL and return a pretty ASCII table string.
+    #[staticmethod]
+    fn table(query: String) -> String {
+        KoreFlow::table(&query)
+    }
+}
+
 #[pymodule]
 fn kore_fileformat(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", "1.1.2")?;
@@ -851,6 +874,7 @@ fn kore_fileformat(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyKoreNerve>()?;
     m.add_class::<PyKoreOracle>()?;
     m.add_class::<PyKoreQuery>()?;
+    m.add_class::<PyKoreFlow>()?;
 
     Ok(())
 }
