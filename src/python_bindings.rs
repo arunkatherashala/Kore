@@ -13,6 +13,12 @@ use crate::monitoring::PerformanceMonitor;
 use sysinfo::System;
 use std::collections::{HashSet, HashMap};
 
+use crate::kore_pulse::FilePulse;
+use crate::kore_mind::KoreMind;
+use crate::kore_nerve::KoreNerve;
+use crate::kore_oracle::KoreOracle;
+
+
 /// Helper: Compress a single CSV file to KORE (no chunking)
 fn compress_csv_single(csv_path: String, kore_path: String) -> PyResult<(u64, u64, f64)> {
     use std::io::{BufRead, Write};
@@ -587,6 +593,177 @@ impl PyPerformanceMonitor {
 }
 
 /// Kore Python module
+#[pyclass]
+pub struct PyKoreOracle {
+    inner: KoreOracle,
+}
+
+#[pymethods]
+impl PyKoreOracle {
+    #[new]
+    fn new(path: String) -> Self {
+        PyKoreOracle { inner: KoreOracle::new(&path) }
+    }
+
+    /// What drives this column? (correlation analysis)
+    fn why(&self, col: String) -> PyResult<String> {
+        self.inner.why(&col)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
+    }
+
+    /// Predict target column from feature dict {col_name: value}
+    fn predict(&self, target: String, features: HashMap<String, f64>) -> PyResult<String> {
+        self.inner.predict(&target, features)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
+    }
+
+    /// Conditional stats: what changes when col = val?
+    fn what_if(&self, col: String, val: String) -> PyResult<String> {
+        self.inner.what_if(&col, &val)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
+    }
+
+    /// Is this column trending up or down?
+    fn trend(&self, col: String) -> PyResult<String> {
+        self.inner.trend(&col)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
+    }
+
+    /// Full Pearson correlation matrix
+    fn correlations(&self) -> PyResult<String> {
+        self.inner.correlations()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
+    }
+}
+
+/// KoreNerve Python wrapper — KORE ∞ Layer 3
+
+#[pyclass]
+pub struct PyKoreNerve {
+    inner: KoreNerve,
+}
+
+#[pymethods]
+impl PyKoreNerve {
+    #[new]
+    fn new(path: String) -> Self {
+        PyKoreNerve { inner: KoreNerve::new(&path) }
+    }
+
+    /// Run all nerve agents — returns full health report
+    fn scan(&self) -> PyResult<String> {
+        let result = self.inner.scan()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        Ok(result.report())
+    }
+
+    /// Run all nerve agents — returns JSON
+    fn scan_json(&self) -> PyResult<String> {
+        let result = self.inner.scan()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        Ok(result.to_json())
+    }
+
+    /// Detect drift between two .kore snapshots
+    #[staticmethod]
+    fn scan_drift(path_before: String, path_after: String) -> PyResult<String> {
+        KoreNerve::scan_drift(&path_before, &path_after)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
+    }
+}
+
+/// KoreMind Python wrapper — KORE ∞ Layer 2
+
+#[pyclass]
+pub struct PyKoreMind {
+    inner: KoreMind,
+}
+
+#[pymethods]
+impl PyKoreMind {
+    #[new]
+    fn new(path: String) -> Self {
+        PyKoreMind { inner: KoreMind::new(&path) }
+    }
+
+    /// Ask a natural language question about the .kore file
+    fn ask(&self, question: String) -> PyResult<String> {
+        let result = self.inner.ask(&question)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        Ok(result.to_table())
+    }
+
+    /// Ask a question, get result as JSON string
+    fn ask_json(&self, question: String) -> PyResult<String> {
+        let result = self.inner.ask(&question)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        Ok(result.to_json())
+    }
+
+    /// Show supported query patterns
+    #[staticmethod]
+    fn help() -> String {
+        KoreMind::help()
+    }
+}
+
+/// Python wrapper for FilePulse — KORE ∞ Layer 1
+
+#[pyclass]
+pub struct PyFilePulse {
+    inner: FilePulse,
+}
+
+#[pymethods]
+impl PyFilePulse {
+    /// Load pulse from a .kore file
+    #[staticmethod]
+    fn from_kore(path: String) -> PyResult<Self> {
+        let inner = FilePulse::from_kore(&path)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e))?;
+        Ok(PyFilePulse { inner })
+    }
+
+    /// Full stats table — all columns with types, nulls, ranges, quality scores
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+
+    /// Health report — issues, grades, recommendations
+    fn health(&self) -> String {
+        self.inner.health()
+    }
+
+    /// Export as JSON string
+    fn to_json(&self) -> String {
+        self.inner.to_json()
+    }
+
+    /// Deterministic fingerprint of the data profile
+    #[getter]
+    fn fingerprint(&self) -> String {
+        self.inner.fingerprint.clone()
+    }
+
+    /// Overall quality score 0–100
+    #[getter]
+    fn quality(&self) -> f64 {
+        self.inner.overall_quality
+    }
+
+    /// Total row count
+    #[getter]
+    fn rows(&self) -> u64 {
+        self.inner.total_rows
+    }
+
+    /// Column count
+    #[getter]
+    fn cols(&self) -> usize {
+        self.inner.total_cols
+    }
+}
+
 #[pymodule]
 fn kore_fileformat(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", "1.1.2")?;
