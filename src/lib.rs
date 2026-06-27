@@ -129,8 +129,10 @@ pub mod kore_mind;
 pub mod kore_nerve;
 pub mod kore_oracle;
 pub mod kore_flow;
+pub mod kore_stream;
 
 // Canonical top-level API points to v2 to avoid ambiguous re-exports.
 pub use kore_query::KoreQuery;
 pub use kore_flow::KoreFlow;
+pub use kore_stream::KoreStream;
 pub use kore_v2::{KColumn, KType, KVal, KoreReader, KoreWriter, KORE_MAGIC, KORE_V2};

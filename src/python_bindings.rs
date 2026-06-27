@@ -19,6 +19,7 @@ use crate::kore_nerve::KoreNerve;
 use crate::kore_oracle::KoreOracle;
 use crate::kore_query::KoreQuery;
 use crate::kore_flow::KoreFlow;
+use crate::kore_stream::KoreStream;
 
 
 /// Helper: Compress a single CSV file to KORE (no chunking)
@@ -852,6 +853,76 @@ impl PyKoreFlow {
     }
 }
 
+/// KoreStream Python wrapper — Layer 7: Zero-dep pure-Rust streaming engine
+#[pyclass]
+pub struct PyKoreStream;
+
+#[pymethods]
+impl PyKoreStream {
+    #[new]
+    fn new() -> Self { PyKoreStream }
+
+    /// Scan file in chunks. Returns list of (headers, rows) per batch.
+    #[staticmethod]
+    fn scan(path: String, chunk_size: usize) -> PyResult<Vec<(Vec<String>, Vec<Vec<String>>)>> {
+        KoreStream::scan(&path, chunk_size).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+
+    /// Streaming WHERE filter in chunks.
+    #[staticmethod]
+    fn filter(path: String, predicate: String, chunk_size: usize) -> PyResult<Vec<(Vec<String>, Vec<Vec<String>>)>> {
+        KoreStream::filter(&path, &predicate, chunk_size).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+
+    /// Tumbling-window GROUP BY aggregation.
+    #[staticmethod]
+    fn window_agg(path: String, window_size: usize, group_col: String, agg_cols: Vec<String>) -> PyResult<Vec<(Vec<String>, Vec<Vec<String>>)>> {
+        let refs: Vec<&str> = agg_cols.iter().map(|s| s.as_str()).collect();
+        KoreStream::window_agg(&path, window_size, &group_col, &refs).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+
+    /// Merge multiple .kore files into a single stream.
+    #[staticmethod]
+    fn merge(paths: Vec<String>) -> PyResult<(Vec<String>, Vec<Vec<String>>)> {
+        let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+        KoreStream::merge(&refs).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+
+    /// Welford online statistics per column. Returns list of (col, count, sum, min, max, mean, variance, stddev, null_count).
+    #[staticmethod]
+    fn running_stats(path: String) -> PyResult<Vec<(String, u64, f64, f64, f64, f64, f64, f64, u64)>> {
+        KoreStream::running_stats(&path)
+            .map(|v| v.into_iter().map(|s| (s.col, s.count, s.sum, s.min, s.max, s.mean, s.variance, s.stddev, s.null_count)).collect())
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+
+    /// Z-score anomaly detection. Returns (headers, anomalous_rows).
+    #[staticmethod]
+    fn anomalies(path: String, threshold: f64) -> PyResult<(Vec<String>, Vec<Vec<String>>)> {
+        KoreStream::anomalies(&path, threshold).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+
+    /// Poll directory for .kore files modified within since_secs. Returns list of (path, mtime_secs, size_bytes).
+    #[staticmethod]
+    fn poll_dir(dir: String, since_secs: u64) -> PyResult<Vec<(String, u64, u64)>> {
+        KoreStream::poll_dir(&dir, since_secs)
+            .map(|v| v.into_iter().map(|e| (e.path, e.modified_secs, e.size_bytes)).collect())
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+
+    /// Per-partition top-N by value_col descending.
+    #[staticmethod]
+    fn top_n(path: String, group_col: String, value_col: String, n: usize) -> PyResult<(Vec<String>, Vec<Vec<String>>)> {
+        KoreStream::top_n(&path, &group_col, &value_col, n).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+
+    /// Render (headers, rows) tuple as an ASCII table string.
+    #[staticmethod]
+    fn table_str(headers: Vec<String>, rows: Vec<Vec<String>>) -> String {
+        KoreStream::table_str(&headers, &rows)
+    }
+}
+
 #[pymodule]
 fn kore_fileformat(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", "1.1.2")?;
@@ -875,6 +946,7 @@ fn kore_fileformat(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyKoreOracle>()?;
     m.add_class::<PyKoreQuery>()?;
     m.add_class::<PyKoreFlow>()?;
+    m.add_class::<PyKoreStream>()?;
 
     Ok(())
 }
