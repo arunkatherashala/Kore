@@ -130,5 +130,5 @@ pub mod kore_nerve;
 pub mod kore_oracle;
 
 // Canonical top-level API points to v2 to avoid ambiguous re-exports.
-pub use kore_query::{AggFunc, FilterOp, KoreQuery, QueryResult, SelectCol, WhereClause};
+pub use kore_query::KoreQuery;
 pub use kore_v2::{KColumn, KType, KVal, KoreReader, KoreWriter, KORE_MAGIC, KORE_V2};

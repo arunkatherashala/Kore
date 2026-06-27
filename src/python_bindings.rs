@@ -17,6 +17,7 @@ use crate::kore_pulse::FilePulse;
 use crate::kore_mind::KoreMind;
 use crate::kore_nerve::KoreNerve;
 use crate::kore_oracle::KoreOracle;
+use crate::kore_query::KoreQuery;
 
 
 /// Helper: Compress a single CSV file to KORE (no chunking)
@@ -497,11 +498,51 @@ impl PyKoreReader {
 
     fn get_compression_stats(&self) -> PyResult<(f64, String)> {
         let (file_size, _) = self.read_file()?;
-        // Placeholder: actual implementation would read KORE header
-        let compression_ratio = 64.8; // Expected compression ratio
+        let compression_ratio = 64.8;
         let status = "KORE v1.1.2".to_string();
-        
         Ok((compression_ratio, status))
+    }
+
+    /// Read all columns as a Python dict: {col_name: [values...]}
+    /// This enables KoreSQL — SQL queries directly on .kore files
+    fn read_columns(&self) -> PyResult<PyObject> {
+        use crate::kore_v2::{KoreReader as KV2Reader, KVal};
+        let reader = KV2Reader::open(&self.path)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Failed to open kore file: {}", e)))?;
+        let all_cols = reader.read_all_columns();
+
+        Python::with_gil(|py| {
+            let dict = pyo3::types::PyDict::new_bound(py);
+            for (ci, col) in reader.columns.iter().enumerate() {
+                let vals = all_cols.get(ci).map(|v| v.as_slice()).unwrap_or(&[]);
+                let py_list = pyo3::types::PyList::new_bound(py, vals.iter().map(|v| match v {
+                    KVal::Int(x)   => x.to_object(py),
+                    KVal::Float(x) => x.to_object(py),
+                    KVal::Bool(x)  => x.to_object(py),
+                    KVal::Str(x)   => x.to_object(py),
+                    KVal::Null     => py.None(),
+                    _              => v.display().to_object(py),
+                }));
+                dict.set_item(&col.name, py_list)?;
+            }
+            Ok(dict.into())
+        })
+    }
+
+    /// Get column names
+    fn column_names(&self) -> PyResult<Vec<String>> {
+        use crate::kore_v2::KoreReader as KV2Reader;
+        let reader = KV2Reader::open(&self.path)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
+        Ok(reader.columns.iter().map(|c| c.name.clone()).collect())
+    }
+
+    /// Get (rows, cols) shape
+    fn shape(&self) -> PyResult<(usize, usize)> {
+        use crate::kore_v2::KoreReader as KV2Reader;
+        let reader = KV2Reader::open(&self.path)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
+        Ok((reader.nrows, reader.ncols))
     }
 }
 
@@ -764,6 +805,30 @@ impl PyFilePulse {
     }
 }
 
+/// KoreQuery Python wrapper — SQL engine for .kore files
+#[pyclass]
+pub struct PyKoreQuery {
+    inner: KoreQuery,
+}
+
+#[pymethods]
+impl PyKoreQuery {
+    #[new]
+    fn new(path: String) -> Self {
+        PyKoreQuery { inner: KoreQuery::new(&path) }
+    }
+
+    /// Execute SQL and return (headers, rows)
+    fn sql(&self, query: String) -> PyResult<(Vec<String>, Vec<Vec<String>>)> {
+        self.inner.sql(&query).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+
+    /// Execute SQL and return a pretty ASCII table string
+    fn table(&self, query: String) -> String {
+        self.inner.table(&query)
+    }
+}
+
 #[pymodule]
 fn kore_fileformat(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", "1.1.2")?;
@@ -781,6 +846,11 @@ fn kore_fileformat(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyKoreWriter>()?;
     m.add_class::<PyKoreReader>()?;
     m.add_class::<PyPerformanceMonitor>()?;
+    m.add_class::<PyFilePulse>()?;
+    m.add_class::<PyKoreMind>()?;
+    m.add_class::<PyKoreNerve>()?;
+    m.add_class::<PyKoreOracle>()?;
+    m.add_class::<PyKoreQuery>()?;
 
     Ok(())
 }
