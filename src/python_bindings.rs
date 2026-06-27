@@ -21,6 +21,7 @@ use crate::kore_query::KoreQuery;
 use crate::kore_flow::KoreFlow;
 use crate::kore_stream::KoreStream;
 use crate::kore_ml::KoreML;
+use crate::kore_vault::KoreVault;
 
 
 /// Helper: Compress a single CSV file to KORE (no chunking)
@@ -997,6 +998,82 @@ impl PyKoreML {
         KoreML::table_str(&headers, &rows)
     }
 }
+
+/// KoreVault Python wrapper — Layer 9: Time travel, ChaCha20 encryption, ACID audit log
+#[pyclass]
+pub struct PyKoreVault;
+
+#[pymethods]
+impl PyKoreVault {
+    #[new]
+    fn new() -> Self { PyKoreVault }
+
+    #[staticmethod]
+    fn snapshot(path: String, tag: String) -> PyResult<String> {
+        KoreVault::snapshot(&path, &tag).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+    #[staticmethod]
+    fn list_snapshots(path: String) -> PyResult<Vec<(String, String, u64, u64, u64, String)>> {
+        KoreVault::list_snapshots(&path)
+            .map(|v| v.into_iter().map(|s| (s.id, s.tag, s.timestamp, s.size, s.hash, s.path)).collect())
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+    #[staticmethod]
+    fn restore(path: String, snapshot_id: String) -> PyResult<()> {
+        KoreVault::restore(&path, &snapshot_id).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+    #[staticmethod]
+    fn diff(path: String, snap1: String, snap2: String) -> PyResult<(String, String, usize, usize, usize, usize, String)> {
+        KoreVault::diff(&path, &snap1, &snap2)
+            .map(|d| (d.snap1, d.snap2, d.rows_before, d.rows_after, d.added, d.removed, d.summary))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+    #[staticmethod]
+    fn encrypt(src: String, key: String, dst: String) -> PyResult<()> {
+        KoreVault::encrypt(&src, &key, &dst).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+    #[staticmethod]
+    fn decrypt(src: String, key: String, dst: String) -> PyResult<()> {
+        KoreVault::decrypt(&src, &key, &dst).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+    #[staticmethod]
+    fn checksum(path: String) -> PyResult<(u64, u64)> {
+        KoreVault::checksum(&path).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+    #[staticmethod]
+    fn verify(path: String, expected_hash: u64) -> PyResult<bool> {
+        KoreVault::verify(&path, expected_hash).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+    #[staticmethod]
+    fn read_audit_log(path: String) -> PyResult<Vec<(u64, String, String, usize, u64)>> {
+        KoreVault::read_audit_log(&path)
+            .map(|v| v.into_iter().map(|e| (e.timestamp, e.operation, e.target, e.rows, e.hash)).collect())
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+    #[staticmethod]
+    fn compact(path: String, keep_latest: usize) -> PyResult<(usize, usize, u64)> {
+        KoreVault::compact(&path, keep_latest)
+            .map(|c| (c.kept, c.deleted, c.freed))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+    #[staticmethod]
+    fn wal_append(path: String, operation: String, rows: usize) -> PyResult<()> {
+        KoreVault::wal_append(&path, &operation, rows).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+    #[staticmethod]
+    fn wal_commit(path: String) -> PyResult<()> {
+        KoreVault::wal_commit(&path).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+    #[staticmethod]
+    fn wal_read(path: String) -> PyResult<Vec<String>> {
+        KoreVault::wal_read(&path).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+    #[staticmethod]
+    fn vault_status(path: String) -> PyResult<(usize, u64, u64, u64)> {
+        KoreVault::vault_status(&path).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+}
+
 #[pymodule]
 fn kore_fileformat(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", "1.1.2")?;
@@ -1022,6 +1099,7 @@ fn kore_fileformat(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyKoreFlow>()?;
     m.add_class::<PyKoreStream>()?;
     m.add_class::<PyKoreML>()?;
+    m.add_class::<PyKoreVault>()?;
 
     Ok(())
 }

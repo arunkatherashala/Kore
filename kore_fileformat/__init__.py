@@ -30,6 +30,7 @@ try:
     KoreFlow   = _core.PyKoreFlow
     KoreStream = _core.PyKoreStream
     KoreML     = _core.PyKoreML
+    KoreVault  = _core.PyKoreVault
     
 except (ImportError, AttributeError) as e:
     raise ImportError(
@@ -59,5 +60,6 @@ __all__ = [
     "KoreFlow",
     "KoreStream",
     "KoreML",
+    "KoreVault",
     "KoreBinaryParser",
 ]
