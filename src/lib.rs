@@ -69,6 +69,12 @@ pub mod arrow_converter;
 pub mod duckdb_connector;
 pub mod duckdb_ffi;
 
+// KORE ∞ — Intelligent Layers
+pub mod kore_pulse;
+pub mod kore_mind;
+pub mod kore_nerve;
+pub mod kore_oracle;
+
 // v1.1.6 Compression Improvements
 pub mod advanced_codecs;
 pub mod column_preprocessor;

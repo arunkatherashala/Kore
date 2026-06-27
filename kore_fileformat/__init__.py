@@ -22,6 +22,10 @@ try:
     get_kore_info = _core.get_kore_info  
     KoreWriter = _core.PyKoreWriter
     KoreReader = _core.PyKoreReader
+    FilePulse  = _core.PyFilePulse
+    KoreMind   = _core.PyKoreMind
+    KoreNerve  = _core.PyKoreNerve
+    KoreOracle = _core.PyKoreOracle
     
 except (ImportError, AttributeError) as e:
     raise ImportError(
@@ -43,5 +47,9 @@ __all__ = [
     "get_kore_info",
     "KoreWriter",
     "KoreReader",
+    "FilePulse",
+    "KoreMind",
+    "KoreNerve",
+    "KoreOracle",
     "KoreBinaryParser",
 ]
