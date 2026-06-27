@@ -1,0 +1,235 @@
+#!/usr/bin/env killer
+/*
+Phase 6c: Killer Language Bindings - Example Programs
+
+Demonstrates Kore format reading/writing in pure Killer.
+
+Run:
+  killer kore_example.killer
+*/
+
+// Load implementation
+include "./implementation.killer"
+
+// ============================================================================
+// Example 1: Column Analysis
+// ============================================================================
+
+fn example_column_analysis() {
+    print("\n=== Example 1: Column Analysis ===\n")
+    
+    // Sample columns
+    let col_boolean = ["true", "false", "true", "true", "false", "true"]
+    let col_numbers = ["1", "2", "3", "1", "2", "1"]
+    let col_strings = ["apple", "banana", "apple", "cherry", "apple", "date"]
+    
+    print("Column 0 (boolean):")
+    let stats0 = column_stats(col_boolean)
+    print("  Cardinality: " + str(stats0["cardinality"]))
+    print("  Best codec: " + stats0["best_codec"])
+    print()
+    
+    print("Column 1 (numbers):")
+    let stats1 = column_stats(col_numbers)
+    print("  Cardinality: " + str(stats1["cardinality"]))
+    print("  Best codec: " + stats1["best_codec"])
+    print()
+    
+    print("Column 2 (strings):")
+    let stats2 = column_stats(col_strings)
+    print("  Cardinality: " + str(stats2["cardinality"]))
+    print("  Best codec: " + stats2["best_codec"])
+}
+
+// ============================================================================
+// Example 2: RLE Encoding
+// ============================================================================
+
+fn example_rle_encoding() {
+    print("\n=== Example 2: RLE Encoding ===\n")
+    
+    // Highly repetitive data
+    let column = ["A", "A", "A", "B", "B", "C", "C", "C", "C"]
+    
+    print("Original column: " + join(column, ", "))
+    let encoded = apply_rle_encoding(column)
+    print("RLE encoded: " + encoded)
+    
+    // Calculate compression
+    let original_size = 0
+    let i = 0
+    while i < len(column) {
+        original_size = original_size + len(column[i])
+        i = i + 1
+    }
+    
+    let encoded_size = len(encoded)
+    let ratio = encoded_size as float / original_size as float * 100.0
+    
+    print("Compression: " + str(original_size) + " → " + str(encoded_size) + " bytes (" + str(ratio) + "%)")
+}
+
+// ============================================================================
+// Example 3: Kore File Info Display
+// ============================================================================
+
+fn example_file_info() {
+    print("\n=== Example 3: Kore File Information ===\n")
+    
+    // Simulate a Kore file
+    let num_cols = 5
+    let num_rows = 1000000
+    
+    let col0 = ["user_id", "123", "456", "789"]  // Numeric
+    let col1 = ["status", "active", "inactive", "active"]  // Low cardinality
+    let col2 = ["name", "Alice", "Bob", "Charlie"]  // High cardinality
+    let col3 = ["flag", "Y", "N", "Y"]  // Boolean-like
+    let col4 = ["value", "100", "200", "100"]  // Numeric
+    
+    let columns = [col0, col1, col2, col3, col4]
+    
+    print(kore_info(num_cols, num_rows, columns))
+}
+
+// ============================================================================
+// Example 4: Data Type Detection
+// ============================================================================
+
+fn is_numeric(value) -> bool {
+    if value == "NULL" { return true }
+    
+    let i = 0
+    while i < len(value) {
+        let ch = value[i:i+1]
+        if ch < "0" || ch > "9" {
+            if i == 0 && ch == "-" {
+                // negative sign is ok at start
+            } else if ch == "." {
+                // decimal point is ok
+            } else {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    
+    return true
+}
+
+fn example_type_detection() {
+    print("\n=== Example 4: Data Type Detection ===\n")
+    
+    let test_values = [
+        "123",
+        "45.67",
+        "-89",
+        "hello",
+        "NULL",
+        "2026-05-08",
+        "true"
+    ]
+    
+    let i = 0
+    while i < len(test_values) {
+        let v = test_values[i]
+        let is_num = is_numeric(v)
+        print(v + " → " + if is_num { "numeric" } else { "string" })
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Example 5: Estimate Compression
+// ============================================================================
+
+fn estimate_compression_ratio(column) -> float {
+    let cardinality = count_cardinality(column)
+    
+    // Higher cardinality = lower compression
+    if cardinality == 0 { return 0.0 }
+    
+    let unique_ratio = cardinality as float / len(column) as float
+    
+    // Rough estimation: compression = 1 / (1 + unique_ratio)
+    return 1.0 / (1.0 + unique_ratio)
+}
+
+fn example_compression() {
+    print("\n=== Example 5: Compression Estimation ===\n")
+    
+    // Low cardinality
+    let col_low = []
+    let i = 0
+    while i < 100 {
+        col_low = col_low + ["A", "B", "C"]
+        i = i + 1
+    }
+    
+    // High cardinality
+    let col_high = []
+    let j = 0
+    while j < 300 {
+        col_high = col_high + [str(j)]
+        j = j + 1
+    }
+    
+    let ratio_low = estimate_compression_ratio(col_low)
+    let ratio_high = estimate_compression_ratio(col_high)
+    
+    print("Low cardinality column: " + str(ratio_low as int * 100) + "% of original")
+    print("High cardinality column: " + str(ratio_high as int * 100) + "% of original")
+}
+
+// ============================================================================
+// Example 6: Round-trip Test
+// ============================================================================
+
+fn example_roundtrip() {
+    print("\n=== Example 6: Round-trip Test (Text Format) ===\n")
+    
+    // Create sample data
+    let rows = [
+        ["alice", "30", "NYC"],
+        ["bob", "25", "LA"],
+        ["charlie", "35", "SF"]
+    ]
+    
+    let schema = "name,age,city"
+    
+    print("Original data:")
+    let i = 0
+    while i < len(rows) {
+        print("  " + join(rows[i], ", "))
+        i = i + 1
+    }
+    
+    // Serialize to Kore
+    let kore_text = rows_to_kore(rows)
+    print("\nSerialized (Kore text format):")
+    print("  " + kore_text)
+    
+    // Write to file (if available)
+    let result = kore_write_text("example_output.kore", schema, kore_text)
+    print("\nWrite result: " + result)
+}
+
+// ============================================================================
+// Main - Run All Examples
+// ============================================================================
+
+fn main() {
+    print("=====================================")
+    print("Kore Format - Killer Language Bindings")
+    print("=====================================")
+    
+    example_column_analysis()
+    example_rle_encoding()
+    example_file_info()
+    example_type_detection()
+    example_compression()
+    example_roundtrip()
+    
+    print("\n=====================================")
+    print("Examples complete!")
+    print("=====================================")
+}

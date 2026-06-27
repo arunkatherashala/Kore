@@ -1,0 +1,1622 @@
+cargo:rerun-if-env-changed=ZSTD_SYS_USE_PKG_CONFIG
+cargo:rerun-if-env-changed=CC_FORCE_DISABLE
+CC_FORCE_DISABLE = None
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+debug.c
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+entropy_common.c
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+error_private.c
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+fse_decompress.c
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+threading.c
+zstd_common.c
+pool.c
+fse_compress.c
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                                                                                                  
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+huf_compress.c
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+hist.c
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+zstd_compress.c
+zstd_compress_literals.c
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+zstd_compress_superblock.c
+zstd_fast.c
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+zstd_compress_sequences.c
+zstd_double_fast.c
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+zstd_lazy.c
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                                                                                                  
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+zstd_ldm.c
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+zstd_preSplit.c
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+zstdmt_compress.c
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+zstd_opt.c
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                                                     
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+huf_decompress.c
+zstd_ddict.c
+zstd_decompress.c
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                                                                                                  
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+zstd_decompress_block.c
+cover.c
+divsufsort.c
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+fastcover.c
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+zdict.c
+zstd_v01.c
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+zstd_v03.c
+zstd_v02.c
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+zstd_v04.c
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64_pc_windows_msvc
+CFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CFLAGS_x86_64-pc-windows-msvc
+CFLAGS_x86_64-pc-windows-msvc = None
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+zstd_v05.c
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+zstd_v06.c
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+cargo:warning=cl : Command line warning D9002 : ignoring unknown option '-fvisibility=hidden'
+                   
+zstd_v07.c
+0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+exit code: 0
+cargo:rerun-if-env-changed=AR_x86_64-pc-windows-msvc
+AR_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=AR_x86_64_pc_windows_msvc
+AR_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_AR
+HOST_AR = None
+cargo:rerun-if-env-changed=AR
+AR = None
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=ARFLAGS
+ARFLAGS = None
+cargo:rerun-if-env-changed=HOST_ARFLAGS
+HOST_ARFLAGS = None
+cargo:rerun-if-env-changed=ARFLAGS_x86_64_pc_windows_msvc
+ARFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=ARFLAGS_x86_64-pc-windows-msvc
+ARFLAGS_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=AR_x86_64-pc-windows-msvc
+AR_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=AR_x86_64_pc_windows_msvc
+AR_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_AR
+HOST_AR = None
+cargo:rerun-if-env-changed=AR
+AR = None
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=ARFLAGS
+ARFLAGS = None
+cargo:rerun-if-env-changed=HOST_ARFLAGS
+HOST_ARFLAGS = None
+cargo:rerun-if-env-changed=ARFLAGS_x86_64_pc_windows_msvc
+ARFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=ARFLAGS_x86_64-pc-windows-msvc
+ARFLAGS_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = None
+PATH = Some(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug;C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\deps;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\AppData\Local\Programs\Python\Python312;C:\Users\ksak_\AppData\Local\Programs\Python\Python312\Scripts;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\ksak_\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code;C:\Python313\Scripts\;C:\Python313\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files\Python312\Scripts\;C:\ProgramData\chocolatey\bin;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\spark-3.4.3\bin;C:\Windows\System32;C:\Hadoop\bin;C:\terraform_1.8.5_windows_386\;C:\Program Files\OpenJDK\jdk-17.0.2\bin;C:\Program Files\Amazon\AWSCLIV2\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\Git\cmd;C:\Program Files (x86)\cloudflared\;C:\Program Files\nodejs\;C:\Program Files\GitHub CLI\;C:\Program Files\Docker\Docker\resources\bin;C:\Users\ksak_\.cargo\bin;C:\Users\ksak_\AppData\Local\Microsoft\WindowsApps;C:\Users\ksak_\AppData\Local\Programs\Microsoft VS Code\bin;C:\Hadoop\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\Astronomer.Astro_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Program Files\JetBrains\PyCharm 2024.1.5\bin;C:\Users\ksak_\AppData\Local\GitHubDesktop\bin;C:\Program Files\Git\cmd;C:\Users\ksak_\AppData\Local\Programs\Ollama;C:\Users\ksak_\AppData\Roaming\npm;C:\Users\ksak_\.fly\bin;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\Users\ksak_\AppData\Local\Programs\MiKTeX\miktex\bin\x64\;C:\Users\ksak_\AppData\Local\Microsoft\WinGet\Packages\nektos.act_Microsoft.Winget.Source_8wekyb3d8bbwe;c:\Users\ksak_\.vscode\extensions\vscjava.vscode-java-debug-0.59.0\bundled\scripts\noConfigScripts;C:\Users\ksak_\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = None
+cargo:rerun-if-env-changed=CC_x86_64-pc-windows-msvc
+CC_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_x86_64_pc_windows_msvc
+CC_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rustc-link-lib=static=zstd
+cargo:rustc-link-search=native=C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\build\zstd-sys-b0e3055a3801a83e\out
+cargo:root=C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore\kore-compression\target\debug\build\zstd-sys-b0e3055a3801a83e\out
+cargo:include=C:\Users\ksak_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\zstd-sys-2.0.16+zstd.1.5.7\zstd/lib

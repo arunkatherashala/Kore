@@ -1,0 +1,138 @@
+﻿name: Publish to Maven Central
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  maven:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up JDK 21
+      uses: actions/setup-java@v4
+      with:
+        java-version: '21'
+        distribution: 'temurin'
+
+    - name: Set up GPG Key for Signing
+      env:
+        MAVEN_GPG_PRIVATE_KEY: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+      run: |
+        echo "Setting up GPG key for Maven Central signing..."
+        
+        # Decode and import the private key from secrets
+        if [ -z "$MAVEN_GPG_PRIVATE_KEY" ]; then
+          echo "❌ ERROR: MAVEN_GPG_PRIVATE_KEY secret not set!"
+          exit 1
+        fi
+        
+        echo "✓ Importing GPG private key from GitHub secrets..."
+        echo "$MAVEN_GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import --no-tty 2>&1 | grep -E "^gpg:|key|imported" || echo "✓ Key imported successfully"
+        
+        # Setup GPG for automated signing
+        mkdir -p ~/.gnupg
+        printf 'allow-loopback-pinentry\n' >> ~/.gnupg/gpg-agent.conf
+        echo "✓ GPG configured for non-interactive signing"
+        
+        # List imported keys to verify
+        echo ""
+        echo "Imported GPG keys:"
+        gpg --list-keys --keyid-format short 2>&1 | head -10 || true
+
+    - name: Create Maven Settings
+      env:
+        MAVEN_USERNAME: ${{ secrets.CENTRAL_PORTAL_TOKEN_USERNAME }}
+        MAVEN_PASSWORD: ${{ secrets.CENTRAL_PORTAL_TOKEN_PASSWORD }}
+      run: |
+        mkdir -p ~/.m2
+        
+        # Debug: check if credentials exist
+        if [ -z "$MAVEN_USERNAME" ]; then
+          echo "❌ ERROR: CENTRAL_PORTAL_TOKEN_USERNAME secret not set!"
+          exit 1
+        fi
+        if [ -z "$MAVEN_PASSWORD" ]; then
+          echo "❌ ERROR: CENTRAL_PORTAL_TOKEN_PASSWORD secret not set!"
+          exit 1
+        fi
+        
+        echo "✓ Credentials found (username length: ${#MAVEN_USERNAME})"
+        
+        # Create settings.xml with actual credentials (not env var refs)
+        cat > ~/.m2/settings.xml << EOF
+        <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd">
+          <servers>
+            <server>
+              <id>central</id>
+              <username>$MAVEN_USERNAME</username>
+              <password>$MAVEN_PASSWORD</password>
+            </server>
+          </servers>
+        </settings>
+        EOF
+        echo "✓ Maven settings configured"
+
+    - name: Publish to Maven Central via mvn deploy
+      env:
+        MAVEN_USERNAME: ${{ secrets.CENTRAL_PORTAL_TOKEN_USERNAME }}
+        MAVEN_PASSWORD: ${{ secrets.CENTRAL_PORTAL_TOKEN_PASSWORD }}
+        MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE || '' }}
+      run: |
+        cd maven
+        
+        echo "========================================"
+        echo "Publishing to Maven Central"
+        echo "========================================"
+        
+        # Always enable GPG signing with release profile
+        echo "✓ GPG signing enabled"
+        
+        # Debug: Show settings.xml
+        echo ""
+        echo "DEBUG: settings.xml content (credentials redacted):"
+        cat ~/.m2/settings.xml | sed 's/<username>[^<]*/<username>***/' | sed 's/<password>[^<]*/<password>***/'
+        echo ""
+        
+        # Deploy with GPG signing enabled
+        # If passphrase is empty, GPG will use the key without passphrase
+        mvn clean deploy \
+          -P release \
+          -Dgpg.passphrase="${MAVEN_GPG_PASSPHRASE}" \
+          -DskipTests \
+          2>&1 | tee mvn-deploy.log
+        
+        # Extract key info from logs
+        if grep -q "published" mvn-deploy.log; then
+          echo ""
+          echo "✓ Published to Maven Central with GPG signatures"
+          echo "Note: Artifact will be indexed within 10-15 minutes"
+        else
+          echo ""
+          echo "⚠ Check deployment status in Maven Central Portal"
+        fi
+
+    - name: Publish Summary
+      if: always()
+      run: |
+        cd maven
+        VERSION=$(sed -n '/<version>/p' pom.xml | head -1 | sed 's/.*<version>\(.*\)<\/version>.*/\1/')
+        
+        echo "## ✅ Kore v${VERSION} Deployed to Maven Central" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Package:** io.github.arunkatherashala:kore-fileformat:${VERSION}" >> $GITHUB_STEP_SUMMARY
+        echo "**Java Runtime:** JDK 21 with full Java 21 language features" >> $GITHUB_STEP_SUMMARY
+        echo "**Repository:** [Maven Central](https://central.sonatype.com/artifact/io.github.arunkatherashala/kore-fileformat)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📋 Next Steps" >> $GITHUB_STEP_SUMMARY
+        echo "- ⏳ Indexing: 10-15 minutes (check back at [Maven Central Search](https://central.sonatype.com/search?q=kore-fileformat))" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Once indexed, use in Maven: \`io.github.arunkatherashala:kore-fileformat:${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+

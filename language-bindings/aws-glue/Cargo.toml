@@ -1,0 +1,26 @@
+[package]
+name = "kore_aws_glue"
+version = "0.2.0"
+edition = "2021"
+authors = ["Katherashala Sai Arun Kumar"]
+license = "Proprietary"
+repository = "https://github.com/arunkatherashala/Kore"
+description = "AWS Glue integration for KORE columnar format with ETL pipeline support"
+
+[dependencies]
+kore_fileformat = { path = "../../", version = "0.1.0" }
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+
+[lib]
+name = "kore_aws_glue"
+crate-type = ["rlib"]
+
+[[example]]
+name = "glue_job"
+path = "examples/glue_job.rs"
+
+[dev-dependencies]
+tokio-test = "0.4"

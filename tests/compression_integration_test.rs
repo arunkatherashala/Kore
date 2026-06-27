@@ -1,0 +1,25 @@
+// Simple integration tests for Compression Phase 1
+// Tests compression components working together
+
+#[cfg(test)]
+mod compression_tests {
+    use kore_fileformat::compression::{DictionaryEncoder, ZstdCompressor};
+
+    #[test]
+    fn test_basic_zstd() {
+        // Use highly repetitive data that RLE compresses well
+        let data = b"Z".repeat(1300); // 1300 identical bytes
+        let compressor = ZstdCompressor::default_fast();
+        let compressed = compressor.compress(&data).unwrap();
+        println!("Basic compression ratio: {:.1}%", compressed.len() as f64 / data.len() as f64 * 100.0);
+        // Mock RLE on 1300 identical bytes achieves compression
+        assert!(compressed.len() < data.len() / 10, "Mock should compress repetitive data significantly");
+    }
+
+    #[test]
+    fn test_dictionary_basic() {
+        let values: Vec<String> = vec!["test".to_string(); 10];
+        let encoder = DictionaryEncoder::encode(&values).unwrap();
+        assert_eq!(encoder.statistics().unique_values, 1);
+    }
+}

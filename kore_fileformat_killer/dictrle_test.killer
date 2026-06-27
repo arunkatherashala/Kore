@@ -1,0 +1,52 @@
+// DictRLE encoder + test
+print("dictrle_test: DictRLE encoder test\n")
+
+fn dictrle_encode(xs)
+{
+    if len(xs) == 0 {
+        return [[], []]
+    }
+    let dict = []
+    let indices = []
+    let i = 0
+    while i < len(xs)
+    {
+        let s = xs[i]
+        // find in dict
+        let found = -1
+        let j = 0
+        while j < len(dict)
+        {
+            if dict[j] == s {
+                found = j
+                break
+            }
+            j = j + 1
+        }
+        if found == -1 {
+            // append to dict
+            dict = concat(dict, [s])
+            // new index is len(dict)-1
+            let idx = len(dict) - 1
+            indices = concat(indices, [idx])
+        } else {
+            indices = concat(indices, [found])
+        }
+        i = i + 1
+    }
+    return [dict, indices]
+}
+
+// Test
+let names = ["Alice","Bob","Alice","Carol","Bob","Dave","Alice"]
+print(K"names: {names}")
+let out = dictrle_encode(names)
+print(K"out: {out}")
+let expected = [["Alice","Bob","Carol","Dave"],[0,1,0,2,1,3,0]]
+print(K"expected: {expected}")
+let ok = (str(out) == str(expected))
+if ok {
+    print("DICTRLE PASS")
+} else {
+    print("DICTRLE FAIL")
+}

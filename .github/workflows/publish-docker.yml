@@ -1,0 +1,50 @@
+﻿name: Publish Documentation Image to GHCR
+# Different approach: Documentation & Reference Image
+# Instead of binary packaging, provides multi-language binding reference
+# Useful for developers exploring KORE across Python/JS/Java/Rust/Go/C#/Ruby/C++
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Extract version
+      id: version
+      run: |
+        if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+          echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Build and push Documentation Image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: |
+          ghcr.io/${{ github.repository_owner }}/kore:latest
+          ${{ (startsWith(github.ref, 'refs/tags/') && format('ghcr.io/{0}/kore:{1}', github.repository_owner, steps.version.outputs.version)) || '' }}
+        cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/kore:buildcache
+        cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/kore:buildcache,mode=max
+
+

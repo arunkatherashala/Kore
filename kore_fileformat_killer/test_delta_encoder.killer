@@ -1,0 +1,27 @@
+print("kore_fileformat_killer: delta encoder test\n")
+
+// Load the encoder (in this environment, just include file)
+// If runtime supports `import`, use it; else assume same folder and run both files sequentially.
+
+// define sample ages
+let ages = [25, 30, 25, 26, 40]
+print(K"ages: {ages}")
+
+let deltas = delta_encode(ages)
+print(K"deltas: {deltas}")
+
+let decoded = delta_decode(deltas)
+print(K"decoded: {decoded}")
+
+// Compare via string equality
+let ok = (str(decoded) == str(ages))
+if ok {
+    print("TEST PASS: delta roundtrip OK")
+} else {
+    print("TEST FAIL: mismatch")
+}
+
+// Expose result as assert_true if runtime provides it
+if function_exists("assert_true") {
+    assert_true(ok)
+}

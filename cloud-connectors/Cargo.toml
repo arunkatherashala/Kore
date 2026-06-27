@@ -1,0 +1,21 @@
+[package]
+name = "kore-cloud-connectors"
+version = "0.1.0"
+edition = "2021"
+authors = ["Arun Kather Ashala"]
+description = "Cloud storage connectors for Kore FileFormat - AWS S3, Azure Blob, GCS, Snowflake"
+license = "MIT"
+
+[dependencies]
+kore_fileformat = { path = "../" }
+tokio = { version = "1.40", features = ["full"] }
+aws-config = "1.1"
+aws-sdk-s3 = "1.24"
+bytes = "1.6"
+anyhow = "1.0"
+thiserror = "1.0"
+async-trait = "0.1"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio-test = "0.4"

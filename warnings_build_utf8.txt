@@ -1,0 +1,450 @@
+﻿cargo :    Compiling kore_fileformat v0.1.0 (A:\My workspace\Kore_fileformat)
+At line:1 char:62
++ ... \My workspace\Kore_fileformat"; cargo clean; cargo build 2>&1 | Tee-O ...
++                                                  ~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling ko...ore_fileformat) 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: unexpected `cfg` condition value: `kore_lite_compat`
+ --> src\lib.rs:9:7
+  |
+9 | #[cfg(feature = "kore_lite_compat")]
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+  |
+  = note: no expected values for `feature`
+  = help: consider adding `kore_lite_compat` as a feature in `Cargo.toml`
+  = note: see 
+<https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for 
+more information about checking conditional configuration
+  = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unused import: `std::collections::HashMap`
+ --> src\kore_query.rs:7:5
+  |
+7 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: ambiguous glob re-exports
+  --> src\lib.rs:13:9
+   |
+13 | pub use kore::*;
+   |         ^^^^^^^ the name `KORE_MAGIC` in the value namespace is first 
+re-exported here
+14 | pub use kore_v2::*;
+   |         ---------- but the name `KORE_MAGIC` in the value namespace is 
+also re-exported here
+   |
+   = note: `#[warn(ambiguous_glob_reexports)]` on by default
+
+warning: ambiguous glob re-exports
+  --> src\lib.rs:13:9
+   |
+13 | pub use kore::*;
+   |         ^^^^^^^ the name `KoreWriter` in the type namespace is first 
+re-exported here
+14 | pub use kore_v2::*;
+   |         ---------- but the name `KoreWriter` in the type namespace is 
+also re-exported here
+
+warning: unused import: `Read`
+  --> src\kore.rs:10:22
+   |
+10 | use std::io::{Write, Read};
+   |                      ^^^^
+
+warning: unused import: `Write`
+  --> src\kore.rs:10:15
+   |
+10 | use std::io::{Write, Read};
+   |               ^^^^^
+
+warning: unused variable: `values`
+   --> src\kore.rs:393:5
+    |
+393 |     values: &[KoreValue],
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: 
+`_values`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by 
+default
+
+warning: unused variable: `col`
+   --> src\kore.rs:394:5
+    |
+394 |     col: &KoreColumn,
+    |     ^^^ help: if this is intentional, prefix it with an underscore: 
+`_col`
+
+warning: unused variable: `dict`
+   --> src\kore.rs:395:5
+    |
+395 |     dict: &HashMap<String, u32>,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: 
+`_dict`
+
+warning: unused variable: `algo`
+   --> src\kore.rs:396:5
+    |
+396 |     algo: &KoreAlgo,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: 
+`_algo`
+
+warning: unused variable: `data`
+   --> src\kore.rs:405:5
+    |
+405 |     data: &[u8],
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: 
+`_data`
+
+warning: unused variable: `col`
+   --> src\kore.rs:406:5
+    |
+406 |     col: &KoreColumn,
+    |     ^^^ help: if this is intentional, prefix it with an underscore: 
+`_col`
+
+warning: unused variable: `algo`
+   --> src\kore.rs:407:5
+    |
+407 |     algo: &KoreAlgo,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: 
+`_algo`
+
+warning: unused variable: `count`
+   --> src\kore.rs:408:5
+    |
+408 |     count: usize,
+    |     ^^^^^ help: if this is intentional, prefix it with an underscore: 
+`_count`
+
+warning: unused variable: `dict_rev`
+   --> src\kore.rs:409:5
+    |
+409 |     dict_rev: &Vec<String>,
+    |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: 
+`_dict_rev`
+
+warning: unused variable: `path`
+   --> src\kore.rs:427:25
+    |
+427 |     pub fn write(&self, path: &str, rows: &[Vec<KoreValue>]) -> 
+Result<String, String> {
+    |                         ^^^^ help: if this is intentional, prefix it 
+with an underscore: `_path`
+
+warning: unused variable: `rows`
+   --> src\kore.rs:427:37
+    |
+427 |     pub fn write(&self, path: &str, rows: &[Vec<KoreValue>]) -> 
+Result<String, String> {
+    |                                     ^^^^ help: if this is intentional, 
+prefix it with an underscore: `_rows`
+
+warning: unused variable: `path`
+   --> src\kore.rs:450:17
+    |
+450 |     pub fn open(path: &str) -> Result<Self, String> {
+    |                 ^^^^ help: if this is intentional, prefix it with an 
+underscore: `_path`
+
+warning: unused variable: `col_name`
+   --> src\kore.rs:455:31
+    |
+455 |     pub fn read_column(&self, col_name: &str) -> Vec<KoreValue> { 
+unimplemented!() }
+    |                               ^^^^^^^^ help: if this is intentional, 
+prefix it with an underscore: `_col_name`
+
+warning: unused variable: `schema_json`
+   --> src\kore.rs:462:38
+    |
+462 | pub fn kore_write_simple(path: &str, schema_json: &str, data_json: &str) 
+-> String {
+    |                                      ^^^^^^^^^^^ help: if this is 
+intentional, prefix it with an underscore: `_schema_json`
+
+warning: unused variable: `data_json`
+   --> src\kore.rs:462:57
+    |
+462 | pub fn kore_write_simple(path: &str, schema_json: &str, data_json: &str) 
+-> String {
+    |                                                         ^^^^^^^^^ help: 
+if this is intentional, prefix it with an underscore: `_data_json`
+
+warning: unused variable: `nchunks`
+   --> src\kore_v2.rs:250:13
+    |
+250 |         let nchunks = 
+u32::from_le_bytes(data[16..20].try_into().unwrap_or([0;4])) as usize;
+    |             ^^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_nchunks`
+
+warning: value assigned to `p` is never read
+   --> src\kore_v2.rs:276:50
+    |
+276 |         let dict_comp = &data[p..dict_comp_end]; p = dict_comp_end;
+    |                                                  ^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by 
+default
+
+warning: unused variable: `message`
+  --> src\kore_txn.rs:44:38
+   |
+44 |     pub fn record_version(&mut self, message: &str, filename: &str, 
+nrows: usize, size_bytes: u64) -> Result<u64, String> { unimplem...
+   |                                      ^^^^^^^ help: if this is 
+intentional, prefix it with an underscore: `_message`
+
+warning: unused variable: `filename`
+  --> src\kore_txn.rs:44:53
+   |
+44 | ...ut self, message: &str, filename: &str, nrows: usize, size_bytes: u64) 
+-> Result<u64, String> { unimplemented!() }
+   |                            ^^^^^^^^ help: if this is intentional, prefix 
+it with an underscore: `_filename`
+
+warning: unused variable: `nrows`
+  --> src\kore_txn.rs:44:69
+   |
+44 | ...age: &str, filename: &str, nrows: usize, size_bytes: u64) -> 
+Result<u64, String> { unimplemented!() }
+   |                               ^^^^^ help: if this is intentional, prefix 
+it with an underscore: `_nrows`
+
+warning: unused variable: `size_bytes`
+  --> src\kore_txn.rs:44:83
+   |
+44 | ...: &str, nrows: usize, size_bytes: u64) -> Result<u64, String> { 
+unimplemented!() }
+   |                          ^^^^^^^^^^ help: if this is intentional, prefix 
+it with an underscore: `_size_bytes`
+
+warning: unused variable: `kore_path`
+  --> src\kore_txn.rs:55:18
+   |
+55 |     pub fn begin(kore_path: &str) -> Self { unimplemented!() }
+   |                  ^^^^^^^^^ help: if this is intentional, prefix it with 
+an underscore: `_kore_path`
+
+warning: variable does not need to be mutable
+  --> src\kore_txn.rs:57:19
+   |
+57 |     pub fn commit(mut self, message: &str) -> Result<u64, String> { 
+unimplemented!() }
+   |                   ----^^^^
+   |                   |
+   |                   help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `message`
+  --> src\kore_txn.rs:57:29
+   |
+57 |     pub fn commit(mut self, message: &str) -> Result<u64, String> { 
+unimplemented!() }
+   |                             ^^^^^^^ help: if this is intentional, prefix 
+it with an underscore: `_message`
+
+warning: unused variable: `kore_path`
+  --> src\kore_txn.rs:61:17
+   |
+61 | pub fn checkout(kore_path: &str, version: u64) -> Result<(), String> { 
+unimplemented!() }
+   |                 ^^^^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_kore_path`
+
+warning: unused variable: `version`
+  --> src\kore_txn.rs:61:34
+   |
+61 | pub fn checkout(kore_path: &str, version: u64) -> Result<(), String> { 
+unimplemented!() }
+   |                                  ^^^^^^^ help: if this is intentional, 
+prefix it with an underscore: `_version`
+
+warning: unused variable: `kore_path`
+  --> src\kore_txn.rs:62:14
+   |
+62 | pub fn as_of(kore_path: &str, timestamp: u64) -> Result<(), String> { 
+unimplemented!() }
+   |              ^^^^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_kore_path`
+
+warning: unused variable: `timestamp`
+  --> src\kore_txn.rs:62:31
+   |
+62 | pub fn as_of(kore_path: &str, timestamp: u64) -> Result<(), String> { 
+unimplemented!() }
+   |                               ^^^^^^^^^ help: if this is intentional, 
+prefix it with an underscore: `_timestamp`
+
+warning: unused variable: `kore_path`
+  --> src\kore_txn.rs:63:22
+   |
+63 | pub fn list_versions(kore_path: &str) -> Vec<String> { Vec::new() }
+   |                      ^^^^^^^^^ help: if this is intentional, prefix it 
+with an underscore: `_kore_path`
+
+warning: associated items `to_u8` and `from_u8` are never used
+  --> src\kore.rs:28:8
+   |
+27 | impl KoreType {
+   | ------------- associated items in this implementation
+28 |     fn to_u8(&self) -> u8 {
+   |        ^^^^^
+...
+38 |     fn from_u8(v: u8, dim: u32) -> Self {
+   |        ^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated items `to_u8` and `from_u8` are never used
+  --> src\kore.rs:63:8
+   |
+62 | impl KoreAlgo {
+   | ------------- associated items in this implementation
+63 |     fn to_u8(&self) -> u8 {
+   |        ^^^^^
+...
+73 |     fn from_u8(v: u8) -> Self {
+   |        ^^^^^^^
+
+warning: methods `as_i64`, `as_f64`, `as_str`, and `to_display` are never used
+   --> src\kore.rs:107:8
+    |
+106 | impl KoreValue {
+    | -------------- methods in this implementation
+107 |     fn as_i64(&self) -> i64 {
+    |        ^^^^^^
+...
+111 |     fn as_f64(&self) -> f64 {
+    |        ^^^^^^
+...
+114 |     fn as_str(&self) -> &str {
+    |        ^^^^^^
+...
+117 |     fn to_display(&self) -> String {
+    |        ^^^^^^^^^^
+
+warning: function `lz77_compress` is never used
+   --> src\kore.rs:185:4
+    |
+185 | fn lz77_compress(input: &[u8]) -> Vec<u8> {
+    |    ^^^^^^^^^^^^^
+
+warning: function `lz77_decompress` is never used
+   --> src\kore.rs:230:4
+    |
+230 | fn lz77_decompress(input: &[u8]) -> Vec<u8> {
+    |    ^^^^^^^^^^^^^^^
+
+warning: function `delta_encode_i64` is never used
+   --> src\kore.rs:257:4
+    |
+257 | fn delta_encode_i64(values: &[i64]) -> Vec<u8> {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `delta_decode_i64` is never used
+   --> src\kore.rs:270:4
+    |
+270 | fn delta_decode_i64(data: &[u8]) -> Vec<i64> {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `encode_varint` is never used
+   --> src\kore.rs:285:4
+    |
+285 | fn encode_varint(mut v: u64, out: &mut Vec<u8>) {
+    |    ^^^^^^^^^^^^^
+
+warning: function `decode_varint` is never used
+   --> src\kore.rs:294:4
+    |
+294 | fn decode_varint(data: &[u8]) -> (u64, usize) {
+    |    ^^^^^^^^^^^^^
+
+warning: function `delta_encode_f64` is never used
+   --> src\kore.rs:309:4
+    |
+309 | fn delta_encode_f64(values: &[f64]) -> Vec<u8> {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `delta_decode_f64` is never used
+   --> src\kore.rs:313:4
+    |
+313 | fn delta_decode_f64(data: &[u8]) -> Vec<f64> {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `xor_encrypt` is never used
+   --> src\kore.rs:318:4
+    |
+318 | fn xor_encrypt(data: &[u8], key: &[u8; 32]) -> Vec<u8> {
+    |    ^^^^^^^^^^^
+
+warning: function `xor_decrypt` is never used
+   --> src\kore.rs:334:4
+    |
+334 | fn xor_decrypt(data: &[u8], key: &[u8; 32]) -> Vec<u8> { 
+xor_encrypt(data, key) }
+    |    ^^^^^^^^^^^
+
+warning: function `rle_encode_bytes` is never used
+   --> src\kore.rs:337:4
+    |
+337 | fn rle_encode_bytes(data: &[u8]) -> Vec<u8> {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `rle_decode_bytes` is never used
+   --> src\kore.rs:354:4
+    |
+354 | fn rle_decode_bytes(data: &[u8]) -> Vec<u8> {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `auto_select_algo` is never used
+   --> src\kore.rs:367:4
+    |
+367 | fn auto_select_algo(col: &KoreColumn, values: &[KoreValue]) -> KoreAlgo {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `encode_column_block` is never used
+   --> src\kore.rs:392:4
+    |
+392 | fn encode_column_block(
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `decode_column_block` is never used
+   --> src\kore.rs:404:4
+    |
+404 | fn decode_column_block(
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `HEADER_SIZE` is never used
+  --> src\kore_v2.rs:51:7
+   |
+51 | const HEADER_SIZE: usize = 64;
+   |       ^^^^^^^^^^^
+
+warning: associated function `from_bytes` is never used
+    --> src\kore_v2.rs:1456:8
+     |
+1426 | impl Bloom {
+     | ---------- associated function in this implementation
+...
+1456 |     fn from_bytes(data: &[u8]) -> Self {
+     |        ^^^^^^^^^^
+
+warning: method `save` is never used
+  --> src\kore_txn.rs:45:8
+   |
+22 | impl KoreVersionLog {
+   | ------------------- method in this implementation
+...
+45 |     fn save(&self) -> Result<(), String> { unimplemented!() }
+   |        ^^^^
+
+warning: `kore_fileformat` (lib) generated 56 warnings (run `cargo fix --lib 
+-p kore_fileformat` to apply 29 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 23.08s

@@ -1,0 +1,5 @@
+com\kore\hadoop\KoreFileSplit.class
+com\kore\hadoop\KoreRecord.class
+com\kore\hadoop\KoreInputFormat.class
+com\kore\hadoop\KoreRecordReader.class
+com\kore\hadoop\KoreRecordReader$ColumnMetadata.class

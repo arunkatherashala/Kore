@@ -1,0 +1,27 @@
+# Node
+node_modules/
+package-lock.json
+
+# Build
+_site/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Env
+.env
+.env.local
+
+# Logs
+*.log
+
+# Temporary
+temp/
+tmp/
+.cache/

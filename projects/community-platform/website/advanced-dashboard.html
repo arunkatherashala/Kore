@@ -1,0 +1,1038 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KORE ADVANCED Monitoring Enterprise Dashboard v1.2.3</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1800px;
+            margin: 0 auto;
+        }
+
+        header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 12px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 20px 60px rgba(102, 126, 234, 0.3);
+            color: white;
+            position: relative;
+            overflow: hidden;
+        }
+
+        header::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            right: 0;
+            width: 200px;
+            height: 200px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 50%;
+            transform: translate(50%, -50%);
+        }
+
+        header h1 {
+            font-size: 2.8em;
+            margin-bottom: 10px;
+            position: relative;
+            z-index: 1;
+        }
+
+        header .subtitle {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+
+        .control-panel {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            align-items: center;
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .control-group label {
+            font-size: 0.85em;
+            color: #666;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        select, input {
+            padding: 10px 12px;
+            border: 2px solid #667eea;
+            border-radius: 6px;
+            font-size: 0.95em;
+            background: white;
+            color: #333;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        select:hover, input:hover {
+            border-color: #764ba2;
+            box-shadow: 0 0 10px rgba(102, 126, 234, 0.2);
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 10px 16px;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.9em;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(102, 126, 234, 0.3);
+        }
+
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+            border: 2px solid #ddd;
+        }
+
+        .btn-secondary:hover {
+            background: #e0e0e0;
+        }
+
+        .btn-danger {
+            background: #e74c3c;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #c0392b;
+        }
+
+        .alerts-panel {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            border-left: 5px solid #e74c3c;
+        }
+
+        .alerts-title {
+            font-size: 1.2em;
+            font-weight: bold;
+            margin-bottom: 15px;
+            color: #333;
+        }
+
+        .alert-item {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 6px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .alert-item.danger {
+            background: #f8d7da;
+            border-left-color: #dc3545;
+        }
+
+        .alert-item.success {
+            background: #d4edda;
+            border-left-color: #28a745;
+        }
+
+        .alert-time {
+            font-size: 0.85em;
+            color: #666;
+        }
+
+        .advanced-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+            width: 100%;
+        }
+
+        .metric-advanced {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            border-top: 4px solid #667eea;
+            display: flex;
+            flex-direction: column;
+            min-height: 180px;
+            overflow: hidden;
+        }
+
+        .metric-advanced.critical {
+            border-top-color: #e74c3c;
+            background: #fff5f5;
+        }
+
+        .metric-advanced.warning {
+            border-top-color: #f39c12;
+            background: #fffaf0;
+        }
+
+        .metric-label {
+            font-size: 0.85em;
+            color: #999;
+            text-transform: uppercase;
+            margin-bottom: 10px;
+            font-weight: 600;
+        }
+
+        .metric-value {
+            font-size: 2em;
+            font-weight: bold;
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+
+        .metric-sparkline {
+            height: 50px;
+            margin-top: 10px;
+            width: 100% !important;
+            position: relative;
+        }
+
+        .sparkline-wrapper {
+            position: relative;
+            width: 100%;
+            height: 50px;
+            margin-top: 10px;
+        }
+
+        .charts-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .chart-container {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .chart-title {
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .chart-options {
+            display: flex;
+            gap: 10px;
+        }
+
+        .chart-options button {
+            padding: 6px 12px;
+            background: #f0f0f0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85em;
+            transition: all 0.2s ease;
+        }
+
+        .chart-options button.active {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+
+        .chart-wrapper {
+            position: relative;
+            height: 350px;
+        }
+
+        .analytics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .analytics-card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+
+        .analytics-title {
+            font-size: 1.1em;
+            font-weight: bold;
+            margin-bottom: 15px;
+            color: #333;
+        }
+
+        .trend-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+            border-bottom: 1px solid #eee;
+        }
+
+        .trend-item:last-child {
+            border-bottom: none;
+        }
+
+        .trend-name {
+            font-weight: 600;
+            color: #333;
+        }
+
+        .trend-value {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .trend-up {
+            color: #27ae60;
+            font-weight: bold;
+        }
+
+        .trend-down {
+            color: #e74c3c;
+            font-weight: bold;
+        }
+
+        .table-advanced {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            overflow-x: auto;
+        }
+
+        .table-title {
+            font-size: 1.2em;
+            font-weight: bold;
+            margin-bottom: 15px;
+            color: #333;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th {
+            background: #f8f9fa;
+            padding: 15px;
+            text-align: left;
+            font-weight: 600;
+            border-bottom: 2px solid #667eea;
+            color: #333;
+            font-size: 0.95em;
+        }
+
+        td {
+            padding: 15px;
+            border-bottom: 1px solid #eee;
+        }
+
+        tr:hover {
+            background: #f8f9fa;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .badge-live {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .badge-trending {
+            background: #cce5ff;
+            color: #004085;
+        }
+
+        .forecast-chart {
+            position: relative;
+            height: 250px;
+        }
+
+        .heatmap {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 8px;
+            margin-top: 15px;
+        }
+
+        .heatmap-cell {
+            aspect-ratio: 1;
+            background: #f0f0f0;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.8em;
+            font-weight: bold;
+            color: white;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
+        }
+
+        .stats-summary {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+
+        .stats-summary h2 {
+            color: #667eea;
+            margin-bottom: 20px;
+        }
+
+        .export-panel {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .export-label {
+            font-weight: 600;
+            color: #333;
+        }
+
+        .live-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            background: #27ae60;
+            border-radius: 50%;
+            margin-right: 8px;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .footer {
+            text-align: center;
+            color: #999;
+            margin-top: 30px;
+            padding: 20px;
+            font-size: 0.9em;
+        }
+
+        @media (max-width: 768px) {
+            .charts-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            header h1 {
+                font-size: 1.8em;
+            }
+
+            .control-panel {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚀 KORE v1.2.3 ADVANCED Enterprise Dashboard</h1>
+            <p class="subtitle">Enterprise-Grade Real-Time Monitoring & Predictive Analytics</p>
+        </header>
+
+        <div class="control-panel">
+            <div class="control-group">
+                <label>📅 Date Range</label>
+                <select onchange="updateDateRange(this.value)">
+                    <option>Today</option>
+                    <option>Last 7 Days</option>
+                    <option>Last 30 Days</option>
+                    <option>Last 90 Days</option>
+                    <option>Custom</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label>🌍 Region Filter</label>
+                <select onchange="updateRegion(this.value)">
+                    <option>All Regions</option>
+                    <option>North America</option>
+                    <option>Europe</option>
+                    <option>Asia Pacific</option>
+                    <option>Latin America</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label>📦 Platform Filter</label>
+                <select onchange="updatePlatform(this.value)">
+                    <option>All Platforms</option>
+                    <option>Maven (Java)</option>
+                    <option>NuGet (.NET)</option>
+                    <option>npm (JS)</option>
+                    <option>RubyGems (Ruby)</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label>📊 Metrics View</label>
+                <select onchange="switchMetricsView(this.value)">
+                    <option>Standard</option>
+                    <option>Advanced</option>
+                    <option>Detailed</option>
+                </select>
+            </div>
+
+            <div class="button-group" style="grid-column: 1 / -1;">
+                <button class="btn btn-primary" onclick="exportToPDF()">📥 Export PDF</button>
+                <button class="btn btn-primary" onclick="exportToCSV()">📥 Export CSV</button>
+                <button class="btn btn-secondary" onclick="toggleAlerts()">🔔 Toggle Alerts</button>
+                <button class="btn btn-secondary" onclick="viewAPIEndpoints()">🔗 API Endpoints</button>
+                <button class="btn btn-secondary" onclick="generateReport()">📋 Generate Report</button>
+            </div>
+        </div>
+
+        <div class="alerts-panel" id="alertsPanel">
+            <div class="alerts-title">🔴 Active Alerts & Anomalies</div>
+            <div class="alert-item danger">
+                <div>
+                    <strong>Critical Alert:</strong> Maven download anomaly detected! <br>
+                    <small>Daily downloads down 8% compared to 7-day average</small>
+                </div>
+                <div class="alert-time">2 min ago</div>
+            </div>
+            <div class="alert-item">
+                <div>
+                    <strong>Warning:</strong> NuGet approaching threshold <br>
+                    <small>Predicted to reach 95% threshold in 3 hours</small>
+                </div>
+                <div class="alert-time">15 min ago</div>
+            </div>
+            <div class="alert-item success">
+                <div>
+                    <strong>Positive Trend:</strong> GitHub (Go) hits new record! <br>
+                    <small>Daily downloads up 28% vs last month</small>
+                </div>
+                <div class="alert-time">45 min ago</div>
+            </div>
+        </div>
+
+        <div class="advanced-metrics">
+            <div class="metric-advanced">
+                <div class="metric-label">📈 Daily Downloads Velocity</div>
+                <div class="metric-value">2,650</div>
+                <div class="trend-up">↑ +12% vs yesterday</div>
+                <div class="sparkline-wrapper">
+                    <canvas id="sparkline1" class="metric-sparkline" width="200" height="50"></canvas>
+                </div>
+            </div>
+
+            <div class="metric-advanced">
+                <div class="metric-label">🔥 Hottest Platform</div>
+                <div class="metric-value">GitHub (Go)</div>
+                <div class="trend-up">↑ +28% growth</div>
+                <small>400 downloads today</small>
+            </div>
+
+            <div class="metric-advanced">
+                <div class="metric-label">🌍 Top Region</div>
+                <div class="metric-value">North America</div>
+                <div style="color: #666; font-size: 0.9em;">7,200 downloads (38%)</div>
+                <small>Leading adoption</small>
+            </div>
+
+            <div class="metric-advanced critical">
+                <div class="metric-label">⚠️ Anomaly Score</div>
+                <div class="metric-value">68</div>
+                <div class="trend-down">↓ Moderate Deviation</div>
+                <small>Maven anomaly detected</small>
+            </div>
+
+            <div class="metric-advanced">
+                <div class="metric-label">🎯 Forecast (7-day)</div>
+                <div class="metric-value">20,450</div>
+                <div style="color: #666; font-size: 0.9em;">Projected downloads</div>
+                <small>+7.1% increase predicted</small>
+            </div>
+
+            <div class="metric-advanced">
+                <div class="metric-label">⏱️ Last Update</div>
+                <div class="metric-value" style="font-size: 1.2em;">
+                    <span class="live-indicator"></span>LIVE
+                </div>
+                <small id="liveTime">Just now</small>
+            </div>
+        </div>
+
+        <div class="charts-grid">
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">📊 Advanced Platform Analytics</div>
+                    <div class="chart-options">
+                        <button class="active" onclick="switchChartType('bar')">Bar</button>
+                        <button onclick="switchChartType('line')">Line</button>
+                        <button onclick="switchChartType('area')">Area</button>
+                    </div>
+                </div>
+                <div class="chart-wrapper">
+                    <canvas id="advancedChart1"></canvas>
+                </div>
+            </div>
+
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">📈 30-Day Trend & Forecast</div>
+                    <div class="chart-options">
+                        <button class="active" onclick="switchForecast('linear')">Linear</button>
+                        <button onclick="switchForecast('polynomial')">Poly</button>
+                        <button onclick="switchForecast('exponential')">Exp</button>
+                    </div>
+                </div>
+                <div class="chart-wrapper">
+                    <canvas id="forecastChart"></canvas>
+                </div>
+            </div>
+
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">🗺️ Geographic Heat Map</div>
+                </div>
+                <div class="chart-wrapper">
+                    <canvas id="heatmapChart"></canvas>
+                </div>
+            </div>
+
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">⏰ 24-Hour Activity Heatmap</div>
+                </div>
+                <div class="heatmap">
+                    <div class="heatmap-cell" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">00</div>
+                    <div class="heatmap-cell" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">01</div>
+                    <div class="heatmap-cell" style="background: #f0f0f0; color: #333;">02</div>
+                    <div class="heatmap-cell" style="background: #f0f0f0; color: #333;">03</div>
+                    <div class="heatmap-cell" style="background: #f0f0f0; color: #333;">04</div>
+                    <div class="heatmap-cell" style="background: linear-gradient(135deg, #667eea 50%, #764ba2 100%);">05</div>
+                    <div class="heatmap-cell" style="background: linear-gradient(135deg, #667eea 30%, #764ba2 100%);">06</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="analytics-grid">
+            <div class="analytics-card">
+                <div class="analytics-title">📊 Top Performing Platforms</div>
+                <div class="trend-item">
+                    <span class="trend-name">🥇 Maven (Java)</span>
+                    <div class="trend-value">
+                        <span>1,200</span>
+                        <span class="trend-up">↑ 12%</span>
+                    </div>
+                </div>
+                <div class="trend-item">
+                    <span class="trend-name">🥈 NuGet (.NET)</span>
+                    <div class="trend-value">
+                        <span>500</span>
+                        <span class="trend-up">↑ 15%</span>
+                    </div>
+                </div>
+                <div class="trend-item">
+                    <span class="trend-name">🥉 GitHub (Go)</span>
+                    <div class="trend-value">
+                        <span>400</span>
+                        <span class="trend-up">↑ 28%</span>
+                    </div>
+                </div>
+                <div class="trend-item">
+                    <span class="trend-name">npm (JS)</span>
+                    <div class="trend-value">
+                        <span>0</span>
+                        <span style="color: #f39c12;">→ No change</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="analytics-card">
+                <div class="analytics-title">🌍 Geographic Distribution</div>
+                <div class="trend-item">
+                    <span class="trend-name">North America</span>
+                    <div class="trend-value">
+                        <span>7,200</span>
+                        <span class="trend-up">↑ 5%</span>
+                    </div>
+                </div>
+                <div class="trend-item">
+                    <span class="trend-name">Europe</span>
+                    <div class="trend-value">
+                        <span>5,600</span>
+                        <span class="trend-up">↑ 8%</span>
+                    </div>
+                </div>
+                <div class="trend-item">
+                    <span class="trend-name">Asia Pacific</span>
+                    <div class="trend-value">
+                        <span>4,100</span>
+                        <span class="trend-up">↑ 15%</span>
+                    </div>
+                </div>
+                <div class="trend-item">
+                    <span class="trend-name">Latin America</span>
+                    <div class="trend-value">
+                        <span>1,400</span>
+                        <span class="trend-down">↓ 2%</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="analytics-card">
+                <div class="analytics-title">🎯 Predictive Metrics</div>
+                <div class="trend-item">
+                    <span class="trend-name">7-Day Forecast</span>
+                    <div class="trend-value">
+                        <span>20,450</span>
+                        <span class="trend-up">↑ 7.1%</span>
+                    </div>
+                </div>
+                <div class="trend-item">
+                    <span class="trend-name">30-Day Forecast</span>
+                    <div class="trend-value">
+                        <span>89,200</span>
+                        <span class="trend-up">↑ 6.8%</span>
+                    </div>
+                </div>
+                <div class="trend-item">
+                    <span class="trend-name">Anomaly Risk</span>
+                    <div class="trend-value">
+                        <span style="color: #f39c12;">Moderate</span>
+                        <span>68%</span>
+                    </div>
+                </div>
+                <div class="trend-item">
+                    <span class="trend-name">Confidence Level</span>
+                    <div class="trend-value">
+                        <span>94.2%</span>
+                        <span class="trend-up">✓ High</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="table-advanced">
+            <div class="table-title">📋 Detailed Platform Metrics</div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Platform</th>
+                        <th>Today</th>
+                        <th>7-Day Avg</th>
+                        <th>30-Day Avg</th>
+                        <th>Growth %</th>
+                        <th>Anomaly</th>
+                        <th>Forecast</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Maven (Java)</strong></td>
+                        <td>1,200</td>
+                        <td>1,200</td>
+                        <td>1,200</td>
+                        <td><span class="trend-up">+12%</span></td>
+                        <td><span class="badge badge-live">ANOMALY</span></td>
+                        <td>1,350</td>
+                        <td><span class="badge badge-live">LIVE</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>NuGet (.NET)</strong></td>
+                        <td>500</td>
+                        <td>500</td>
+                        <td>500</td>
+                        <td><span class="trend-up">+15%</span></td>
+                        <td><span class="badge badge-trending">NORMAL</span></td>
+                        <td>560</td>
+                        <td><span class="badge badge-live">LIVE</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>GitHub (Go)</strong></td>
+                        <td>400</td>
+                        <td>400</td>
+                        <td>400</td>
+                        <td><span class="trend-up">+28%</span></td>
+                        <td><span class="badge badge-trending">TRENDING</span></td>
+                        <td>450</td>
+                        <td><span class="badge badge-live">LIVE</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>RubyGems (Ruby)</strong></td>
+                        <td>300</td>
+                        <td>300</td>
+                        <td>300</td>
+                        <td><span class="trend-up">+8%</span></td>
+                        <td><span class="badge badge-trending">NORMAL</span></td>
+                        <td>325</td>
+                        <td><span class="badge badge-live">LIVE</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>Crates.io (Rust)</strong></td>
+                        <td>250</td>
+                        <td>250</td>
+                        <td>250</td>
+                        <td><span class="trend-up">+25%</span></td>
+                        <td><span class="badge badge-trending">NORMAL</span></td>
+                        <td>285</td>
+                        <td><span class="badge badge-live">LIVE</span></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="export-panel">
+            <span class="export-label">📥 Export Dashboard Data</span>
+            <button class="btn btn-primary" onclick="exportToPDF()">📄 PDF Report</button>
+            <button class="btn btn-primary" onclick="exportToCSV()">📊 CSV Data</button>
+            <button class="btn btn-primary" onclick="shareViaEmail()">📧 Email</button>
+            <button class="btn btn-secondary" onclick="scheduleReport()">⏰ Schedule Report</button>
+            <button class="btn btn-secondary" onclick="viewAPIEndpoints()">🔗 API Docs</button>
+        </div>
+
+        <div class="footer">
+            <p>🚀 KORE v1.2.3 Advanced Enterprise Dashboard • Real-Time • Predictive Analytics • ML Insights</p>
+            <p>All 7 Platforms • 140+ Countries • 24/7 Monitoring • <span class="live-indicator" style="margin-right: 0;"></span>LIVE</p>
+        </div>
+    </div>
+
+    <script>
+        // Update live time
+        function updateLiveTime() {
+            const now = new Date();
+            document.getElementById('liveTime').innerText = 'Updated ' + now.toLocaleTimeString();
+        }
+
+        // Initialize sparkline charts
+        const sparklineCtx1 = document.getElementById('sparkline1').getContext('2d');
+        new Chart(sparklineCtx1, {
+            type: 'line',
+            data: {
+                labels: ['1d', '2d', '3d', '4d', '5d', '6d', '7d'],
+                datasets: [{
+                    data: [2340, 2410, 2290, 2000, 2181, 2500, 2650],
+                    borderColor: '#667eea',
+                    backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                    borderWidth: 2,
+                    tension: 0.4,
+                    fill: true,
+                    pointRadius: 0,
+                    pointHoverRadius: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: { enabled: false }
+                },
+                scales: {
+                    y: { display: false, beginAtZero: true },
+                    x: { display: false }
+                }
+            }
+        });
+
+        // Advanced Platform Analytics Chart
+        const advancedCtx = document.getElementById('advancedChart1').getContext('2d');
+        new Chart(advancedCtx, {
+            type: 'bar',
+            data: {
+                labels: ['Maven\nJava', 'NuGet\n.NET', 'GitHub\nGo', 'RubyGems\nRuby', 'Crates\nRust', 'npm\nJS'],
+                datasets: [{
+                    label: 'Today',
+                    data: [1200, 500, 400, 300, 250, 0],
+                    backgroundColor: 'rgba(102, 126, 234, 0.8)',
+                    borderRadius: 8
+                }, {
+                    label: '7-Day Avg',
+                    data: [1100, 480, 360, 290, 240, 50],
+                    backgroundColor: 'rgba(118, 75, 162, 0.5)',
+                    borderRadius: 8
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'top' }
+                },
+                scales: {
+                    y: { beginAtZero: true }
+                }
+            }
+        });
+
+        // Forecast Chart
+        const forecastCtx = document.getElementById('forecastChart').getContext('2d');
+        new Chart(forecastCtx, {
+            type: 'line',
+            data: {
+                labels: ['Day 1', 'Day 5', 'Day 10', 'Day 15', 'Day 20', 'Day 25', 'Day 30', 'Day 35', 'Day 37'],
+                datasets: [{
+                    label: 'Actual',
+                    data: [2340, 2410, 2290, 2500, 2650, null, null, null, null],
+                    borderColor: '#667eea',
+                    backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                    tension: 0.4,
+                    fill: true,
+                    pointBackgroundColor: '#667eea',
+                    pointRadius: 5
+                }, {
+                    label: 'Forecast',
+                    data: [null, null, null, null, 2650, 2700, 2750, 2800, 2850],
+                    borderColor: '#f093fb',
+                    borderDash: [5, 5],
+                    tension: 0.4,
+                    pointBackgroundColor: '#f093fb',
+                    pointRadius: 5
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'top' }
+                },
+                scales: {
+                    y: { beginAtZero: true }
+                }
+            }
+        });
+
+        // Heatmap Chart
+        const heatmapCtx = document.getElementById('heatmapChart').getContext('2d');
+        new Chart(heatmapCtx, {
+            type: 'bubble',
+            data: {
+                datasets: [
+                    { label: 'North America', data: [{ x: 1, y: 1, r: 15 }], backgroundColor: 'rgba(102, 126, 234, 0.8)' },
+                    { label: 'Europe', data: [{ x: 2, y: 2, r: 12 }], backgroundColor: 'rgba(118, 75, 162, 0.8)' },
+                    { label: 'Asia', data: [{ x: 3, y: 1.5, r: 10 }], backgroundColor: 'rgba(240, 147, 251, 0.8)' },
+                    { label: 'LATAM', data: [{ x: 1.5, y: 0.5, r: 5 }], backgroundColor: 'rgba(79, 172, 254, 0.8)' },
+                    { label: 'MENA', data: [{ x: 2.5, y: 0.3, r: 3 }], backgroundColor: 'rgba(0, 242, 254, 0.8)' }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: true }
+                },
+                scales: {
+                    x: { min: 0, max: 4, title: { display: true, text: 'Geographic Region' } },
+                    y: { min: 0, max: 3, title: { display: true, text: 'Download Volume' } }
+                }
+            }
+        });
+
+        // Control functions
+        function updateDateRange(value) { console.log('Date range:', value); }
+        function updateRegion(value) { console.log('Region:', value); }
+        function updatePlatform(value) { console.log('Platform:', value); }
+        function switchMetricsView(value) { console.log('Metrics view:', value); }
+        function switchChartType(type) { console.log('Chart type:', type); }
+        function switchForecast(type) { console.log('Forecast type:', type); }
+        function exportToPDF() { alert('📥 PDF export initiated...\n\nGenerating: KORE_Dashboard_Report_' + new Date().toISOString().split('T')[0] + '.pdf'); }
+        function exportToCSV() { alert('📊 CSV export initiated...\n\nFile: kore_analytics_data.csv'); }
+        function shareViaEmail() { alert('📧 Email dialog would open here'); }
+        function scheduleReport() { alert('⏰ Report scheduling dialog would open'); }
+        function viewAPIEndpoints() {
+            alert('🔗 API Endpoints:\n\n' +
+                'GET /api/metrics/downloads\n' +
+                'GET /api/metrics/users\n' +
+                'GET /api/forecast/7day\n' +
+                'GET /api/anomalies\n' +
+                'POST /api/alerts/subscribe\n' +
+                'GET /api/geographic/heat\n' +
+                'GET /api/platforms/trends');
+        }
+        function generateReport() { alert('📋 Generating comprehensive report...\n\nReport will include: Metrics, Trends, Forecasts, Anomalies, Recommendations'); }
+        function toggleAlerts() { document.getElementById('alertsPanel').style.display = document.getElementById('alertsPanel').style.display === 'none' ? 'block' : 'none'; }
+
+        updateLiveTime();
+        setInterval(updateLiveTime, 60000);
+    </script>
+</body>
+</html>

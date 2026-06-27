@@ -1,0 +1,42 @@
+# AWS Terraform Configuration Example
+# Copy this to terraform.tfvars and fill in your values
+
+aws_region     = "us-east-1"
+aws_account_id = "123456789012"  # Your AWS account ID
+
+environment = "prod"  # or "staging", "dev"
+
+# Docker image in ECR
+image_tag               = "latest"
+ecr_repository_url      = "123456789012.dkr.ecr.us-east-1.amazonaws.com/kore-cloud"
+
+# Database
+db_password = "your-secure-password-here"  # Use: openssl rand -base64 32
+
+# ECS Configuration
+desired_count = 3
+log_level     = "info"  # debug, info, warn, error
+
+# SSL Certificate (create in AWS Certificate Manager first)
+certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/xxxxxxxxxxxxx"
+
+# VPC and Subnets (create these first or use existing)
+vpc_id = "vpc-xxxxxxxxxxxxx"
+
+# Database subnets (must be in different AZs for RDS Multi-AZ)
+database_subnets = [
+  "subnet-db-az1",
+  "subnet-db-az2"
+]
+
+# Service subnets (for ECS tasks)
+service_subnets = [
+  "subnet-svc-az1",
+  "subnet-svc-az2"
+]
+
+# Load balancer subnets
+lb_subnets = [
+  "subnet-lb-az1",
+  "subnet-lb-az2"
+]

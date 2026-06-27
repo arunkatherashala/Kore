@@ -1,0 +1,49 @@
+[package]
+name = "kore-cloud"
+version = "1.0.0"
+edition = "2021"
+authors = ["Arun Kather Ashala <arun@kore.dev>"]
+description = "Cloud storage integration for Kore file format"
+license = "KUOPL"
+repository = "https://github.com/arunkatherashala/Kore"
+
+[[bin]]
+name = "kore-cloud"
+path = "src/main.rs"
+
+[dependencies]
+# Web Framework
+axum = { version = "0.7", features = ["multipart"] }
+tokio = { version = "1.35", features = ["full"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace"] }
+
+# Utilities
+uuid = { version = "1.6", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+async-trait = "0.1"
+thiserror = "1.0"
+
+# Cloud providers (optional for now)
+rusoto_core = { version = "0.48", optional = true }
+rusoto_s3 = { version = "0.48", optional = true }
+
+# Database (optional)
+sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "macros", "uuid", "chrono"], optional = true }
+
+[dev-dependencies]
+tempfile = "3.8"
+
+[features]
+default = []
+s3 = ["rusoto_core", "rusoto_s3"]
+postgres = ["sqlx"]
+
+[profile.release]
+opt-level = 3
+lto = true
+

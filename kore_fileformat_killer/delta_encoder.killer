@@ -1,0 +1,45 @@
+// Delta encoder/decoder in pure Killer
+print("kore_fileformat_killer: delta_encoder loaded")
+
+fn delta_encode(xs)
+{
+    let out = []
+    if len(xs) == 0 {
+        return out
+    }
+    let i = 0
+    let prev = xs[0]
+    out = out + [prev]
+    i = 1
+    while i < len(xs)
+    {
+        let v = xs[i]
+        let d = v - prev
+        out = out + [d]
+        prev = v
+        i = i + 1
+    }
+    return out
+}
+
+fn delta_decode(deltas)
+{
+    let out = []
+    if len(deltas) == 0 {
+        return out
+    }
+    let i = 0
+    let prev = deltas[0]
+    out = out + [prev]
+    i = 1
+    while i < len(deltas)
+    {
+        let v = prev + deltas[i]
+        out = out + [v]
+        prev = v
+        i = i + 1
+    }
+    return out
+}
+
+print("delta_encoder: functions delta_encode and delta_decode are available")

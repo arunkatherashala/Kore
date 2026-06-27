@@ -1,0 +1,94 @@
+// kore_fileformat_killer/binary_writer.killer
+// Deterministic binary writer that emits a hex string representation of a simple KORE-like container.
+// This is a minimal deterministic on-disk format for parity testing; not full kore_v2.
+
+print("binary_writer: loaded")
+
+fn _u32_to_bytes_le(n) {
+    // little-endian 4-byte
+    let b0 = (n & 0xFF)
+    let b1 = ((n >> 8) & 0xFF)
+    let b2 = ((n >> 16) & 0xFF)
+    let b3 = ((n >> 24) & 0xFF)
+    return [b0, b1, b2, b3]
+}
+
+fn _append_bytes(hex_out, bytes_arr) {
+    let i = 0
+    while i < len(bytes_arr)
+    {
+        let v = bytes_arr[i]
+        // to hex (two chars)
+        let hi = (v >> 4) & 0xF
+        let lo = v & 0xF
+        let hex_chars = "0123456789abcdef"
+        let h = substr(hex_chars, hi, 1)
+        let l = substr(hex_chars, lo, 1)
+        hex_out = hex_out + h + l
+        i = i + 1
+    }
+    return hex_out
+}
+
+fn _utf8_bytes_of_str(s) {
+    // Killer lacks direct UTF-8 bytes access; assume ASCII subset and map chars to bytes
+    let out = []
+    let i = 0
+    while i < len(s)
+    {
+        let c = s[i]
+        let code = ord(c)
+        out = out + [code]
+        i = i + 1
+    }
+    return out
+}
+
+fn kore_write_binary_hex(path, schema, rows) {
+    // Format:
+    // MAGIC: "KORE" (4 bytes)
+    // VERSION: u32 (4 bytes) little-endian
+    // SCHEMA_LEN: u32
+    // SCHEMA_BYTES
+    // ROW_COUNT: u32
+    // For each row: COL_COUNT:u32, then for each column: BYTES_LEN:u32 + BYTES
+
+    let hex_out = ""
+    // magic
+    hex_out = _append_bytes(hex_out, [0x4B,0x4F,0x52,0x45])
+    // version 2
+    hex_out = _append_bytes(hex_out, _u32_to_bytes_le(2))
+
+    // schema
+    let schema_bytes = _utf8_bytes_of_str(schema)
+    hex_out = _append_bytes(hex_out, _u32_to_bytes_le(len(schema_bytes)))
+    hex_out = _append_bytes(hex_out, schema_bytes)
+
+    // rows
+    hex_out = _append_bytes(hex_out, _u32_to_bytes_le(len(rows)))
+    let i = 0
+    while i < len(rows)
+    {
+        let r = rows[i]
+        hex_out = _append_bytes(hex_out, _u32_to_bytes_le(len(r)))
+        let j = 0
+        while j < len(r)
+        {
+            let cell = r[j]
+            let b = _utf8_bytes_of_str(cell)
+            hex_out = _append_bytes(hex_out, _u32_to_bytes_le(len(b)))
+            hex_out = _append_bytes(hex_out, b)
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // write to file as hex text if possible, else return hex string
+    let ok = try file_write(path, hex_out)
+    if ok == null {
+        return hex_out
+    }
+    return "ok: wrote " + path
+}
+
+print("binary_writer: kore_write_binary_hex available")

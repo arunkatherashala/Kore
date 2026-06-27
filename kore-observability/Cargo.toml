@@ -1,0 +1,71 @@
+[package]
+name = "kore-observability"
+version = "1.0.0"
+edition = "2021"
+authors = ["Arun Kather Ashala <arun@kore.dev>"]
+description = "Observability and metrics for Kore file format (Prometheus + OpenTelemetry)"
+license = "KUOPL"
+repository = "https://github.com/arunkatherashala/Kore"
+
+[dependencies]
+# Prometheus metrics
+prometheus = "0.13"
+prometheus-static-metric = "0.5"
+
+# OpenTelemetry
+opentelemetry = "0.20"
+opentelemetry-prometheus = "0.12"
+opentelemetry-jaeger = "0.19"
+opentelemetry-api = "0.20"
+opentelemetry-sdk = { version = "0.20", features = ["rt-tokio"] }
+opentelemetry-semantic-conventions = "0.12"
+
+# Tracing
+tracing = "0.1"
+tracing-opentelemetry = "0.21"
+tracing-subscriber = { version = "0.3", features = ["json", "fmt", "env-filter"] }
+
+# Runtime
+tokio = { version = "1.35", features = ["full"] }
+bytes = "1.5"
+
+# Async utilities
+async-trait = "0.1"
+futures = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Utilities
+log = "0.4"
+thiserror = "1.0"
+parking_lot = "0.12"
+once_cell = "1.19"
+
+[dev-dependencies]
+tempfile = "3.8"
+mockall = "0.12"
+tokio-test = "0.4"
+
+[features]
+default = ["prometheus", "jaeger"]
+prometheus = []
+jaeger = []
+full = ["prometheus", "jaeger"]
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[[example]]
+name = "prometheus_metrics"
+path = "examples/prometheus_metrics.rs"
+
+[[example]]
+name = "jaeger_tracing"
+path = "examples/jaeger_tracing.rs"
+
+[[example]]
+name = "metrics_dashboard"
+path = "examples/metrics_dashboard.rs"

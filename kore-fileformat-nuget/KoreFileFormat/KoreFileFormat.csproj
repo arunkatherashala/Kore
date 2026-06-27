@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net6.0;net7.0;net8.0</TargetFrameworks>
+    <RuntimeIdentifiers>win-x64;linux-x64;osx-arm64;osx-x64</RuntimeIdentifiers>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    
+    <!-- NuGet Package Info -->
+    <PackageId>kore-fileformat</PackageId>
+    <Version>1.2.1</Version>
+    <Title>KORE File Format - High-Performance Compression</Title>
+    <Authors>Sai Arun Kumar Katherashala</Authors>
+    <Description>
+      KORE is a high-performance, multi-platform file compression format.
+      
+      Key Features:
+      • 19.1 GB/s throughput (verified)
+      • 42.1% compression ratio
+      • &lt;1ms metadata extraction
+      • Production-validated
+      
+      Supports .NET 6, 7, 8 on Windows, Linux, macOS
+    </Description>
+    <PackageProjectUrl>https://github.com/arunkatherashala/Kore</PackageProjectUrl>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/arunkatherashala/Kore</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>compression;data-format;performance;library</PackageTags>
+    <PackageReleaseNotes>
+      v1.2.1: Production release with .NET support
+      - Full C# bindings
+      - 3 compression levels (Fast, Balanced, Maximum)
+      - Multi-platform support
+      - Comprehensive error handling
+    </PackageReleaseNotes>
+  </PropertyGroup>
+
+</Project>

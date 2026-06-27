@@ -1,0 +1,80 @@
+// kore_fileformat_killer/kore_writer.killer
+// Deterministic text KORE writer and reader (pure-Killer)
+
+print("kore_writer: deterministic text writer/reader loaded")
+
+// Serialize rows deterministically: no extra whitespace, stable ordering
+fn serialize_rows_deterministic(rows) -> str {
+    let parts = []
+    let i = 0
+    while i < len(rows)
+    {
+        let r = rows[i]
+        let j = 0
+        let cols = ""
+        while j < len(r)
+        {
+            if j > 0 { cols = cols + "," }
+            // assume values are already strings
+            cols = cols + r[j]
+            j = j + 1
+        }
+        parts = parts + ["[" + cols + "]"]
+        i = i + 1
+    }
+    return "[" + join(parts, ",") + "]"
+}
+
+// Write deterministic text KORE: first line schema, second line canonical rows
+fn kore_write_text_deterministic(path, schema, rows) -> str {
+    let rows_str = serialize_rows_deterministic(rows)
+    let out = schema + "\n" + rows_str + "\n"
+    let ok = try file_write(path, out)
+    if ok == null { return "error: file_write not available in this runtime" }
+    return "ok: wrote " + path
+}
+
+// Read deterministic text KORE produced by this writer (best-effort)
+fn kore_read_text(path) -> [str, []] {
+    let contents = try file_read(path)
+    if contents == null { return ["", []] }
+    // split into lines
+    let lines = split(contents, "\n")
+    if len(lines) < 2 { return ["", []] }
+    let schema = lines[0]
+    let data = lines[1]
+    // parse rows: expect format [ [a,b],[c,d],... ] without nested quoting
+    // remove outer [ ]
+    if len(data) >= 2 && data[0] == '[' && data[len(data)-1] == ']' {
+        data = substr(data, 1, len(data)-2)
+    }
+    let rows = []
+    if len(data) == 0 { return [schema, rows] }
+    // split on '],[' boundary by replacing '],[' with ']|[' then splitting on '|'
+    let normalized = replace(data, '],[', ']|[')
+    let parts = split(normalized, '|')
+    let i = 0
+    while i < len(parts)
+    {
+        let p = parts[i]
+        // remove leading [ or trailing ]
+        if len(p) >= 1 && p[0] == '[' { p = substr(p, 1, len(p)-1) }
+        if len(p) >= 1 && p[len(p)-1] == ']' { p = substr(p, 0, len(p)-2) }
+        // split columns by comma
+        let cols = []
+        if len(p) > 0 {
+            let cols_raw = split(p, ',')
+            let j = 0
+            while j < len(cols_raw)
+            {
+                cols = cols + [cols_raw[j]]
+                j = j + 1
+            }
+        }
+        rows = rows + [cols]
+        i = i + 1
+    }
+    return [schema, rows]
+}
+
+print("kore_writer: functions kore_write_text_deterministic and kore_read_text available")

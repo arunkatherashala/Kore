@@ -1,0 +1,13 @@
+[package]
+name = "kore-cloud-stub"
+version = "1.0.0"
+edition = "2021"
+
+[[bin]]
+name = "kore-cloud"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "1.0", features = ["full"] }
+serde_json = "1.0"

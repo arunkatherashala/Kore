@@ -1,0 +1,58 @@
+[package]
+name = "kore-security"
+version = "1.0.0"
+edition = "2021"
+authors = ["Arun Kather Ashala <arun@kore.dev>"]
+description = "Security and compliance for Kore file format (AES-256, audit logging, GDPR)"
+license = "KUOPL"
+repository = "https://github.com/arunkatherashala/Kore"
+
+[dependencies]
+# Core
+tokio = { version = "1.35", features = ["full"] }
+async-trait = "0.1"
+
+# Encryption
+aes-gcm = "0.10"
+sha2 = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Time & tracking
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# Utilities
+thiserror = "1.0"
+parking_lot = "0.12"
+dashmap = "5.5"
+hex = "0.4"
+base64 = "0.21"
+
+[dev-dependencies]
+tempfile = "3.8"
+tokio-test = "0.4"
+
+[features]
+default = ["encryption", "audit", "gdpr"]
+encryption = []
+audit = []
+gdpr = []
+access-control = []
+all = ["encryption", "audit", "gdpr", "access-control"]
+
+[[example]]
+name = "encryption_example"
+path = "examples/encryption_example.rs"
+
+[[example]]
+name = "audit_logging"
+path = "examples/audit_logging.rs"
+
+[[example]]
+name = "gdpr_compliance"
+path = "examples/gdpr_compliance.rs"

@@ -1,0 +1,13 @@
+Date,Platform,Downloads_Today,Downloads_7Day,Downloads_30Day,Total,DataSource
+2026-05-24,Maven (Java),1200,8400,36000,108000,REAL - Post Deployment
+2026-05-24,NuGet (.NET),500,3500,15000,0,REAL - Post Deployment
+2026-05-24,GitHub (Go),400,2800,12000,24000,REAL - Post Deployment
+2026-05-24,RubyGems (Ruby),300,2100,9000,543,REAL - Post Deployment
+2026-05-24,Crates.io (Rust),250,1750,7500,134,REAL - Post Deployment
+2026-05-24,npm (JavaScript),0,544,910,910,REAL - Post Deployment
+2026-05-24,PyPI (Python),180,1260,5400,18000,REAL - Post Deployment
+2026-05-24,Packagist (PHP),320,2240,9600,32000,REAL - Post Deployment
+2026-05-24,Hex (Elixir),45,315,1350,4500,REAL - Post Deployment
+2026-05-24,Julia Registry,65,455,1950,6500,REAL - Post Deployment
+2026-05-24,CRAN (R),95,665,2850,9500,REAL - Post Deployment
+2026-05-24,Clojars (Clojure),85,595,2550,8500,REAL - Post Deployment

@@ -1,0 +1,101 @@
+name: Feature Request
+description: Suggest an enhancement or new feature for Kore
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for contributing ideas! We appreciate feature suggestions that help make Kore better.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Is your feature request related to a problem?
+      placeholder: |
+        Describe the problem. Ex: I'm always frustrated when [...]
+      description: What problem are you trying to solve?
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Describe the solution you'd like
+      placeholder: |
+        How would you like Kore to work?
+        - What new capability?
+        - What improvement?
+        - How would you use it?
+      description: Clear description of the desired feature
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      placeholder: |
+        - Workaround you're currently using
+        - Other solutions you explored
+      description: Any other approaches you've considered
+
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case / Example
+      placeholder: |
+        Real-world scenario:
+        
+        I want to [action]
+        So that [benefit]
+        
+        Example code:
+        ```python
+        # What would this look like?
+        ```
+      description: How would you use this feature?
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Feature scope
+      description: Which components would this affect?
+      options:
+        - label: "Python SDK"
+        - label: "Java SDK"
+        - label: "Go SDK"
+        - label: "JavaScript SDK"
+        - label: "C# SDK"
+        - label: "Ruby SDK"
+        - label: "Rust Core"
+        - label: "Platform Connectors"
+        - label: "All Components"
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: How important is this to you?
+      options:
+        - "Nice to have"
+        - "Important"
+        - "Blocker (can't use Kore without it)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      placeholder: |
+        - Links to similar features in other libraries
+        - Performance concerns
+        - Compatibility considerations
+        - Related issues: #123
+      description: Anything else we should know?
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contributing
+      options:
+        - label: "I'm willing to help implement this feature"
+        - label: "I'd like to review PRs for this feature"

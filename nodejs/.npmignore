@@ -1,0 +1,10 @@
+target/
+.git/
+.github/
+tests/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

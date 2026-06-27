@@ -1,0 +1,403 @@
+﻿cargo :     Checking kore_fileformat v1.2.2 
+(C:\Users\ksak_\OneDrive\Desktop\dbt_prep\Kore)
+At line:1 char:1
++ cargo check 2>&1 | Out-String | Out-File -FilePath error_output.txt - ...
++ ~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Checking ko...\dbt_prep\Kore) 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: unused imports: `ColumnSelection` and `PredicateExpression`
+ --> src\kore_reader.rs:9:38
+  |
+9 | use crate::predicates::{QueryFilter, ColumnSelection, PredicateExpression};
+  |                                      ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::collections::HashSet`
+  --> src\kore_reader.rs:11:5
+   |
+11 | use std::collections::HashSet;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `BTreeMap`
+ --> src\statistics.rs:6:33
+  |
+6 | use std::collections::{HashMap, BTreeMap};
+  |                                 ^^^^^^^^
+
+warning: unused imports: `ColumnSelection` and `PredicateExpression`
+ --> src\query_execution.rs:1:38
+  |
+1 | use crate::predicates::{QueryFilter, PredicateExpression, ColumnSelection};
+  |                                      ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+
+warning: unused import: `BlockMetadata`
+ --> src\query_execution.rs:2:60
+  |
+2 | use crate::statistics::{ColumnStatistics, TableStatistics, BlockMetadata};
+  |                                                            ^^^^^^^^^^^^^
+
+warning: unnecessary parentheses around assigned value
+   --> src\query_execution.rs:202:44
+    |
+202 |             plan.estimated_cost.io_cost *= (1.0 - io_reduction);
+    |                                            ^                  ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+202 -             plan.estimated_cost.io_cost *= (1.0 - io_reduction);
+202 +             plan.estimated_cost.io_cost *= 1.0 - io_reduction ;
+    |
+
+warning: unused import: `crate::statistics::TableStatistics`
+ --> src\parallel_execution.rs:6:5
+  |
+6 | use crate::statistics::TableStatistics;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `ExecutionPlan` and `QueryCost`
+ --> src\parallel_execution.rs:7:30
+  |
+7 | use crate::query_execution::{ExecutionPlan, QueryPlanner, QueryCost};
+  |                              ^^^^^^^^^^^^^                ^^^^^^^^^
+
+warning: unused import: `Mutex`
+ --> src\parallel_execution.rs:8:22
+  |
+8 | use std::sync::{Arc, Mutex};
+  |                      ^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> src\arrow_converter.rs:6:5
+  |
+6 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `ArrowConverter`
+ --> src\duckdb_connector.rs:7:61
+  |
+7 | use crate::arrow_converter::{ArrowSchema, ArrowRecordBatch, 
+ArrowConverter, ArrowDataType, ArrowField, ArrowColumn};
+  |                                                             ^^^^^^^^^^^^^^
+
+warning: unexpected `cfg` condition value: `duckdb-ffi`
+  --> src\duckdb_ffi.rs:89:7
+   |
+89 | #[cfg(feature = "duckdb-ffi")]
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: expected values for `feature` are: `aws-config`, `aws-sdk-s3`, 
+`azure`, `azure_identity`, `azure_storage`, `default`, `futures-util`, `gcs`, 
+`google-cloud-default`, `google-cloud-storage`, `java`, `jni`, 
+`kore_lite_compat`, `maturin`, `napi`, `pyo3`, `s3`, and `tokio`
+   = help: consider adding `duckdb-ffi` as a feature in `Cargo.toml`
+   = note: see 
+<https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for 
+more information about checking conditional configuration
+   = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition value: `duckdb-ffi`
+   --> src\duckdb_ffi.rs:156:7
+    |
+156 | #[cfg(feature = "duckdb-ffi")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `aws-config`, `aws-sdk-s3`, 
+`azure`, `azure_identity`, `azure_storage`, `default`, `futures-util`, `gcs`, 
+`google-cloud-default`, `google-cloud-storage`, `java`, `jni`, 
+`kore_lite_compat`, `maturin`, `napi`, `pyo3`, `s3`, and `tokio`
+    = help: consider adding `duckdb-ffi` as a feature in `Cargo.toml`
+    = note: see 
+<https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for 
+more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `duckdb-ffi`
+   --> src\duckdb_ffi.rs:162:7
+    |
+162 | #[cfg(feature = "duckdb-ffi")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `aws-config`, `aws-sdk-s3`, 
+`azure`, `azure_identity`, `azure_storage`, `default`, `futures-util`, `gcs`, 
+`google-cloud-default`, `google-cloud-storage`, `java`, `jni`, 
+`kore_lite_compat`, `maturin`, `napi`, `pyo3`, `s3`, and `tokio`
+    = help: consider adding `duckdb-ffi` as a feature in `Cargo.toml`
+    = note: see 
+<https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for 
+more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `duckdb-ffi`
+   --> src\duckdb_ffi.rs:237:7
+    |
+237 | #[cfg(feature = "duckdb-ffi")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `aws-config`, `aws-sdk-s3`, 
+`azure`, `azure_identity`, `azure_storage`, `default`, `futures-util`, `gcs`, 
+`google-cloud-default`, `google-cloud-storage`, `java`, `jni`, 
+`kore_lite_compat`, `maturin`, `napi`, `pyo3`, `s3`, and `tokio`
+    = help: consider adding `duckdb-ffi` as a feature in `Cargo.toml`
+    = note: see 
+<https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for 
+more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `duckdb-ffi`
+   --> src\duckdb_ffi.rs:319:7
+    |
+319 | #[cfg(feature = "duckdb-ffi")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `aws-config`, `aws-sdk-s3`, 
+`azure`, `azure_identity`, `azure_storage`, `default`, `futures-util`, `gcs`, 
+`google-cloud-default`, `google-cloud-storage`, `java`, `jni`, 
+`kore_lite_compat`, `maturin`, `napi`, `pyo3`, `s3`, and `tokio`
+    = help: consider adding `duckdb-ffi` as a feature in `Cargo.toml`
+    = note: see 
+<https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for 
+more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `duckdb-ffi`
+   --> src\duckdb_ffi.rs:350:7
+    |
+350 | #[cfg(feature = "duckdb-ffi")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `aws-config`, `aws-sdk-s3`, 
+`azure`, `azure_identity`, `azure_storage`, `default`, `futures-util`, `gcs`, 
+`google-cloud-default`, `google-cloud-storage`, `java`, `jni`, 
+`kore_lite_compat`, `maturin`, `napi`, `pyo3`, `s3`, and `tokio`
+    = help: consider adding `duckdb-ffi` as a feature in `Cargo.toml`
+    = note: see 
+<https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for 
+more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `duckdb-ffi`
+   --> src\duckdb_ffi.rs:391:7
+    |
+391 | #[cfg(feature = "duckdb-ffi")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `aws-config`, `aws-sdk-s3`, 
+`azure`, `azure_identity`, `azure_storage`, `default`, `futures-util`, `gcs`, 
+`google-cloud-default`, `google-cloud-storage`, `java`, `jni`, 
+`kore_lite_compat`, `maturin`, `napi`, `pyo3`, `s3`, and `tokio`
+    = help: consider adding `duckdb-ffi` as a feature in `Cargo.toml`
+    = note: see 
+<https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for 
+more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `duckdb-ffi`
+   --> src\duckdb_ffi.rs:448:7
+    |
+448 | #[cfg(feature = "duckdb-ffi")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `aws-config`, `aws-sdk-s3`, 
+`azure`, `azure_identity`, `azure_storage`, `default`, `futures-util`, `gcs`, 
+`google-cloud-default`, `google-cloud-storage`, `java`, `jni`, 
+`kore_lite_compat`, `maturin`, `napi`, `pyo3`, `s3`, and `tokio`
+    = help: consider adding `duckdb-ffi` as a feature in `Cargo.toml`
+    = note: see 
+<https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for 
+more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `duckdb-ffi`
+   --> src\duckdb_ffi.rs:523:7
+    |
+523 | #[cfg(feature = "duckdb-ffi")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `aws-config`, `aws-sdk-s3`, 
+`azure`, `azure_identity`, `azure_storage`, `default`, `futures-util`, `gcs`, 
+`google-cloud-default`, `google-cloud-storage`, `java`, `jni`, 
+`kore_lite_compat`, `maturin`, `napi`, `pyo3`, `s3`, and `tokio`
+    = help: consider adding `duckdb-ffi` as a feature in `Cargo.toml`
+    = note: see 
+<https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for 
+more information about checking conditional configuration
+
+warning: unused imports: `CStr` and `CString`
+  --> src\duckdb_ffi.rs:16:16
+   |
+16 | use std::ffi::{CStr, CString};
+   |                ^^^^  ^^^^^^^
+
+warning: unused import: `std::ptr`
+  --> src\duckdb_ffi.rs:19:5
+   |
+19 | use std::ptr;
+   |     ^^^^^^^^
+
+warning: unused imports: `ArrowColumn`, `ArrowDataType`, and `ArrowField`
+  --> src\duckdb_ffi.rs:21:30
+   |
+21 | use crate::arrow_converter::{ArrowColumn, ArrowRecordBatch, ArrowSchema, 
+ArrowField, ArrowDataType};
+   |                              ^^^^^^^^^^^                                 
+^^^^^^^^^^  ^^^^^^^^^^^^^
+
+error[E0689]: can't call method `max` on ambiguous numeric type `{float}`
+   --> src\codec_selector.rs:248:39
+    |
+248 |                 ((base_ratio * 0.975).max(0.0), 480.0) // 2.5% 
+improvement, slightly slower
+    |                                       ^^^
+
+error[E0609]: no field `is_sorted` on type `&codec_selector::ColumnProfile`
+   --> src\codec_selector.rs:260:50
+    |
+260 |                 if profile.is_numeric && profile.is_sorted {
+    |                                                  ^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `total_values`, `unique_values`, 
+`cardinality_ratio`, `distribution`, `max_run_length` ... and 4 others
+
+warning: value assigned to `result_vec` is never read
+   --> src\compression\zstd_compression.rs:138:30
+    |
+138 |         let mut result_vec = Vec::new();
+    |                              ^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by 
+default
+
+warning: unused variable: `profile`
+   --> src\compression\codec_selector.rs:151:30
+    |
+151 |     fn select_temporal_codec(profile: &ColumnProfile) -> 
+CompressionCodec {
+    |                              ^^^^^^^ help: if this is intentional, 
+prefix it with an underscore: `_profile`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by 
+default
+
+warning: variable `compressed_any` is assigned to, but never used
+   --> src\compression\mod.rs:124:13
+    |
+124 |         let mut compressed_any = false;
+    |             ^^^^^^^^^^^^^^^^^^
+    |
+    = note: consider using `_compressed_any` instead
+
+warning: value assigned to `compressed_any` is never read
+   --> src\compression\mod.rs:140:17
+    |
+140 |                 compressed_any = true;
+    |                 ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+error[E0004]: non-exhaustive patterns: `&CodecId::EnhancedDictionary` and 
+`&CodecId::DoubleDelta` not covered
+   --> src\kore_writer.rs:227:15
+    |
+227 |         match self {
+    |               ^^^^ patterns `&CodecId::EnhancedDictionary` and 
+`&CodecId::DoubleDelta` not covered
+    |
+note: `CodecId` defined here
+   --> src\decompression.rs:10:10
+    |
+ 10 | pub enum CodecId {
+    |          ^^^^^^^
+...
+ 16 |     EnhancedDictionary = 5,      // Multi-level dictionary (+2-3%)
+    |     ------------------ not covered
+ 17 |     DoubleDelta = 6,             // Double delta encoding (+3-5%)
+    |     ----------- not covered
+    = note: the matched value is of type `&CodecId`
+help: ensure that all possible cases are being handled by adding a match arm 
+with a wildcard pattern, a match arm with multiple or-patterns as shown, or 
+multiple match arms
+    |
+232 ~             CodecId::LZSS => 4,
+233 ~             &CodecId::EnhancedDictionary | &CodecId::DoubleDelta => 
+todo!(),
+    |
+
+warning: unused variable: `filter`
+   --> src\query_execution.rs:260:38
+    |
+260 |     pub fn compare_strategies(&self, filter: &QueryFilter, total_rows: 
+u64) -> Vec<(ExecutionStrategy, QueryCost)> {
+    |                                      ^^^^^^ help: if this is 
+intentional, prefix it with an underscore: `_filter`
+
+warning: unused variable: `total_rows`
+   --> src\parallel_execution.rs:270:9
+    |
+270 |         total_rows: u64,
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_total_rows`
+
+warning: unused variable: `worker_count`
+   --> src\parallel_execution.rs:272:13
+    |
+272 |         let worker_count = 
+self.thread_pool.worker_count().min(partitions.len());
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_worker_count`
+
+warning: unused variable: `i`
+   --> src\parallel_execution.rs:276:14
+    |
+276 |         for (i, partition) in partitions.into_iter().enumerate() {
+    |              ^ help: if this is intentional, prefix it with an 
+underscore: `_i`
+
+warning: unused variable: `filter`
+   --> src\parallel_execution.rs:278:17
+    |
+278 |             let filter = filter.clone();
+    |                 ^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_filter`
+
+warning: unused variable: `planner`
+   --> src\parallel_execution.rs:279:17
+    |
+279 |             let planner = Arc::clone(&self.planner);
+    |                 ^^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_planner`
+
+warning: unused variable: `level`
+  --> src\advanced_codecs.rs:91:13
+   |
+91 |         let level = Self::calculate_compression_level(data);
+   |             ^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_level`
+
+warning: variable `run_count` is assigned to, but never used
+  --> src\adaptive_blocking.rs:64:13
+   |
+64 |         let mut run_count = 0;
+   |             ^^^^^^^^^^^^^
+   |
+   = note: consider using `_run_count` instead
+
+warning: value assigned to `run_count` is never read
+  --> src\adaptive_blocking.rs:82:13
+   |
+82 |             run_count += 1;
+   |             ^^^^^^^^^^^^^^
+   |
+   = help: maybe it is overwritten before being read?
+
+warning: value assigned to `run_count` is never read
+  --> src\adaptive_blocking.rs:73:21
+   |
+73 |                     run_count += 1;
+   |                     ^^^^^^^^^^^^^^
+   |
+   = help: maybe it is overwritten before being read?
+
+Some errors have detailed explanations: E0004, E0609, E0689.
+For more information about an error, try `rustc --explain E0004`.
+warning: `kore_fileformat` (lib) generated 37 warnings
+error: could not compile `kore_fileformat` (lib) due to 3 previous errors; 37 
+warnings emitted
+

@@ -1,0 +1,70 @@
+[package]
+name = "kore_fileformat"
+version = "1.2.3"
+edition = "2021"
+description = "KORE — Killer Optimized Record Exchange: standalone Rust crate (zero deps)"
+readme = "README.md"
+authors = ["Sai Arun Kumar Ktherashala <arunkatherashala@gmail.com>"]
+repository = "https://github.com/arunkatherashala/Kore"
+homepage = "https://github.com/arunkatherashala/Kore"
+documentation = "https://docs.rs/kore_fileformat"
+keywords = ["columnar", "file-format", "analytics", "compression", "kore"]
+categories = ["encoding", "compression", "database-implementations"]
+include = [
+    "src/",
+    "Cargo.toml",
+    "README.md"
+]
+
+[features]
+default = []
+kore_lite_compat = []
+# Cloud connector features (requires disk space for SDK compilation)
+s3 = ["aws-sdk-s3", "tokio", "aws-config"]
+azure = ["azure_storage", "tokio", "azure_identity", "futures-util"]
+gcs = ["google-cloud-storage", "tokio", "google-cloud-default"]
+# Language bindings
+pyo3 = ["pyo3/extension-module"]
+java = ["jni"]
+napi = ["napi/napi8"]
+
+[dependencies]
+# Optional cloud storage support - commented out due to disk space constraints
+# Uncomment when sufficient disk space available
+
+# AWS S3
+aws-sdk-s3 = { version = "1.30", optional = true }
+aws-config = { version = "1.1", optional = true }
+
+# Azure Blob Storage
+azure_storage = { version = "0.20", optional = true }
+azure_identity = { version = "0.17", optional = true }
+
+# Google Cloud Storage
+google-cloud-storage = { version = "0.20", optional = true }
+google-cloud-default = { version = "0.2", optional = true }
+
+# Shared async runtime
+tokio = { version = "1.36", features = ["full"], optional = true }
+
+# Stream utilities for Azure
+futures-util = { version = "0.3", optional = true }
+
+# CPU count for parallel execution
+num_cpus = "1.16"
+
+# Language bindings
+pyo3 = { version = "0.21", optional = true }
+maturin = { version = "1.5", optional = true }
+
+# Java/JNI bindings
+jni = { version = "0.21", optional = true }
+
+# JavaScript/NAPI bindings
+napi = { version = "2.15", optional = true }
+
+[lib]
+name = "kore_fileformat"
+path = "src/lib.rs"
+# Generate dynamic library for JNI/NAPI bindings AND allow internal linking for tests/bins
+crate-type = ["cdylib", "rlib"]
