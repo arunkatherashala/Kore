@@ -124,6 +124,10 @@ pub mod napi_bindings;
 
 #[cfg(feature = "kore_lite_compat")]
 pub mod kore_lite;
+pub mod kore_pulse;
+pub mod kore_mind;
+pub mod kore_nerve;
+pub mod kore_oracle;
 
 // Canonical top-level API points to v2 to avoid ambiguous re-exports.
 pub use kore_query::{AggFunc, FilterOp, KoreQuery, QueryResult, SelectCol, WhereClause};
