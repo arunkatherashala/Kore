@@ -1074,6 +1074,158 @@ impl PyKoreVault {
     }
 }
 
+// ─── Layer 10: KorePress ─────────────────────────────────────────────────────
+use crate::kore_press::KorePress;
+#[pyclass] pub struct PyKorePress;
+#[pymethods]
+impl PyKorePress {
+    #[new] fn new() -> Self { PyKorePress }
+    #[staticmethod]
+    fn compress(src: String, dst: String, algo: String) -> PyResult<(String,u64,u64,f64)> {
+        KorePress::compress(&src,&dst,&algo).map(|r|(r.algo,r.original_size,r.compressed_size,r.ratio))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn decompress(src: String, dst: String) -> PyResult<()> {
+        KorePress::decompress(&src,&dst).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn info(path: String) -> PyResult<(String,u64,u64,f64)> {
+        KorePress::info(&path).map(|r|(r.algo,r.original_size,r.compressed_size,r.ratio))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+}
+
+// ─── Layer 11: KoreParallel ──────────────────────────────────────────────────
+use crate::kore_parallel::KoreParallel;
+#[pyclass] pub struct PyKoreParallel;
+#[pymethods]
+impl PyKoreParallel {
+    #[new] fn new() -> Self { PyKoreParallel }
+    #[staticmethod]
+    fn pfilter(path: String, predicate: String, threads: usize) -> PyResult<(Vec<String>,Vec<Vec<String>>)> {
+        KoreParallel::pfilter(&path,&predicate,threads).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn pcount(path: String, predicate: String, threads: usize) -> PyResult<usize> {
+        KoreParallel::pcount(&path,&predicate,threads).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn psum(path: String, col: String, predicate: String, threads: usize) -> PyResult<f64> {
+        KoreParallel::psum(&path,&col,&predicate,threads).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn pavg(path: String, col: String, threads: usize) -> PyResult<f64> {
+        KoreParallel::pavg(&path,&col,threads).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn pgroup(path: String, group_col: String, agg_col: String, agg_fn: String, threads: usize) -> PyResult<Vec<(String,f64)>> {
+        KoreParallel::pgroup(&path,&group_col,&agg_col,&agg_fn,threads).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn benchmark(path: String, threads: usize) -> PyResult<(u64,u64,f64)> {
+        KoreParallel::benchmark(&path,threads).map(|r|(r.single_ms,r.parallel_ms,r.speedup))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+}
+
+// ─── Layer 12: KoreGraph ─────────────────────────────────────────────────────
+use crate::kore_graph::KoreGraph;
+#[pyclass] pub struct PyKoreGraph;
+#[pymethods]
+impl PyKoreGraph {
+    #[new] fn new() -> Self { PyKoreGraph }
+    #[staticmethod]
+    fn stats(path: String) -> PyResult<Vec<(String,String,String,usize,usize,f64)>> {
+        KoreGraph::stats(&path)
+            .map(|v| v.into_iter().map(|s|(s.name,s.min_val,s.max_val,s.null_count,s.distinct_count,s.mean)).collect())
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn explain(path: String, query: String) -> PyResult<String> {
+        KoreGraph::explain(&path,&query).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn build_index(path: String, col: String) -> PyResult<usize> {
+        KoreGraph::build_index(&path,&col).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn index_lookup(path: String, col: String, value: String) -> PyResult<Vec<usize>> {
+        KoreGraph::index_lookup(&path,&col,&value).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn optimize(query: String) -> PyResult<String> {
+        KoreGraph::optimize(&query).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn profile(path: String, query: String) -> PyResult<(String,usize,usize,u64)> {
+        KoreGraph::profile(&path,&query).map(|r|(r.plan,r.rows_scanned,r.rows_out,r.elapsed_ms))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+}
+
+// ─── Layer 13: KoreServe ─────────────────────────────────────────────────────
+use crate::kore_serve::KoreServe;
+#[pyclass] pub struct PyKoreServe;
+#[pymethods]
+impl PyKoreServe {
+    #[new] fn new() -> Self { PyKoreServe }
+    #[staticmethod]
+    fn start(path: String, port: u16) -> PyResult<()> {
+        KoreServe::start(&path,port).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn stop() -> PyResult<()> {
+        KoreServe::stop().map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn is_running() -> bool { KoreServe::is_running() }
+    #[staticmethod]
+    fn handle_request(path: String, method: String, endpoint: String, body: String) -> PyResult<String> {
+        KoreServe::handle_request(&path,&method,&endpoint,&body).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+}
+
+// ─── Layer 14: KoreConnect ───────────────────────────────────────────────────
+use crate::kore_connect::KoreConnect;
+#[pyclass] pub struct PyKoreConnect;
+#[pymethods]
+impl PyKoreConnect {
+    #[new] fn new() -> Self { PyKoreConnect }
+    #[staticmethod]
+    fn from_json(src: String, dst: String) -> PyResult<usize> {
+        KoreConnect::from_json(&src,&dst).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn to_json(path: String, dst: String) -> PyResult<usize> {
+        KoreConnect::to_json(&path,&dst).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn to_csv(path: String, dst: String) -> PyResult<usize> {
+        KoreConnect::to_csv(&path,&dst).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn merge(paths: Vec<String>, dst: String) -> PyResult<usize> {
+        KoreConnect::merge(paths,&dst).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn split_by(path: String, col: String, dst_dir: String) -> PyResult<Vec<String>> {
+        KoreConnect::split_by(&path,&col,&dst_dir).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn sample(path: String, n: usize, dst: String) -> PyResult<usize> {
+        KoreConnect::sample(&path,n,&dst).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn head(path: String, n: usize, dst: String) -> PyResult<usize> {
+        KoreConnect::head(&path,n,&dst).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+    #[staticmethod]
+    fn schema_diff(path1: String, path2: String) -> PyResult<String> {
+        KoreConnect::schema_diff(&path1,&path2).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(e))
+    }
+}
+
 #[pymodule]
 fn kore_fileformat(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", "1.1.2")?;
@@ -1100,6 +1252,11 @@ fn kore_fileformat(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyKoreStream>()?;
     m.add_class::<PyKoreML>()?;
     m.add_class::<PyKoreVault>()?;
+    m.add_class::<PyKorePress>()?;
+    m.add_class::<PyKoreParallel>()?;
+    m.add_class::<PyKoreGraph>()?;
+    m.add_class::<PyKoreServe>()?;
+    m.add_class::<PyKoreConnect>()?;
 
     Ok(())
 }

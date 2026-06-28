@@ -1898,10 +1898,12 @@ fn decode_raw_str(data: &[u8], pos: usize, nrows: usize) -> (Vec<String>, usize)
     let mut out = Vec::with_capacity(nrows);
     let mut p = pos;
     for _ in 0..nrows {
+        if p >= data.len() { out.push(String::new()); continue; }
         let (slen, np) = read_varint(data, p);
-        let end = np + slen as usize;
-        out.push(String::from_utf8_lossy(&data[np..end.min(data.len())]).into_owned());
-        p = end;
+        let np = np.min(data.len());
+        let end = (np + slen as usize).min(data.len());
+        out.push(String::from_utf8_lossy(&data[np..end]).into_owned());
+        p = np + slen as usize;
     }
     (out, p)
 }

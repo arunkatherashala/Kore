@@ -132,6 +132,11 @@ pub mod kore_flow;
 pub mod kore_stream;
 pub mod kore_ml;
 pub mod kore_vault;
+pub mod kore_press;
+pub mod kore_parallel;
+pub mod kore_graph;
+pub mod kore_serve;
+pub mod kore_connect;
 
 // Canonical top-level API points to v2 to avoid ambiguous re-exports.
 pub use kore_query::KoreQuery;
@@ -139,4 +144,9 @@ pub use kore_flow::KoreFlow;
 pub use kore_stream::KoreStream;
 pub use kore_ml::KoreML;
 pub use kore_vault::KoreVault;
+pub use kore_press::KorePress;
+pub use kore_parallel::KoreParallel;
+pub use kore_graph::KoreGraph;
+pub use kore_serve::KoreServe;
+pub use kore_connect::KoreConnect;
 pub use kore_v2::{KColumn, KType, KVal, KoreReader, KoreWriter, KORE_MAGIC, KORE_V2};
