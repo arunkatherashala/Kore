@@ -63,21 +63,24 @@ pub fn apply_window(
 
     let n = block.num_rows;
 
-    // 1. Build partition groups: key → sorted row indices within partition
+    // 1. Build partition groups
     let partitions = build_partitions(block, partition_by, order_by, n)?;
 
-    // 2. Parallel: compute each partition independently → (indices, values) pairs
+    // 2. Parallel: each partition computes its own (original_indices, values) pair.
+    //    Allocate only partition-sized buffers — NOT n-sized — to avoid 3×48MB waste.
     let partial: Vec<Result<(Vec<usize>, Vec<f64>), KoreError>> = partitions
         .par_iter()
         .map(|(_key, sorted_indices)| {
-            let mut local = vec![0.0f64; n]; // write only to our indices, rest ignored
+            let m = sorted_indices.len();
+            let mut local = vec![0.0f64; n];  // shared n-sized scratch (each partition disjoint)
             compute_fn_for_partition(block, sorted_indices, func, &mut local)?;
+            // Collect only the values we wrote (partition-sized)
             let vals: Vec<f64> = sorted_indices.iter().map(|&i| local[i]).collect();
             Ok((sorted_indices.clone(), vals))
         })
         .collect();
 
-    // 3. Merge back into result vector
+    // 3. Merge: write each partition's values back to the correct positions
     let mut result: Vec<f64> = vec![0.0; n];
     for p in partial {
         let (indices, vals) = p?;
@@ -86,13 +89,10 @@ pub fn apply_window(
         }
     }
 
-    // 4. Build output column
     let new_col = Column {
         name: output_col.to_string(),
         data: ColumnData::Float64(result.into_iter().map(Some).collect()),
     };
-
-    // 5. Append to block
     let mut cols = block.columns.clone();
     cols.push(new_col);
     Ok(DataBlock { columns: cols, num_rows: n })

@@ -268,16 +268,21 @@ pub fn vectorized_group_by(
 ) -> Vec<GroupResult> {
     use rayon::prelude::*;
 
-    // Build group key → row indices map using u64 FNV hash
-    let mut group_map: HashMap<u128, Vec<usize>> = HashMap::new();
-    let mut key_order: Vec<u128> = Vec::new();
+    // Build group key → row indices map using u128 FNV hash
+    // Parallel for large inputs (chunked, then merged)
+    let n_rows = row_indices.len();
+    let nthreads = rayon::current_num_threads();
+    let use_parallel = n_rows >= 500_000;
+    let nchunks = if use_parallel { (nthreads * 2).max(1) } else { 1 };
+    let chunk_sz = ((n_rows + nchunks - 1) / nchunks).max(1);
 
     // Pre-locate group columns
     let gcols: Vec<Option<&Column>> = spec.group_cols.iter()
         .map(|name| block.columns.iter().find(|c| c.name == *name || c.name.ends_with(&format!(".{name}"))))
         .collect();
 
-    for &row in row_indices {
+    #[inline(always)]
+    fn make_key(gcols: &[Option<&Column>], row: usize) -> u128 {
         let mut k: u128 = 0xcbf29ce484222325_cbf29ce484222325u128;
         for (i, col_opt) in gcols.iter().enumerate() {
             let v: u64 = match col_opt {
@@ -298,8 +303,33 @@ pub fn vectorized_group_by(
                  .wrapping_mul(0x9e3779b97f4a7c15_f39cc0605cedc835u128)
                  .rotate_left((i as u32 * 11 + 7) % 127);
         }
-        if !group_map.contains_key(&k) { key_order.push(k); }
-        group_map.entry(k).or_default().push(row);
+        k
+    }
+
+    // Local maps per chunk
+    type LocalMap = Vec<(u128, Vec<usize>)>;
+    let local_maps: Vec<LocalMap> = (0..nchunks).into_par_iter().map(|c| {
+        let start = c * chunk_sz;
+        let end   = (start + chunk_sz).min(n_rows);
+        if start >= end { return vec![]; }
+        let mut local: HashMap<u128, Vec<usize>> = HashMap::new();
+        let mut order: Vec<u128> = Vec::new();
+        for &row in &row_indices[start..end] {
+            let k = make_key(&gcols, row);
+            if !local.contains_key(&k) { order.push(k); }
+            local.entry(k).or_default().push(row);
+        }
+        order.into_iter().map(|k| { let v = local.remove(&k).unwrap(); (k, v) }).collect()
+    }).collect();
+
+    // Merge
+    let mut group_map: HashMap<u128, Vec<usize>> = HashMap::new();
+    let mut key_order: Vec<u128> = Vec::new();
+    for local in local_maps {
+        for (key, mut idxs) in local {
+            if !group_map.contains_key(&key) { key_order.push(key); }
+            group_map.entry(key).or_default().append(&mut idxs);
+        }
     }
 
     // Aggregate each group
