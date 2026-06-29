@@ -1,0 +1,9 @@
+[package]
+name    = "kore-catalyst"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kore-core    = { workspace = true }
+kore-sql     = { path = "../kore-sql" }
+kore-catalog = { path = "../kore-catalog" }

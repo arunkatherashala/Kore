@@ -646,6 +646,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kore-catalyst"
+version = "0.1.0"
+dependencies = [
+ "kore-catalog",
+ "kore-core",
+ "kore-sql",
+]
+
+[[package]]
 name = "kore-cluster"
 version = "0.1.0"
 dependencies = [
@@ -668,6 +677,15 @@ name = "kore-compress"
 version = "0.1.0"
 dependencies = [
  "kore-core",
+]
+
+[[package]]
+name = "kore-connect"
+version = "0.1.0"
+dependencies = [
+ "kore-core",
+ "kore-store",
+ "serde_json",
 ]
 
 [[package]]
@@ -696,6 +714,28 @@ name = "kore-delta"
 version = "0.1.0"
 dependencies = [
  "kore-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kore-distml"
+version = "0.1.0"
+dependencies = [
+ "kore-core",
+ "kore-net",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "kore-dml"
+version = "0.1.0"
+dependencies = [
+ "kore-core",
+ "kore-delta",
+ "kore-sql",
  "serde",
  "serde_json",
 ]
@@ -827,6 +867,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kore-rm"
+version = "0.1.0"
+dependencies = [
+ "kore-core",
+ "kore-net",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "kore-shuffle"
 version = "0.1.0"
 dependencies = [
@@ -881,6 +932,14 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "kore-subquery"
+version = "0.1.0"
+dependencies = [
+ "kore-core",
+ "kore-sql",
 ]
 
 [[package]]

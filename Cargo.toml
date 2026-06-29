@@ -33,6 +33,12 @@ members = [
     "kore-codegen",  # Layer 46 — Compiled query predicates (zero interpreter)
     "kore-mv",       # Layer 47 — Materialized views + incremental refresh
     "kore-prune",    # Layer 48 — Zone-map partition pruning
+    "kore-dml",      # Layer 49 — DML: INSERT/UPDATE/DELETE/MERGE/CTAS
+    "kore-subquery", # Layer 50 — Scalar/IN/EXISTS subqueries
+    "kore-catalyst", # Layer 51 — Full Catalyst-level query optimizer
+    "kore-distml",   # Layer 52 — Distributed ML across workers
+    "kore-connect",  # Layer 53 — Arrow/IPC, JSON, HTTP connectors
+    "kore-rm",       # Layer 54 — Cluster resource manager
 ]
 resolver = "2"
 
