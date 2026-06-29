@@ -77,7 +77,7 @@ impl HashJoin {
         build_result(left, right, &pairs)
     }
 
-    /// Optimized Int64 hash join — no JoinKey allocation, parallel build + probe.
+    /// Optimized Int64 hash join — no JoinKey allocation, parallel probe.
     fn join_int64(
         left: &DataBlock,
         right: &DataBlock,
@@ -87,41 +87,26 @@ impl HashJoin {
     ) -> Result<DataBlock, KoreError> {
         use std::collections::HashMap;
 
-        // ── Parallel build: split right side across threads ────────────────────
+        // ── Sequential build: preallocated, direct array access, no JoinKey ───
+        // Sequential is FASTER than parallel for build due to merge overhead.
+        // Key insight: direct rv[i] access eliminates JoinKey enum alloc per row.
         let n_right = rv.len();
-        let n_threads = rayon::current_num_threads();
-        let chunk_sz = ((n_right + n_threads - 1) / n_threads).max(1);
-
-        // Each thread builds a local HashMap<i64, Vec<usize>>
-        let local_tables: Vec<HashMap<i64, Vec<usize>>> = (0..n_threads)
-            .into_par_iter()
-            .map(|t| {
-                let start = t * chunk_sz;
-                let end   = (start + chunk_sz).min(n_right);
-                let mut local: HashMap<i64, Vec<usize>> = HashMap::with_capacity((end - start) * 2);
-                for i in start..end {
-                    if let Some(k) = rv[i] { local.entry(k).or_default().push(i); }
-                }
-                local
-            })
-            .collect();
-
-        // Merge into one table
-        let mut table: HashMap<i64, Vec<usize>> = HashMap::with_capacity(n_right);
-        for local in local_tables {
-            for (k, mut v) in local { table.entry(k).or_default().append(&mut v); }
+        let mut table: HashMap<i64, Vec<usize>> = HashMap::with_capacity(n_right / 4 + 16);
+        for i in 0..n_right {
+            if let Some(k) = rv[i] { table.entry(k).or_default().push(i); }
         }
         let table = Arc::new(table);
 
-        // ── Parallel probe ──────────────────────────────────────────────────────
-        let n_left = lv.len();
-        let chunk_sz2 = ((n_left + n_threads - 1) / n_threads).max(1);
+        // ── Parallel probe: T threads, each scans its chunk of the probe side ──
+        let n_left   = lv.len();
+        let n_threads = rayon::current_num_threads();
+        let chunk_sz  = ((n_left + n_threads - 1) / n_threads).max(1);
 
         let local_pairs: Vec<Vec<(Option<usize>, Option<usize>)>> = (0..n_threads)
             .into_par_iter()
             .map(|t| {
-                let start = t * chunk_sz2;
-                let end   = (start + chunk_sz2).min(n_left);
+                let start = t * chunk_sz;
+                let end   = (start + chunk_sz).min(n_left);
                 if start >= end { return vec![]; }
                 let mut pairs = Vec::new();
                 for l in start..end {
