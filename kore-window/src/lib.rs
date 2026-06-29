@@ -115,33 +115,63 @@ pub fn apply_windows(
 
 /// Returns a map: partition_key → Vec<row_index in original block>
 /// where the inner Vec is sorted by order_by.
+/// Uses u128 FNV hash keys — eliminates String allocation per row.
 fn build_partitions(
     block:        &DataBlock,
     partition_by: &[String],
     order_by:     &[WinOrder],
     n:            usize,
 ) -> Result<Vec<(String, Vec<usize>)>, KoreError> {
+    // Pre-locate partition columns once
+    let pcols: Vec<Option<&Column>> = partition_by.iter()
+        .map(|name| block.columns.iter().find(|c| c.name == *name || c.name.ends_with(&format!(".{name}"))))
+        .collect();
 
-    // Group rows by partition key (stringify for simplicity; fast for low cardinality)
-    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+    // Group rows using u128 FNV hash — zero String allocation per row
+    let mut groups: HashMap<u128, Vec<usize>> = HashMap::with_capacity(n.min(1024));
+    let mut key_to_str: HashMap<u128, String> = HashMap::new();  // one String per distinct group
 
     for i in 0..n {
-        let key = if partition_by.is_empty() {
-            "__all__".to_string()
+        let key: u128 = if partition_by.is_empty() {
+            0u128
         } else {
-            partition_key(block, partition_by, i)
+            let mut k: u128 = 0xcbf29ce484222325_cbf29ce484222325u128;
+            for (gi, col_opt) in pcols.iter().enumerate() {
+                let v: u64 = match col_opt {
+                    None => 0,
+                    Some(col) => match &col.data {
+                        ColumnData::Int64(v)   => v.get(i).and_then(|x| *x).unwrap_or(i64::MIN) as u64,
+                        ColumnData::Float64(v) => v.get(i).and_then(|x| *x).map(|f| f.to_bits()).unwrap_or(0),
+                        ColumnData::Bool(v)    => v.get(i).and_then(|x| *x).unwrap_or(false) as u64,
+                        ColumnData::Str(v)     => {
+                            let s = v.get(i).and_then(|x| x.as_deref()).unwrap_or("");
+                            let mut h: u64 = 14695981039346656037;
+                            for b in s.bytes() { h ^= b as u64; h = h.wrapping_mul(1099511628211); }
+                            h
+                        }
+                    }
+                };
+                k = k.wrapping_add(v as u128)
+                     .wrapping_mul(0x9e3779b97f4a7c15_f39cc0605cedc835u128)
+                     .rotate_left((gi as u32 * 11 + 7) % 127);
+            }
+            k
         };
+        // Store readable key only once per distinct group (for downstream compatibility)
+        key_to_str.entry(key).or_insert_with(|| {
+            if partition_by.is_empty() { "__all__".to_string() }
+            else { partition_key(block, partition_by, i) }
+        });
         groups.entry(key).or_default().push(i);
     }
 
-    // Sort each group by order_by columns using Schwartzian transform
-    let mut result: Vec<(String, Vec<usize>)> = groups.into_iter().collect();
-
-    for (_, indices) in &mut result {
-        if !order_by.is_empty() {
-            sort_indices(block, indices, order_by);
-        }
-    }
+    // Sort each partition by order_by and return (readable_key, sorted_indices)
+    let mut result: Vec<(String, Vec<usize>)> = groups.into_iter()
+        .map(|(k, mut idxs)| {
+            if !order_by.is_empty() { sort_indices(block, &mut idxs, order_by); }
+            (key_to_str.remove(&k).unwrap_or_default(), idxs)
+        })
+        .collect();
 
     Ok(result)
 }
