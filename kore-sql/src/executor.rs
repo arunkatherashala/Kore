@@ -192,9 +192,17 @@ fn filter_block(block: DataBlock, pred: &Expr) -> Result<DataBlock, KoreError> {
     // Use batch (column-at-a-time) evaluation when possible for SIMD auto-vectorization.
     // Falls back to row-at-a-time for complex expressions (CASE WHEN, LIKE, FuncCall, etc.).
     let keep: Vec<bool> = eval_batch(pred, &block);
-    let indices: Vec<usize> = keep.iter().enumerate()
-        .filter_map(|(i, &k)| if k { Some(i) } else { None })
-        .collect();
+    // Parallel index extraction for large blocks
+    let indices: Vec<usize> = if block.num_rows > 50_000 {
+        use rayon::prelude::*;
+        keep.par_iter().enumerate()
+            .filter_map(|(i, &k)| if k { Some(i) } else { None })
+            .collect()
+    } else {
+        keep.iter().enumerate()
+            .filter_map(|(i, &k)| if k { Some(i) } else { None })
+            .collect()
+    };
     Ok(block.select_rows(&indices))
 }
 
@@ -875,42 +883,76 @@ fn group_by_agg(
     group_cols: &[String],
     projections: &[Projection],
 ) -> Result<DataBlock, KoreError> {
-    // Pre-locate group-by columns once (avoids O(n × g) name scans in the hot loop)
+    use rayon::prelude::*;
+    use std::collections::HashMap;
+    use std::fmt::Write as FmtWrite;
+
+    // Pre-locate group-by columns once
     let gcols: Vec<&Column> = group_cols.iter()
         .filter_map(|c| find_col(&block, c))
         .collect();
+    let fallback = gcols.len() < group_cols.len();
 
-    // O(n) HashMap-based grouping — replaces the previous O(n²) Vec scan
-    let mut group_map: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
-    let mut key_order: Vec<String> = Vec::new();   // preserve first-seen insertion order
+    let n = block.num_rows;
+    // 2 chunks per thread for better load balancing
+    let nthreads  = rayon::current_num_threads();
+    let nchunks   = (nthreads * 2).max(1);
+    let chunk_sz  = ((n + nchunks - 1) / nchunks).max(1);
 
-    let mut key_buf = String::with_capacity(64);   // reuse buffer to reduce allocations
-    for row in 0..block.num_rows {
-        key_buf.clear();
-        for (gi, col) in gcols.iter().enumerate() {
-            if gi > 0 { key_buf.push('\x00'); }
-            match &col.data {
-                ColumnData::Int64(v)   => { use std::fmt::Write; let _ = write!(key_buf, "i{}", v.get(row).and_then(|x| *x).unwrap_or(i64::MIN)); }
-                ColumnData::Float64(v) => { use std::fmt::Write; let _ = write!(key_buf, "f{:.10}", v.get(row).and_then(|x| *x).unwrap_or(f64::NAN)); }
-                ColumnData::Str(v)     => { key_buf.push('s'); key_buf.push_str(v.get(row).and_then(|x| x.as_deref()).unwrap_or("")); }
-                ColumnData::Bool(v)    => { key_buf.push(if v.get(row).and_then(|x| *x).unwrap_or(false) { 'T' } else { 'F' }); }
+    // ── Parallel phase: each chunk builds a local (ordered) key→rows map ─────
+    // Returns Vec<(key_string, row_indices)> in first-seen order per chunk.
+    type LocalMap = Vec<(String, Vec<usize>)>;
+    let local_maps: Vec<LocalMap> = (0..nchunks)
+        .into_par_iter()
+        .map(|c| {
+            let start = c * chunk_sz;
+            let end   = (start + chunk_sz).min(n);
+            if start >= end { return vec![]; }
+
+            let mut local: HashMap<String, Vec<usize>> = HashMap::new();
+            let mut order: Vec<String>                 = Vec::new();
+            let mut key_buf = String::with_capacity(64);
+
+            for row in start..end {
+                key_buf.clear();
+                if fallback {
+                    for (gi, gc) in group_cols.iter().enumerate() {
+                        if gi > 0 { key_buf.push('\x00'); }
+                        match get_cell(&block, gc, row) {
+                            ExprVal::Int(i)   => { let _ = write!(key_buf, "i{i}"); }
+                            ExprVal::Float(f) => { let _ = write!(key_buf, "f{f:.10}"); }
+                            ExprVal::Str(s)   => { key_buf.push('s'); key_buf.push_str(&s); }
+                            ExprVal::Bool(b)  => { key_buf.push(if b {'T'} else {'F'}); }
+                            ExprVal::Null     => { key_buf.push('n'); }
+                        }
+                    }
+                } else {
+                    for (gi, col) in gcols.iter().enumerate() {
+                        if gi > 0 { key_buf.push('\x00'); }
+                        match &col.data {
+                            ColumnData::Int64(v)   => { let _ = write!(key_buf, "i{}", v.get(row).and_then(|x| *x).unwrap_or(i64::MIN)); }
+                            ColumnData::Float64(v) => { let _ = write!(key_buf, "f{:.10}", v.get(row).and_then(|x| *x).unwrap_or(f64::NAN)); }
+                            ColumnData::Str(v)     => { key_buf.push('s'); key_buf.push_str(v.get(row).and_then(|x| x.as_deref()).unwrap_or("")); }
+                            ColumnData::Bool(v)    => { key_buf.push(if v.get(row).and_then(|x| *x).unwrap_or(false) {'T'} else {'F'}); }
+                        }
+                    }
+                }
+                let key = key_buf.clone();
+                if !local.contains_key(&key) { order.push(key.clone()); }
+                local.entry(key).or_default().push(row);
             }
-        }
-        // fall back to slow path if any group col wasn't found above
-        let key = if gcols.len() < group_cols.len() {
-            group_cols.iter().map(|c| match get_cell(&block, c, row) {
-                ExprVal::Int(i)   => format!("i{i}"),
-                ExprVal::Float(f) => format!("f{f:.10}"),
-                ExprVal::Str(s)   => format!("s{s}"),
-                ExprVal::Bool(b)  => format!("b{b}"),
-                ExprVal::Null     => "n".into(),
-            }).collect::<Vec<_>>().join("\x00")
-        } else {
-            key_buf.clone()
-        };
+            order.into_iter().map(|k| { let v = local.remove(&k).unwrap(); (k, v) }).collect()
+        })
+        .collect();
 
-        if !group_map.contains_key(&key) { key_order.push(key.clone()); }
-        group_map.entry(key).or_default().push(row);
+    // ── Merge phase: combine local maps (sequential, O(groups × chunks)) ─────
+    let mut group_map: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut key_order: Vec<String>                 = Vec::new();
+    for local in local_maps {
+        for (key, mut idxs) in local {
+            if !group_map.contains_key(&key) { key_order.push(key.clone()); }
+            group_map.entry(key).or_default().append(&mut idxs);
+        }
     }
 
     // Reconstruct ordered groups vec for downstream processing
