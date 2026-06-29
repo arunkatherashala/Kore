@@ -1,0 +1,9 @@
+[package]
+name    = "kore-pipeline"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kore-core = { workspace = true }
+kore-ml2  = { workspace = true }
+serde     = { workspace = true }

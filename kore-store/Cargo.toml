@@ -1,0 +1,8 @@
+[package]
+name    = "kore-store"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kore-core = { workspace = true }
+thiserror = { workspace = true }

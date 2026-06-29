@@ -1,0 +1,10 @@
+[package]
+name    = "kore-io"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kore-core  = { workspace = true }
+kore-store = { workspace = true }
+thiserror  = { workspace = true }
+serde_json = { workspace = true }

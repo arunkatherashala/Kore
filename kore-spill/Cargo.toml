@@ -1,0 +1,9 @@
+[package]
+name    = "kore-spill"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kore-core  = { workspace = true }
+kore-store = { workspace = true }
+thiserror  = { workspace = true }

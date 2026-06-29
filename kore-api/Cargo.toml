@@ -1,0 +1,23 @@
+[package]
+name    = "kore-api"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "kore-api"
+path = "src/main.rs"
+
+[dependencies]
+kore-core     = { workspace = true }
+kore-join     = { workspace = true }
+kore-cache    = { workspace = true }
+kore-ml2      = { workspace = true }
+kore-ml3      = { workspace = true }
+kore-sql      = { workspace = true }
+kore-store    = { workspace = true }
+tokio         = { workspace = true }
+axum          = { workspace = true }
+tower-http    = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+thiserror     = { workspace = true }

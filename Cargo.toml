@@ -1,0 +1,63 @@
+[workspace]
+members = [
+    "kore-core",
+    "kore-join",
+    "kore-cache",
+    "kore-ml2",
+    "kore-pipeline",
+    "kore-cluster",
+    "kore-bench",
+    "kore-sql",      # Layer 21 — KQL query language
+    "kore-store",    # Layer 22 — columnar storage engine
+    "kore-ml3",      # Layer 23 — more ML: LinReg, KNN, SVM, LogReg
+    "kore-ffi",      # Layer 24 — C ABI + 7-language bindings
+    "kore-api",      # Layer 25 — Axum REST / WebSocket API
+    "kore-window",   # Layer 27 — Window functions
+    "kore-io",       # Layer 28 — File I/O
+    "kore-shuffle",  # Layer 29 — Distributed shuffle
+    "kore-spill",    # Layer 30 — Out-of-core / spill
+    "kore-stream",   # Layer 31 — Structured streaming
+    "kore-parquet",  # Layer 32 — Parquet I/O
+    "kore-optimize", # Layer 33 — Query optimizer
+    "kore-parallel", # Layer 35 — Parallel query execution (Rayon)
+    "kore-bloom",    # Layer 36 — Bloom filter joins
+    "kore-net",      # Layer 37 — Network transport (TCP framing)
+    "kore-worker",   # Layer 38 — Distributed worker node
+    "kore-coord",    # Layer 39 — Cluster coordinator / master
+    "kore-fault",    # Layer 40 — Fault tolerance (lineage + retry)
+    "kore-aqe",      # Layer 41 — Adaptive Query Execution
+    "kore-simd",     # Layer 42 — Vectorized / SIMD execution
+    "kore-delta",    # Layer 43 — ACID Delta Lake (transactions, time travel)
+    "kore-catalog",  # Layer 44 — Column histograms + cardinality estimation
+    "kore-compress", # Layer 45 — Column compression (dict, RLE, bit-pack)
+    "kore-codegen",  # Layer 46 — Compiled query predicates (zero interpreter)
+    "kore-mv",       # Layer 47 — Materialized views + incremental refresh
+    "kore-prune",    # Layer 48 — Zone-map partition pruning
+]
+resolver = "2"
+
+[workspace.dependencies]
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+thiserror   = "2"
+rayon       = "1"
+tokio       = { version = "1", features = ["full"] }
+parquet     = "59"
+axum        = "0.8"
+tower-http  = { version = "0.6", features = ["cors", "trace"] }
+libc        = "0.2"
+kore-core   = { path = "kore-core" }
+kore-join   = { path = "kore-join" }
+kore-cache  = { path = "kore-cache" }
+kore-ml2    = { path = "kore-ml2" }
+kore-pipeline = { path = "kore-pipeline" }
+kore-cluster  = { path = "kore-cluster" }
+kore-sql    = { path = "kore-sql" }
+kore-store  = { path = "kore-store" }
+kore-ml3    = { path = "kore-ml3" }
+kore-window = { path = "kore-window" }
+kore-io     = { path = "kore-io" }
+kore-shuffle = { path = "kore-shuffle" }
+kore-spill  = { path = "kore-spill" }
+kore-parquet = { path = "kore-parquet" }
+kore-optimize = { path = "kore-optimize" }

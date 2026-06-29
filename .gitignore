@@ -1,0 +1,35 @@
+# Build artifacts
+target/
+**/*.pdb
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Editor
+.vscode/settings.json
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Benchmark outputs (keep .csv but not binary files)
+*.kore
+*.kore.*
+bench_split/
+benchmark.kore.idx/
+
+# Secrets / keys
+*.pem
+*.key
+secrets.toml

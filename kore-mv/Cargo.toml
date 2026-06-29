@@ -1,0 +1,10 @@
+[package]
+name    = "kore-mv"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kore-core = { workspace = true }
+kore-sql  = { path = "../kore-sql" }
+serde     = { workspace = true }
+serde_json = { workspace = true }

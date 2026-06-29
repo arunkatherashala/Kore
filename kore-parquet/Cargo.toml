@@ -1,0 +1,10 @@
+[package]
+name    = "kore-parquet"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kore-core  = { workspace = true }
+thiserror  = { workspace = true }
+parquet    = { workspace = true }
+serde_json = { workspace = true }
