@@ -8,13 +8,16 @@ name = "kore-tpch"
 path = "src/main.rs"
 
 [dependencies]
-kore-core    = { workspace = true }
-kore-sql     = { path = "../kore-sql" }
-kore-join    = { path = "../kore-join" }
-kore-window  = { path = "../kore-window" }
-kore-shuffle = { path = "../kore-shuffle" }
-kore-simd    = { path = "../kore-simd" }
-kore-parallel = { path = "../kore-parallel" }
-serde        = { workspace = true }
-serde_json   = { workspace = true }
-rayon        = { workspace = true }
+kore-core       = { workspace = true }
+kore-sql        = { path = "../kore-sql" }
+kore-join       = { path = "../kore-join" }
+kore-window     = { path = "../kore-window" }
+kore-shuffle    = { path = "../kore-shuffle" }
+kore-simd       = { path = "../kore-simd" }
+kore-parallel   = { path = "../kore-parallel" }
+kore-vectorized = { path = "../kore-vectorized" }
+kore-arrow      = { path = "../kore-arrow" }
+kore-gpu        = { path = "../kore-gpu" }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+rayon           = { workspace = true }

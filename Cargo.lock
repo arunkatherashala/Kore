@@ -1372,12 +1372,15 @@ dependencies = [
 name = "kore-tpch"
 version = "0.1.0"
 dependencies = [
+ "kore-arrow",
  "kore-core",
+ "kore-gpu",
  "kore-join",
  "kore-parallel",
  "kore-shuffle",
  "kore-simd",
  "kore-sql",
+ "kore-vectorized",
  "kore-window",
  "rayon",
  "serde",
