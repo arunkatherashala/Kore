@@ -19,7 +19,19 @@ impl HashJoin {
         right: &DataBlock,
         cfg: &JoinConfig,
     ) -> Result<DataBlock, KoreError> {
-        // ── Build phase: key → list of right-side row indices ──────────────────
+        // ── Fast path: Int64 key columns (most common, no JoinKey allocation) ──
+        let right_int_col = right.columns.iter().find(|c| c.name == cfg.right_key);
+        let left_int_col  = left.columns.iter().find(|c| c.name == cfg.left_key);
+
+        if let (Some(rc), Some(lc)) = (right_int_col, left_int_col) {
+            if let (kore_core::ColumnData::Int64(rv), kore_core::ColumnData::Int64(lv)) =
+                (&rc.data, &lc.data)
+            {
+                return Self::join_int64(left, right, lv, rv, cfg);
+            }
+        }
+
+        // ── Fallback: generic JoinKey path (handles Str/Bool/Null keys) ────────
         let mut table: HashMap<JoinKey, Vec<usize>> = HashMap::with_capacity(right.num_rows);
         for i in 0..right.num_rows {
             let key = right.join_key(i, &cfg.right_key)?;
@@ -27,8 +39,6 @@ impl HashJoin {
         }
         let table = Arc::new(table);
 
-        // ── Parallel probe phase ───────────────────────────────────────────────
-        // Split probe (left) side into Rayon chunks; each thread probes independently.
         let n_left = left.num_rows;
         let n_threads = rayon::current_num_threads();
         let chunk_sz = ((n_left + n_threads - 1) / n_threads).max(1);
@@ -43,9 +53,7 @@ impl HashJoin {
                 for l in start..end {
                     if let Ok(key) = left.join_key(l, &cfg.left_key) {
                         if let Some(right_rows) = table.get(&key) {
-                            for &r in right_rows {
-                                pairs.push((Some(l), Some(r)));
-                            }
+                            for &r in right_rows { pairs.push((Some(l), Some(r))); }
                         } else if matches!(cfg.join_type, JoinType::Left | JoinType::Full) {
                             pairs.push((Some(l), None));
                         }
@@ -55,13 +63,85 @@ impl HashJoin {
             })
             .collect();
 
-        // Merge local pair lists (preserves left-side order)
         let mut pairs: Vec<(Option<usize>, Option<usize>)> = Vec::new();
         for lp in local_pairs { pairs.extend(lp); }
 
-        // ── Unmatched right rows for RIGHT / FULL OUTER ────────────────────────
         if matches!(cfg.join_type, JoinType::Right | JoinType::Full) {
             let mut right_matched = vec![false; right.num_rows];
+            for &(_, r) in &pairs { if let Some(ri) = r { right_matched[ri] = true; } }
+            for (r, matched) in right_matched.iter().enumerate() {
+                if !matched { pairs.push((None, Some(r))); }
+            }
+        }
+
+        build_result(left, right, &pairs)
+    }
+
+    /// Optimized Int64 hash join — no JoinKey allocation, parallel build + probe.
+    fn join_int64(
+        left: &DataBlock,
+        right: &DataBlock,
+        lv: &[Option<i64>],
+        rv: &[Option<i64>],
+        cfg: &JoinConfig,
+    ) -> Result<DataBlock, KoreError> {
+        use std::collections::HashMap;
+
+        // ── Parallel build: split right side across threads ────────────────────
+        let n_right = rv.len();
+        let n_threads = rayon::current_num_threads();
+        let chunk_sz = ((n_right + n_threads - 1) / n_threads).max(1);
+
+        // Each thread builds a local HashMap<i64, Vec<usize>>
+        let local_tables: Vec<HashMap<i64, Vec<usize>>> = (0..n_threads)
+            .into_par_iter()
+            .map(|t| {
+                let start = t * chunk_sz;
+                let end   = (start + chunk_sz).min(n_right);
+                let mut local: HashMap<i64, Vec<usize>> = HashMap::with_capacity((end - start) * 2);
+                for i in start..end {
+                    if let Some(k) = rv[i] { local.entry(k).or_default().push(i); }
+                }
+                local
+            })
+            .collect();
+
+        // Merge into one table
+        let mut table: HashMap<i64, Vec<usize>> = HashMap::with_capacity(n_right);
+        for local in local_tables {
+            for (k, mut v) in local { table.entry(k).or_default().append(&mut v); }
+        }
+        let table = Arc::new(table);
+
+        // ── Parallel probe ──────────────────────────────────────────────────────
+        let n_left = lv.len();
+        let chunk_sz2 = ((n_left + n_threads - 1) / n_threads).max(1);
+
+        let local_pairs: Vec<Vec<(Option<usize>, Option<usize>)>> = (0..n_threads)
+            .into_par_iter()
+            .map(|t| {
+                let start = t * chunk_sz2;
+                let end   = (start + chunk_sz2).min(n_left);
+                if start >= end { return vec![]; }
+                let mut pairs = Vec::new();
+                for l in start..end {
+                    if let Some(k) = lv[l] {
+                        if let Some(right_rows) = table.get(&k) {
+                            for &r in right_rows { pairs.push((Some(l), Some(r))); }
+                        } else if matches!(cfg.join_type, JoinType::Left | JoinType::Full) {
+                            pairs.push((Some(l), None));
+                        }
+                    }
+                }
+                pairs
+            })
+            .collect();
+
+        let mut pairs: Vec<(Option<usize>, Option<usize>)> = Vec::new();
+        for lp in local_pairs { pairs.extend(lp); }
+
+        if matches!(cfg.join_type, JoinType::Right | JoinType::Full) {
+            let mut right_matched = vec![false; n_right];
             for &(_, r) in &pairs { if let Some(ri) = r { right_matched[ri] = true; } }
             for (r, matched) in right_matched.iter().enumerate() {
                 if !matched { pairs.push((None, Some(r))); }
