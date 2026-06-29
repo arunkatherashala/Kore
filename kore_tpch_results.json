@@ -1,65 +1,65 @@
 [
   {
     "description": "Scan 6M lineitem + GROUP BY",
-    "kore_ms": 534.3101,
+    "kore_ms": 488.9393,
     "query": "Q1",
     "rows": 6,
     "scale": 1,
     "spark_ms": 4200.0,
-    "speedup": 7.860603795436395
+    "speedup": 8.59002334236581
   },
   {
     "description": "orders×lineitem join + GROUP BY + LIMIT",
-    "kore_ms": 19878.2417,
+    "kore_ms": 10850.4931,
     "query": "Q3",
     "rows": 10,
     "scale": 1,
     "spark_ms": 8700.0,
-    "speedup": 0.43766446405569165
+    "speedup": 0.8018068782514594
   },
   {
     "description": "Scan + filter + SUM (no join)",
-    "kore_ms": 66.9211,
+    "kore_ms": 69.4753,
     "query": "Q6",
     "rows": 1,
     "scale": 1,
     "spark_ms": 2800.0,
-    "speedup": 41.840316432335996
+    "speedup": 40.30209297404977
   },
   {
     "description": "Window functions over 6M rows",
-    "kore_ms": 18579.4156,
+    "kore_ms": 16544.817600000002,
     "query": "W1",
     "rows": 6000000,
     "scale": 1,
     "spark_ms": 6500.0,
-    "speedup": 0.3498495399392433
+    "speedup": 0.39287226714424456
   },
   {
     "description": "Sort 6M rows (3 keys)",
-    "kore_ms": 4624.9038,
+    "kore_ms": 4226.946800000001,
     "query": "S1",
     "rows": 6000000,
     "scale": 1,
     "spark_ms": 5100.0,
-    "speedup": 1.102725639396002
+    "speedup": 1.2065446387922363
   },
   {
     "description": "SIMD vectorized aggregation (AVX2)",
-    "kore_ms": 913.8426,
+    "kore_ms": 766.3949,
     "query": "SIMD",
     "rows": 4,
     "scale": 1,
     "spark_ms": 100000.0,
-    "speedup": 109.42803498107881
+    "speedup": 130.48103529916497
   },
   {
     "description": "Distributed GROUP BY (4 workers)",
-    "kore_ms": 4285.6799,
+    "kore_ms": 3943.9139999999998,
     "query": "D1",
     "rows": 6,
     "scale": 1,
     "spark_ms": 11300.0,
-    "speedup": 2.636687821691956
+    "speedup": 2.8651740377706005
   }
 ]
