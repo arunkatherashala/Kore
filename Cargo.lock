@@ -999,6 +999,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "kore-tpch"
+version = "0.1.0"
+dependencies = [
+ "kore-core",
+ "kore-join",
+ "kore-parallel",
+ "kore-shuffle",
+ "kore-simd",
+ "kore-sql",
+ "kore-window",
+ "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kore-window"
 version = "0.1.0"
 dependencies = [

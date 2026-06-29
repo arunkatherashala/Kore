@@ -45,6 +45,7 @@ members = [
     "kore-security",     # Layer 58 — Token auth, RBAC, TLS config
     "kore-sql-v2",       # Layer 59 — DISTINCT, EXCEPT, INTERSECT, ROLLUP, CUBE
     "kore-iceberg",      # Layer 60 — Apache Iceberg table format
+    "kore-tpch",         # TPC-H benchmark suite (real timing vs Spark)
 ]
 resolver = "2"
 
