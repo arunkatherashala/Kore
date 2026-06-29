@@ -192,17 +192,9 @@ fn filter_block(block: DataBlock, pred: &Expr) -> Result<DataBlock, KoreError> {
     // Use batch (column-at-a-time) evaluation when possible for SIMD auto-vectorization.
     // Falls back to row-at-a-time for complex expressions (CASE WHEN, LIKE, FuncCall, etc.).
     let keep: Vec<bool> = eval_batch(pred, &block);
-    // Parallel index extraction for large blocks
-    let indices: Vec<usize> = if block.num_rows > 50_000 {
-        use rayon::prelude::*;
-        keep.par_iter().enumerate()
-            .filter_map(|(i, &k)| if k { Some(i) } else { None })
-            .collect()
-    } else {
-        keep.iter().enumerate()
-            .filter_map(|(i, &k)| if k { Some(i) } else { None })
-            .collect()
-    };
+    let indices: Vec<usize> = keep.iter().enumerate()
+        .filter_map(|(i, &k)| if k { Some(i) } else { None })
+        .collect();
     Ok(block.select_rows(&indices))
 }
 
@@ -894,9 +886,11 @@ fn group_by_agg(
     let fallback = gcols.len() < group_cols.len();
 
     let n = block.num_rows;
-    // 2 chunks per thread for better load balancing
+    // Only parallelize when table is large enough that merge overhead is worth it.
+    // High-cardinality GROUP BY on small tables (e.g. Q3: 1.3M unique keys) is
+    // slower in parallel due to merge cost. 2M row threshold is safe.
     let nthreads  = rayon::current_num_threads();
-    let nchunks   = (nthreads * 2).max(1);
+    let nchunks   = if n >= 2_000_000 { (nthreads * 2).max(1) } else { 1 };
     let chunk_sz  = ((n + nchunks - 1) / nchunks).max(1);
 
     // ── Parallel phase: each chunk builds a local (ordered) key→rows map ─────
