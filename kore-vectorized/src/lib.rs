@@ -36,9 +36,10 @@ pub struct VecFilter {
 
 #[derive(Debug, Clone)]
 pub struct ColCondition {
-    pub col_name:  String,
-    pub op:        CmpOp,
-    pub threshold: f64,
+    pub col_name:   String,
+    pub op:         CmpOp,
+    pub threshold:  f64,
+    pub str_value:  Option<String>,  // if set: string equality comparison (op must be Eq or Ne)
 }
 
 // ─── Vectorized aggregation ───────────────────────────────────────────────────
@@ -161,7 +162,30 @@ pub fn vectorized_filter(block: &DataBlock, filter: &VecFilter) -> Vec<usize> {
                         .map(|x| x.unwrap_or(i64::MIN)).collect();
                     batch_cmp_i64(&slice, cond.threshold as i64, cond.op)
                 }
-                _ => (1u64 << batch_len) - 1,  // non-numeric: pass through
+                ColumnData::Str(v) => {
+                    // String equality/inequality (vectorized over batch)
+                    if let Some(ref sv) = cond.str_value {
+                        let n2 = batch_end - row;
+                        let mut mask = 0u64;
+                        match cond.op {
+                            CmpOp::Eq => {
+                                for i in 0..n2.min(64) {
+                                    if v[row + i].as_deref() == Some(sv.as_str()) { mask |= 1 << i; }
+                                }
+                            }
+                            CmpOp::Ne => {
+                                for i in 0..n2.min(64) {
+                                    if v[row + i].as_deref() != Some(sv.as_str()) { mask |= 1 << i; }
+                                }
+                            }
+                            _ => mask = if batch_len >= 64 { u64::MAX } else { (1u64 << batch_len) - 1 },
+                        }
+                        mask
+                    } else {
+                        if batch_len >= 64 { u64::MAX } else { (1u64 << batch_len) - 1 }
+                    }
+                }
+                _ => if batch_len >= 64 { u64::MAX } else { (1u64 << batch_len) - 1 },  // pass through
             };
             combined_mask &= mask;
         }
@@ -353,7 +377,7 @@ mod tests {
     fn test_vectorized_filter() {
         let block = make_block(1000);
         let filter = VecFilter { conditions: vec![
-            ColCondition { col_name: "amount".into(), op: CmpOp::Lt, threshold: 100.0 },
+            ColCondition { col_name: "amount".into(), op: CmpOp::Lt, threshold: 100.0, str_value: None },
         ]};
         let rows = vectorized_filter(&block, &filter);
         assert_eq!(rows.len(), 100);

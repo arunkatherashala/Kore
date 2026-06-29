@@ -141,7 +141,7 @@ fn q1(lineitem: &DataBlock) -> usize {
     // Q1: vectorized fast path — filter + GROUP BY using SIMD batch ops
     // 1024-row batches with u64 bitmask filter → ~10-20× faster than SQL interpreter
     let filter = VecFilter { conditions: vec![
-        ColCondition { col_name: "l_shipdate".into(), op: CmpOp::Le, threshold: 19980902.0 },
+        ColCondition { col_name: "l_shipdate".into(), op: CmpOp::Le, threshold: 19980902.0, str_value: None },
     ]};
     let group = GroupBySpec {
         group_cols: vec!["l_returnflag".into(), "l_linestatus".into()],
@@ -155,49 +155,44 @@ fn q1(lineitem: &DataBlock) -> usize {
 }
 
 fn q3(orders: &DataBlock, lineitem: &DataBlock) -> usize {
-    // Q3: HashJoin + vectorized filter + vectorized GROUP BY (replaces SQL interpreter)
+    // Q3: HashJoin + fully vectorized filter + GROUP BY (no SQL interpreter at all)
     let cfg    = JoinConfig::inner("o_orderkey", "l_orderkey");
     let joined = HashJoin::join(orders, lineitem, &cfg).unwrap_or_else(|_| DataBlock::empty());
 
-    // Step 1: vectorized filter WHERE o_orderstatus = 'F'
+    // Step 1: vectorized string equality filter WHERE o_orderstatus = 'F'
     let filter = VecFilter { conditions: vec![
-        ColCondition { col_name: "o_orderstatus".into(), op: CmpOp::Eq, threshold: 0.0 }, // string eq handled by string path
+        ColCondition { col_name: "o_orderstatus".into(), op: CmpOp::Eq, threshold: 0.0,
+                       str_value: Some("F".to_string()) },
     ]};
-    // String equality needs special path — use SQL for just the filter, then vectorized GROUP BY
-    let mut ctx = KqlContext::new();
-    ctx.register("ol", joined.clone());
-    let filtered = ctx.query("SELECT * FROM ol WHERE o_orderstatus = 'F'")
-        .unwrap_or_else(|_| joined);
+    let filtered_rows = vectorized_filter(&joined, &filter);
 
-    // Step 2: vectorized GROUP BY + SUM on filtered result
+    // Step 2: vectorized GROUP BY + SUM on filtered rows (parallel, u128 FNV keys)
     let group = GroupBySpec {
         group_cols: vec!["l_orderkey".into(), "o_orderdate".into(), "o_shippriority".into()],
         aggs: vec![
             AggSpec { input_col: "l_extprice".into(), agg: VecAgg::Sum, output_col: "revenue".into() },
         ],
     };
-    let all_rows: Vec<usize> = (0..filtered.num_rows).collect();
-    let groups = vectorized_group_by(&filtered, &all_rows, &group);
+    let mut groups = vectorized_group_by(&joined, &filtered_rows, &group);
     // Sort by revenue DESC, take top 10
-    let mut groups_sorted = groups;
-    groups_sorted.sort_by(|a, b| {
+    groups.sort_by(|a, b| {
         let ra = a.aggs.first().map(|x| x.value).unwrap_or(0.0);
         let rb = b.aggs.first().map(|x| x.value).unwrap_or(0.0);
         rb.partial_cmp(&ra).unwrap_or(std::cmp::Ordering::Equal)
     });
-    groups_sorted.truncate(10);
-    groups_sorted.len()
+    groups.truncate(10);
+    groups.len()
 }
 
 fn q6(lineitem: &DataBlock) -> usize {
     // Q6: vectorized fast path — 5-condition AND filter + SUM
     // All conditions are col OP lit → u64 bitmask per 64 rows, short-circuits on 0
     let filter = VecFilter { conditions: vec![
-        ColCondition { col_name: "l_shipdate".into(), op: CmpOp::Ge, threshold: 19940101.0 },
-        ColCondition { col_name: "l_shipdate".into(), op: CmpOp::Lt, threshold: 19950101.0 },
-        ColCondition { col_name: "l_discount".into(), op: CmpOp::Ge, threshold: 0.05 },
-        ColCondition { col_name: "l_discount".into(), op: CmpOp::Le, threshold: 0.07 },
-        ColCondition { col_name: "l_quantity".into(), op: CmpOp::Lt, threshold: 24.0 },
+        ColCondition { col_name: "l_shipdate".into(), op: CmpOp::Ge, threshold: 19940101.0, str_value: None },
+        ColCondition { col_name: "l_shipdate".into(), op: CmpOp::Lt, threshold: 19950101.0, str_value: None },
+        ColCondition { col_name: "l_discount".into(), op: CmpOp::Ge, threshold: 0.05, str_value: None },
+        ColCondition { col_name: "l_discount".into(), op: CmpOp::Le, threshold: 0.07, str_value: None },
+        ColCondition { col_name: "l_quantity".into(), op: CmpOp::Lt, threshold: 24.0, str_value: None },
     ]};
     let rows = vectorized_filter(lineitem, &filter);
     let specs = vec![
