@@ -1,0 +1,21 @@
+[package]
+name    = "kore-dist-net"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "kore-worker-node"
+path = "src/worker_main.rs"
+
+[[bin]]
+name = "kore-coordinator"
+path = "src/coord_main.rs"
+
+[dependencies]
+kore-core       = { workspace = true }
+kore-sql        = { workspace = true }
+kore-vectorized = { path = "../kore-vectorized" }
+tokio           = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+rayon           = { workspace = true }

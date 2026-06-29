@@ -1066,6 +1066,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kore-dist-net"
+version = "0.1.0"
+dependencies = [
+ "kore-core",
+ "kore-sql",
+ "kore-vectorized",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "kore-distml"
 version = "0.1.0"
 dependencies = [
