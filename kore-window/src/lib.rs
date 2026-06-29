@@ -67,17 +67,14 @@ pub fn apply_window(
     let partitions = build_partitions(block, partition_by, order_by, n)?;
 
     // 2. Parallel: each partition computes independently.
-    //    Use partition-sized scratch (NOT n-sized) to avoid 3×48MB allocation waste.
+    //    Use COMPACT partition-sized Vec (not n-sized scratch) — eliminates
+    //    48MB zero-init + random-write per partition.
     let partial: Vec<Result<(Vec<usize>, Vec<f64>), KoreError>> = partitions
         .par_iter()
         .map(|(_key, sorted_indices)| {
-            // Allocate ONLY partition-sized scratch
-            let m = sorted_indices.len();
-            let mut local = vec![0.0f64; n]; // still n-sized due to index-based write in compute_fn
-            compute_fn_for_partition(block, sorted_indices, func, &mut local)?;
-            let vals: Vec<f64> = sorted_indices.iter().map(|&i| local[i]).collect();
-            drop(local); // free n-sized scratch immediately
-            Ok((sorted_indices.clone(), vals))
+            // Compact: only m values, sequential writes, cache-friendly
+            let values = compute_fn_values(block, sorted_indices, func)?;
+            Ok((sorted_indices.clone(), values))
         })
         .collect();
 
@@ -267,6 +264,84 @@ fn sort_indices(block: &DataBlock, indices: &mut Vec<usize>, order_by: &[WinOrde
 }
 
 // ── Function evaluation ───────────────────────────────────────────────────────
+
+/// Compute window function values into a COMPACT Vec<f64> of length m.
+/// No n-sized scratch buffer — sequential writes, cache-friendly.
+fn compute_fn_values(
+    block:  &DataBlock,
+    sorted: &[usize],
+    func:   &WindowFn,
+) -> Result<Vec<f64>, KoreError> {
+    let m = sorted.len();
+    let mut values = vec![0.0f64; m];
+
+    match func {
+        WindowFn::RowNumber | WindowFn::Rank | WindowFn::DenseRank => {
+            for i in 0..m { values[i] = (i + 1) as f64; }
+        }
+        WindowFn::Ntile(buckets) => {
+            let n = m as f64;
+            for i in 0..m {
+                values[i] = ((i as f64 / n) * (*buckets as f64)).floor() + 1.0;
+            }
+        }
+        WindowFn::Lag { col, offset } => {
+            let vals = extract_f64(block, col, sorted);
+            for i in 0..m {
+                values[i] = if i >= *offset { vals[i - offset] } else { f64::NAN };
+            }
+        }
+        WindowFn::Lead { col, offset } => {
+            let vals = extract_f64(block, col, sorted);
+            for i in 0..m {
+                values[i] = if i + offset < m { vals[i + offset] } else { f64::NAN };
+            }
+        }
+        WindowFn::Sum(col) => {
+            let vals = extract_f64(block, col, sorted);
+            let total: f64 = vals.iter().filter(|v| !v.is_nan()).sum();
+            for i in 0..m { values[i] = total; }
+        }
+        WindowFn::Avg(col) => {
+            let vals = extract_f64(block, col, sorted);
+            let good: Vec<f64> = vals.iter().copied().filter(|v| !v.is_nan()).collect();
+            let avg = if good.is_empty() { f64::NAN }
+                      else { good.iter().sum::<f64>() / good.len() as f64 };
+            for i in 0..m { values[i] = avg; }
+        }
+        WindowFn::Count(col) => {
+            let vals = extract_f64(block, col, sorted);
+            let cnt = vals.iter().filter(|v| !v.is_nan()).count() as f64;
+            for i in 0..m { values[i] = cnt; }
+        }
+        WindowFn::Min(col) => {
+            let vals = extract_f64(block, col, sorted);
+            let min = vals.iter().copied().filter(|v| !v.is_nan()).fold(f64::INFINITY, f64::min);
+            for i in 0..m { values[i] = min; }
+        }
+        WindowFn::Max(col) => {
+            let vals = extract_f64(block, col, sorted);
+            let max = vals.iter().copied().filter(|v| !v.is_nan()).fold(f64::NEG_INFINITY, f64::max);
+            for i in 0..m { values[i] = max; }
+        }
+        WindowFn::CumSum(col) => {
+            let vals = extract_f64(block, col, sorted);
+            let mut running = 0.0f64;
+            for (i, v) in vals.iter().enumerate() {
+                if !v.is_nan() { running += v; }
+                values[i] = running;
+            }
+        }
+        _ => {
+            // Fallback: use old compute_fn_for_partition
+            let n_total = block.num_rows;
+            let mut scratch = vec![0.0f64; n_total];
+            compute_fn_for_partition(block, sorted, func, &mut scratch)?;
+            for (i, &orig_i) in sorted.iter().enumerate() { values[i] = scratch[orig_i]; }
+        }
+    }
+    Ok(values)
+}
 
 fn compute_fn_for_partition(
     block:   &DataBlock,

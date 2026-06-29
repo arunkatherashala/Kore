@@ -16,7 +16,7 @@
 //!   5. Merge partial aggregates at end
 
 use std::collections::HashMap;
-
+use rayon::prelude::*;
 use kore_core::types::{Column, ColumnData, DataBlock};
 
 pub const BATCH_SIZE: usize = 1024;
@@ -126,24 +126,54 @@ pub fn batch_sum_full(vals: &[f64]) -> f64 {
 // ─── Full vectorized filter ───────────────────────────────────────────────────
 
 /// Filter a DataBlock using a VecFilter, returning matching row indices.
-/// Processes BATCH_SIZE rows at a time with SIMD-friendly loops.
+/// Parallel for large blocks (splits rows across Rayon threads).
 pub fn vectorized_filter(block: &DataBlock, filter: &VecFilter) -> Vec<usize> {
     if filter.conditions.is_empty() {
         return (0..block.num_rows).collect();
     }
-
-    // Pre-locate columns
-    let mut col_refs: Vec<Option<&Column>> = filter.conditions.iter()
+    let n = block.num_rows;
+    // Parallel for large blocks — each thread handles its row range independently
+    if n >= 100_000 {
+        let nthreads = rayon::current_num_threads();
+        let chunk_sz = ((n + nthreads - 1) / nthreads).max(64);
+        // Pre-locate columns once (shared across threads)
+        let col_refs: Vec<Option<&Column>> = filter.conditions.iter()
+            .map(|c| block.columns.iter().find(|col| col.name == c.col_name || col.name.ends_with(&format!(".{}", c.col_name))))
+            .collect();
+        let local: Vec<Vec<usize>> = (0..nthreads)
+            .into_par_iter()
+            .map(|t| {
+                let row_start = t * chunk_sz;
+                let row_end   = (row_start + chunk_sz).min(n);
+                if row_start >= row_end { return vec![]; }
+                filter_range(block, filter, &col_refs, row_start, row_end)
+            })
+            .collect();
+        let mut result = Vec::with_capacity(n / 8);
+        for v in local { result.extend(v); }
+        return result;
+    }
+    // Sequential for small blocks
+    let col_refs: Vec<Option<&Column>> = filter.conditions.iter()
         .map(|c| block.columns.iter().find(|col| col.name == c.col_name || col.name.ends_with(&format!(".{}", c.col_name))))
         .collect();
+    filter_range(block, filter, &col_refs, 0, n)
+}
 
-    let n = block.num_rows;
+fn filter_range(
+    block: &DataBlock,
+    filter: &VecFilter,
+    col_refs: &[Option<&Column>],
+    row_start: usize,
+    row_end: usize,
+) -> Vec<usize> {
+    let n = row_end - row_start;
     let mut indices = Vec::with_capacity(n / 4);
 
     // Process 64 rows at a time (one u64 bitmask per pass)
-    let mut row = 0;
-    while row < n {
-        let batch_end = (row + 64).min(n);
+    let mut row = row_start;
+    while row < row_end {
+        let batch_end = (row + 64).min(row_end);
         let batch_len = batch_end - row;
 
         let mut combined_mask: u64 = if batch_len >= 64 { u64::MAX } else { (1u64 << batch_len) - 1 };
