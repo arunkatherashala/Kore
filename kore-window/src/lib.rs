@@ -59,25 +59,40 @@ pub fn apply_window(
     func:        &WindowFn,
     output_col:  &str,
 ) -> Result<DataBlock, KoreError> {
+    use rayon::prelude::*;
+
     let n = block.num_rows;
 
     // 1. Build partition groups: key → sorted row indices within partition
     let partitions = build_partitions(block, partition_by, order_by, n)?;
 
-    // 2. Compute function value for every row in original order
-    let mut result: Vec<f64> = vec![0.0; n];
+    // 2. Parallel: compute each partition independently → (indices, values) pairs
+    let partial: Vec<Result<(Vec<usize>, Vec<f64>), KoreError>> = partitions
+        .par_iter()
+        .map(|(_key, sorted_indices)| {
+            let mut local = vec![0.0f64; n]; // write only to our indices, rest ignored
+            compute_fn_for_partition(block, sorted_indices, func, &mut local)?;
+            let vals: Vec<f64> = sorted_indices.iter().map(|&i| local[i]).collect();
+            Ok((sorted_indices.clone(), vals))
+        })
+        .collect();
 
-    for (_key, sorted_indices) in &partitions {
-        compute_fn_for_partition(block, sorted_indices, func, &mut result)?;
+    // 3. Merge back into result vector
+    let mut result: Vec<f64> = vec![0.0; n];
+    for p in partial {
+        let (indices, vals) = p?;
+        for (&idx, &val) in indices.iter().zip(vals.iter()) {
+            result[idx] = val;
+        }
     }
 
-    // 3. Build output column
+    // 4. Build output column
     let new_col = Column {
         name: output_col.to_string(),
         data: ColumnData::Float64(result.into_iter().map(Some).collect()),
     };
 
-    // 4. Append to block
+    // 5. Append to block
     let mut cols = block.columns.clone();
     cols.push(new_col);
     Ok(DataBlock { columns: cols, num_rows: n })

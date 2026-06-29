@@ -1,8 +1,11 @@
 //! Hash Join — build a hash table on the smaller (build) side, probe with the larger side.
 //!
 //! Supports INNER, LEFT, RIGHT and FULL OUTER joins.
+//! Probe phase is parallelized via Rayon (O(n/T) per thread).
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use rayon::prelude::*;
 use kore_core::{Column, DataBlock, JoinKey, JoinType, KoreError, Value};
 
 use crate::JoinConfig;
@@ -17,35 +20,51 @@ impl HashJoin {
         cfg: &JoinConfig,
     ) -> Result<DataBlock, KoreError> {
         // ── Build phase: key → list of right-side row indices ──────────────────
-        let mut table: HashMap<JoinKey, Vec<usize>> = HashMap::new();
+        let mut table: HashMap<JoinKey, Vec<usize>> = HashMap::with_capacity(right.num_rows);
         for i in 0..right.num_rows {
             let key = right.join_key(i, &cfg.right_key)?;
             table.entry(key).or_default().push(i);
         }
+        let table = Arc::new(table);
 
-        // ── Probe phase ────────────────────────────────────────────────────────
-        // (left_row_idx | None, right_row_idx | None)
-        let mut pairs: Vec<(Option<usize>, Option<usize>)> = Vec::new();
-        let mut right_matched: Vec<bool> = vec![false; right.num_rows];
+        // ── Parallel probe phase ───────────────────────────────────────────────
+        // Split probe (left) side into Rayon chunks; each thread probes independently.
+        let n_left = left.num_rows;
+        let n_threads = rayon::current_num_threads();
+        let chunk_sz = ((n_left + n_threads - 1) / n_threads).max(1);
 
-        for l in 0..left.num_rows {
-            let key = left.join_key(l, &cfg.left_key)?;
-            if let Some(right_rows) = table.get(&key) {
-                for &r in right_rows {
-                    pairs.push((Some(l), Some(r)));
-                    right_matched[r] = true;
+        let local_pairs: Vec<Vec<(Option<usize>, Option<usize>)>> = (0..n_threads)
+            .into_par_iter()
+            .map(|t| {
+                let start = t * chunk_sz;
+                let end   = (start + chunk_sz).min(n_left);
+                if start >= end { return vec![]; }
+                let mut pairs: Vec<(Option<usize>, Option<usize>)> = Vec::new();
+                for l in start..end {
+                    if let Ok(key) = left.join_key(l, &cfg.left_key) {
+                        if let Some(right_rows) = table.get(&key) {
+                            for &r in right_rows {
+                                pairs.push((Some(l), Some(r)));
+                            }
+                        } else if matches!(cfg.join_type, JoinType::Left | JoinType::Full) {
+                            pairs.push((Some(l), None));
+                        }
+                    }
                 }
-            } else if matches!(cfg.join_type, JoinType::Left | JoinType::Full) {
-                pairs.push((Some(l), None));
-            }
-        }
+                pairs
+            })
+            .collect();
+
+        // Merge local pair lists (preserves left-side order)
+        let mut pairs: Vec<(Option<usize>, Option<usize>)> = Vec::new();
+        for lp in local_pairs { pairs.extend(lp); }
 
         // ── Unmatched right rows for RIGHT / FULL OUTER ────────────────────────
         if matches!(cfg.join_type, JoinType::Right | JoinType::Full) {
+            let mut right_matched = vec![false; right.num_rows];
+            for &(_, r) in &pairs { if let Some(ri) = r { right_matched[ri] = true; } }
             for (r, matched) in right_matched.iter().enumerate() {
-                if !matched {
-                    pairs.push((None, Some(r)));
-                }
+                if !matched { pairs.push((None, Some(r))); }
             }
         }
 
