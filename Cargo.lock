@@ -1286,6 +1286,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kore-self"
+version = "0.1.0"
+dependencies = [
+ "kore-core",
+ "kore-mcp",
+ "kore-sql",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "kore-shuffle"
 version = "0.1.0"
 dependencies = [

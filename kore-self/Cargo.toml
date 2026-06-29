@@ -1,0 +1,17 @@
+[package]
+name    = "kore-self"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "kore-self"
+path = "src/main.rs"
+
+[dependencies]
+kore-core = { workspace = true }
+kore-sql  = { workspace = true }
+kore-mcp  = { path = "../kore-mcp" }
+tokio     = { workspace = true }
+serde     = { workspace = true }
+serde_json = { workspace = true }
+rayon     = { workspace = true }
