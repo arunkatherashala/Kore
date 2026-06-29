@@ -1077,6 +1077,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kore-distributed"
+version = "0.1.0"
+dependencies = [
+ "kore-core",
+ "kore-sql",
+ "kore-vectorized",
+ "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kore-dml"
 version = "0.1.0"
 dependencies = [

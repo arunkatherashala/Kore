@@ -50,6 +50,7 @@ members = [
     "kore-vectorized",   # Layer 63 — Vectorized batch SQL (1024-row SIMD chunks)
     "kore-gpu",          # Layer 64 — GPU compute (wgpu/CUDA GROUP BY, sort, filter)
     "kore-self",         # Layer 65 — Personal AI twin (memory, recall, respond, learn)
+    "kore-distributed",  # Layer 66 — True distributed SQL engine (SQL→cluster wire-up)
     "kore-tpch",         # TPC-H benchmark suite (real timing vs Spark)
 ]
 resolver = "2"

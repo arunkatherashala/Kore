@@ -1,0 +1,12 @@
+[package]
+name    = "kore-distributed"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kore-core       = { workspace = true }
+kore-sql        = { workspace = true }
+kore-vectorized = { path = "../kore-vectorized" }
+rayon           = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
