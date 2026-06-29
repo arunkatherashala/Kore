@@ -877,7 +877,6 @@ fn group_by_agg(
 ) -> Result<DataBlock, KoreError> {
     use rayon::prelude::*;
     use std::collections::HashMap;
-    use std::fmt::Write as FmtWrite;
 
     // Pre-locate group-by columns once
     let gcols: Vec<&Column> = group_cols.iter()
@@ -886,65 +885,83 @@ fn group_by_agg(
     let fallback = gcols.len() < group_cols.len();
 
     let n = block.num_rows;
-    // Only parallelize when table is large enough that merge overhead is worth it.
-    // High-cardinality GROUP BY on small tables (e.g. Q3: 1.3M unique keys) is
-    // slower in parallel due to merge cost. 2M row threshold is safe.
-    let nthreads  = rayon::current_num_threads();
-    let nchunks   = if n >= 2_000_000 { (nthreads * 2).max(1) } else { 1 };
-    let chunk_sz  = ((n + nchunks - 1) / nchunks).max(1);
+    let nthreads = rayon::current_num_threads();
+    let nchunks  = if n >= 2_000_000 { (nthreads * 2).max(1) } else { 1 };
+    let chunk_sz = ((n + nchunks - 1) / nchunks).max(1);
 
-    // ── Parallel phase: each chunk builds a local (ordered) key→rows map ─────
-    // Returns Vec<(key_string, row_indices)> in first-seen order per chunk.
-    type LocalMap = Vec<(String, Vec<usize>)>;
-    let local_maps: Vec<LocalMap> = (0..nchunks)
-        .into_par_iter()
-        .map(|c| {
-            let start = c * chunk_sz;
-            let end   = (start + chunk_sz).min(n);
-            if start >= end { return vec![]; }
+    // ── Fast u128 key (no String allocation per row) ──────────────────────────
+    // FNV-1a hashed per column, combined with position-aware rotation.
+    // u128 space (2^128) makes hash collisions practically impossible.
+    #[inline(always)]
+    fn fnv64(bytes: &[u8]) -> u64 {
+        let mut h: u64 = 14695981039346656037;
+        for &b in bytes { h ^= b as u64; h = h.wrapping_mul(1099511628211); }
+        h
+    }
 
-            let mut local: HashMap<String, Vec<usize>> = HashMap::new();
-            let mut order: Vec<String>                 = Vec::new();
-            let mut key_buf = String::with_capacity(64);
+    // ── build_chunk: no-allocation hot loop ───────────────────────────────────
+    type LocalMap = Vec<(u128, Vec<usize>)>;
+    let build_chunk = |c: usize| -> LocalMap {
+        let start = c * chunk_sz;
+        let end   = (start + chunk_sz).min(n);
+        if start >= end { return vec![]; }
 
-            for row in start..end {
-                key_buf.clear();
-                if fallback {
-                    for (gi, gc) in group_cols.iter().enumerate() {
-                        if gi > 0 { key_buf.push('\x00'); }
-                        match get_cell(&block, gc, row) {
-                            ExprVal::Int(i)   => { let _ = write!(key_buf, "i{i}"); }
-                            ExprVal::Float(f) => { let _ = write!(key_buf, "f{f:.10}"); }
-                            ExprVal::Str(s)   => { key_buf.push('s'); key_buf.push_str(&s); }
-                            ExprVal::Bool(b)  => { key_buf.push(if b {'T'} else {'F'}); }
-                            ExprVal::Null     => { key_buf.push('n'); }
-                        }
-                    }
-                } else {
-                    for (gi, col) in gcols.iter().enumerate() {
-                        if gi > 0 { key_buf.push('\x00'); }
-                        match &col.data {
-                            ColumnData::Int64(v)   => { let _ = write!(key_buf, "i{}", v.get(row).and_then(|x| *x).unwrap_or(i64::MIN)); }
-                            ColumnData::Float64(v) => { let _ = write!(key_buf, "f{:.10}", v.get(row).and_then(|x| *x).unwrap_or(f64::NAN)); }
-                            ColumnData::Str(v)     => { key_buf.push('s'); key_buf.push_str(v.get(row).and_then(|x| x.as_deref()).unwrap_or("")); }
-                            ColumnData::Bool(v)    => { key_buf.push(if v.get(row).and_then(|x| *x).unwrap_or(false) {'T'} else {'F'}); }
-                        }
-                    }
+        let mut local: HashMap<u128, Vec<usize>> = HashMap::with_capacity((end - start) / 4 + 8);
+        let mut order: Vec<u128>                 = Vec::new();
+
+        for row in start..end {
+            // Compute u128 key: mix per-column values without String allocation
+            let key: u128 = if fallback {
+                let mut k: u128 = 0xcbf29ce484222325_cbf29ce484222325u128;
+                for (i, gc) in group_cols.iter().enumerate() {
+                    let v = match get_cell(&block, gc, row) {
+                        ExprVal::Int(x)   => x as u64,
+                        ExprVal::Float(x) => x.to_bits(),
+                        ExprVal::Str(ref s) => fnv64(s.as_bytes()),
+                        ExprVal::Bool(x)  => x as u64,
+                        ExprVal::Null     => 0xFFFF_FFFF_FFFF_FFFF,
+                    };
+                    k = k.wrapping_add(v as u128)
+                         .wrapping_mul(0x9e3779b97f4a7c15_f39cc0605cedc835u128)
+                         .rotate_left((i as u32 * 11 + 7) % 127);
                 }
-                let key = key_buf.clone();
-                if !local.contains_key(&key) { order.push(key.clone()); }
-                local.entry(key).or_default().push(row);
-            }
-            order.into_iter().map(|k| { let v = local.remove(&k).unwrap(); (k, v) }).collect()
-        })
-        .collect();
+                k
+            } else {
+                let mut k: u128 = 0xcbf29ce484222325_cbf29ce484222325u128;
+                for (i, col) in gcols.iter().enumerate() {
+                    let v: u64 = match &col.data {
+                        ColumnData::Int64(v)   => v.get(row).and_then(|x| *x).unwrap_or(i64::MIN) as u64,
+                        ColumnData::Float64(v) => v.get(row).and_then(|x| *x).map(|f| f.to_bits()).unwrap_or(0),
+                        ColumnData::Bool(v)    => v.get(row).and_then(|x| *x).unwrap_or(false) as u64,
+                        ColumnData::Str(v)     => fnv64(v.get(row).and_then(|x| x.as_deref()).unwrap_or("").as_bytes()),
+                    };
+                    k = k.wrapping_add(v as u128)
+                         .wrapping_mul(0x9e3779b97f4a7c15_f39cc0605cedc835u128)
+                         .rotate_left((i as u32 * 11 + 7) % 127);
+                }
+                k
+            };
 
-    // ── Merge phase: combine local maps (sequential, O(groups × chunks)) ─────
-    let mut group_map: HashMap<String, Vec<usize>> = HashMap::new();
-    let mut key_order: Vec<String>                 = Vec::new();
+            if !local.contains_key(&key) { order.push(key); }
+            local.entry(key).or_default().push(row);
+        }
+        order.into_iter().map(|k| { let v = local.remove(&k).unwrap(); (k, v) }).collect()
+    };
+
+    // Sequential (nchunks==1) avoids Rayon overhead for small/high-cardinality tables.
+    // Parallel (nchunks>1) for large low-cardinality tables (e.g. Q1: 6M rows, 6 groups).
+    let local_maps: Vec<LocalMap> = if nchunks == 1 {
+        vec![build_chunk(0)]
+    } else {
+        (0..nchunks).into_par_iter().map(build_chunk).collect()
+    };
+
+    // ── Merge phase ───────────────────────────────────────────────────────────
+    let mut group_map: HashMap<u128, Vec<usize>> = HashMap::new();
+    let mut key_order: Vec<u128>                 = Vec::new();
     for local in local_maps {
         for (key, mut idxs) in local {
-            if !group_map.contains_key(&key) { key_order.push(key.clone()); }
+            if !group_map.contains_key(&key) { key_order.push(key); }
             group_map.entry(key).or_default().append(&mut idxs);
         }
     }
