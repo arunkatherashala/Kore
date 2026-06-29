@@ -875,18 +875,39 @@ fn group_by_agg(
     group_cols: &[String],
     projections: &[Projection],
 ) -> Result<DataBlock, KoreError> {
+    // Pre-locate group-by columns once (avoids O(n × g) name scans in the hot loop)
+    let gcols: Vec<&Column> = group_cols.iter()
+        .filter_map(|c| find_col(&block, c))
+        .collect();
+
     // O(n) HashMap-based grouping — replaces the previous O(n²) Vec scan
     let mut group_map: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
     let mut key_order: Vec<String> = Vec::new();   // preserve first-seen insertion order
 
+    let mut key_buf = String::with_capacity(64);   // reuse buffer to reduce allocations
     for row in 0..block.num_rows {
-        let key: String = group_cols.iter().map(|c| match get_cell(&block, c, row) {
-            ExprVal::Int(i)   => format!("i{i}"),
-            ExprVal::Float(f) => format!("f{f:.10}"),
-            ExprVal::Str(s)   => format!("s{s}"),
-            ExprVal::Bool(b)  => format!("b{b}"),
-            ExprVal::Null     => "n".into(),
-        }).collect::<Vec<_>>().join("\x00");
+        key_buf.clear();
+        for (gi, col) in gcols.iter().enumerate() {
+            if gi > 0 { key_buf.push('\x00'); }
+            match &col.data {
+                ColumnData::Int64(v)   => { use std::fmt::Write; let _ = write!(key_buf, "i{}", v.get(row).and_then(|x| *x).unwrap_or(i64::MIN)); }
+                ColumnData::Float64(v) => { use std::fmt::Write; let _ = write!(key_buf, "f{:.10}", v.get(row).and_then(|x| *x).unwrap_or(f64::NAN)); }
+                ColumnData::Str(v)     => { key_buf.push('s'); key_buf.push_str(v.get(row).and_then(|x| x.as_deref()).unwrap_or("")); }
+                ColumnData::Bool(v)    => { key_buf.push(if v.get(row).and_then(|x| *x).unwrap_or(false) { 'T' } else { 'F' }); }
+            }
+        }
+        // fall back to slow path if any group col wasn't found above
+        let key = if gcols.len() < group_cols.len() {
+            group_cols.iter().map(|c| match get_cell(&block, c, row) {
+                ExprVal::Int(i)   => format!("i{i}"),
+                ExprVal::Float(f) => format!("f{f:.10}"),
+                ExprVal::Str(s)   => format!("s{s}"),
+                ExprVal::Bool(b)  => format!("b{b}"),
+                ExprVal::Null     => "n".into(),
+            }).collect::<Vec<_>>().join("\x00")
+        } else {
+            key_buf.clone()
+        };
 
         if !group_map.contains_key(&key) { key_order.push(key.clone()); }
         group_map.entry(key).or_default().push(row);
