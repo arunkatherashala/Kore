@@ -28,6 +28,7 @@ use kore_vectorized::{CmpOp, ColCondition, VecFilter, VecAgg, AggSpec, GroupBySp
                       execute_vectorized, vectorized_filter, vectorized_agg as vec_agg,
                       vectorized_group_by};
 use kore_arrow::memory_report;
+use kore_distributed::DistributedContext;
 use kore_gpu::GpuPipeline;
 use rayon::prelude::*;
 
@@ -300,6 +301,33 @@ fn q_distributed_groupby(lineitem: &DataBlock) -> usize {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
+// ─── Distributed SQL benchmarks (Layer 66) ────────────────────────────────────
+
+fn dq1(lineitem: &DataBlock) -> usize {
+    // Q1 through kore-distributed — real SQL, automatically partitioned
+    let mut ctx = DistributedContext::with_workers(rayon::current_num_threads());
+    ctx.register("lineitem", lineitem.clone());
+    ctx.query(
+        "SELECT l_returnflag, l_linestatus, SUM(l_quantity) AS sum_qty,
+                SUM(l_extprice) AS sum_price, COUNT(l_orderkey) AS cnt
+         FROM lineitem
+         WHERE l_shipdate <= 19980902
+         GROUP BY l_returnflag, l_linestatus"
+    ).map(|r| r.num_rows).unwrap_or(0)
+}
+
+fn dq6(lineitem: &DataBlock) -> usize {
+    // Q6 through kore-distributed — parallel filter + SUM
+    let mut ctx = DistributedContext::with_workers(rayon::current_num_threads());
+    ctx.register("lineitem", lineitem.clone());
+    ctx.query(
+        "SELECT SUM(l_extprice) AS revenue FROM lineitem
+         WHERE l_shipdate >= 19940101 AND l_shipdate < 19950101
+           AND l_discount >= 0.05 AND l_discount <= 0.07
+           AND l_quantity < 24"
+    ).map(|r| r.num_rows).unwrap_or(0)
+}
+
 fn main() {
     let scale: usize = std::env::args()
         .skip_while(|a| a != "--scale")
@@ -341,6 +369,11 @@ fn main() {
         run_bench("SIMD","SIMD vectorized aggregation (AVX2)",
                               || q_simd_agg(&lineitem),            100.0),
         run_bench("D1",  sdesc("D1"),  || q_distributed_groupby(&lineitem),spark("D1")),
+        // ── Distributed SQL (Layer 66: kore-distributed) ─────────────────────
+        run_bench("DQ1", "DISTRIBUTED Q1 (kore-distributed, 8 workers)",
+            || dq1(&lineitem), spark("Q1")),
+        run_bench("DQ6", "DISTRIBUTED Q6 (kore-distributed, 8 workers)",
+            || dq6(&lineitem), spark("Q6")),
     ];
 
     // ── Print table ──────────────────────────────────────────────────────────
