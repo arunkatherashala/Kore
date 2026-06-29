@@ -1,0 +1,8 @@
+[package]
+name    = "kore-security"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+kore-core = { workspace = true }
+serde     = { workspace = true }
+serde_json = { workspace = true }

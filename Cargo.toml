@@ -38,7 +38,13 @@ members = [
     "kore-catalyst", # Layer 51 — Full Catalyst-level query optimizer
     "kore-distml",   # Layer 52 — Distributed ML across workers
     "kore-connect",  # Layer 53 — Arrow/IPC, JSON, HTTP connectors
-    "kore-rm",       # Layer 54 — Cluster resource manager
+    "kore-rm",           # Layer 54 — Cluster resource manager
+    "kore-shuffle-store",# Layer 55 — Persistent shuffle store (disk-based, TB-scale)
+    "kore-object-store", # Layer 56 — S3/GCS/Azure Blob cloud storage abstraction
+    "kore-metrics",      # Layer 57 — Prometheus metrics + job/query history
+    "kore-security",     # Layer 58 — Token auth, RBAC, TLS config
+    "kore-sql-v2",       # Layer 59 — DISTINCT, EXCEPT, INTERSECT, ROLLUP, CUBE
+    "kore-iceberg",      # Layer 60 — Apache Iceberg table format
 ]
 resolver = "2"
 

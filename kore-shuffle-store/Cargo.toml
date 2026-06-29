@@ -1,0 +1,9 @@
+[package]
+name    = "kore-shuffle-store"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+kore-core  = { workspace = true }
+kore-store = { path = "../kore-store" }
+serde      = { workspace = true }
+serde_json = { workspace = true }
