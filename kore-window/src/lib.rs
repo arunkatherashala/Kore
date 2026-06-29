@@ -198,6 +198,41 @@ fn partition_key(block: &DataBlock, cols: &[String], row: usize) -> String {
 }
 
 fn sort_indices(block: &DataBlock, indices: &mut Vec<usize>, order_by: &[WinOrder]) {
+    use rayon::slice::ParallelSliceMut;
+
+    let m = indices.len();
+    if m <= 1 || order_by.is_empty() { return; }
+
+    // ── Fast path: single numeric order-by column ─────────────────────────────
+    // Schwartzian transform: pre-extract keys → parallel sort → write back.
+    // Eliminates random column access per comparison; LLVM vectorizes extraction.
+    if order_by.len() == 1 {
+        let ord = &order_by[0];
+        if let Some(col) = col_lookup(block, &ord.col) {
+            let mut keyed: Vec<(f64, usize)> = indices.iter().map(|&i| {
+                let k = match &col.data {
+                    ColumnData::Float64(v) => v.get(i).and_then(|x| *x).unwrap_or(f64::NEG_INFINITY),
+                    ColumnData::Int64(v)   => v.get(i).and_then(|x| *x).unwrap_or(i64::MIN) as f64,
+                    ColumnData::Bool(v)    => v.get(i).and_then(|x| *x).unwrap_or(false) as i32 as f64,
+                    ColumnData::Str(_)     => 0.0,  // handled in fallback
+                };
+                (k, i)
+            }).collect();
+
+            // Rayon parallel sort — uses all 8 cores
+            if ord.desc {
+                keyed.par_sort_unstable_by(|a, b|
+                    b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            } else {
+                keyed.par_sort_unstable_by(|a, b|
+                    a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            }
+            for (j, (_, idx)) in keyed.into_iter().enumerate() { indices[j] = idx; }
+            return;
+        }
+    }
+
+    // ── Fallback: multi-column or String ORDER BY (sequential) ────────────────
     indices.sort_unstable_by(|&a, &b| {
         for ord in order_by {
             if let Some(col) = col_lookup(block, &ord.col) {
