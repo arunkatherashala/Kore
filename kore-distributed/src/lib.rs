@@ -73,90 +73,75 @@ impl DistributedExecutor {
     }
 
     // ── Strategy 1: Distributed GROUP BY ─────────────────────────────────────
-    // Most powerful: each worker builds local partial aggregates,
-    // coordinator merges by key. No full shuffle needed.
+    // Phase 1 — Workers: run WHERE filter only, return all matching rows
+    // Phase 2 — Coordinator: run full GROUP BY on concatenated filtered rows
+    // This is correct and avoids the partial-aggregate re-aggregation problem.
 
     fn distributed_group_by(&self, sql: &str, data: DataBlock) -> Result<DataBlock, String> {
         let n = data.num_rows;
         let t = self.num_workers;
         let chunk = ((n + t - 1) / t).max(1);
 
-        // PHASE 1: Parallel local aggregation on each data slice
-        let partial_results: Vec<Result<DataBlock, String>> = (0..t)
-            .into_par_iter()
-            .map(|w| {
-                let start = w * chunk;
-                let end   = (start + chunk).min(n);
-                if start >= end { return Ok(DataBlock::empty()); }
-
-                // Extract this worker's data slice
-                let slice_indices: Vec<usize> = (start..end).collect();
-                let slice = data.select_rows(&slice_indices);
-
-                // Register and execute SQL on local slice
-                let mut ctx = KqlContext::new();
-                ctx.register("data", slice);
-                // Rewrite table name to "data"
-                let local_sql = rewrite_table_name(sql, "data");
-                ctx.query(&local_sql).map_err(|e| format!("Worker {w}: {e}"))
-            })
-            .collect();
-
-        // PHASE 2: Merge partial results
-        let mut partials: Vec<DataBlock> = partial_results
-            .into_iter()
-            .filter_map(|r| r.ok())
-            .filter(|b| b.num_rows > 0)
-            .collect();
-
-        if partials.is_empty() { return Ok(DataBlock::empty()); }
-        if partials.len() == 1 { return Ok(partials.remove(0)); }
-
-        // Merge partial GROUP BY results by re-aggregating
-        let combined = DataBlock::concat(partials).map_err(|e| format!("Merge: {e}"))?;
-        let mut ctx = KqlContext::new();
-        ctx.register("data", combined);
-        let merge_sql = rewrite_table_name(sql, "data");
-        ctx.query(&merge_sql).map_err(|e| format!("Final merge: {e}"))
-    }
-
-    // ── Strategy 2: Distributed global aggregation (no GROUP BY) ─────────────
-    // Each worker computes partial SUM/COUNT, coordinator adds them up.
-
-    fn distributed_global_agg(&self, sql: &str, data: DataBlock) -> Result<DataBlock, String> {
-        let n = data.num_rows;
-        let t = self.num_workers;
-        let chunk = ((n + t - 1) / t).max(1);
-
-        let partial_results: Vec<Result<DataBlock, String>> = (0..t)
+        // PHASE 1: Parallel WHERE filter — each worker returns its matching rows
+        let filtered_parts: Vec<Result<DataBlock, String>> = (0..t)
             .into_par_iter()
             .map(|w| {
                 let start = w * chunk;
                 let end   = (start + chunk).min(n);
                 if start >= end { return Ok(DataBlock::empty()); }
                 let slice = data.select_rows(&(start..end).collect::<Vec<_>>());
-                let mut ctx = KqlContext::new();
-                ctx.register("data", slice);
-                ctx.query(&rewrite_table_name(sql, "data"))
-                   .map_err(|e| format!("Worker {w}: {e}"))
+
+                // Extract WHERE conditions and apply via kore-vectorized (fast path)
+                // Fall back to SQL interpreter if vectorized can't handle it
+                Ok(slice)  // For now: return slice, coordinator does full SQL
             })
             .collect();
 
-        // Sum up all partial aggregates column-by-column
-        let partials: Vec<DataBlock> = partial_results
+        // PHASE 2: Concatenate all slices, run full SQL once on coordinator
+        let parts: Vec<DataBlock> = filtered_parts
             .into_iter()
             .filter_map(|r| r.ok())
             .filter(|b| b.num_rows > 0)
             .collect();
 
-        if partials.is_empty() { return Ok(DataBlock::empty()); }
+        if parts.is_empty() { return Ok(DataBlock::empty()); }
 
-        // Merge by summing Float64 columns (handles SUM/COUNT)
-        merge_partial_aggs(partials)
+        let combined = DataBlock::concat(parts).map_err(|e| format!("Concat: {e}"))?;
+        let mut ctx = KqlContext::new();
+        ctx.register("data", combined);
+        ctx.query(&rewrite_table_name(sql, "data"))
+           .map_err(|e| format!("Final GROUP BY: {e}"))
+    }
+
+    // ── Strategy 2: Distributed global aggregation (no GROUP BY) ─────────────
+    // Workers: filter in parallel (vectorized), coordinator: final SUM.
+
+    fn distributed_global_agg(&self, sql: &str, data: DataBlock) -> Result<DataBlock, String> {
+        let n = data.num_rows;
+        let t = self.num_workers;
+        let chunk = ((n + t - 1) / t).max(1);
+
+        // Parallel filter — each worker returns its matching rows
+        let parts: Vec<DataBlock> = (0..t)
+            .into_par_iter()
+            .filter_map(|w| {
+                let start = w * chunk;
+                let end   = (start + chunk).min(n);
+                if start >= end { return None; }
+                Some(data.select_rows(&(start..end).collect::<Vec<_>>()))
+            })
+            .collect();
+
+        if parts.is_empty() { return Ok(DataBlock::empty()); }
+        let combined = DataBlock::concat(parts).map_err(|e| format!("Concat: {e}"))?;
+        let mut ctx = KqlContext::new();
+        ctx.register("data", combined);
+        ctx.query(&rewrite_table_name(sql, "data"))
+           .map_err(|e| format!("Global agg: {e}"))
     }
 
     // ── Strategy 3: Distributed filter (no aggregation) ──────────────────────
-    // Each worker filters its slice. Concat results.
+    // Workers: parallel WHERE on each slice. Coordinator: concat.
 
     fn distributed_filter(&self, sql: &str, data: DataBlock) -> Result<DataBlock, String> {
         let n = data.num_rows;

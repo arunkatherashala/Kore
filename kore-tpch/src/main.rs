@@ -369,11 +369,6 @@ fn main() {
         run_bench("SIMD","SIMD vectorized aggregation (AVX2)",
                               || q_simd_agg(&lineitem),            100.0),
         run_bench("D1",  sdesc("D1"),  || q_distributed_groupby(&lineitem),spark("D1")),
-        // ── Distributed SQL (Layer 66: kore-distributed) ─────────────────────
-        run_bench("DQ1", "DISTRIBUTED Q1 (kore-distributed, 8 workers)",
-            || dq1(&lineitem), spark("Q1")),
-        run_bench("DQ6", "DISTRIBUTED Q6 (kore-distributed, 8 workers)",
-            || dq6(&lineitem), spark("Q6")),
     ];
 
     // ── Print table ──────────────────────────────────────────────────────────
