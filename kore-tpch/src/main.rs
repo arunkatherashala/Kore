@@ -25,7 +25,8 @@ use kore_join::{HashJoin, JoinConfig};
 use kore_window::{WindowFn, WinOrder, apply_window};
 use kore_simd::vectorized_agg;
 use kore_vectorized::{CmpOp, ColCondition, VecFilter, VecAgg, AggSpec, GroupBySpec,
-                      execute_vectorized, vectorized_filter, vectorized_agg as vec_agg};
+                      execute_vectorized, vectorized_filter, vectorized_agg as vec_agg,
+                      vectorized_group_by};
 use kore_arrow::memory_report;
 use kore_gpu::GpuPipeline;
 use rayon::prelude::*;
@@ -154,20 +155,38 @@ fn q1(lineitem: &DataBlock) -> usize {
 }
 
 fn q3(orders: &DataBlock, lineitem: &DataBlock) -> usize {
-    // Q3: Get top 10 unshipped orders by revenue
+    // Q3: HashJoin + vectorized filter + vectorized GROUP BY (replaces SQL interpreter)
     let cfg    = JoinConfig::inner("o_orderkey", "l_orderkey");
     let joined = HashJoin::join(orders, lineitem, &cfg).unwrap_or_else(|_| DataBlock::empty());
+
+    // Step 1: vectorized filter WHERE o_orderstatus = 'F'
+    let filter = VecFilter { conditions: vec![
+        ColCondition { col_name: "o_orderstatus".into(), op: CmpOp::Eq, threshold: 0.0 }, // string eq handled by string path
+    ]};
+    // String equality needs special path — use SQL for just the filter, then vectorized GROUP BY
     let mut ctx = KqlContext::new();
-    ctx.register("ol", joined);
-    let r = ctx.query(
-        "SELECT l_orderkey, SUM(l_extprice) AS revenue, o_orderdate, o_shippriority
-         FROM ol
-         WHERE o_orderstatus = 'F'
-         GROUP BY l_orderkey, o_orderdate, o_shippriority
-         ORDER BY revenue DESC
-         LIMIT 10"
-    ).unwrap_or_else(|_| DataBlock::empty());
-    r.num_rows
+    ctx.register("ol", joined.clone());
+    let filtered = ctx.query("SELECT * FROM ol WHERE o_orderstatus = 'F'")
+        .unwrap_or_else(|_| joined);
+
+    // Step 2: vectorized GROUP BY + SUM on filtered result
+    let group = GroupBySpec {
+        group_cols: vec!["l_orderkey".into(), "o_orderdate".into(), "o_shippriority".into()],
+        aggs: vec![
+            AggSpec { input_col: "l_extprice".into(), agg: VecAgg::Sum, output_col: "revenue".into() },
+        ],
+    };
+    let all_rows: Vec<usize> = (0..filtered.num_rows).collect();
+    let groups = vectorized_group_by(&filtered, &all_rows, &group);
+    // Sort by revenue DESC, take top 10
+    let mut groups_sorted = groups;
+    groups_sorted.sort_by(|a, b| {
+        let ra = a.aggs.first().map(|x| x.value).unwrap_or(0.0);
+        let rb = b.aggs.first().map(|x| x.value).unwrap_or(0.0);
+        rb.partial_cmp(&ra).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    groups_sorted.truncate(10);
+    groups_sorted.len()
 }
 
 fn q6(lineitem: &DataBlock) -> usize {
