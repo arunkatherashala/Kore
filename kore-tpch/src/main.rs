@@ -155,31 +155,82 @@ fn q1(lineitem: &DataBlock) -> usize {
 }
 
 fn q3(orders: &DataBlock, lineitem: &DataBlock) -> usize {
-    // Q3: HashJoin + fully vectorized filter + GROUP BY (no SQL interpreter at all)
-    let cfg    = JoinConfig::inner("o_orderkey", "l_orderkey");
-    let joined = HashJoin::join(orders, lineitem, &cfg).unwrap_or_else(|_| DataBlock::empty());
+    // Q3: Deferred-materialization join — no intermediate DataBlock allocation.
+    // Directly computes GROUP BY on (orders_row, lineitem_row) pairs using
+    // original tables, eliminating the 6M row × 17 column join materialization.
+    use std::collections::HashMap;
 
-    // Step 1: vectorized string equality filter WHERE o_orderstatus = 'F'
-    let filter = VecFilter { conditions: vec![
-        ColCondition { col_name: "o_orderstatus".into(), op: CmpOp::Eq, threshold: 0.0,
-                       str_value: Some("F".to_string()) },
-    ]};
-    let filtered_rows = vectorized_filter(&joined, &filter);
+    // Pre-extract columns from original tables (no copies)
+    let o_key    = orders.columns.iter().find(|c| c.name == "o_orderkey");
+    let o_status = orders.columns.iter().find(|c| c.name == "o_orderstatus");
+    let o_date   = orders.columns.iter().find(|c| c.name == "o_orderdate");
+    let o_prio   = orders.columns.iter().find(|c| c.name == "o_shippriority");
+    let l_key    = lineitem.columns.iter().find(|c| c.name == "l_orderkey");
+    let l_price  = lineitem.columns.iter().find(|c| c.name == "l_extprice");
 
-    // Step 2: vectorized GROUP BY + SUM on filtered rows (parallel, u128 FNV keys)
-    let group = GroupBySpec {
-        group_cols: vec!["l_orderkey".into(), "o_orderdate".into(), "o_shippriority".into()],
-        aggs: vec![
-            AggSpec { input_col: "l_extprice".into(), agg: VecAgg::Sum, output_col: "revenue".into() },
-        ],
+    let (o_keys, o_statuses, o_dates, o_prios) = match (o_key, o_status, o_date, o_prio) {
+        (Some(a), Some(b), Some(c), Some(d)) => {
+            match (&a.data, &b.data, &c.data, &d.data) {
+                (ColumnData::Int64(ak), ColumnData::Str(bs), ColumnData::Int64(cd), ColumnData::Int64(dp)) =>
+                    (ak, bs, cd, dp),
+                _ => return 0,
+            }
+        }
+        _ => return 0,
     };
-    let mut groups = vectorized_group_by(&joined, &filtered_rows, &group);
+    let (l_keys, l_prices) = match (l_key, l_price) {
+        (Some(k), Some(p)) => match (&k.data, &p.data) {
+            (ColumnData::Int64(kv), ColumnData::Float64(pv)) => (kv, pv),
+            _ => return 0,
+        },
+        _ => return 0,
+    };
+
+    // Build hash table: l_orderkey → list of lineitem row indices
+    let mut ht: HashMap<i64, Vec<usize>> = HashMap::with_capacity(lineitem.num_rows / 4);
+    for (i, k) in l_keys.iter().enumerate() {
+        if let Some(k) = k { ht.entry(*k).or_default().push(i); }
+    }
+
+    // Probe: orders WHERE o_orderstatus = 'F', compute GROUP BY directly
+    // Group key = (l_orderkey, o_orderdate, o_shippriority) encoded as u128
+    let mut group_sum:   HashMap<u128, f64>    = HashMap::new();
+    let mut group_first: HashMap<u128, (i64, i64, i64)> = HashMap::new(); // key → (lkey, odate, oprio)
+
+    for (ol, ok) in o_keys.iter().enumerate() {
+        // Filter: o_orderstatus = 'F'
+        if o_statuses.get(ol).and_then(|x| x.as_deref()) != Some("F") { continue; }
+        let ok = match ok { Some(v) => *v, None => continue };
+        let odate = o_dates.get(ol).and_then(|x| *x).unwrap_or(0);
+        let oprio = o_prios.get(ol).and_then(|x| *x).unwrap_or(0);
+
+        if let Some(line_rows) = ht.get(&ok) {
+            for &lr in line_rows {
+                let price = l_prices.get(lr).and_then(|x| *x).unwrap_or(0.0);
+                // Hash key = FNV mix of (l_orderkey=ok, o_orderdate=odate, o_shippriority=oprio)
+                let k: u128 = {
+                    let mut h: u128 = 0xcbf29ce484222325_cbf29ce484222325u128;
+                    for v in [ok as u64, odate as u64, oprio as u64] {
+                        h = h.wrapping_add(v as u128)
+                             .wrapping_mul(0x9e3779b97f4a7c15_f39cc0605cedc835u128)
+                             .rotate_left(31);
+                    }
+                    h
+                };
+                *group_sum.entry(k).or_insert(0.0) += price;
+                group_first.entry(k).or_insert((ok, odate, oprio));
+            }
+        }
+    }
+
     // Sort by revenue DESC, take top 10
-    groups.sort_by(|a, b| {
-        let ra = a.aggs.first().map(|x| x.value).unwrap_or(0.0);
-        let rb = b.aggs.first().map(|x| x.value).unwrap_or(0.0);
-        rb.partial_cmp(&ra).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    let mut groups: Vec<(f64, i64, i64, i64)> = group_sum.iter()
+        .map(|(k, &sum)| {
+            let (lk, od, op) = group_first[k];
+            (sum, lk, od, op)
+        })
+        .collect();
+    groups.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     groups.truncate(10);
     groups.len()
 }
