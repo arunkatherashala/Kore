@@ -1,0 +1,20 @@
+[package]
+name    = "kore-gpu"
+version = "0.1.0"
+edition = "2021"
+
+# GPU backend selection:
+#   default  → CPU SIMD fallback (no special hardware needed)
+#   cuda     → NVIDIA CUDA via cudarc (requires CUDA toolkit)
+#   wgpu     → WebGPU cross-platform (any GPU: NVIDIA/AMD/Apple/Intel)
+[features]
+default = []
+wgpu    = ["dep:wgpu"]
+cuda    = []  # reserved — wire up cudarc here
+
+[dependencies]
+kore-core = { workspace = true }
+rayon     = { workspace = true }
+serde     = { workspace = true }
+serde_json = { workspace = true }
+wgpu      = { version = "0.20", optional = true }

@@ -1,0 +1,9 @@
+[package]
+name    = "kore-vectorized"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kore-core = { workspace = true }
+kore-sql  = { workspace = true }
+rayon     = { workspace = true }

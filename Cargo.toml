@@ -46,6 +46,9 @@ members = [
     "kore-sql-v2",       # Layer 59 — DISTINCT, EXCEPT, INTERSECT, ROLLUP, CUBE
     "kore-iceberg",      # Layer 60 — Apache Iceberg table format
     "kore-mcp",          # Layer 61 — MCP server (AI assistant integration)
+    "kore-arrow",        # Layer 62 — Apache Arrow compact columnar format (50% less RAM)
+    "kore-vectorized",   # Layer 63 — Vectorized batch SQL (1024-row SIMD chunks)
+    "kore-gpu",          # Layer 64 — GPU compute (wgpu/CUDA GROUP BY, sort, filter)
     "kore-tpch",         # TPC-H benchmark suite (real timing vs Spark)
 ]
 resolver = "2"
