@@ -793,6 +793,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kore-mcp"
+version = "0.1.0"
+dependencies = [
+ "kore-core",
+ "kore-sql",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "kore-metrics"
 version = "0.1.0"
 dependencies = [
@@ -957,6 +968,7 @@ dependencies = [
  "kore-core",
  "kore-join",
  "kore-window",
+ "rayon",
  "serde",
  "serde_json",
  "thiserror",
