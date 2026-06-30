@@ -60,7 +60,9 @@ fn datablock_to_json(block: &DataBlock) -> String {
                 kore_core::Value::Str(s)   => serde_json::Value::String(s),
                 kore_core::Value::Null     => serde_json::Value::Null,
             };
-            obj.insert(col.name.clone(), jval);
+            // Strip table qualifier: "orders.total" → "total"
+            let key = col.name.rfind('.').map(|i| &col.name[i+1..]).unwrap_or(&col.name);
+            obj.insert(key.to_string(), jval);
         }
         rows.push(serde_json::Value::Object(obj));
     }

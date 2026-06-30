@@ -32,7 +32,8 @@ def _find_lib() -> ctypes.CDLL:
     search_dirs = [
         Path(__file__).parent,
         Path(__file__).parent / "target" / "release",
-        Path(__file__).parent / ".." / "kore" / "target" / "release",
+        Path(__file__).parent / ".." / "target" / "release",
+        Path(__file__).parent.parent / "target" / "release",
     ]
     for d in search_dirs:
         for name in names:
