@@ -1,232 +1,406 @@
 package com.kore;
 
-import java.lang.foreign.*;
-import java.lang.invoke.*;
+import java.io.*;
+import java.net.URI;
+import java.net.http.*;
+import java.net.http.HttpRequest.BodyPublishers;
+import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.file.*;
 import java.util.*;
 
 /**
- * KoreEngine — Java 21 + Panama (java.lang.foreign) bindings for the KORE engine.
+ * KoreClient -- Java bindings for the KORE engine via REST API (Java 11+).
  *
- * Requires: JDK 21+, libkore_ffi built with:
- *   cargo build --release -p kore-ffi
+ * Start the KORE API server first:
+ *   cargo run --release -p kore-api
  *
- * Usage:
- *   try (var kore = new KoreEngine()) {
- *       long block = kore.blockNew();
- *       kore.blockAddF64(block, "score", new double[]{1.0, 2.0, 3.0});
- *       long model = kore.modelNew(KoreEngine.ModelType.LINEAR_REGRESSOR, 0, 0);
- *       kore.modelFit(model, X_flat, nRows, nCols, y);
- *       double[] preds = kore.modelPredict(model, X_flat, nRows, nCols);
+ * Then use this client:
+ *   try (var kore = new KoreClient()) {
+ *       kore.loadCsv("sales", "/data/sales.csv");
+ *       var rows = kore.query("SELECT region, SUM(amount) FROM sales GROUP BY region");
+ *       rows.forEach(System.out::println);
  *   }
+ *
+ * Default server: http://localhost:3000  (override via KORE_API_URL env var)
+ *
+ * REST API contract:
+ *   POST /sql/load_csv   body: {"session":"<id>","table":"<name>","path":"<path>"}
+ *   POST /sql/query      body: {"session":"<id>","sql":"<query>"}
+ *   GET  /sql/row_count  body: {"session":"<id>","table":"<name>"}
+ *   POST /session/new    returns: {"session":"<id>"}
+ *   POST /session/free   body: {"session":"<id>"}
+ *   POST /ml/fit         body: {"session":"<id>","model_type":<int>,"param1":<int>,
+ *                               "param2":<int>,"x":[[...]],"y":[...]}
+ *   POST /ml/predict     body: {"session":"<id>","model_id":"<id>","x":[[...]]}
  */
-public class KoreEngine implements AutoCloseable {
+public final class KoreClient implements AutoCloseable {
 
-    // ── Model type constants ──────────────────────────────────────────────────
-    public static final class ModelType {
-        public static final int RF_REGRESSOR     = 0;
-        public static final int RF_CLASSIFIER    = 1;
-        public static final int GBM_REGRESSOR    = 2;
-        public static final int LINEAR_REGRESSOR = 3;
-        public static final int LOGISTIC         = 4;
-        public static final int KNN_REGRESSOR    = 5;
-        public static final int KNN_CLASSIFIER   = 6;
-        public static final int SVM              = 7;
+    // -------------------------------------------------------------------------
+    // Configuration
+    // -------------------------------------------------------------------------
+
+    private static final String DEFAULT_BASE_URL = "http://localhost:3000";
+
+    private final String   baseUrl;
+    private final HttpClient http;
+    private final String   sessionId;
+
+    // Model type constants (mirrors kore.h)
+    public static final int RF_REGRESSOR     = 0;
+    public static final int RF_CLASSIFIER    = 1;
+    public static final int GBM_REGRESSOR    = 2;
+    public static final int LINEAR_REGRESSOR = 3;
+    public static final int LOGISTIC         = 4;
+    public static final int KNN_REGRESSOR    = 5;
+    public static final int KNN_CLASSIFIER   = 6;
+    public static final int SVM              = 7;
+
+    // -------------------------------------------------------------------------
+    // Construction / lifecycle
+    // -------------------------------------------------------------------------
+
+    /** Connect to the default server URL from KORE_API_URL env var or localhost:3000. */
+    public KoreClient() throws IOException, InterruptedException {
+        this(resolveBaseUrl());
     }
 
-    private final Arena    arena;
-    private final Linker   linker;
-    private final SymbolLookup lookup;
-
-    // Method handles cached at construction time
-    private final MethodHandle mh_block_new;
-    private final MethodHandle mh_block_free;
-    private final MethodHandle mh_block_num_rows;
-    private final MethodHandle mh_block_num_cols;
-    private final MethodHandle mh_block_add_f64;
-    private final MethodHandle mh_block_add_i64;
-    private final MethodHandle mh_block_get_f64;
-    private final MethodHandle mh_hash_join;
-    private final MethodHandle mh_model_new;
-    private final MethodHandle mh_model_free;
-    private final MethodHandle mh_model_fit;
-    private final MethodHandle mh_model_predict;
-    private final MethodHandle mh_last_error;
-
-    public KoreEngine() {
-        this(findLibPath());
+    /** Connect to a specific server URL. */
+    public KoreClient(String baseUrl) throws IOException, InterruptedException {
+        this.baseUrl = baseUrl.replaceAll("/+$", "");
+        this.http    = HttpClient.newHttpClient();
+        this.sessionId = allocSession();
     }
 
-    public KoreEngine(String libPath) {
-        this.arena  = Arena.ofShared();
-        this.linker = Linker.nativeLinker();
-        this.lookup = SymbolLookup.libraryLookup(libPath, arena);
-
-        mh_block_new      = link("kore_block_new",  FunctionDescriptor.of(ValueLayout.ADDRESS));
-        mh_block_free     = link("kore_block_free", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
-        mh_block_num_rows = link("kore_block_num_rows", FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS));
-        mh_block_num_cols = link("kore_block_num_cols", FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
-        mh_block_add_f64  = link("kore_block_add_f64", FunctionDescriptor.of(ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
-        mh_block_add_i64  = link("kore_block_add_i64", FunctionDescriptor.of(ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
-        mh_block_get_f64  = link("kore_block_get_f64", FunctionDescriptor.of(ValueLayout.JAVA_LONG,
-            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
-        mh_hash_join      = link("kore_hash_join", FunctionDescriptor.of(ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
-        mh_model_new      = link("kore_model_new", FunctionDescriptor.of(ValueLayout.ADDRESS,
-            ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
-        mh_model_free     = link("kore_model_free", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
-        mh_model_fit      = link("kore_model_fit", FunctionDescriptor.of(ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS));
-        mh_model_predict  = link("kore_model_predict", FunctionDescriptor.of(ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS));
-        mh_last_error     = link("kore_last_error", FunctionDescriptor.of(ValueLayout.ADDRESS));
+    private static String resolveBaseUrl() {
+        String env = System.getenv("KORE_API_URL");
+        return (env != null && !env.isBlank()) ? env : DEFAULT_BASE_URL;
     }
 
-    private MethodHandle link(String name, FunctionDescriptor desc) {
-        return linker.downcallHandle(lookup.find(name).orElseThrow(
-            () -> new RuntimeException("Symbol not found: " + name)), desc);
+    private String allocSession() throws IOException, InterruptedException {
+        String body = post("/session/new", "{}");
+        return extractString(body, "session");
     }
 
-    // ── DataBlock API ─────────────────────────────────────────────────────────
-
-    public long blockNew() {
-        try { return ((MemorySegment) mh_block_new.invoke()).address(); }
-        catch (Throwable e) { throw new RuntimeException(e); }
-    }
-
-    public void blockFree(long ptr) {
-        try { mh_block_free.invoke(MemorySegment.ofAddress(ptr)); }
-        catch (Throwable e) { throw new RuntimeException(e); }
-    }
-
-    public long blockNumRows(long ptr) {
-        try { return (long) mh_block_num_rows.invoke(MemorySegment.ofAddress(ptr)); }
-        catch (Throwable e) { throw new RuntimeException(e); }
-    }
-
-    public int blockNumCols(long ptr) {
-        try { return (int) mh_block_num_cols.invoke(MemorySegment.ofAddress(ptr)); }
-        catch (Throwable e) { throw new RuntimeException(e); }
-    }
-
-    public void blockAddF64(long ptr, String col, double[] data) {
-        try (var tmp = Arena.ofConfined()) {
-            var nameSeg = tmp.allocateFrom(col);
-            var dataSeg = tmp.allocateFrom(ValueLayout.JAVA_DOUBLE, data);
-            int rc = (int) mh_block_add_f64.invoke(
-                MemorySegment.ofAddress(ptr), nameSeg, dataSeg, (long) data.length);
-            if (rc != 0) throw new RuntimeException("kore_block_add_f64 failed: " + lastError());
-        } catch (Throwable e) { throw new RuntimeException(e); }
-    }
-
-    public void blockAddI64(long ptr, String col, long[] data) {
-        try (var tmp = Arena.ofConfined()) {
-            var nameSeg = tmp.allocateFrom(col);
-            var dataSeg = tmp.allocateFrom(ValueLayout.JAVA_LONG, data);
-            int rc = (int) mh_block_add_i64.invoke(
-                MemorySegment.ofAddress(ptr), nameSeg, dataSeg, (long) data.length);
-            if (rc != 0) throw new RuntimeException("kore_block_add_i64 failed: " + lastError());
-        } catch (Throwable e) { throw new RuntimeException(e); }
-    }
-
-    public double[] blockGetF64(long ptr, String col) {
-        long n = blockNumRows(ptr);
-        try (var tmp = Arena.ofConfined()) {
-            var colSeg = tmp.allocateFrom(col);
-            var outSeg = tmp.allocate(ValueLayout.JAVA_DOUBLE, n);
-            long read  = (long) mh_block_get_f64.invoke(
-                MemorySegment.ofAddress(ptr), colSeg, outSeg, n);
-            if (read < 0) throw new RuntimeException("kore_block_get_f64: " + lastError());
-            double[] result = new double[(int) read];
-            for (int i = 0; i < read; i++) result[i] = outSeg.getAtIndex(ValueLayout.JAVA_DOUBLE, i);
-            return result;
-        } catch (Throwable e) { throw new RuntimeException(e); }
-    }
-
-    // ── HashJoin ──────────────────────────────────────────────────────────────
-
-    /** how: 0=INNER 1=LEFT 2=FULL. Returns handle to new block (caller must free). */
-    public long hashJoin(long left, long right, String lk, String rk, int how) {
-        try (var tmp = Arena.ofConfined()) {
-            var lkSeg = tmp.allocateFrom(lk);
-            var rkSeg = tmp.allocateFrom(rk);
-            MemorySegment res = (MemorySegment) mh_hash_join.invoke(
-                MemorySegment.ofAddress(left), MemorySegment.ofAddress(right),
-                lkSeg, rkSeg, how);
-            if (res.address() == 0) throw new RuntimeException("hash_join: " + lastError());
-            return res.address();
-        } catch (Throwable e) { throw new RuntimeException(e); }
-    }
-
-    // ── ML Models ─────────────────────────────────────────────────────────────
-
-    public long modelNew(int type, int p1, int p2) {
+    @Override
+    public void close() {
         try {
-            MemorySegment ptr = (MemorySegment) mh_model_new.invoke(type, p1, p2);
-            if (ptr.address() == 0) throw new RuntimeException("model_new: " + lastError());
-            return ptr.address();
-        } catch (Throwable e) { throw new RuntimeException(e); }
+            post("/session/free", jsonObject("session", sessionId));
+        } catch (Exception ignored) {}
     }
 
-    public void modelFree(long ptr) {
-        try { mh_model_free.invoke(MemorySegment.ofAddress(ptr)); }
-        catch (Throwable e) { throw new RuntimeException(e); }
+    // -------------------------------------------------------------------------
+    // SQL Session API
+    // -------------------------------------------------------------------------
+
+    /**
+     * Register a CSV file as a named table in this session.
+     *
+     * @param table logical table name
+     * @param path  path visible to the server process
+     */
+    public void loadCsv(String table, String path) throws IOException, InterruptedException {
+        String payload = "{"
+            + "\"session\":" + jsonStr(sessionId) + ","
+            + "\"table\":"   + jsonStr(table)     + ","
+            + "\"path\":"    + jsonStr(path)
+            + "}";
+        String resp = post("/sql/load_csv", payload);
+        checkOk(resp);
     }
 
-    /** x_flat: row-major double[], length = nRows * nCols */
-    public void modelFit(long ptr, double[] x_flat, long nRows, long nCols, double[] y) {
-        try (var tmp = Arena.ofConfined()) {
-            var xSeg = tmp.allocateFrom(ValueLayout.JAVA_DOUBLE, x_flat);
-            var ySeg = tmp.allocateFrom(ValueLayout.JAVA_DOUBLE, y);
-            int rc = (int) mh_model_fit.invoke(
-                MemorySegment.ofAddress(ptr), xSeg, nRows, nCols, ySeg);
-            if (rc != 0) throw new RuntimeException("model_fit: " + lastError());
-        } catch (Throwable e) { throw new RuntimeException(e); }
+    /**
+     * Load a list of maps as a named table.
+     *
+     * The data is serialised to JSON and sent to the server, which materialises
+     * it as a table without requiring a file on disk.
+     *
+     * @param table logical table name
+     * @param rows  list of column-name -> value maps
+     */
+    public void loadTable(String table, List<Map<String, Object>> rows)
+            throws IOException, InterruptedException {
+        if (rows == null || rows.isEmpty())
+            throw new IllegalArgumentException("rows must not be empty");
+        String payload = "{"
+            + "\"session\":"  + jsonStr(sessionId)  + ","
+            + "\"table\":"    + jsonStr(table)       + ","
+            + "\"rows\":"     + toJsonArray(rows)
+            + "}";
+        String resp = post("/sql/load_table", payload);
+        checkOk(resp);
     }
 
-    public double[] modelPredict(long ptr, double[] x_flat, long nRows, long nCols) {
-        try (var tmp = Arena.ofConfined()) {
-            var xSeg   = tmp.allocateFrom(ValueLayout.JAVA_DOUBLE, x_flat);
-            var outSeg = tmp.allocate(ValueLayout.JAVA_DOUBLE, nRows);
-            int rc = (int) mh_model_predict.invoke(
-                MemorySegment.ofAddress(ptr), xSeg, nRows, nCols, outSeg);
-            if (rc != 0) throw new RuntimeException("model_predict: " + lastError());
-            double[] result = new double[(int) nRows];
-            for (int i = 0; i < nRows; i++) result[i] = outSeg.getAtIndex(ValueLayout.JAVA_DOUBLE, i);
-            return result;
-        } catch (Throwable e) { throw new RuntimeException(e); }
+    /**
+     * Execute a SQL query and return results as a list of maps.
+     *
+     * @param sql SQL statement to execute
+     * @return ordered list of row maps (column name -> value)
+     */
+    public List<Map<String, Object>> query(String sql)
+            throws IOException, InterruptedException {
+        String payload = "{"
+            + "\"session\":" + jsonStr(sessionId) + ","
+            + "\"sql\":"     + jsonStr(sql)
+            + "}";
+        String resp = post("/sql/query", payload);
+        return parseJsonArray(resp);
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    public String lastError() {
-        try {
-            MemorySegment seg = (MemorySegment) mh_last_error.invoke();
-            return seg.address() == 0 ? null : seg.reinterpret(1024).getString(0);
-        } catch (Throwable e) { return e.getMessage(); }
+    /**
+     * Return the row count of a named table.
+     *
+     * @param table logical table name
+     * @return number of rows
+     */
+    public long rowCount(String table) throws IOException, InterruptedException {
+        String payload = "{"
+            + "\"session\":" + jsonStr(sessionId) + ","
+            + "\"table\":"   + jsonStr(table)
+            + "}";
+        String resp = post("/sql/row_count", payload);
+        return parseLong(resp, "count");
     }
 
-    @Override public void close() { arena.close(); }
+    // -------------------------------------------------------------------------
+    // ML API
+    // -------------------------------------------------------------------------
 
-    private static String findLibPath() {
-        String env = System.getenv("KORE_LIB");
-        if (env != null) return env;
-        String os  = System.getProperty("os.name").toLowerCase();
-        String ext  = os.contains("win") ? ".dll" : os.contains("mac") ? ".dylib" : ".so";
-        String pre  = os.contains("win") ? "" : "lib";
-        Path   root = Path.of(System.getProperty("user.dir"));
-        // try to find target/release relative to cwd or parent dirs
-        for (int i = 0; i < 5; i++) {
-            Path p = root.resolve("target/release/" + pre + "kore_ffi" + ext);
-            if (Files.exists(p)) return p.toString();
-            Path parent = root.getParent();
-            if (parent == null) break;
-            root = parent;
+    /**
+     * Train a model and return an opaque model ID.
+     *
+     * @param modelType one of the model type constants (e.g. LINEAR_REGRESSOR)
+     * @param param1    model-specific parameter (e.g. n_trees)
+     * @param param2    model-specific parameter (e.g. max_depth)
+     * @param x         feature matrix as list-of-rows
+     * @param y         label vector
+     * @return server-assigned model ID for use in predict()
+     */
+    public String fit(int modelType, int param1, int param2,
+                      List<List<Double>> x, List<Double> y)
+            throws IOException, InterruptedException {
+        String payload = "{"
+            + "\"session\":"    + jsonStr(sessionId)       + ","
+            + "\"model_type\":" + modelType                + ","
+            + "\"param1\":"     + param1                   + ","
+            + "\"param2\":"     + param2                   + ","
+            + "\"x\":"          + toJsonMatrix(x)          + ","
+            + "\"y\":"          + toJsonDoubleArray(y)
+            + "}";
+        String resp = post("/ml/fit", payload);
+        return extractString(resp, "model_id");
+    }
+
+    /**
+     * Run inference with a previously trained model.
+     *
+     * @param modelId model ID returned by fit()
+     * @param x       feature matrix as list-of-rows
+     * @return predicted values
+     */
+    public List<Double> predict(String modelId, List<List<Double>> x)
+            throws IOException, InterruptedException {
+        String payload = "{"
+            + "\"session\":"  + jsonStr(sessionId) + ","
+            + "\"model_id\":" + jsonStr(modelId)   + ","
+            + "\"x\":"        + toJsonMatrix(x)
+            + "}";
+        String resp = post("/ml/predict", payload);
+        return parseDoubleArray(resp);
+    }
+
+    // -------------------------------------------------------------------------
+    // HTTP helpers (no third-party JSON library required)
+    // -------------------------------------------------------------------------
+
+    private String post(String path, String jsonBody)
+            throws IOException, InterruptedException {
+        HttpRequest req = HttpRequest.newBuilder()
+            .uri(URI.create(baseUrl + path))
+            .header("Content-Type", "application/json")
+            .POST(BodyPublishers.ofString(jsonBody))
+            .build();
+        HttpResponse<String> resp = http.send(req, BodyHandlers.ofString());
+        if (resp.statusCode() >= 400) {
+            throw new IOException(
+                "KORE API error " + resp.statusCode() + " on " + path
+                + ": " + resp.body()
+            );
         }
-        throw new RuntimeException(
-            "libkore_ffi not found. Build with: cargo build --release -p kore-ffi"
-        );
+        return resp.body();
+    }
+
+    private static void checkOk(String json) throws IOException {
+        if (json.contains("\"error\"")) {
+            String msg = extractString(json, "error");
+            throw new IOException("KORE error: " + msg);
+        }
+    }
+
+    /** Minimal JSON string extraction without a full parser. */
+    private static String extractString(String json, String key) {
+        String marker = "\"" + key + "\":\"";
+        int start = json.indexOf(marker);
+        if (start < 0) return "";
+        start += marker.length();
+        int end = json.indexOf('"', start);
+        return end < 0 ? json.substring(start) : json.substring(start, end);
+    }
+
+    private static long parseLong(String json, String key) {
+        String marker = "\"" + key + "\":";
+        int start = json.indexOf(marker);
+        if (start < 0) return -1;
+        start += marker.length();
+        int end = start;
+        while (end < json.length() && (Character.isDigit(json.charAt(end)) || json.charAt(end) == '-'))
+            end++;
+        try { return Long.parseLong(json.substring(start, end)); }
+        catch (NumberFormatException e) { return -1; }
+    }
+
+    /** Very small JSON array-of-objects parser: handles string and number values. */
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> parseJsonArray(String json) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        // Minimal tokeniser -- sufficient for flat row objects
+        int i = json.indexOf('[');
+        if (i < 0) return result;
+        while ((i = json.indexOf('{', i)) >= 0) {
+            int end = json.indexOf('}', i);
+            if (end < 0) break;
+            String obj = json.substring(i + 1, end);
+            Map<String, Object> row = new LinkedHashMap<>();
+            int pos = 0;
+            while (pos < obj.length()) {
+                int ks = obj.indexOf('"', pos);
+                if (ks < 0) break;
+                int ke = obj.indexOf('"', ks + 1);
+                if (ke < 0) break;
+                String k = obj.substring(ks + 1, ke);
+                int colon = obj.indexOf(':', ke);
+                if (colon < 0) break;
+                int vs = colon + 1;
+                while (vs < obj.length() && obj.charAt(vs) == ' ') vs++;
+                Object val;
+                if (obj.charAt(vs) == '"') {
+                    int ve = obj.indexOf('"', vs + 1);
+                    val = ve < 0 ? "" : obj.substring(vs + 1, ve);
+                    pos = ve < 0 ? obj.length() : ve + 1;
+                } else {
+                    int ve = vs;
+                    while (ve < obj.length() && ",}".indexOf(obj.charAt(ve)) < 0) ve++;
+                    String raw = obj.substring(vs, ve).trim();
+                    try { val = raw.contains(".") ? Double.parseDouble(raw) : Long.parseLong(raw); }
+                    catch (NumberFormatException e) { val = raw; }
+                    pos = ve + 1;
+                }
+                row.put(k, val);
+            }
+            result.add(row);
+            i = end + 1;
+        }
+        return result;
+    }
+
+    private static List<Double> parseDoubleArray(String json) {
+        List<Double> out = new ArrayList<>();
+        int i = json.indexOf('[');
+        if (i < 0) return out;
+        int end = json.lastIndexOf(']');
+        if (end <= i) return out;
+        for (String tok : json.substring(i + 1, end).split(",")) {
+            try { out.add(Double.parseDouble(tok.trim())); } catch (NumberFormatException ignored) {}
+        }
+        return out;
+    }
+
+    // -------------------------------------------------------------------------
+    // Minimal JSON serialisation (no third-party libs)
+    // -------------------------------------------------------------------------
+
+    private static String jsonStr(String s) {
+        return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"")
+                       .replace("\n", "\\n").replace("\r", "\\r") + "\"";
+    }
+
+    private static String jsonObject(String key, String value) {
+        return "{" + jsonStr(key) + ":" + jsonStr(value) + "}";
+    }
+
+    private static String toJsonArray(List<Map<String, Object>> rows) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < rows.size(); i++) {
+            if (i > 0) sb.append(",");
+            sb.append("{");
+            boolean first = true;
+            for (Map.Entry<String, Object> e : rows.get(i).entrySet()) {
+                if (!first) sb.append(",");
+                first = false;
+                sb.append(jsonStr(e.getKey())).append(":");
+                Object v = e.getValue();
+                if (v instanceof String) sb.append(jsonStr((String) v));
+                else sb.append(v);
+            }
+            sb.append("}");
+        }
+        return sb.append("]").toString();
+    }
+
+    private static String toJsonMatrix(List<List<Double>> m) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < m.size(); i++) {
+            if (i > 0) sb.append(",");
+            sb.append(toJsonDoubleArray(m.get(i)));
+        }
+        return sb.append("]").toString();
+    }
+
+    private static String toJsonDoubleArray(List<Double> arr) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < arr.size(); i++) {
+            if (i > 0) sb.append(",");
+            sb.append(arr.get(i));
+        }
+        return sb.append("]").toString();
+    }
+
+    // -------------------------------------------------------------------------
+    // Demo main
+    // -------------------------------------------------------------------------
+
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== KORE Java REST client demo ===\n");
+        System.out.println("Connecting to " + resolveBaseUrl() + " ...");
+
+        try (KoreClient kore = new KoreClient()) {
+            // Load inline table
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (int i = 1; i <= 5; i++) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id",    i);
+                row.put("value", i * 10.0);
+                rows.add(row);
+            }
+            kore.loadTable("nums", rows);
+            System.out.println("Loaded 'nums' table (" + kore.rowCount("nums") + " rows)");
+
+            // SQL query
+            var result = kore.query("SELECT SUM(value) AS total FROM nums");
+            System.out.println("SELECT SUM(value): " + result);
+
+            // ML: linear regression
+            List<List<Double>> X = List.of(
+                List.of(1.0), List.of(2.0), List.of(3.0), List.of(4.0)
+            );
+            List<Double> y = List.of(2.0, 4.0, 6.0, 8.0);
+            String modelId = kore.fit(LINEAR_REGRESSOR, 0, 0, X, y);
+            System.out.println("Trained model ID: " + modelId);
+
+            List<List<Double>> Xtest = List.of(List.of(5.0), List.of(6.0));
+            var preds = kore.predict(modelId, Xtest);
+            System.out.println("Predictions for x=5,6: " + preds);
+        }
+
+        System.out.println("\nDone.");
     }
 }

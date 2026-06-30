@@ -63,6 +63,56 @@ KoreModel* kore_model_new(int model_type, int param1, int param2);
 void       kore_model_free(KoreModel* model);
 
 /** Fit model on x_flat (row-major, n_rows × n_cols) and y (n_rows). */
+int     kore_model_fit(KoreModel* model, const double* x_flat,
+                        uint64_t n_rows, uint64_t n_cols, const double* y);
+/** Predict. out must hold n_rows doubles. Returns 0 on success. */
+int     kore_model_predict(KoreModel* model, const double* x_flat,
+                            uint64_t n_rows, uint64_t n_cols, double* out);
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * SQL SESSION API  —  High-level query interface
+ * One session = one in-memory database.
+ * Supported by all language bindings (Python, Java, Node.js, Go, C#, R, Ruby).
+ * ══════════════════════════════════════════════════════════════════════════ */
+typedef struct KoreSession KoreSession;
+
+/** Create a new SQL session.  Must be freed with kore_session_free. */
+KoreSession* kore_session_new(void);
+
+/** Free a session. */
+void kore_session_free(KoreSession* sess);
+
+/** Load a CSV file as a named table.  Returns 0 on success. */
+int kore_session_load_csv(KoreSession* sess,
+                           const char* table_name, const char* path);
+
+/** Register an existing DataBlock as a named table (copies data). */
+int kore_session_register_block(KoreSession* sess,
+                                 const char* table_name,
+                                 const KoreBlock* block);
+
+/**
+ * Execute a SQL query.
+ * Returns a heap-allocated JSON string (UTF-8, null-terminated).
+ * Caller MUST free the string with kore_free_string().
+ * Returns NULL on error — check kore_last_error().
+ *
+ * Example result: [{"id":1,"name":"Alice","score":95.5}, ...]
+ */
+char* kore_session_query(KoreSession* sess, const char* sql);
+
+/** Return row count of a table, or -1 if not found. */
+int64_t kore_session_row_count(const KoreSession* sess, const char* table_name);
+
+/** Free a string returned by kore_session_query. */
+void kore_free_string(char* s);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* KORE_H */
+
 int kore_model_fit(KoreModel* model,
                    const double* x_flat, uint64_t n_rows, uint64_t n_cols,
                    const double* y);

@@ -12,5 +12,8 @@ kore-core  = { workspace = true }
 kore-join  = { workspace = true }
 kore-ml2   = { workspace = true }
 kore-ml3   = { workspace = true }
+kore-sql   = { workspace = true }
+kore-io    = { workspace = true }
+serde_json = { workspace = true }
 thiserror  = { workspace = true }
 libc       = { workspace = true }

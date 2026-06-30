@@ -1129,10 +1129,13 @@ name = "kore-ffi"
 version = "0.1.0"
 dependencies = [
  "kore-core",
+ "kore-io",
  "kore-join",
  "kore-ml2",
  "kore-ml3",
+ "kore-sql",
  "libc",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 

@@ -255,3 +255,169 @@ pub unsafe extern "C" fn kore_model_predict(
     0
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  SQL SESSION API  —  Universal query interface for all language bindings
+//  Same logic as kore-python but exposed through the unified kore_ffi library.
+//  All 7 languages (Python, Java, Node.js, Go, C#, R, Ruby) use these calls.
+// ══════════════════════════════════════════════════════════════════════════════
+
+use kore_sql::KqlContext;
+
+pub struct KoreSession {
+    ctx: KqlContext,
+}
+
+/// Create a new SQL session.  Returns an opaque handle; free with kore_session_free.
+#[no_mangle]
+pub extern "C" fn kore_session_new() -> *mut KoreSession {
+    Box::into_raw(Box::new(KoreSession { ctx: KqlContext::new() }))
+}
+
+/// Free a session created by kore_session_new.
+#[no_mangle]
+pub unsafe extern "C" fn kore_session_free(ptr: *mut KoreSession) {
+    if !ptr.is_null() { drop(Box::from_raw(ptr)); }
+}
+
+/// Load a CSV file as a named table.  Returns 0 on success, -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn kore_session_load_csv(
+    sess:  *mut KoreSession,
+    table: *const c_char,
+    path:  *const c_char,
+) -> c_int {
+    let s = match (ptr_to_str(table), ptr_to_str(path)) {
+        (Some(t), Some(p)) => (t, p),
+        _ => { set_error("null pointer in kore_session_load_csv"); return -1; }
+    };
+    if sess.is_null() { set_error("null session"); return -1; }
+    match load_csv_into(&mut (*sess).ctx, s.0, s.1) {
+        Ok(_)  => 0,
+        Err(e) => { set_error(e); -1 }
+    }
+}
+
+/// Register a DataBlock as a named table inside a session.
+/// The session takes a COPY of the block data.
+#[no_mangle]
+pub unsafe extern "C" fn kore_session_register_block(
+    sess:  *mut KoreSession,
+    table: *const c_char,
+    block: *const KoreBlock,
+) -> c_int {
+    if sess.is_null() || block.is_null() { return -1; }
+    let name = match ptr_to_str(table) { Some(s) => s, None => return -1 };
+    (*sess).ctx.register(name, (*block).inner.clone());
+    0
+}
+
+/// Execute a SQL query and return the result as a JSON UTF-8 string.
+/// The caller MUST free the returned string with kore_free_string.
+/// Returns NULL on error (check kore_last_error()).
+#[no_mangle]
+pub unsafe extern "C" fn kore_session_query(
+    sess: *mut KoreSession,
+    sql:  *const c_char,
+) -> *mut c_char {
+    if sess.is_null() { set_error("null session"); return std::ptr::null_mut(); }
+    let sql_str = match ptr_to_str(sql) { Some(s) => s, None => { set_error("null sql"); return std::ptr::null_mut(); } };
+    match kore_sql::query(sql_str, &(*sess).ctx) {
+        Ok(block)  => {
+            let json = block_to_json_stripped(&block);
+            CString::new(json).map(|cs| cs.into_raw()).unwrap_or(std::ptr::null_mut())
+        }
+        Err(e) => { set_error(format!("{e}")); std::ptr::null_mut() }
+    }
+}
+
+/// Return the row count of a registered table, or -1 if not found.
+#[no_mangle]
+pub unsafe extern "C" fn kore_session_row_count(
+    sess:  *const KoreSession,
+    table: *const c_char,
+) -> i64 {
+    if sess.is_null() { return -1; }
+    let name = match ptr_to_str(table) { Some(s) => s, None => return -1 };
+    (*sess).ctx.get(name).map(|b| b.num_rows as i64).unwrap_or(-1)
+}
+
+/// Free a string returned by kore_session_query.
+#[no_mangle]
+pub unsafe extern "C" fn kore_free_string(s: *mut c_char) {
+    if !s.is_null() { drop(CString::from_raw(s)); }
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+unsafe fn ptr_to_str<'a>(p: *const c_char) -> Option<&'a str> {
+    if p.is_null() { return None; }
+    CStr::from_ptr(p).to_str().ok()
+}
+
+fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(), String> {
+    use std::io::{BufRead, BufReader};
+    let file = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+    let mut lines = BufReader::new(file).lines();
+    let header = lines.next().ok_or("empty")?.map_err(|e| e.to_string())?;
+    let headers: Vec<String> = header.split(',').map(|h| h.trim().trim_matches('"').to_string()).collect();
+    let nc = headers.len();
+    let mut raw: Vec<Vec<String>> = vec![vec![]; nc];
+    for line in lines.flatten() {
+        let vals: Vec<&str> = line.splitn(nc, ',').collect();
+        for (i, v) in vals.iter().enumerate() {
+            if i < nc { raw[i].push(v.trim().trim_matches('"').to_string()); }
+        }
+        for i in vals.len()..nc { raw[i].push(String::new()); }
+    }
+    let nr = raw[0].len();
+    let mut columns = vec![];
+    for (i, name) in headers.iter().enumerate() {
+        let vals = &raw[i];
+        // Try i64
+        let as_i64: Option<Vec<Option<i64>>> = vals.iter().map(|v| {
+            if v.is_empty() { Some(None) } else { v.parse::<i64>().ok().map(Some) }
+        }).collect();
+        if let Some(v) = as_i64 {
+            columns.push(Column { name: name.clone(), data: ColumnData::Int64(v) });
+            continue;
+        }
+        // Try f64
+        let as_f64: Option<Vec<Option<f64>>> = vals.iter().map(|v| {
+            if v.is_empty() { Some(None) } else { v.parse::<f64>().ok().map(Some) }
+        }).collect();
+        if let Some(v) = as_f64 {
+            columns.push(Column { name: name.clone(), data: ColumnData::Float64(v) });
+            continue;
+        }
+        // Str
+        columns.push(Column {
+            name: name.clone(),
+            data: ColumnData::Str(vals.iter().map(|v| if v.is_empty() { None } else { Some(v.clone()) }).collect()),
+        });
+    }
+    let block = DataBlock { columns, num_rows: nr };
+    ctx.register(table_name, block);
+    Ok(())
+}
+
+fn block_to_json_stripped(block: &DataBlock) -> String {
+    let mut rows = vec![];
+    for r in 0..block.num_rows {
+        let mut obj = serde_json::Map::new();
+        for col in &block.columns {
+            let key = col.name.rfind('.').map(|i| &col.name[i+1..]).unwrap_or(&col.name).to_string();
+            let val = col.data.get_value(r);
+            let jv = match val {
+                kore_core::Value::Int(i)   => serde_json::json!(i),
+                kore_core::Value::Float(f) => serde_json::json!(f),
+                kore_core::Value::Bool(b)  => serde_json::json!(b),
+                kore_core::Value::Str(s)   => serde_json::json!(s),
+                kore_core::Value::Null     => serde_json::Value::Null,
+            };
+            obj.insert(key, jv);
+        }
+        rows.push(serde_json::Value::Object(obj));
+    }
+    serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
+}
+
