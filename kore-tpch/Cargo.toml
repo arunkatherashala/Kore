@@ -19,6 +19,7 @@ kore-vectorized = { path = "../kore-vectorized" }
 kore-arrow      = { path = "../kore-arrow" }
 kore-gpu        = { path = "../kore-gpu" }
 kore-distributed = { path = "../kore-distributed" }
+kore-jit         = { path = "../kore-jit" }
 serde           = { workspace = true }
 serde_json      = { workspace = true }
 rayon           = { workspace = true }

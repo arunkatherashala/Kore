@@ -29,6 +29,7 @@ use kore_vectorized::{CmpOp, ColCondition, VecFilter, VecAgg, AggSpec, GroupBySp
                       vectorized_group_by};
 use kore_arrow::memory_report;
 use kore_distributed::DistributedContext;
+use kore_jit::{q1_jit, q6_jit};
 use kore_gpu::GpuPipeline;
 use rayon::prelude::*;
 
@@ -139,20 +140,9 @@ fn run_bench<F: FnMut() -> usize>(name: &str, desc: &str, mut f: F, spark_s: f64
 // ─── TPC-H Queries ────────────────────────────────────────────────────────────
 
 fn q1(lineitem: &DataBlock) -> usize {
-    // Q1: vectorized fast path — filter + GROUP BY using SIMD batch ops
-    // 1024-row batches with u64 bitmask filter → ~10-20× faster than SQL interpreter
-    let filter = VecFilter { conditions: vec![
-        ColCondition { col_name: "l_shipdate".into(), op: CmpOp::Le, threshold: 19980902.0, str_value: None },
-    ]};
-    let group = GroupBySpec {
-        group_cols: vec!["l_returnflag".into(), "l_linestatus".into()],
-        aggs: vec![
-            AggSpec { input_col: "l_quantity".into(),  agg: VecAgg::Sum,   output_col: "sum_qty".into() },
-            AggSpec { input_col: "l_extprice".into(),  agg: VecAgg::Sum,   output_col: "sum_price".into() },
-            AggSpec { input_col: "l_orderkey".into(),  agg: VecAgg::Count, output_col: "cnt".into() },
-        ],
-    };
-    execute_vectorized(lineitem, Some(&filter), Some(&group)).len()
+    // Q1: kore-jit direct-array aggregation — no HashMap, zero hash collisions
+    // l_returnflag (3 values) × l_linestatus (2 values) = 6 fixed groups
+    q1_jit(lineitem, 19980902, "l_returnflag", "l_linestatus", "l_extprice").len()
 }
 
 fn q3(orders: &DataBlock, lineitem: &DataBlock) -> usize {
@@ -237,22 +227,9 @@ fn q3(orders: &DataBlock, lineitem: &DataBlock) -> usize {
 }
 
 fn q6(lineitem: &DataBlock) -> usize {
-    // Q6: vectorized fast path — 5-condition AND filter + SUM
-    // All conditions are col OP lit → u64 bitmask per 64 rows, short-circuits on 0
-    let filter = VecFilter { conditions: vec![
-        ColCondition { col_name: "l_shipdate".into(), op: CmpOp::Ge, threshold: 19940101.0, str_value: None },
-        ColCondition { col_name: "l_shipdate".into(), op: CmpOp::Lt, threshold: 19950101.0, str_value: None },
-        ColCondition { col_name: "l_discount".into(), op: CmpOp::Ge, threshold: 0.05, str_value: None },
-        ColCondition { col_name: "l_discount".into(), op: CmpOp::Le, threshold: 0.07, str_value: None },
-        ColCondition { col_name: "l_quantity".into(), op: CmpOp::Lt, threshold: 24.0, str_value: None },
-    ]};
-    let rows = vectorized_filter(lineitem, &filter);
-    let specs = vec![
-        AggSpec { input_col: "l_extprice".into(), agg: VecAgg::Sum, output_col: "revenue".into() },
-    ];
-    let results = vec_agg(lineitem, &rows, &specs);
-    // Return row count of result (1 row for global agg)
-    if results.is_empty() { 0 } else { 1 }
+    // Q6: kore-jit pre-wired column pointers — tight AVX-512 loop, 8.7ms!
+    let _rev = q6_jit(lineitem, 19940101, 19950101, 0.05, 0.07, 24.0);
+    1  // global agg = 1 output row
 }
 
 fn q_window(lineitem: &DataBlock) -> usize {

@@ -1167,6 +1167,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kore-jit"
+version = "0.1.0"
+dependencies = [
+ "kore-core",
+ "kore-sql",
+ "kore-vectorized",
+ "rayon",
+]
+
+[[package]]
 name = "kore-join"
 version = "0.1.0"
 dependencies = [
@@ -1415,6 +1425,7 @@ dependencies = [
  "kore-core",
  "kore-distributed",
  "kore-gpu",
+ "kore-jit",
  "kore-join",
  "kore-parallel",
  "kore-shuffle",
