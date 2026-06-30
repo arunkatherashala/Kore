@@ -107,6 +107,7 @@ fn cell_key(data: &ColumnData, row: usize) -> Option<u64> {
         ColumnData::Float64(v) => v.get(row).and_then(|x| *x).map(|f| f.to_bits()),
         ColumnData::Bool(v)    => v.get(row).and_then(|x| *x).map(|b| b as u64),
         ColumnData::Str(v)     => v.get(row).and_then(|x| x.as_deref()).map(fnv1a_str),
+        ColumnData::StrDict { codes, dict } => codes.get(row).and_then(|&c| if c == u8::MAX { None } else { dict.get(c as usize) }).map(|s| fnv1a_str(s)),
     }
 }
 
@@ -116,6 +117,7 @@ fn str_key(data: &ColumnData, row: usize) -> Option<String> {
         ColumnData::Float64(v) => v.get(row).and_then(|x| *x).map(|f| format!("{f:.10}")),
         ColumnData::Bool(v)    => v.get(row).and_then(|x| *x).map(|b| b.to_string()),
         ColumnData::Str(v)     => v.get(row).and_then(|x| x.clone()),
+        ColumnData::StrDict { codes, dict } => codes.get(row).and_then(|&c| if c == u8::MAX { None } else { dict.get(c as usize).cloned() }),
     }
 }
 
@@ -223,6 +225,10 @@ fn select_col(col: &Column, indices: &[usize]) -> Column {
         ColumnData::Float64(v) => ColumnData::Float64(indices.iter().map(|&i| v.get(i).copied().flatten()).collect()),
         ColumnData::Bool(v)    => ColumnData::Bool   (indices.iter().map(|&i| v.get(i).copied().flatten()).collect()),
         ColumnData::Str(v)     => ColumnData::Str    (indices.iter().map(|&i| v.get(i).cloned().flatten()).collect()),
+        ColumnData::StrDict { codes, dict } => ColumnData::StrDict {
+            codes: indices.iter().map(|&i| codes.get(i).copied().unwrap_or(u8::MAX)).collect(),
+            dict: dict.clone(),
+        },
     };
     Column { name: col.name.clone(), data }
 }

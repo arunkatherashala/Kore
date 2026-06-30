@@ -122,6 +122,10 @@ pub fn serialize_block(block: &DataBlock) -> SerializedBlock {
                 name: col.name.clone(), dtype: "str".to_string(),
                 values: serde_json::to_value(v).unwrap_or(Value::Null)
             },
+            ColumnData::StrDict { codes, dict } => {
+                let v: Vec<Option<String>> = codes.iter().map(|&c| if c == u8::MAX { None } else { dict.get(c as usize).cloned() }).collect();
+                SerializedColumn { name: col.name.clone(), dtype: "str".to_string(), values: serde_json::to_value(v).unwrap_or(Value::Null) }
+            },
         }
     }).collect();
     SerializedBlock { num_rows: block.num_rows, columns }
