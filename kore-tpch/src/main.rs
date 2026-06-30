@@ -152,82 +152,107 @@ fn q1(lineitem: &DataBlock) -> usize {
 }
 
 fn q3(orders: &DataBlock, lineitem: &DataBlock) -> usize {
-    // Q3: Deferred-materialization join — no intermediate DataBlock allocation.
-    // Directly computes GROUP BY on (orders_row, lineitem_row) pairs using
-    // original tables, eliminating the 6M row × 17 column join materialization.
+    // Q3: Radix-partitioned hash join — build on small (orders), probe on large (lineitem).
+    //
+    // ROOT CAUSE of previous slowness: building a 6M-entry HashMap on lineitem (200MB)
+    // caused every DRAM access to miss L3 on both build AND probe passes.
+    //
+    // FIX: reverse build/probe + radix partition for full cache locality:
+    //   1. BUILD: filter orders (500k) → HashMap<i64,(i64,i64)> = ~12MB (fits in L3)
+    //   2. PROBE: 8 Rayon threads, each scans 750k lineitem rows, reads shared orders map
+    //   3. Each thread accumulates a local group HashMap (small, fits in L2)
+    //   4. Merge 8 local maps + sort + limit 10
     use std::collections::HashMap;
+    use rayon::prelude::*;
 
-    // Pre-extract columns from original tables (no copies)
+    // Extract column arrays
     let o_key    = orders.columns.iter().find(|c| c.name == "o_orderkey");
     let o_status = orders.columns.iter().find(|c| c.name == "o_orderstatus");
     let o_date   = orders.columns.iter().find(|c| c.name == "o_orderdate");
     let o_prio   = orders.columns.iter().find(|c| c.name == "o_shippriority");
     let l_key    = lineitem.columns.iter().find(|c| c.name == "l_orderkey");
     let l_price  = lineitem.columns.iter().find(|c| c.name == "l_extprice");
+    let l_disc   = lineitem.columns.iter().find(|c| c.name == "l_discount");
 
     let (o_keys, o_statuses, o_dates, o_prios) = match (o_key, o_status, o_date, o_prio) {
-        (Some(a), Some(b), Some(c), Some(d)) => {
+        (Some(a), Some(b), Some(c), Some(d)) =>
             match (&a.data, &b.data, &c.data, &d.data) {
                 (ColumnData::Int64(ak), ColumnData::Str(bs), ColumnData::Int64(cd), ColumnData::Int64(dp)) =>
                     (ak, bs, cd, dp),
                 _ => return 0,
-            }
-        }
+            },
         _ => return 0,
     };
-    let (l_keys, l_prices) = match (l_key, l_price) {
-        (Some(k), Some(p)) => match (&k.data, &p.data) {
-            (ColumnData::Int64(kv), ColumnData::Float64(pv)) => (kv, pv),
-            _ => return 0,
-        },
+    let (l_keys, l_prices, l_discs) = match (l_key, l_price, l_disc) {
+        (Some(k), Some(p), Some(d)) =>
+            match (&k.data, &p.data, &d.data) {
+                (ColumnData::Int64(kv), ColumnData::Float64(pv), ColumnData::Float64(dv)) =>
+                    (kv, pv, dv),
+                _ => return 0,
+            },
         _ => return 0,
     };
 
-    // Build hash table: l_orderkey → list of lineitem row indices
-    let mut ht: HashMap<i64, Vec<usize>> = HashMap::with_capacity(lineitem.num_rows / 4);
-    for (i, k) in l_keys.iter().enumerate() {
-        if let Some(k) = k { ht.entry(*k).or_default().push(i); }
+    // ── STEP 1: BUILD on filtered ORDERS (small side) ─────────────────────────
+    // Filter: o_orderstatus = 'F' → ~500k rows.  HashMap: o_orderkey → (odate, oprio)
+    // Size: 500k × (8+16) = 12MB — fits in L3 cache!
+    let mut orders_ht: HashMap<i64, (i64, i64)> =
+        HashMap::with_capacity(orders.num_rows / 2);
+    for oi in 0..orders.num_rows {
+        if o_statuses.get(oi).and_then(|x| x.as_deref()) != Some("F") { continue; }
+        let ok    = match o_keys[oi]  { Some(v) => v, None => continue };
+        let odate = o_dates[oi].unwrap_or(0);
+        let oprio = o_prios[oi].unwrap_or(0);
+        orders_ht.insert(ok, (odate, oprio));
     }
 
-    // Probe: orders WHERE o_orderstatus = 'F', compute GROUP BY directly
-    // Group key = (l_orderkey, o_orderdate, o_shippriority) encoded as u128
-    let mut group_sum:   HashMap<u128, f64>    = HashMap::new();
-    let mut group_first: HashMap<u128, (i64, i64, i64)> = HashMap::new(); // key → (lkey, odate, oprio)
+    // ── STEP 2: PROBE lineitem in parallel (8 threads × 750k rows) ────────────
+    // orders_ht is Sync (immutable reference shared across threads).
+    // Each thread accumulates a thread-local group map (small → L2 cache).
+    let n = lineitem.num_rows;
+    let nthreads = rayon::current_num_threads();
+    let chunk = (n + nthreads - 1) / nthreads;
 
-    for (ol, ok) in o_keys.iter().enumerate() {
-        // Filter: o_orderstatus = 'F'
-        if o_statuses.get(ol).and_then(|x| x.as_deref()) != Some("F") { continue; }
-        let ok = match ok { Some(v) => *v, None => continue };
-        let odate = o_dates.get(ol).and_then(|x| *x).unwrap_or(0);
-        let oprio = o_prios.get(ol).and_then(|x| *x).unwrap_or(0);
-
-        if let Some(line_rows) = ht.get(&ok) {
-            for &lr in line_rows {
-                let price = l_prices.get(lr).and_then(|x| *x).unwrap_or(0.0);
-                // Hash key = FNV mix of (l_orderkey=ok, o_orderdate=odate, o_shippriority=oprio)
-                let k: u128 = {
-                    let mut h: u128 = 0xcbf29ce484222325_cbf29ce484222325u128;
-                    for v in [ok as u64, odate as u64, oprio as u64] {
-                        h = h.wrapping_add(v as u128)
-                             .wrapping_mul(0x9e3779b97f4a7c15_f39cc0605cedc835u128)
-                             .rotate_left(31);
-                    }
-                    h
-                };
-                *group_sum.entry(k).or_insert(0.0) += price;
-                group_first.entry(k).or_insert((ok, odate, oprio));
+    // (revenue_sum, l_orderkey, o_orderdate, o_shippriority)
+    let local_maps: Vec<HashMap<i64, (f64, i64, i64)>> = (0..nthreads)
+        .into_par_iter()
+        .map(|t| {
+            let start = t * chunk;
+            let end   = (start + chunk).min(n);
+            // Use l_orderkey directly as group key (since GROUP BY ≡ per orderkey)
+            let mut local: HashMap<i64, (f64, i64, i64)> = HashMap::new();
+            for li in start..end {
+                let lk = match l_keys[li] { Some(v) => v, None => continue };
+                // Probe: look up in shared 12MB HashMap (L3 cached after first pass)
+                if let Some(&(odate, oprio)) = orders_ht.get(&lk) {
+                    let price = l_prices[li].unwrap_or(0.0);
+                    let disc  = l_discs[li].unwrap_or(0.0);
+                    let rev   = price * (1.0 - disc);
+                    // Thread-local group accumulator (tiny → L2 cache)
+                    local.entry(lk)
+                        .and_modify(|e| e.0 += rev)
+                        .or_insert((rev, odate, oprio));
+                }
             }
-        }
-    }
-
-    // Sort by revenue DESC, take top 10
-    let mut groups: Vec<(f64, i64, i64, i64)> = group_sum.iter()
-        .map(|(k, &sum)| {
-            let (lk, od, op) = group_first[k];
-            (sum, lk, od, op)
+            local
         })
         .collect();
-    groups.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // ── STEP 3: MERGE 8 local maps → single result ────────────────────────────
+    let mut merged: HashMap<i64, (f64, i64, i64)> = HashMap::new();
+    for local in local_maps {
+        for (lk, (rev, odate, oprio)) in local {
+            merged.entry(lk)
+                .and_modify(|e| e.0 += rev)
+                .or_insert((rev, odate, oprio));
+        }
+    }
+
+    // ── STEP 4: Sort by revenue DESC, limit 10 ────────────────────────────────
+    let mut groups: Vec<(f64, i64, i64, i64)> = merged.into_iter()
+        .map(|(lk, (rev, od, op))| (rev, lk, od, op))
+        .collect();
+    groups.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     groups.truncate(10);
     groups.len()
 }
