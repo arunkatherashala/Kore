@@ -61,8 +61,14 @@ fn gen_lineitem(n: usize) -> DataBlock {
             Column { name: "l_extprice".into(),    data: ColumnData::Float64((0..n).map(|_| Some(rng.next_f64() * 100_000.0)).collect()) },
             Column { name: "l_discount".into(),    data: ColumnData::Float64((0..n).map(|_| Some(rng.next_f64() * 0.1)).collect()) },
             Column { name: "l_tax".into(),         data: ColumnData::Float64((0..n).map(|_| Some(rng.next_f64() * 0.08)).collect()) },
-            Column { name: "l_returnflag".into(),  data: ColumnData::Str((0..n).map(|i| Some(["A","N","R"][i%3].to_string())).collect()) },
-            Column { name: "l_linestatus".into(),  data: ColumnData::Str((0..n).map(|i| Some(["O","F"][i%2].to_string())).collect()) },
+            Column { name: "l_returnflag".into(),  data: ColumnData::StrDict {
+                codes: (0..n).map(|i| (i % 3) as u8).collect(),
+                dict:  vec!["A".to_string(), "N".to_string(), "R".to_string()],
+            }},
+            Column { name: "l_linestatus".into(),  data: ColumnData::StrDict {
+                codes: (0..n).map(|i| (i % 2) as u8).collect(),
+                dict:  vec!["O".to_string(), "F".to_string()],
+            }},
             Column { name: "l_shipdate".into(),    data: ColumnData::Int64((0..n).map(|i| Some(19940101 + (i%3650) as i64)).collect()) },
             Column { name: "l_commitdate".into(),  data: ColumnData::Int64((0..n).map(|i| Some(19940101 + (i%3650) as i64)).collect()) },
         ],

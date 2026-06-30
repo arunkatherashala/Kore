@@ -96,6 +96,11 @@ impl StageStats {
                     for x in v { if x.is_none() { cs.null_count += 1; } }
                     seen.insert("true".into()); seen.insert("false".into());
                 }
+                ColumnData::StrDict { codes, dict } => {
+                    for &c in codes {
+                        if c == u8::MAX { cs.null_count += 1; } else if let Some(s) = dict.get(c as usize) { seen.insert(s.clone()); }
+                    }
+                }
             }
 
             cs.ndv = seen.len();

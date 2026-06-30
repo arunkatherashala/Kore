@@ -234,6 +234,7 @@ fn eval_batch(expr: &Expr, block: &DataBlock) -> Vec<bool> {
                         ColumnData::Float64(v) => v.iter().map(|x| x.is_none()).collect(),
                         ColumnData::Bool(v)    => v.iter().map(|x| x.is_none()).collect(),
                         ColumnData::Str(v)     => v.iter().map(|x| x.is_none()).collect(),
+                        ColumnData::StrDict { codes, .. } => codes.iter().map(|&c| c == u8::MAX).collect(),
                     };
                 }
             }
@@ -247,6 +248,7 @@ fn eval_batch(expr: &Expr, block: &DataBlock) -> Vec<bool> {
                         ColumnData::Float64(v) => v.iter().map(|x| x.is_some()).collect(),
                         ColumnData::Bool(v)    => v.iter().map(|x| x.is_some()).collect(),
                         ColumnData::Str(v)     => v.iter().map(|x| x.is_some()).collect(),
+                        ColumnData::StrDict { codes, .. } => codes.iter().map(|&c| c != u8::MAX).collect(),
                     };
                 }
             }
@@ -633,6 +635,10 @@ fn get_cell(block: &DataBlock, col_name: &str, row: usize) -> ExprVal {    // Tr
             ColumnData::Float64(v) => v.get(row).and_then(|x| x.as_ref()).map(|&f| ExprVal::Float(f)).unwrap_or(ExprVal::Null),
             ColumnData::Bool(v)    => v.get(row).and_then(|x| x.as_ref()).map(|&b| ExprVal::Bool(b)).unwrap_or(ExprVal::Null),
             ColumnData::Str(v)     => v.get(row).and_then(|x| x.as_ref()).map(|s| ExprVal::Str(s.clone())).unwrap_or(ExprVal::Null),
+            ColumnData::StrDict { codes, dict } => {
+                let c = codes.get(row).copied().unwrap_or(u8::MAX);
+                if c == u8::MAX { ExprVal::Null } else { dict.get(c as usize).map(|s| ExprVal::Str(s.clone())).unwrap_or(ExprVal::Null) }
+            }
         }
     }
 }
@@ -810,6 +816,7 @@ fn extract_f64_at(col: &Column, indices: &[usize]) -> Vec<f64> {
         ColumnData::Int64(v)   => indices.iter().filter_map(|&r| v.get(r).and_then(|x| *x).map(|i| i as f64)).collect(),
         ColumnData::Bool(v)    => indices.iter().filter_map(|&r| v.get(r).and_then(|x| *x).map(|b| b as i64 as f64)).collect(),
         ColumnData::Str(_)     => vec![],
+        ColumnData::StrDict { .. } => vec![],
     }
 }
 
@@ -821,6 +828,7 @@ fn extract_f64_all(col: &Column) -> Vec<f64> {
         ColumnData::Int64(v)   => v.iter().filter_map(|x| *x).map(|i| i as f64).collect(),
         ColumnData::Bool(v)    => v.iter().filter_map(|x| *x).map(|b| b as i64 as f64).collect(),
         ColumnData::Str(_)     => vec![],
+        ColumnData::StrDict { .. } => vec![],
     }
 }
 
@@ -934,6 +942,10 @@ fn group_by_agg(
                         ColumnData::Float64(v) => v.get(row).and_then(|x| *x).map(|f| f.to_bits()).unwrap_or(0),
                         ColumnData::Bool(v)    => v.get(row).and_then(|x| *x).unwrap_or(false) as u64,
                         ColumnData::Str(v)     => fnv64(v.get(row).and_then(|x| x.as_deref()).unwrap_or("").as_bytes()),
+                        ColumnData::StrDict { codes, dict } => {
+                            let c = codes.get(row).copied().unwrap_or(u8::MAX);
+                            if c == u8::MAX { 0 } else { fnv64(dict.get(c as usize).map(|s| s.as_bytes()).unwrap_or(b"")) }
+                        }
                     };
                     k = k.wrapping_add(v as u128)
                          .wrapping_mul(0x9e3779b97f4a7c15_f39cc0605cedc835u128)

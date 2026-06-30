@@ -67,6 +67,10 @@ impl HashPartitioner {
                         .map(|b| vec![b as u8]).unwrap_or_default(),
                     ColumnData::Str(v)     => v.get(row).and_then(|x| x.as_deref())
                         .map(|s| s.as_bytes().to_vec()).unwrap_or_default(),
+                    ColumnData::StrDict { codes, dict } => {
+                        let c = codes.get(row).copied().unwrap_or(u8::MAX);
+                        if c == u8::MAX { vec![] } else { dict.get(c as usize).map(|s| s.as_bytes().to_vec()).unwrap_or_default() }
+                    }
                 };
                 for byte in bytes {
                     h ^= byte as u64;
@@ -188,6 +192,10 @@ fn local_group_by(
                     ColumnData::Int64(v)   => v.get(i).and_then(|x| *x).map(|v| v.to_string()).unwrap_or_default(),
                     ColumnData::Float64(v) => v.get(i).and_then(|x| *x).map(|v| format!("{v:.10}")).unwrap_or_default(),
                     ColumnData::Str(v)     => v.get(i).and_then(|x| x.as_deref()).unwrap_or("").to_string(),
+                    ColumnData::StrDict { codes, dict } => {
+                        let c = codes.get(i).copied().unwrap_or(u8::MAX);
+                        if c == u8::MAX { String::new() } else { dict.get(c as usize).cloned().unwrap_or_default() }
+                    }
                     ColumnData::Bool(v)    => v.get(i).and_then(|x| *x).map(|b| b.to_string()).unwrap_or_default(),
                 })
                 .unwrap_or_default()
@@ -221,6 +229,15 @@ fn local_group_by(
                 key_order.iter().map(|k| {
                     let first = groups[k][0];
                     if let ColumnData::Str(v) = &col.data { v.get(first).cloned().flatten() } else { None }
+                }).collect()
+            ),
+            ColumnData::StrDict { .. } => ColumnData::Str(
+                key_order.iter().map(|k| {
+                    let first = groups[k][0];
+                    if let ColumnData::StrDict { codes, dict } = &col.data {
+                        let c = codes.get(first).copied().unwrap_or(u8::MAX);
+                        if c == u8::MAX { None } else { dict.get(c as usize).cloned() }
+                    } else { None }
                 }).collect()
             ),
             ColumnData::Bool(_) => ColumnData::Bool(
@@ -333,6 +350,10 @@ fn local_hash_join(
             ColumnData::Float64(v) => ColumnData::Float64(l_indices.iter().map(|&i| v.get(i).copied().flatten()).collect()),
             ColumnData::Bool(v)    => ColumnData::Bool(l_indices.iter().map(|&i| v.get(i).copied().flatten()).collect()),
             ColumnData::Str(v)     => ColumnData::Str(l_indices.iter().map(|&i| v.get(i).cloned().flatten()).collect()),
+            ColumnData::StrDict { codes, dict } => ColumnData::Str(l_indices.iter().map(|&i| {
+                let c = codes.get(i).copied().unwrap_or(u8::MAX);
+                if c == u8::MAX { None } else { dict.get(c as usize).cloned() }
+            }).collect()),
         },
     }).collect();
 
@@ -344,6 +365,10 @@ fn local_hash_join(
                 ColumnData::Float64(v) => ColumnData::Float64(r_indices.iter().map(|&i| v.get(i).copied().flatten()).collect()),
                 ColumnData::Bool(v)    => ColumnData::Bool(r_indices.iter().map(|&i| v.get(i).copied().flatten()).collect()),
                 ColumnData::Str(v)     => ColumnData::Str(r_indices.iter().map(|&i| v.get(i).cloned().flatten()).collect()),
+                ColumnData::StrDict { codes, dict } => ColumnData::Str(r_indices.iter().map(|&i| {
+                    let c = codes.get(i).copied().unwrap_or(u8::MAX);
+                    if c == u8::MAX { None } else { dict.get(c as usize).cloned() }
+                }).collect()),
             },
         });
     }
@@ -357,6 +382,10 @@ fn row_key(block: &DataBlock, col_name: &str, row: usize) -> String {
         ColumnData::Int64(v)   => v.get(row).and_then(|x| *x).map(|i| i.to_string()).unwrap_or_default(),
         ColumnData::Float64(v) => v.get(row).and_then(|x| *x).map(|f| format!("{f:.10}")).unwrap_or_default(),
         ColumnData::Str(v)     => v.get(row).and_then(|x| x.as_deref()).unwrap_or("").to_string(),
+        ColumnData::StrDict { codes, dict } => {
+            let c = codes.get(row).copied().unwrap_or(u8::MAX);
+            if c == u8::MAX { String::new() } else { dict.get(c as usize).cloned().unwrap_or_default() }
+        }
         ColumnData::Bool(v)    => v.get(row).and_then(|x| *x).map(|b| b.to_string()).unwrap_or_default(),
     }).unwrap_or_default()
 }

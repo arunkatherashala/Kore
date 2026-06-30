@@ -271,7 +271,8 @@ impl<'a> JitContext<'a> {
 // ─── 4. Q1/Q6 specialized executors ─────────────────────────────────────────
 
 /// JIT-compiled Q1: scan + GROUP BY on low-cardinality string columns.
-/// Direct array aggregation — zero HashMap, zero hash collisions.
+/// FAST PATH: StrDict columns → zero heap pointer chasing, DuckDB speed.
+/// SLOW PATH: Vec<Option<String>> → parallel single-pass with inline encode.
 pub fn q1_jit(
     lineitem: &DataBlock,
     shipdate_cutoff: i64,
@@ -279,38 +280,64 @@ pub fn q1_jit(
     group_col2: &str,
     agg_col: &str,
 ) -> Vec<(String, String, f64, u64)> {
-    // Step 1: Find column pointers (compile-time wiring)
     let shipdate_col = lineitem.columns.iter().find(|c| c.name == "l_shipdate");
     let g1_col = lineitem.columns.iter().find(|c| c.name == group_col1);
     let g2_col = lineitem.columns.iter().find(|c| c.name == group_col2);
     let agg_c  = lineitem.columns.iter().find(|c| c.name == agg_col);
 
-    let (dates, g1, g2, vals) = match (shipdate_col, g1_col, g2_col, agg_c) {
-        (Some(d), Some(g1), Some(g2), Some(a)) => {
-            match (&d.data, &g1.data, &g2.data, &a.data) {
-                (ColumnData::Int64(dv), ColumnData::Str(g1v), ColumnData::Str(g2v), ColumnData::Float64(av)) =>
-                    (dv, g1v, g2v, av),
-                _ => return vec![],
-            }
+    if let (Some(d), Some(g1), Some(g2), Some(a)) = (shipdate_col, g1_col, g2_col, agg_c) {
+        // FAST PATH: StrDict — zero heap ptr dereference
+        if let (ColumnData::Int64(dv), ColumnData::StrDict { codes: c1, dict: d1 },
+                ColumnData::StrDict { codes: c2, dict: d2 }, ColumnData::Float64(av)) =
+            (&d.data, &g1.data, &g2.data, &a.data)
+        {
+            return q1_jit_strdict(dv, c1, d1, c2, d2, av, shipdate_cutoff, lineitem.num_rows);
         }
-        _ => return vec![],
-    };
+    }
+    // SLOW PATH: Vec<Option<String>>
+    q1_jit_slow(lineitem, shipdate_cutoff, group_col1, group_col2, agg_col)
+}
+
+/// Slow path for q1_jit when columns are Vec<Option<String>>.
+/// Uses parallel single-pass: filter → inline encode → accumulate.
+fn q1_jit_slow(
+    lineitem: &DataBlock,
+    shipdate_cutoff: i64,
+    group_col1: &str,
+    group_col2: &str,
+    agg_col: &str,
+) -> Vec<(String, String, f64, u64)> {
+    let dates = if let Some(c) = lineitem.columns.iter().find(|c| c.name == "l_shipdate") {
+        if let ColumnData::Int64(v) = &c.data { v } else { return vec![]; }
+    } else { return vec![]; };
+    let g1 = if let Some(c) = lineitem.columns.iter().find(|c| c.name == group_col1) {
+        if let ColumnData::Str(v) = &c.data { v } else { return vec![]; }
+    } else { return vec![]; };
+    let g2 = if let Some(c) = lineitem.columns.iter().find(|c| c.name == group_col2) {
+        if let ColumnData::Str(v) = &c.data { v } else { return vec![]; }
+    } else { return vec![]; };
+    let vals = if let Some(c) = lineitem.columns.iter().find(|c| c.name == agg_col) {
+        if let ColumnData::Float64(v) = &c.data { v } else { return vec![]; }
+    } else { return vec![]; };
 
     let n = lineitem.num_rows;
 
-    // Step 2: Build string → u8 dictionaries
-    let mut d1: HashMap<&str, u8> = HashMap::new();
-    let mut d2: HashMap<&str, u8> = HashMap::new();
-    for s in g1.iter().flatten() { let n = d1.len() as u8; d1.entry(s.as_str()).or_insert(n); }
-    for s in g2.iter().flatten() { let n = d2.len() as u8; d2.entry(s.as_str()).or_insert(n); }
-    let nd1 = d1.len().max(1);
-    let nd2 = d2.len().max(1);
+    let mut dict1: Vec<String> = Vec::with_capacity(8);
+    for s in g1.iter().flatten() {
+        if !dict1.iter().any(|d| d.as_str() == s.as_str()) { dict1.push(s.clone()); }
+        if dict1.len() >= 255 { break; }
+    }
+    let mut dict2: Vec<String> = Vec::with_capacity(8);
+    for s in g2.iter().flatten() {
+        if !dict2.iter().any(|d| d.as_str() == s.as_str()) { dict2.push(s.clone()); }
+        if dict2.len() >= 255 { break; }
+    }
+    let nd1 = dict1.len().max(1);
+    let nd2 = dict2.len().max(1);
     let total = nd1 * nd2;
 
-    // Step 3: Parallel scan + direct-array accumulation
     let nthreads = rayon::current_num_threads();
     let chunk = ((n + nthreads - 1) / nthreads).max(1);
-
     let local_results: Vec<Vec<(f64, u64)>> = (0..nthreads)
         .into_par_iter()
         .map(|t| {
@@ -318,37 +345,92 @@ pub fn q1_jit(
             let end   = (start + chunk).min(n);
             let mut local = vec![(0.0f64, 0u64); total];
             for row in start..end {
-                // Compiled filter: shipdate <= cutoff (no branch overhead)
                 if dates.get(row).and_then(|x| *x).unwrap_or(i64::MAX) > shipdate_cutoff { continue; }
-                let gid1 = g1.get(row).and_then(|x| x.as_deref()).and_then(|s| d1.get(s)).copied().unwrap_or(0) as usize;
-                let gid2 = g2.get(row).and_then(|x| x.as_deref()).and_then(|s| d2.get(s)).copied().unwrap_or(0) as usize;
-                let gid  = gid1 * nd2 + gid2;
-                let val  = vals.get(row).and_then(|x| *x).unwrap_or(0.0);
-                if gid < total { local[gid].0 += val; local[gid].1 += 1; }
+                let s1 = g1.get(row).and_then(|x| x.as_deref()).unwrap_or("");
+                let s2 = g2.get(row).and_then(|x| x.as_deref()).unwrap_or("");
+                let c1 = dict1.iter().position(|d| d.as_str() == s1).unwrap_or(0);
+                let c2 = dict2.iter().position(|d| d.as_str() == s2).unwrap_or(0);
+                let gid = c1 * nd2 + c2;
+                let val = vals.get(row).and_then(|x| *x).unwrap_or(0.0);
+                local[gid].0 += val;
+                local[gid].1 += 1;
             }
             local
         })
         .collect();
 
-    // Step 4: Merge
     let mut merged = vec![(0.0f64, 0u64); total];
     for local in local_results {
         for (i, (s, c)) in local.into_iter().enumerate() { merged[i].0 += s; merged[i].1 += c; }
     }
-
-    // Step 5: Decode
-    let r1: Vec<String> = { let mut v = vec![String::new(); nd1]; for (s, &id) in &d1 { if (id as usize) < nd1 { v[id as usize] = s.to_string(); } } v };
-    let r2: Vec<String> = { let mut v = vec![String::new(); nd2]; for (s, &id) in &d2 { if (id as usize) < nd2 { v[id as usize] = s.to_string(); } } v };
-
     let mut result: Vec<(String, String, f64, u64)> = merged.iter().enumerate()
         .filter(|(_, (_, c))| *c > 0)
         .map(|(gid, (sum, cnt))| {
-            let g1 = r1.get(gid / nd2).cloned().unwrap_or_default();
-            let g2 = r2.get(gid % nd2).cloned().unwrap_or_default();
-            (g1, g2, *sum, *cnt)
+            let g1r = dict1.get(gid / nd2).cloned().unwrap_or_default();
+            let g2r = dict2.get(gid % nd2).cloned().unwrap_or_default();
+            (g1r, g2r, *sum, *cnt)
         })
         .collect();
-    result.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    result.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    result
+}
+
+/// FAST PATH: Q1 with StrDict columns — zero heap pointer dereferences.
+/// The hot loop reads only sequential u8/i64/f64 arrays — fully cache-friendly.
+fn q1_jit_strdict(
+    dates:  &[Option<i64>],
+    codes1: &[u8], dict1: &[String],
+    codes2: &[u8], dict2: &[String],
+    vals:   &[Option<f64>],
+    shipdate_cutoff: i64,
+    n: usize,
+) -> Vec<(String, String, f64, u64)> {
+    let nd1 = dict1.len().max(1);
+    let nd2 = dict2.len().max(1);
+    let total = nd1 * nd2;
+
+    let nthreads = rayon::current_num_threads();
+    let chunk = ((n + nthreads - 1) / nthreads).max(1);
+
+    // HOT LOOP: all array accesses are sequential u8/i64/f64 — L1/L2 cache friendly.
+    // No heap pointer dereferences whatsoever. LLVM auto-vectorizes this.
+    let local_results: Vec<Vec<(f64, u64)>> = (0..nthreads)
+        .into_par_iter()
+        .map(|t| {
+            let start = t * chunk;
+            let end   = (start + chunk).min(n);
+            let mut local = vec![(0.0f64, 0u64); total];
+            for row in start..end {
+                // All three arrays are contiguous — prefetcher works perfectly
+                let date = unsafe { *dates.get_unchecked(row) };
+                if date.unwrap_or(i64::MAX) > shipdate_cutoff { continue; }
+                let c1 = unsafe { *codes1.get_unchecked(row) } as usize;
+                let c2 = unsafe { *codes2.get_unchecked(row) } as usize;
+                let gid = c1 * nd2 + c2;
+                let val = unsafe { *vals.get_unchecked(row) }.unwrap_or(0.0);
+                unsafe {
+                    let entry = local.get_unchecked_mut(gid);
+                    entry.0 += val;
+                    entry.1 += 1;
+                }
+            }
+            local
+        })
+        .collect();
+
+    let mut merged = vec![(0.0f64, 0u64); total];
+    for local in local_results {
+        for (i, (s, c)) in local.into_iter().enumerate() { merged[i].0 += s; merged[i].1 += c; }
+    }
+    let mut result: Vec<(String, String, f64, u64)> = merged.iter().enumerate()
+        .filter(|(_, (_, c))| *c > 0)
+        .map(|(gid, (sum, cnt))| {
+            let g1r = dict1.get(gid / nd2).cloned().unwrap_or_default();
+            let g2r = dict2.get(gid % nd2).cloned().unwrap_or_default();
+            (g1r, g2r, *sum, *cnt)
+        })
+        .collect();
+    result.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     result
 }
 
@@ -420,12 +502,14 @@ mod tests {
                 Column { name: "l_shipdate".into(),   data: ColumnData::Int64(
                     (0..n).map(|i| Some(19940101 + (i as i64 % 3650))).collect()
                 )},
-                Column { name: "l_returnflag".into(), data: ColumnData::Str(
-                    (0..n).map(|i| Some(["A","N","R"][i%3].to_string())).collect()
-                )},
-                Column { name: "l_linestatus".into(), data: ColumnData::Str(
-                    (0..n).map(|i| Some(["O","F"][i%2].to_string())).collect()
-                )},
+                Column { name: "l_returnflag".into(), data: ColumnData::StrDict {
+                    codes: (0..n).map(|i| (i % 3) as u8).collect(),
+                    dict:  vec!["A".to_string(), "N".to_string(), "R".to_string()],
+                }},
+                Column { name: "l_linestatus".into(), data: ColumnData::StrDict {
+                    codes: (0..n).map(|i| (i % 2) as u8).collect(),
+                    dict:  vec!["O".to_string(), "F".to_string()],
+                }},
                 Column { name: "l_quantity".into(),   data: ColumnData::Float64(
                     (0..n).map(|i| Some((i % 50 + 1) as f64)).collect()
                 )},

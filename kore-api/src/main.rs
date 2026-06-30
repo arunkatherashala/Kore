@@ -176,6 +176,9 @@ async fn run_query(
             ColumnData::Int64(v)   => json!(v.iter().map(|x| x.map(|i| i)).collect::<Vec<_>>()),
             ColumnData::Bool(v)    => json!(v.iter().map(|x| x.map(|b| b)).collect::<Vec<_>>()),
             ColumnData::Str(v)     => json!(v.iter().map(|x| x.as_deref()).collect::<Vec<_>>()),
+            ColumnData::StrDict { codes, dict } => json!(codes.iter().map(|&c| {
+                if c == u8::MAX { None } else { dict.get(c as usize).map(|s| s.as_str()) }
+            }).collect::<Vec<_>>()),
         };
         json!({ "name": c.name, "values": values })
     }).collect();

@@ -109,7 +109,8 @@ impl ParquetWriter {
                 ColumnData::Int64(_)   => format!("OPTIONAL INT64 {};", safe),
                 ColumnData::Float64(_) => format!("OPTIONAL DOUBLE {};", safe),
                 ColumnData::Bool(_)    => format!("OPTIONAL BOOLEAN {};", safe),
-                ColumnData::Str(_)     => format!("OPTIONAL BYTE_ARRAY {} (UTF8);", safe),
+                ColumnData::Str(_)      => format!("OPTIONAL BYTE_ARRAY {} (UTF8);", safe),
+                ColumnData::StrDict { .. } => format!("OPTIONAL BYTE_ARRAY {} (UTF8);", safe),
             }
         }).collect();
 

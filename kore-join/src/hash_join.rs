@@ -188,6 +188,11 @@ fn bulk_copy(src: &kore_core::ColumnData, idxs: &[Option<usize>]) -> kore_core::
             ColumnData::Bool(idxs.iter().map(|i| i.and_then(|r| v.get(r).and_then(|x| *x))).collect()),
         ColumnData::Str(v) =>
             ColumnData::Str(idxs.iter().map(|i| i.and_then(|r| v.get(r).and_then(|x| x.clone()))).collect()),
+        ColumnData::StrDict { codes, dict } =>
+            ColumnData::Str(idxs.iter().map(|i| i.and_then(|r| {
+                let c = codes.get(r).copied().unwrap_or(u8::MAX);
+                if c == u8::MAX { None } else { dict.get(c as usize).cloned() }
+            })).collect()),
     }
 }
 

@@ -170,6 +170,13 @@ impl CsvWriter {
                     ColumnData::Str(v)     => v.get(i).and_then(|x| x.as_deref())
                         .map(|s| if s.contains(',') { format!("\"{s}\"") } else { s.to_string() })
                         .unwrap_or_default(),
+                    ColumnData::StrDict { codes, dict } => {
+                        let c = codes.get(i).copied().unwrap_or(u8::MAX);
+                        if c == u8::MAX { String::new() } else {
+                            let s = dict.get(c as usize).map(|s| s.as_str()).unwrap_or("");
+                            if s.contains(',') { format!("\"{}\"", s) } else { s.to_string() }
+                        }
+                    }
                 }
             }).collect();
             out.push_str(&row.join(","));
@@ -276,6 +283,10 @@ impl NdJsonWriter {
                         ColumnData::Float64(v) => v.get(i).and_then(|x| *x).map(|f| serde_json::json!(f)).unwrap_or(serde_json::Value::Null),
                         ColumnData::Bool(v)    => v.get(i).and_then(|x| *x).map(serde_json::Value::Bool).unwrap_or(serde_json::Value::Null),
                         ColumnData::Str(v)     => v.get(i).and_then(|x| x.as_deref()).map(|s| serde_json::Value::String(s.to_string())).unwrap_or(serde_json::Value::Null),
+                        ColumnData::StrDict { codes, dict } => {
+                            let c = codes.get(i).copied().unwrap_or(u8::MAX);
+                            if c == u8::MAX { serde_json::Value::Null } else { dict.get(c as usize).map(|s| serde_json::Value::String(s.clone())).unwrap_or(serde_json::Value::Null) }
+                        }
                     };
                     (c.name.clone(), val)
                 })

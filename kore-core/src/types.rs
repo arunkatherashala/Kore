@@ -10,15 +10,20 @@ pub enum ColumnData {
     Float64(Vec<Option<f64>>),
     Bool(Vec<Option<bool>>),
     Str(Vec<Option<String>>),
+    /// Dictionary-encoded strings: codes[row] = index into dict (u8::MAX = NULL).
+    /// Zero heap-pointer chasing in hot loops — 24× less memory than Vec<Option<String>>.
+    /// Use Column::str_dict() to create. Maximum 254 distinct non-NULL values.
+    StrDict { codes: Vec<u8>, dict: Vec<String> },
 }
 
 impl ColumnData {
     pub fn len(&self) -> usize {
         match self {
-            Self::Int64(v)   => v.len(),
-            Self::Float64(v) => v.len(),
-            Self::Bool(v)    => v.len(),
-            Self::Str(v)     => v.len(),
+            Self::Int64(v)       => v.len(),
+            Self::Float64(v)     => v.len(),
+            Self::Bool(v)        => v.len(),
+            Self::Str(v)         => v.len(),
+            Self::StrDict { codes, .. } => codes.len(),
         }
     }
 
@@ -26,10 +31,24 @@ impl ColumnData {
 
     pub fn dtype(&self) -> DataType {
         match self {
-            Self::Int64(_)   => DataType::Int64,
-            Self::Float64(_) => DataType::Float64,
-            Self::Bool(_)    => DataType::Bool,
-            Self::Str(_)     => DataType::Str,
+            Self::Int64(_)         => DataType::Int64,
+            Self::Float64(_)       => DataType::Float64,
+            Self::Bool(_)          => DataType::Bool,
+            Self::Str(_)           => DataType::Str,
+            Self::StrDict { .. }   => DataType::Str,
+        }
+    }
+
+    /// Get the string value at `row` for both Str and StrDict variants.
+    #[inline]
+    pub fn get_str(&self, row: usize) -> Option<&str> {
+        match self {
+            Self::Str(v) => v.get(row).and_then(|x| x.as_deref()),
+            Self::StrDict { codes, dict } => {
+                let c = *codes.get(row)?;
+                if c == u8::MAX { None } else { dict.get(c as usize).map(|s| s.as_str()) }
+            }
+            _ => None,
         }
     }
 
@@ -39,15 +58,20 @@ impl ColumnData {
             Self::Float64(v) => v.get(idx).and_then(|x| x.as_ref()).map(|&x| Value::Float(x)).unwrap_or(Value::Null),
             Self::Bool(v)    => v.get(idx).and_then(|x| x.as_ref()).map(|&x| Value::Bool(x)).unwrap_or(Value::Null),
             Self::Str(v)     => v.get(idx).and_then(|x| x.as_ref()).map(|x| Value::Str(x.clone())).unwrap_or(Value::Null),
+            Self::StrDict { codes, dict } => {
+                let c = codes.get(idx).copied().unwrap_or(u8::MAX);
+                if c == u8::MAX { Value::Null } else { dict.get(c as usize).map(|s| Value::Str(s.clone())).unwrap_or(Value::Null) }
+            }
         }
     }
 
     pub fn empty_like(&self) -> Self {
         match self {
-            Self::Int64(_)   => Self::Int64(vec![]),
-            Self::Float64(_) => Self::Float64(vec![]),
-            Self::Bool(_)    => Self::Bool(vec![]),
-            Self::Str(_)     => Self::Str(vec![]),
+            Self::Int64(_)       => Self::Int64(vec![]),
+            Self::Float64(_)     => Self::Float64(vec![]),
+            Self::Bool(_)        => Self::Bool(vec![]),
+            Self::Str(_)         => Self::Str(vec![]),
+            Self::StrDict { dict, .. } => Self::StrDict { codes: vec![], dict: dict.clone() },
         }
     }
 
@@ -62,6 +86,12 @@ impl ColumnData {
             (Self::Bool(v),    Value::Null)     => { v.push(None); Ok(()) }
             (Self::Str(v),     Value::Str(s))   => { v.push(Some(s.clone())); Ok(()) }
             (Self::Str(v),     Value::Null)     => { v.push(None); Ok(()) }
+            (Self::StrDict { codes, dict }, Value::Str(s)) => {
+                let code = dict.iter().position(|d| d == s)
+                    .unwrap_or_else(|| { dict.push(s.clone()); dict.len() - 1 }) as u8;
+                codes.push(code); Ok(())
+            }
+            (Self::StrDict { codes, .. }, Value::Null) => { codes.push(u8::MAX); Ok(()) }
             (col, val) => Err(KoreError::TypeMismatch {
                 expected: col.dtype().to_string(),
                 got: val.type_name().to_string(),
@@ -76,6 +106,10 @@ impl ColumnData {
             Self::Float64(v) => Self::Float64(indices.iter().map(|&i| v.get(i).copied().flatten()).collect()),
             Self::Bool(v)    => Self::Bool(indices.iter().map(|&i| v.get(i).copied().flatten()).collect()),
             Self::Str(v)     => Self::Str(indices.iter().map(|&i| v.get(i).and_then(|x| x.clone())).collect()),
+            Self::StrDict { codes, dict } => Self::StrDict {
+                codes: indices.iter().map(|&i| codes.get(i).copied().unwrap_or(u8::MAX)).collect(),
+                dict: dict.clone(),
+            },
         }
     }
 }
@@ -187,6 +221,11 @@ impl Column {
     pub fn bool_col(name: &str, data: Vec<Option<bool>>) -> Self {
         Self { name: name.into(), data: ColumnData::Bool(data) }
     }
+    /// Create a dictionary-encoded string column.
+    /// `codes[row]` is an index into `dict`; u8::MAX = NULL.
+    pub fn str_dict(name: &str, codes: Vec<u8>, dict: Vec<String>) -> Self {
+        Self { name: name.into(), data: ColumnData::StrDict { codes, dict } }
+    }
 }
 
 // ─── DataBlock ─────────────────────────────────────────────────────────────────
@@ -293,6 +332,16 @@ impl DataBlock {
                 });
                 indices
             }
+            ColumnData::StrDict { codes, dict } => {
+                let mut indices: Vec<usize> = (0..self.num_rows).collect();
+                indices.sort_unstable_by(|&a, &b| {
+                    let ca = codes[a]; let cb = codes[b];
+                    let sa = if ca == u8::MAX { "" } else { dict.get(ca as usize).map(|s| s.as_str()).unwrap_or("") };
+                    let sb = if cb == u8::MAX { "" } else { dict.get(cb as usize).map(|s| s.as_str()).unwrap_or("") };
+                    if ascending { sa.cmp(sb) } else { sb.cmp(sa) }
+                });
+                indices
+            }
         };
 
         Ok(self.select_rows(&indices))
@@ -309,7 +358,16 @@ impl DataBlock {
                 DataType::Int64   => ColumnData::Int64(vec![]),
                 DataType::Float64 => ColumnData::Float64(vec![]),
                 DataType::Bool    => ColumnData::Bool(vec![]),
-                DataType::Str     => ColumnData::Str(vec![]),
+                DataType::Str     => {
+                    // Check if first block has StrDict — preserve variant
+                    let first_col = blocks[0].columns.iter().find(|(c)| c.data.dtype() == DataType::Str);
+                    if let Some(c) = first_col {
+                        if let ColumnData::StrDict { dict, .. } = &c.data {
+                            return ColumnData::StrDict { codes: vec![], dict: dict.clone() };
+                        }
+                    }
+                    ColumnData::Str(vec![])
+                }
             })
             .collect();
         let mut total = 0usize;
@@ -325,6 +383,28 @@ impl DataBlock {
                     (ColumnData::Float64(d), ColumnData::Float64(s)) => d.extend_from_slice(s),
                     (ColumnData::Bool(d),    ColumnData::Bool(s))    => d.extend_from_slice(s),
                     (ColumnData::Str(d),     ColumnData::Str(s))     => d.extend_from_slice(s),
+                    // StrDict concat: if same dict, just extend codes; else convert to Str
+                    (ColumnData::StrDict { codes: dc, dict: dd }, ColumnData::StrDict { codes: sc, dict: sd }) => {
+                        if dd == sd {
+                            dc.extend_from_slice(sc);
+                        } else {
+                            // Remap codes to shared dict
+                            let base = dd.len();
+                            for s in sd.iter() {
+                                if !dd.contains(s) { dd.push(s.clone()); }
+                            }
+                            for &c in sc.iter() {
+                                let new_code = if c == u8::MAX { u8::MAX } else {
+                                    sd.get(c as usize).and_then(|s| dd.iter().position(|d| d == s)).unwrap_or(0) as u8
+                                };
+                                dc.push(new_code);
+                            }
+                        }
+                    }
+                    // StrDict with Str: convert StrDict to Str and extend
+                    (ColumnData::Str(d), ColumnData::StrDict { codes, dict }) => {
+                        d.extend(codes.iter().map(|&c| if c == u8::MAX { None } else { dict.get(c as usize).cloned() }));
+                    }
                     _ => return Err(KoreError::TypeMismatch {
                         expected: schema[i].1.to_string(),
                         got: col.data.dtype().to_string(),

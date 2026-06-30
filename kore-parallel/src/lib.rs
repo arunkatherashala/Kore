@@ -87,6 +87,7 @@ fn extract_sort_key(data: &ColumnData, row: usize) -> SortKey {
         ColumnData::Float64(v) => v.get(row).and_then(|x| *x),
         ColumnData::Bool(v)    => v.get(row).and_then(|x| *x).map(|b| b as i64 as f64),
         ColumnData::Str(_)     => None,
+        ColumnData::StrDict { .. } => None,
     };
     SortKey(v.unwrap_or(f64::NAN))
 }
@@ -103,7 +104,8 @@ where
         ColumnData::Int64(v)   => v.par_iter().map(|x| f(x.map(|i| i as f64))).collect(),
         ColumnData::Float64(v) => v.par_iter().map(|x| f(*x)).collect(),
         ColumnData::Bool(v)    => v.par_iter().map(|x| f(x.map(|b| b as i64 as f64))).collect(),
-        ColumnData::Str(_)     => vec![None; col.data.len()],
+        ColumnData::Str(_)              => vec![None; col.data.len()],
+        ColumnData::StrDict { codes, .. } => vec![None; codes.len()],
     };
     Column { name: col.name.clone(), data: ColumnData::Float64(vals) }
 }
@@ -150,6 +152,7 @@ fn extract_f64(data: &ColumnData) -> Vec<f64> {
         ColumnData::Float64(v) => v.iter().filter_map(|x| *x).collect(),
         ColumnData::Bool(v)    => v.iter().filter_map(|x| x.map(|b| b as i64 as f64)).collect(),
         ColumnData::Str(_)     => vec![],
+        ColumnData::StrDict { .. } => vec![],
     }
 }
 
@@ -159,6 +162,10 @@ fn cell_to_str(data: &ColumnData, row: usize) -> String {
         ColumnData::Float64(v) => v.get(row).and_then(|x| *x).map(|f| format!("{f:.6}")).unwrap_or_default(),
         ColumnData::Bool(v)    => v.get(row).and_then(|x| *x).map(|b| b.to_string()).unwrap_or_default(),
         ColumnData::Str(v)     => v.get(row).and_then(|x| x.clone()).unwrap_or_default(),
+        ColumnData::StrDict { codes, dict } => {
+            let c = codes.get(row).copied().unwrap_or(u8::MAX);
+            if c == u8::MAX { String::new() } else { dict.get(c as usize).cloned().unwrap_or_default() }
+        }
     }
 }
 
@@ -171,7 +178,8 @@ impl ColLen for ColumnData {
             ColumnData::Int64(v)   => v.len(),
             ColumnData::Float64(v) => v.len(),
             ColumnData::Bool(v)    => v.len(),
-            ColumnData::Str(v)     => v.len(),
+            ColumnData::Str(v)              => v.len(),
+            ColumnData::StrDict { codes, .. } => codes.len(),
         }
     }
 }

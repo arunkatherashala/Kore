@@ -172,6 +172,17 @@ impl ColStats {
                     min_f64: Some(0.0), max_f64: Some(1.0), histogram: None,
                 })
             }
+            ColumnData::StrDict { codes, dict } => {
+                let mut seen = std::collections::HashSet::new();
+                for &c in codes {
+                    if c == u8::MAX { null_count += 1; } else if let Some(s) = dict.get(c as usize) { seen.insert(s.clone()); }
+                }
+                Some(ColStats {
+                    name: col_name.into(), dtype: "STRING".into(),
+                    row_count, null_count, ndv: seen.len(),
+                    min_f64: None, max_f64: None, histogram: None,
+                })
+            }
         }
     }
 

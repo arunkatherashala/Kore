@@ -131,6 +131,10 @@ fn cpu_group_by_simd(block: &DataBlock, group_cols: &[String], agg_col: &str) ->
             for (i, col) in gcols.iter().enumerate() {
                 let v: u64 = match &col.data {
                     ColumnData::Str(v)     => fnv64(v.get(row).and_then(|x| x.as_deref()).unwrap_or("").as_bytes()),
+                    ColumnData::StrDict { codes, dict } => {
+                        let c = codes.get(row).copied().unwrap_or(u8::MAX);
+                        if c == u8::MAX { 0 } else { fnv64(dict.get(c as usize).map(|s| s.as_bytes()).unwrap_or(b"")) }
+                    }
                     ColumnData::Int64(v)   => v.get(row).and_then(|x| *x).unwrap_or(0) as u64,
                     ColumnData::Float64(v) => v.get(row).and_then(|x| *x).map(|f| f.to_bits()).unwrap_or(0),
                     ColumnData::Bool(v)    => v.get(row).and_then(|x| *x).unwrap_or(false) as u64,

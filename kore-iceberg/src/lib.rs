@@ -419,7 +419,8 @@ pub fn schema_from_block(block: &DataBlock) -> IcebergSchema {
             ColumnData::Int64(_)   => IcebergType::Long,
             ColumnData::Float64(_) => IcebergType::Double,
             ColumnData::Bool(_)    => IcebergType::Boolean,
-            ColumnData::Str(_)     => IcebergType::String,
+            ColumnData::Str(_)      => IcebergType::String,
+            ColumnData::StrDict { .. } => IcebergType::String,
         };
         IcebergField { id: i as u32 + 1, name: col.name.clone(), dtype, required: false, doc: None }
     }).collect();

@@ -77,6 +77,10 @@ impl DataSink for JsonFileSink {
                     ColumnData::Float64(v) => v.get(r).and_then(|x| *x).map(|f| serde_json::json!(f)).unwrap_or(serde_json::Value::Null),
                     ColumnData::Bool(v)    => v.get(r).and_then(|x| *x).map(serde_json::Value::Bool).unwrap_or(serde_json::Value::Null),
                     ColumnData::Str(v)     => v.get(r).and_then(|x| x.as_deref()).map(|s| serde_json::Value::String(s.into())).unwrap_or(serde_json::Value::Null),
+                    ColumnData::StrDict { codes, dict } => {
+                        let c = codes.get(r).copied().unwrap_or(u8::MAX);
+                        if c == u8::MAX { serde_json::Value::Null } else { dict.get(c as usize).map(|s| serde_json::Value::String(s.clone())).unwrap_or(serde_json::Value::Null) }
+                    }
                 };
                 obj.insert(col.name.clone(), v);
             }

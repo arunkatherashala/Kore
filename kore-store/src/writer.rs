@@ -35,8 +35,9 @@ impl KoreWriter {
                 ColumnData::Float64(_) => DType::F64  as u8,
                 ColumnData::Bool(_)    => DType::Bool as u8,
                 ColumnData::Str(_)     => DType::Str  as u8,
+                ColumnData::StrDict { .. } => DType::Str  as u8,
             };
-            w.write_all(&[dtype])?;
+            w.write_all(&[dtype])?;;
         }
 
         // ── Column data ───────────────────────────────────────────────────
@@ -73,5 +74,11 @@ fn encode_column(data: &ColumnData) -> (Compression, Vec<u8>) {
         ColumnData::Float64(v) => (Compression::Raw, compress::raw_encode_f64(v)),
         ColumnData::Bool(v)    => (Compression::Raw, compress::raw_encode_bool(v)),
         ColumnData::Str(v)     => (Compression::Raw, compress::encode_strs(v)),
+        ColumnData::StrDict { codes, dict } => {
+            let v: Vec<Option<String>> = codes.iter().map(|&c| {
+                if c == u8::MAX { None } else { dict.get(c as usize).cloned() }
+            }).collect();
+            (Compression::Raw, compress::encode_strs(&v))
+        }
     }
 }

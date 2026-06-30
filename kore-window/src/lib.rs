@@ -147,6 +147,13 @@ fn build_partitions(
                             for b in s.bytes() { h ^= b as u64; h = h.wrapping_mul(1099511628211); }
                             h
                         }
+                        ColumnData::StrDict { codes, dict } => {
+                            let c = codes.get(i).copied().unwrap_or(u8::MAX);
+                            let s = if c == u8::MAX { "" } else { dict.get(c as usize).map(|x| x.as_str()).unwrap_or("") };
+                            let mut h: u64 = 14695981039346656037;
+                            for b in s.bytes() { h ^= b as u64; h = h.wrapping_mul(1099511628211); }
+                            h
+                        }
                     }
                 };
                 k = k.wrapping_add(v as u128)
@@ -187,6 +194,10 @@ fn partition_key(block: &DataBlock, cols: &[String], row: usize) -> String {
                 ColumnData::Float64(v) => v.get(row).and_then(|x| *x).map(|f| format!("{f:.6}")).unwrap_or_default(),
                 ColumnData::Bool(v)    => v.get(row).and_then(|x| *x).map(|b| b.to_string()).unwrap_or_default(),
                 ColumnData::Str(v)     => v.get(row).and_then(|x| x.as_deref()).unwrap_or("").to_string(),
+                ColumnData::StrDict { codes, dict } => {
+                    let c = codes.get(row).copied().unwrap_or(u8::MAX);
+                    if c == u8::MAX { String::new() } else { dict.get(c as usize).cloned().unwrap_or_default() }
+                }
             })
             .unwrap_or_default()
     })
@@ -211,7 +222,8 @@ fn sort_indices(block: &DataBlock, indices: &mut Vec<usize>, order_by: &[WinOrde
                     ColumnData::Float64(v) => v.get(i).and_then(|x| *x).unwrap_or(f64::NEG_INFINITY),
                     ColumnData::Int64(v)   => v.get(i).and_then(|x| *x).unwrap_or(i64::MIN) as f64,
                     ColumnData::Bool(v)    => v.get(i).and_then(|x| *x).unwrap_or(false) as i32 as f64,
-                    ColumnData::Str(_)     => 0.0,  // handled in fallback
+                    ColumnData::Str(_)        => 0.0,  // handled in fallback
+                    ColumnData::StrDict { .. } => 0.0,  // handled in fallback
                 };
                 (k, i)
             }).collect();
@@ -247,6 +259,13 @@ fn sort_indices(block: &DataBlock, indices: &mut Vec<usize>, order_by: &[WinOrde
                     ColumnData::Str(v) => {
                         let sa = v.get(a).and_then(|x| x.as_deref()).unwrap_or("");
                         let sb = v.get(b).and_then(|x| x.as_deref()).unwrap_or("");
+                        sa.cmp(sb)
+                    }
+                    ColumnData::StrDict { codes, dict } => {
+                        let ca = codes.get(a).copied().unwrap_or(u8::MAX);
+                        let cb = codes.get(b).copied().unwrap_or(u8::MAX);
+                        let sa = if ca == u8::MAX { "" } else { dict.get(ca as usize).map(|s| s.as_str()).unwrap_or("") };
+                        let sb = if cb == u8::MAX { "" } else { dict.get(cb as usize).map(|s| s.as_str()).unwrap_or("") };
                         sa.cmp(sb)
                     }
                     ColumnData::Bool(v) => {

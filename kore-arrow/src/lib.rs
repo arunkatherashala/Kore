@@ -135,6 +135,12 @@ impl ArrowBlock {
                 ColumnData::Float64(v) => ArrowColumnData::Float64(ArrowArray::from_option_vec(v)),
                 ColumnData::Bool(v)    => ArrowColumnData::Bool(ArrowArray::from_option_vec(v)),
                 ColumnData::Str(v)     => ArrowColumnData::Str(ArrowStringArray::from_option_vec(v)),
+                ColumnData::StrDict { codes, dict } => {
+                    let v: Vec<Option<String>> = codes.iter().map(|&c| {
+                        if c == u8::MAX { None } else { dict.get(c as usize).cloned() }
+                    }).collect();
+                    ArrowColumnData::Str(ArrowStringArray::from_option_vec(&v))
+                }
             };
             ArrowColumn { name: col.name.clone(), data }
         }).collect();
@@ -206,6 +212,9 @@ pub fn memory_report(block: &DataBlock) -> MemoryReport {
         ColumnData::Str(v)     => v.iter().map(|s|
             s.as_ref().map(|x| x.len()).unwrap_or(0) + 24  // String = 24 + data
         ).sum(),
+        ColumnData::StrDict { codes, dict } => {
+            codes.len() + dict.iter().map(|s| s.len() + 24).sum::<usize>()
+        }
     }).sum();
 
     let arrow = ArrowBlock::from_data_block(block);

@@ -156,6 +156,7 @@ pub fn update(
                         }
                     }
                 }
+                ColumnData::StrDict { .. } => {} // read-only dict; skip in-place update
             }
         }
     }
@@ -208,7 +209,8 @@ pub fn create_table_as_select(
             ColumnData::Int64(_)   => "INT64".into(),
             ColumnData::Float64(_) => "FLOAT64".into(),
             ColumnData::Bool(_)    => "BOOL".into(),
-            ColumnData::Str(_)     => "VARCHAR".into(),
+            ColumnData::Str(_)      => "VARCHAR".into(),
+            ColumnData::StrDict { .. } => "VARCHAR".into(),
         },
         nullable: true,
     }).collect();
