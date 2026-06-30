@@ -54,6 +54,11 @@ members = [
     "kore-dist-net",     # Layer 67 — TRUE network distribution (TCP workers, real multi-node)
     "kore-jit",          # Layer 68 — JIT/compiled execution (low-cardinality GROUP BY, compiled filters)
     "kore-tpch",         # TPC-H benchmark suite (real timing vs Spark)
+    "kore-python",       # Layer 70 — Python ctypes bindings (C ABI bridge)
+    "kore-sortmerge",    # Layer 71 — Sort-merge join + broadcast join strategy
+    "kore-kafka",        # Layer 72 — Kafka-compatible streaming source/sink
+    "kore-mlx",          # Layer 73 — Expanded ML: RandomForest, LogReg, KMeans
+    "kore-node",         # Layer 74 — True multi-node cluster (TCP gRPC-style)
 ]
 resolver = "2"
 
@@ -84,3 +89,8 @@ kore-parquet = { path = "kore-parquet" }
 kore-optimize = { path = "kore-optimize" }
 
 kore-mcp    = { path = "kore-mcp" }
+kore-python    = { path = "kore-python" }
+kore-sortmerge = { path = "kore-sortmerge" }
+kore-kafka     = { path = "kore-kafka" }
+kore-mlx       = { path = "kore-mlx" }
+kore-node      = { path = "kore-node" }

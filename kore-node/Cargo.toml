@@ -1,0 +1,11 @@
+[package]
+name = "kore-node"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kore-core = { path = "../kore-core" }
+kore-sql  = { path = "../kore-sql" }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+rayon = { workspace = true }

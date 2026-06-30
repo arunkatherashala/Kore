@@ -1188,6 +1188,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kore-kafka"
+version = "0.1.0"
+dependencies = [
+ "kore-core",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "kore-mcp"
 version = "0.1.0"
 dependencies = [
@@ -1227,6 +1236,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kore-mlx"
+version = "0.1.0"
+dependencies = [
+ "kore-core",
+ "rayon",
+]
+
+[[package]]
 name = "kore-mv"
 version = "0.1.0"
 dependencies = [
@@ -1242,6 +1259,17 @@ version = "0.1.0"
 dependencies = [
  "kore-core",
  "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "kore-node"
+version = "0.1.0"
+dependencies = [
+ "kore-core",
+ "kore-sql",
+ "rayon",
  "serde_json",
  "tokio",
 ]
@@ -1302,6 +1330,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kore-python"
+version = "0.1.0"
+dependencies = [
+ "kore-core",
+ "kore-sql",
+ "libc",
+ "serde_json",
+]
+
+[[package]]
 name = "kore-rm"
 version = "0.1.0"
 dependencies = [
@@ -1358,6 +1396,14 @@ name = "kore-simd"
 version = "0.1.0"
 dependencies = [
  "kore-core",
+]
+
+[[package]]
+name = "kore-sortmerge"
+version = "0.1.0"
+dependencies = [
+ "kore-core",
+ "rayon",
 ]
 
 [[package]]

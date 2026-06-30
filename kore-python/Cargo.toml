@@ -1,0 +1,14 @@
+[package]
+name = "kore-python"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "kore_python"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+kore-core = { path = "../kore-core" }
+kore-sql  = { path = "../kore-sql" }
+serde_json = { workspace = true }
+libc = { workspace = true }

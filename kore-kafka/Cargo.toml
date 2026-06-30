@@ -1,0 +1,9 @@
+[package]
+name = "kore-kafka"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kore-core = { path = "../kore-core" }
+serde_json = { workspace = true }
+tokio = { workspace = true }
