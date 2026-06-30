@@ -16,6 +16,8 @@ use kore_join::{HashJoin, JoinConfig};
 use kore_core::JoinType;
 use kore_ml2::{GradientBoostingRegressor, RandomForestClassifier, RandomForestRegressor};
 use kore_ml3::{KNearestNeighbors, LinearRegressor, LogisticRegressor, LinearSVM};
+extern crate kore_io;
+extern crate kore_parquet;
 
 // ─── Error buffer ─────────────────────────────────────────────────────────────
 
@@ -297,6 +299,66 @@ pub unsafe extern "C" fn kore_session_load_csv(
     }
 }
 
+/// Load a .kore native binary file as a named table. Returns 0 on success, -1 on error.
+/// The .kore format is KORE's own columnar binary format — much faster to load than CSV.
+#[no_mangle]
+pub unsafe extern "C" fn kore_session_load_kore(
+    sess:  *mut KoreSession,
+    table: *const c_char,
+    path:  *const c_char,
+) -> c_int {
+    let s = match (ptr_to_str(table), ptr_to_str(path)) {
+        (Some(t), Some(p)) => (t, p),
+        _ => { set_error("null pointer in kore_session_load_kore"); return -1; }
+    };
+    if sess.is_null() { set_error("null session"); return -1; }
+    match kore_io::KoreReader::read_file(std::path::Path::new(s.1)) {
+        Ok(block) => { (*sess).ctx.register(s.0, block); 0 }
+        Err(e) => { set_error(format!("{e}")); -1 }
+    }
+}
+
+/// Save a registered table to .kore native binary format. Returns 0 on success, -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn kore_session_save_kore(
+    sess:  *const KoreSession,
+    table: *const c_char,
+    path:  *const c_char,
+) -> c_int {
+    let s = match (ptr_to_str(table), ptr_to_str(path)) {
+        (Some(t), Some(p)) => (t, p),
+        _ => { set_error("null pointer in kore_session_save_kore"); return -1; }
+    };
+    if sess.is_null() { set_error("null session"); return -1; }
+    match (*sess).ctx.get(s.0) {
+        None => { set_error(format!("table not found: {}", s.0)); -1 }
+        Some(block) => {
+            match kore_io::KoreWriter::write_file(std::path::Path::new(s.1), block) {
+                Ok(_)  => 0,
+                Err(e) => { set_error(format!("{e}")); -1 }
+            }
+        }
+    }
+}
+
+/// Load an Apache Parquet file as a named table. Returns 0 on success, -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn kore_session_load_parquet(
+    sess:  *mut KoreSession,
+    table: *const c_char,
+    path:  *const c_char,
+) -> c_int {
+    let s = match (ptr_to_str(table), ptr_to_str(path)) {
+        (Some(t), Some(p)) => (t, p),
+        _ => { set_error("null pointer in kore_session_load_parquet"); return -1; }
+    };
+    if sess.is_null() { set_error("null session"); return -1; }
+    match kore_parquet::ParquetReader::new(s.1).read() {
+        Ok(block) => { (*sess).ctx.register(s.0, block); 0 }
+        Err(e) => { set_error(format!("{e}")); -1 }
+    }
+}
+
 /// Register a DataBlock as a named table inside a session.
 /// The session takes a COPY of the block data.
 #[no_mangle]
@@ -356,47 +418,129 @@ unsafe fn ptr_to_str<'a>(p: *const c_char) -> Option<&'a str> {
 
 fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(), String> {
     use std::io::{BufRead, BufReader};
-    let file = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
-    let mut lines = BufReader::new(file).lines();
-    let header = lines.next().ok_or("empty")?.map_err(|e| e.to_string())?;
-    let headers: Vec<String> = header.split(',').map(|h| h.trim().trim_matches('"').to_string()).collect();
+    use std::collections::HashMap;
+
+    // ── Pass 1: read header + 2 000 sample rows → determine column types ──────
+    let file1 = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+    let mut r1 = BufReader::new(file1);
+
+    let mut hdr = String::new();
+    r1.read_line(&mut hdr).map_err(|e| e.to_string())?;
+    let headers: Vec<String> = hdr.trim_end().split(',')
+        .map(|h| h.trim().trim_matches('"').to_string()).collect();
     let nc = headers.len();
-    let mut raw: Vec<Vec<String>> = vec![vec![]; nc];
-    for line in lines.flatten() {
-        let vals: Vec<&str> = line.splitn(nc, ',').collect();
-        for (i, v) in vals.iter().enumerate() {
-            if i < nc { raw[i].push(v.trim().trim_matches('"').to_string()); }
+
+    const SAMPLE: usize = 2_000;
+    // For each column: track if all non-empty values parse as i64, f64, and cardinality.
+    let mut all_i64:   Vec<bool> = vec![true; nc];
+    let mut all_f64:   Vec<bool> = vec![true; nc];
+    let mut seen:      Vec<HashMap<[u8; 16], ()>> = (0..nc).map(|_| HashMap::new()).collect();
+    let mut seen_many: Vec<bool> = vec![false; nc];  // >255 unique
+    let mut any_val:   Vec<bool> = vec![false; nc];
+    let mut nsampled = 0usize;
+
+    let mut line = String::new();
+    while nsampled < SAMPLE {
+        line.clear();
+        if r1.read_line(&mut line).map_err(|e| e.to_string())? == 0 { break; }
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() { continue; }
+        let vals: Vec<&str> = trimmed.splitn(nc, ',').collect();
+        for i in 0..nc {
+            let v = vals.get(i).map(|s| s.trim().trim_matches('"')).unwrap_or("");
+            if v.is_empty() { continue; }
+            any_val[i] = true;
+            if all_i64[i] && v.parse::<i64>().is_err() { all_i64[i] = false; }
+            if all_f64[i] && v.parse::<f64>().is_err() { all_f64[i] = false; }
+            if !seen_many[i] {
+                // cheap 16-byte key from first 16 bytes of value
+                let mut key = [0u8; 16];
+                let b = v.as_bytes();
+                let n = b.len().min(16);
+                key[..n].copy_from_slice(&b[..n]);
+                key[15] = b.len() as u8;
+                seen[i].insert(key, ());
+                if seen[i].len() > 255 { seen_many[i] = true; }
+            }
         }
-        for i in vals.len()..nc { raw[i].push(String::new()); }
+        nsampled += 1;
     }
-    let nr = raw[0].len();
+
+    #[derive(Clone, PartialEq)]
+    enum CT { Int64, Float64, StrDict, Str }
+    let col_types: Vec<CT> = (0..nc).map(|i| {
+        if !any_val[i]       { return CT::Str; }
+        if all_i64[i]        { return CT::Int64; }
+        if all_f64[i]        { return CT::Float64; }
+        if !seen_many[i]     { return CT::StrDict; }
+        CT::Str
+    }).collect();
+
+    // ── Pass 2: read full file directly into typed columns ───────────────────
+    // No intermediate String storage for numeric columns — direct parse.
+    let file2 = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+    let mut r2 = BufReader::new(file2);
+    let mut skip = String::new();
+    r2.read_line(&mut skip).map_err(|e| e.to_string())?;   // skip header
+
+    let cap = 1_100_000usize;
+    let mut i64_cols:  Vec<Vec<Option<i64>>>    = (0..nc).map(|i| if col_types[i]==CT::Int64   { Vec::with_capacity(cap) } else { vec![] }).collect();
+    let mut f64_cols:  Vec<Vec<Option<f64>>>    = (0..nc).map(|i| if col_types[i]==CT::Float64 { Vec::with_capacity(cap) } else { vec![] }).collect();
+    let mut str_cols:  Vec<Vec<Option<String>>> = (0..nc).map(|i| if col_types[i]==CT::Str     { Vec::with_capacity(cap) } else { vec![] }).collect();
+    // StrDict state per column
+    let mut sd_codes:  Vec<Vec<u8>>             = (0..nc).map(|i| if col_types[i]==CT::StrDict { Vec::with_capacity(cap) } else { vec![] }).collect();
+    let mut sd_dict:   Vec<Vec<String>>         = vec![vec![]; nc];
+    let mut sd_map:    Vec<HashMap<String, u8>> = vec![HashMap::new(); nc];
+
+    let mut line2 = String::new();
+    let mut nr = 0usize;
+    loop {
+        line2.clear();
+        if r2.read_line(&mut line2).map_err(|e| e.to_string())? == 0 { break; }
+        let trimmed = line2.trim_end();
+        if trimmed.is_empty() { continue; }
+        nr += 1;
+        let vals: Vec<&str> = trimmed.splitn(nc, ',').collect();
+        for i in 0..nc {
+            let v = vals.get(i).map(|s| s.trim().trim_matches('"')).unwrap_or("");
+            match col_types[i] {
+                CT::Int64   => i64_cols[i].push(if v.is_empty() { None } else { v.parse().ok() }),
+                CT::Float64 => f64_cols[i].push(if v.is_empty() { None } else { v.parse().ok() }),
+                CT::Str     => str_cols[i].push(if v.is_empty() { None } else { Some(v.to_string()) }),
+                CT::StrDict => {
+                    if v.is_empty() {
+                        sd_codes[i].push(u8::MAX);
+                    } else if let Some(&code) = sd_map[i].get(v) {
+                        sd_codes[i].push(code);
+                    } else if sd_dict[i].len() < 255 {
+                        let code = sd_dict[i].len() as u8;
+                        sd_map[i].insert(v.to_string(), code);
+                        sd_dict[i].push(v.to_string());
+                        sd_codes[i].push(code);
+                    } else {
+                        // cardinality overflowed sample estimate — treat as plain Str
+                        sd_codes[i].push(0);
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Build DataBlock ───────────────────────────────────────────────────────
     let mut columns = vec![];
     for (i, name) in headers.iter().enumerate() {
-        let vals = &raw[i];
-        // Try i64
-        let as_i64: Option<Vec<Option<i64>>> = vals.iter().map(|v| {
-            if v.is_empty() { Some(None) } else { v.parse::<i64>().ok().map(Some) }
-        }).collect();
-        if let Some(v) = as_i64 {
-            columns.push(Column { name: name.clone(), data: ColumnData::Int64(v) });
-            continue;
-        }
-        // Try f64
-        let as_f64: Option<Vec<Option<f64>>> = vals.iter().map(|v| {
-            if v.is_empty() { Some(None) } else { v.parse::<f64>().ok().map(Some) }
-        }).collect();
-        if let Some(v) = as_f64 {
-            columns.push(Column { name: name.clone(), data: ColumnData::Float64(v) });
-            continue;
-        }
-        // Str
-        columns.push(Column {
-            name: name.clone(),
-            data: ColumnData::Str(vals.iter().map(|v| if v.is_empty() { None } else { Some(v.clone()) }).collect()),
-        });
+        let data = match col_types[i] {
+            CT::Int64   => ColumnData::Int64(std::mem::take(&mut i64_cols[i])),
+            CT::Float64 => ColumnData::Float64(std::mem::take(&mut f64_cols[i])),
+            CT::Str     => ColumnData::Str(std::mem::take(&mut str_cols[i])),
+            CT::StrDict => ColumnData::StrDict {
+                codes: std::mem::take(&mut sd_codes[i]),
+                dict:  std::mem::take(&mut sd_dict[i]),
+            },
+        };
+        columns.push(Column { name: name.clone(), data });
     }
-    let block = DataBlock { columns, num_rows: nr };
-    ctx.register(table_name, block);
+    ctx.register(table_name, DataBlock { columns, num_rows: nr });
     Ok(())
 }
 

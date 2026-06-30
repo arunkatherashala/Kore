@@ -4,6 +4,21 @@ use std::io::{self, Write};
 use kore_core::{ColumnData, DataBlock};
 use crate::{Compression, DType, MAGIC, VERSION, compress};
 
+/// Try LZ4 on top of already-encoded bytes.
+/// Returns (Compression::Lz4, compressed) if LZ4 shrinks data, else original.
+fn try_lz4(comp: Compression, data: Vec<u8>) -> (Compression, Vec<u8>) {
+    if data.len() < 64 { return (comp, data); }  // not worth it for tiny cols
+    let compressed = lz4_flex::compress_prepend_size(&data);
+    if compressed.len() < data.len() {
+        // Encode the original comp type in first byte so reader can round-trip
+        let mut out = vec![comp as u8];
+        out.extend_from_slice(&compressed);
+        (Compression::Lz4, out)
+    } else {
+        (comp, data)
+    }
+}
+
 pub struct KoreWriter;
 
 impl KoreWriter {
@@ -31,11 +46,11 @@ impl KoreWriter {
             w.write_all(&(name_bytes.len() as u16).to_le_bytes())?;
             w.write_all(name_bytes)?;
             let dtype: u8 = match &col.data {
-                ColumnData::Int64(_)   => DType::I64  as u8,
-                ColumnData::Float64(_) => DType::F64  as u8,
-                ColumnData::Bool(_)    => DType::Bool as u8,
-                ColumnData::Str(_)     => DType::Str  as u8,
-                ColumnData::StrDict { .. } => DType::Str  as u8,
+                ColumnData::Int64(_)       => DType::I64     as u8,
+                ColumnData::Float64(_)     => DType::F64     as u8,
+                ColumnData::Bool(_)        => DType::Bool    as u8,
+                ColumnData::Str(_)         => DType::Str     as u8,
+                ColumnData::StrDict { .. } => DType::StrDict as u8,
             };
             w.write_all(&[dtype])?;;
         }
@@ -43,9 +58,10 @@ impl KoreWriter {
         // ── Column data ───────────────────────────────────────────────────
         for col in &block.columns {
             let (comp, data) = encode_column(&col.data);
-            w.write_all(&[comp as u8])?;
-            w.write_all(&(data.len() as u64).to_le_bytes())?;
-            w.write_all(&data)?;
+            let (final_comp, final_data) = try_lz4(comp, data);
+            w.write_all(&[final_comp as u8])?;
+            w.write_all(&(final_data.len() as u64).to_le_bytes())?;
+            w.write_all(&final_data)?;
         }
         Ok(())
     }
@@ -60,7 +76,6 @@ impl KoreWriter {
 fn encode_column(data: &ColumnData) -> (Compression, Vec<u8>) {
     match data {
         ColumnData::Int64(v) => {
-            // Use delta encoding if values are sorted (common for IDs), else RLE
             let is_sorted = v.windows(2).all(|w| match (w[0], w[1]) {
                 (Some(a), Some(b)) => a <= b,
                 _ => true,
@@ -71,14 +86,20 @@ fn encode_column(data: &ColumnData) -> (Compression, Vec<u8>) {
                 (Compression::Rle, compress::rle_encode_i64(v))
             }
         }
-        ColumnData::Float64(v) => (Compression::Raw, compress::raw_encode_f64(v)),
+        // Float64: try dictionary first (huge win for low-cardinality, e.g. l_discount).
+        // Fall back to NaN-sentinel (8 bytes/el) which is still better than raw (9 bytes/el).
+        ColumnData::Float64(v) => {
+            if let Some(dict_bytes) = compress::dict_encode_f64(v) {
+                (Compression::Dict, dict_bytes)
+            } else {
+                (Compression::NanRaw, compress::nan_encode_f64(v))
+            }
+        }
         ColumnData::Bool(v)    => (Compression::Raw, compress::raw_encode_bool(v)),
         ColumnData::Str(v)     => (Compression::Raw, compress::encode_strs(v)),
+        // StrDict: store codes directly (1 byte/row) + tiny dict — no string explosion.
         ColumnData::StrDict { codes, dict } => {
-            let v: Vec<Option<String>> = codes.iter().map(|&c| {
-                if c == u8::MAX { None } else { dict.get(c as usize).cloned() }
-            }).collect();
-            (Compression::Raw, compress::encode_strs(&v))
+            (Compression::Raw, compress::encode_strdict(codes, dict))
         }
     }
 }

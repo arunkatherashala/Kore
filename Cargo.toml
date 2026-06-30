@@ -68,7 +68,10 @@ serde_json  = "1"
 thiserror   = "2"
 rayon       = "1"
 tokio       = { version = "1", features = ["full"] }
-parquet     = "59"
+parquet     = { version = "59", features = ["arrow"] }
+arrow-array = "59"
+arrow-schema = "59"
+lz4_flex    = "0.11"
 axum        = "0.8"
 tower-http  = { version = "0.6", features = ["cors", "trace"] }
 libc        = "0.2"

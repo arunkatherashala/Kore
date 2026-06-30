@@ -22,7 +22,7 @@ impl KoreReader {
             return Err(KoreError::InvalidArgument("invalid KORE magic bytes".into()));
         }
         let version = read_u16(r)?;
-        if version != crate::VERSION {
+        if version != crate::VERSION && version != 1 {
             return Err(KoreError::InvalidArgument(format!("unsupported version {version}")));
         }
         let num_cols = read_u32(r)? as usize;
@@ -65,13 +65,24 @@ impl KoreReader {
 }
 
 fn decode_column(raw: &[u8], dtype: DType, comp: Compression, n: usize) -> Result<ColumnData, String> {
+    // If LZ4-compressed: first byte is the original compression type, rest is LZ4 data
+    let (raw, comp) = if comp == Compression::Lz4 {
+        if raw.is_empty() { return Err("empty LZ4 block".into()); }
+        let inner_comp = Compression::try_from(raw[0])
+            .map_err(|e| format!("LZ4 inner comp: {e}"))?;
+        let decompressed = lz4_flex::decompress_size_prepended(&raw[1..])
+            .map_err(|e| format!("LZ4 decompress: {e}"))?;
+        return decode_column(&decompressed, dtype, inner_comp, n);
+    } else {
+        (raw, comp)
+    };
+
     Ok(match dtype {
         DType::I64 => {
             let vals = match comp {
-                Compression::Delta => compress::delta_decode_i64(raw, n),
-                Compression::Rle   => compress::rle_decode_i64(raw, n),
-                Compression::Raw   => {
-                    // raw i64: (null:1)(val:8) × n
+                Compression::Delta  => compress::delta_decode_i64(raw, n),
+                Compression::Rle    => compress::rle_decode_i64(raw, n),
+                _                   => {
                     let mut out = Vec::with_capacity(n);
                     let mut i = 0;
                     while i + 9 <= raw.len() && out.len() < n {
@@ -84,9 +95,17 @@ fn decode_column(raw: &[u8], dtype: DType, comp: Compression, n: usize) -> Resul
             };
             ColumnData::Int64(vals)
         }
-        DType::F64  => ColumnData::Float64(compress::raw_decode_f64(raw, n)),
-        DType::Bool => ColumnData::Bool(compress::raw_decode_bool(raw, n)),
-        DType::Str  => ColumnData::Str(compress::decode_strs(raw)),
+        DType::F64 => ColumnData::Float64(match comp {
+            Compression::Dict   => compress::dict_decode_f64(raw, n),
+            Compression::NanRaw => compress::nan_decode_f64(raw, n),
+            _                   => compress::raw_decode_f64(raw, n),
+        }),
+        DType::Bool    => ColumnData::Bool(compress::raw_decode_bool(raw, n)),
+        DType::Str     => ColumnData::Str(compress::decode_strs(raw)),
+        DType::StrDict => {
+            let (codes, dict) = compress::decode_strdict(raw, n);
+            ColumnData::StrDict { codes, dict }
+        }
     })
 }
 

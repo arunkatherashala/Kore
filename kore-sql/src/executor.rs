@@ -67,9 +67,28 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     // 1. Resolve FROM table
     let base_name   = &stmt.from.name;
     let base_alias  = stmt.from.alias.as_deref().unwrap_or(base_name.as_str());
-    let base_block  = ctx.get(base_name)
-        .ok_or_else(|| KoreError::InvalidArgument(format!("unknown table: {base_name}")))?
-        .clone();
+    let base_ref    = ctx.get(base_name)
+        .ok_or_else(|| KoreError::InvalidArgument(format!("unknown table: {base_name}")))?;
+
+    // Column pruning: for simple queries (no JOIN, no SELECT *) only clone columns
+    // actually referenced by projections/WHERE/GROUP BY/ORDER BY.
+    // Avoids cloning expensive high-cardinality Str columns (e.g. l_comment) unnecessarily.
+    let has_star = stmt.projections.iter().any(|p| matches!(p, Projection::Star));
+    let base_block: DataBlock = if !has_star && stmt.joins.is_empty() {
+        let needed = used_columns(stmt);
+        DataBlock {
+            num_rows: base_ref.num_rows,
+            columns:  base_ref.columns.iter()
+                .filter(|c| {
+                    let bare = c.name.rsplit('.').next().unwrap_or(&c.name);
+                    needed.contains(bare) || needed.contains(c.name.as_str())
+                })
+                .cloned()
+                .collect(),
+        }
+    } else {
+        base_ref.clone()
+    };
 
     // Prefix column names with alias
     let mut result = prefix_columns(base_block, base_alias);
@@ -189,9 +208,15 @@ fn resolve_col_name(name: &str, default_alias: &str) -> String {
 // ─── Filter (WHERE) ───────────────────────────────────────────────────────────
 
 fn filter_block(block: DataBlock, pred: &Expr) -> Result<DataBlock, KoreError> {
-    // Use batch (column-at-a-time) evaluation when possible for SIMD auto-vectorization.
-    // Falls back to row-at-a-time for complex expressions (CASE WHEN, LIKE, FuncCall, etc.).
-    let keep: Vec<bool> = eval_batch(pred, &block);
+    let n = block.num_rows;
+    // For large blocks: parallel row-at-a-time evaluation uses all CPU cores.
+    // For small blocks: column-at-a-time is faster (no thread overhead).
+    let keep: Vec<bool> = if n >= 100_000 {
+        use rayon::prelude::*;
+        (0..n).into_par_iter().map(|r| eval_bool(pred, &block, r)).collect()
+    } else {
+        eval_batch(pred, &block)
+    };
     let indices: Vec<usize> = keep.iter().enumerate()
         .filter_map(|(i, &k)| if k { Some(i) } else { None })
         .collect();
@@ -626,8 +651,12 @@ fn eval_func(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> ExprVa
 }
 
 fn get_cell(block: &DataBlock, col_name: &str, row: usize) -> ExprVal {    // Try exact match, then suffix match (for qualified names)
-    let col = block.columns.iter().find(|c| c.name == col_name)
-        .or_else(|| block.columns.iter().find(|c| c.name.ends_with(&format!(".{}", col_name))));
+    let col = block.columns.iter().find(|c| {
+        c.name == col_name || {
+            let cn = c.name.len(); let nm = col_name.len();
+            cn > nm && c.name.as_bytes()[cn - nm - 1] == b'.' && &c.name[cn - nm..] == col_name
+        }
+    });
     match col {
         None => ExprVal::Null,
         Some(c) => match &c.data {
@@ -704,7 +733,10 @@ fn sort_block(block: DataBlock, col: &str, desc: bool) -> Result<DataBlock, Kore
     // Use DataBlock::sort_by which uses a Schwartzian transform (cache-friendly,
     // avoids calling get_cell() twice per comparison in the comparator).
     let col_name = block.columns.iter()
-        .find(|c| c.name == col || c.name.ends_with(&format!(".{}", col)))
+        .find(|c| c.name == col || {
+            let cn = c.name.len(); let m = col.len();
+            cn > m && c.name.as_bytes()[cn - m - 1] == b'.' && &c.name[cn - m..] == col
+        })
         .map(|c| c.name.clone())
         .ok_or_else(|| KoreError::InvalidArgument(format!("ORDER BY column not found: {col}")))?;
     // ascending=!desc to match the desc semantics
@@ -739,7 +771,9 @@ fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, Ko
                             _                    => c.clone(),
                         };
                         let src = block.columns.iter().find(|col| {
-                            col.name == col_name || col.name.ends_with(&format!(".{}", col_name))
+                            let cn = col.name.len(); let nm = col_name.len();
+                            col.name == col_name ||
+                            (cn > nm && col.name.as_bytes()[cn-nm-1] == b'.' && &col.name[cn-nm..] == col_name)
                         }).ok_or_else(|| KoreError::InvalidArgument(format!("column not found: {col_name}")))?;
                         let mut nc = src.clone();
                         if let Some(a) = alias { nc.name = a.clone(); }
@@ -802,9 +836,77 @@ fn exprvals_to_column(name: String, vals: Vec<ExprVal>) -> Column {
 
 // ─── Fast column extraction helpers ──────────────────────────────────────────
 
+/// Collect all bare column names referenced anywhere in an expression.
+fn collect_cols_expr(expr: &Expr, set: &mut std::collections::HashSet<String>) {
+    match expr {
+        Expr::Col(c)            => { set.insert(c.clone()); }
+        Expr::QualCol(_, c)     => { set.insert(c.clone()); }
+        Expr::Agg { expr: e, .. } => collect_cols_expr(e, set),
+        Expr::BinOp { left, right, .. } => {
+            collect_cols_expr(left, set);
+            collect_cols_expr(right, set);
+        }
+        Expr::Not(e) | Expr::IsNull(e) | Expr::IsNotNull(e) => collect_cols_expr(e, set),
+        Expr::Between { expr: e, low, high, .. } => {
+            collect_cols_expr(e, set);
+            collect_cols_expr(low, set);
+            collect_cols_expr(high, set);
+        }
+        Expr::In { expr: e, values, .. } => {
+            collect_cols_expr(e, set);
+            for v in values { collect_cols_expr(v, set); }
+        }
+        Expr::Like { expr: e, pattern, .. } => {
+            collect_cols_expr(e, set);
+            collect_cols_expr(pattern, set);
+        }
+        Expr::Case { operand, branches, else_val } => {
+            if let Some(op) = operand { collect_cols_expr(op, set); }
+            for (cond, val) in branches { collect_cols_expr(cond, set); collect_cols_expr(val, set); }
+            if let Some(ev) = else_val { collect_cols_expr(ev, set); }
+        }
+        Expr::FuncCall { args, .. } => { for a in args { collect_cols_expr(a, set); } }
+        Expr::Window { func, spec } => {
+            match func {
+                WindowFn::Agg { expr: e, .. } => collect_cols_expr(e, set),
+                WindowFn::Ntile(e) | WindowFn::FirstValue(e) | WindowFn::LastValue(e) | WindowFn::CumSum(e) => {
+                    collect_cols_expr(e, set);
+                }
+                WindowFn::Lag { expr: e, offset } | WindowFn::Lead { expr: e, offset } => {
+                    collect_cols_expr(e, set);
+                    collect_cols_expr(offset, set);
+                }
+                _ => {}
+            }
+            for e in &spec.partition_by { collect_cols_expr(e, set); }
+            for o in &spec.order_by    { set.insert(o.col.rsplit('.').next().unwrap_or(&o.col).to_string()); }
+        }
+        _ => {}
+    }
+}
+
+/// Return the set of bare column names (without table prefix) used by a SELECT statement.
+fn used_columns(stmt: &SelectStmt) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    for proj in &stmt.projections {
+        if let Projection::Expr { expr, .. } = proj { collect_cols_expr(expr, &mut set); }
+    }
+    if let Some(pred) = &stmt.where_clause { collect_cols_expr(pred, &mut set); }
+    for col in &stmt.group_by  { set.insert(col.rsplit('.').next().unwrap_or(col).to_string()); }
+    for item in &stmt.order_by { set.insert(item.col.rsplit('.').next().unwrap_or(&item.col).to_string()); }
+    set
+}
+
 /// Find a column by exact name or table-prefix suffix match.
 fn find_col<'a>(block: &'a DataBlock, name: &str) -> Option<&'a Column> {
-    block.columns.iter().find(|c| c.name == name || c.name.ends_with(&format!(".{name}")))
+    // Hot path: avoid format!() allocation by doing suffix check inline.
+    block.columns.iter().find(|c| {
+        c.name == name || {
+            let cn = c.name.len();
+            let nm = name.len();
+            cn > nm && c.name.as_bytes()[cn - nm - 1] == b'.' && &c.name[cn - nm..] == name
+        }
+    })
 }
 
 /// Extract f64 values for a subset of rows — column-at-a-time, no per-row dispatch.
@@ -840,14 +942,24 @@ fn global_agg(block: DataBlock, projections: &[Projection]) -> Result<DataBlock,
     let mut new_cols: Vec<Column> = Vec::new();
     for proj in projections {
         if let Projection::Expr { expr: Expr::Agg { func, expr: inner }, alias } = proj {
+            let is_direct = matches!(inner.as_ref(),
+                Expr::Col(_) | Expr::QualCol(_, _) | Expr::Star);
             let col_name = match inner.as_ref() {
                 Expr::Col(c)        => c.clone(),
                 Expr::QualCol(t, c) => format!("{}.{}", t, c),
-                _ => String::new(),
+                _                   => String::new(),
             };
-            // Fast column-at-a-time extraction
-            let agg_col = find_col(&block, &col_name);
-            let vals: Vec<f64> = agg_col.map(|c| extract_f64_all(c)).unwrap_or_default();
+            let agg_col = if is_direct { find_col(&block, &col_name) } else { None };
+            // Direct col: fast column-at-a-time; complex expr: row-at-a-time
+            let vals: Vec<f64> = if is_direct {
+                agg_col.map(|c| extract_f64_all(c)).unwrap_or_default()
+            } else {
+                (0..block.num_rows).filter_map(|r| match eval_expr(inner, &block, r) {
+                    ExprVal::Float(f) => Some(f),
+                    ExprVal::Int(i)   => Some(i as f64),
+                    _                 => None,
+                }).collect()
+            };
             let v: Option<f64> = match func {
                 AggFunc::Count => Some(block.num_rows as f64),
                 AggFunc::CountDistinct => {
@@ -894,7 +1006,8 @@ fn group_by_agg(
 
     let n = block.num_rows;
     let nthreads = rayon::current_num_threads();
-    let nchunks  = if n >= 2_000_000 { (nthreads * 2).max(1) } else { 1 };
+    // Use parallelism for any table large enough to benefit (~50K+ rows).
+    let nchunks  = if n >= 50_000 { (nthreads * 2).max(1) } else { 1 };
     let chunk_sz = ((n + nchunks - 1) / nchunks).max(1);
 
     // ── Fast u128 key (no String allocation per row) ──────────────────────────
@@ -1005,28 +1118,41 @@ fn group_by_agg(
             Projection::Expr { expr, alias } => {
                 match expr {
                     Expr::Agg { func, expr: inner } => {
+                        let is_direct = matches!(inner.as_ref(),
+                            Expr::Col(_) | Expr::QualCol(_, _) | Expr::Star);
                         let col_name = match inner.as_ref() {
-                            Expr::Col(c)       => c.clone(),
+                            Expr::Col(c)        => c.clone(),
                             Expr::QualCol(t, c) => format!("{}.{}", t, c),
-                            _ => String::new(),
+                            _                   => String::new(),
                         };
                         // Pre-find the column once (not per group)
-                        let agg_col = find_col(&block, &col_name);
+                        let agg_col = if is_direct { find_col(&block, &col_name) } else { None };
                         let mut agg_vals: Vec<Option<f64>> = Vec::new();
                         for (_, idxs) in &groups {
-                            // Fast column-at-a-time extraction for the group's rows
-                            let vals: Vec<f64> = agg_col
-                                .map(|c| extract_f64_at(c, idxs))
-                                .unwrap_or_default();
+                            // Direct column ref: fast column-at-a-time extraction.
+                            // Arbitrary expression (e.g. col*col): row-at-a-time eval.
+                            let vals: Vec<f64> = if is_direct {
+                                agg_col.map(|c| extract_f64_at(c, idxs)).unwrap_or_default()
+                            } else {
+                                idxs.iter().filter_map(|&r| match eval_expr(inner, &block, r) {
+                                    ExprVal::Float(f) => Some(f),
+                                    ExprVal::Int(i)   => Some(i as f64),
+                                    _                 => None,
+                                }).collect()
+                            };
                             let v = match func {
                                 AggFunc::Count => Some(idxs.len() as f64),
                                 AggFunc::CountDistinct => {
                                     use std::collections::HashSet;
-                                    let seen: HashSet<u64> = agg_col.map(|col| match &col.data {
-                                        ColumnData::Float64(v) => idxs.iter().filter_map(|&r| v.get(r).and_then(|x| *x)).map(|f| f.to_bits()).collect(),
-                                        ColumnData::Int64(v)   => idxs.iter().filter_map(|&r| v.get(r).and_then(|x| *x)).map(|i| i as u64).collect(),
-                                        _ => HashSet::new(),
-                                    }).unwrap_or_default();
+                                    let seen: HashSet<u64> = if is_direct {
+                                        agg_col.map(|col| match &col.data {
+                                            ColumnData::Float64(v) => idxs.iter().filter_map(|&r| v.get(r).and_then(|x| *x)).map(|f| f.to_bits()).collect(),
+                                            ColumnData::Int64(v)   => idxs.iter().filter_map(|&r| v.get(r).and_then(|x| *x)).map(|i| i as u64).collect(),
+                                            _ => HashSet::new(),
+                                        }).unwrap_or_default()
+                                    } else {
+                                        vals.iter().map(|&f| f.to_bits()).collect()
+                                    };
                                     Some(seen.len() as f64)
                                 }
                                 AggFunc::Sum   => if vals.is_empty() { None } else { Some(vals.iter().sum()) },

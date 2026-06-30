@@ -1,19 +1,30 @@
-//! KORE Layer 32 â€” Parquet I/O
+﻿//! KORE Layer 32 — Parquet I/O
 //!
 //! Read and write Apache Parquet files to/from KORE DataBlocks.
-//! Uses the official `parquet` crate (v59) from Apache Arrow-rs.
+//! Reader uses the Arrow columnar API for fast, allocation-efficient loading.
+//! Writer uses the low-level parquet API for fine-grained control.
 
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use parquet::file::reader::{FileReader, SerializedFileReader};
-use parquet::record::Field;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::schema::parser::parse_message_type;
 use parquet::file::writer::SerializedFileWriter;
 use parquet::file::properties::WriterProperties;
 use parquet::data_type::ByteArray;
+use parquet::record::Field;
+
+use arrow_schema::DataType as ArrowType;
+use arrow_array::{
+    Array, RecordBatch,
+    Int8Array, Int16Array, Int32Array, Int64Array,
+    UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    Float32Array, Float64Array, BooleanArray,
+    StringArray, LargeStringArray,
+    Date32Array, Date64Array,
+};
 
 use kore_core::{Column, ColumnData, DataBlock, KoreError};
 
@@ -23,6 +34,7 @@ use kore_core::{Column, ColumnData, DataBlock, KoreError};
 pub enum ParquetError {
     #[error("I/O: {0}")]     Io(#[from] std::io::Error),
     #[error("Parquet: {0}")] Parquet(#[from] parquet::errors::ParquetError),
+    #[error("Arrow: {0}")]   Arrow(#[from] arrow_schema::ArrowError),
     #[error("KORE: {0}")]    Kore(#[from] KoreError),
 }
 
@@ -34,68 +46,35 @@ impl ParquetReader {
     pub fn new(path: impl Into<PathBuf>) -> Self { Self { path: path.into() } }
 
     pub fn read(&self) -> Result<DataBlock, ParquetError> {
-        let file   = File::open(&self.path)?;
-        let reader = SerializedFileReader::new(file)?;
-        let row_iter = reader.get_row_iter(None)?;
-        let mut col_data: HashMap<String, Vec<Option<String>>> = HashMap::new();
-        let mut col_order: Vec<String> = Vec::new();
-        let mut n = 0usize;
-
-        for row_result in row_iter {
-            let row = row_result?;
-            for (name, field) in row.get_column_iter() {
-                if !col_data.contains_key(name) {
-                    col_order.push(name.to_string());
-                    col_data.insert(name.to_string(), Vec::new());
-                }
-                col_data.get_mut(name).unwrap().push(field_to_string(field));
-            }
-            n += 1;
+        // Arrow columnar reader: no row-by-row iteration, no String intermediates.
+        // Reads entire columns in native Parquet types, converts directly to KORE types.
+        let file    = File::open(&self.path)?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let schema  = builder.schema().clone();
+        let reader  = builder.with_batch_size(131_072).build()?;
+        let batches: Vec<RecordBatch> = reader.collect::<Result<Vec<_>, _>>()?;
+        if batches.is_empty() { return Ok(DataBlock::empty()); }
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        let mut columns: Vec<Column> = Vec::with_capacity(schema.fields().len());
+        for (ci, field) in schema.fields().iter().enumerate() {
+            let data = build_kore_column(&batches, ci, field.data_type(), total);
+            columns.push(Column { name: field.name().clone(), data });
         }
-
-        if n == 0 { return Ok(DataBlock::empty()); }
-        let columns: Vec<Column> = col_order.iter()
-            .map(|c| infer_column(c, &col_data[c]))
-            .collect();
-        Ok(DataBlock { columns, num_rows: n })
+        Ok(DataBlock { columns, num_rows: total })
     }
 }
 
-fn field_to_string(f: &Field) -> Option<String> {
-    match f {
-        Field::Null      => None,
-        Field::Bool(b)   => Some(b.to_string()),
-        Field::Byte(i)   => Some(i.to_string()),
-        Field::Short(i)  => Some(i.to_string()),
-        Field::Int(i)    => Some(i.to_string()),
-        Field::Long(i)   => Some(i.to_string()),
-        Field::Float(f)  => Some(f.to_string()),
-        Field::Double(f) => Some(f.to_string()),
-        Field::Str(s)    => Some(s.clone()),
-        Field::Bytes(b)  => Some(String::from_utf8_lossy(b.data()).to_string()),
-        other            => Some(format!("{other:?}")),
+fn build_kore_column(batches: &[RecordBatch], ci: usize, dtype: &ArrowType, total: usize) -> ColumnData {
+    match dtype {
+        ArrowType::Int64   => { let mut out: Vec<Option<i64>> = Vec::with_capacity(total); for b in batches { let a = b.column(ci).as_any().downcast_ref::<Int64Array>().unwrap(); for i in 0..a.len() { out.push(if a.is_null(i) { None } else { Some(a.value(i)) }); } } ColumnData::Int64(out) }
+        ArrowType::Int32   => { let mut out: Vec<Option<i64>> = Vec::with_capacity(total); for b in batches { let a = b.column(ci).as_any().downcast_ref::<Int32Array>().unwrap(); for i in 0..a.len() { out.push(if a.is_null(i) { None } else { Some(a.value(i) as i64) }); } } ColumnData::Int64(out) }
+        ArrowType::Float64 => { let mut out: Vec<Option<f64>> = Vec::with_capacity(total); for b in batches { let a = b.column(ci).as_any().downcast_ref::<Float64Array>().unwrap(); for i in 0..a.len() { out.push(if a.is_null(i) { None } else { Some(a.value(i)) }); } } ColumnData::Float64(out) }
+        ArrowType::Float32 => { let mut out: Vec<Option<f64>> = Vec::with_capacity(total); for b in batches { let a = b.column(ci).as_any().downcast_ref::<Float32Array>().unwrap(); for i in 0..a.len() { out.push(if a.is_null(i) { None } else { Some(a.value(i) as f64) }); } } ColumnData::Float64(out) }
+        ArrowType::Utf8 | ArrowType::LargeUtf8 => { let mut out: Vec<Option<String>> = Vec::with_capacity(total); for b in batches { let arr = b.column(ci); if let Some(a) = arr.as_any().downcast_ref::<StringArray>() { for i in 0..a.len() { out.push(if a.is_null(i) { None } else { Some(a.value(i).to_string()) }); } } else if let Some(a) = arr.as_any().downcast_ref::<LargeStringArray>() { for i in 0..a.len() { out.push(if a.is_null(i) { None } else { Some(a.value(i).to_string()) }); } } } ColumnData::Str(out) }
+        _ => ColumnData::Str(vec![None; total]),
     }
 }
 
-fn infer_column(name: &str, raw: &[Option<String>]) -> Column {
-    let non_null: Vec<&str> = raw.iter().filter_map(|x| x.as_deref()).collect();
-    if non_null.is_empty() {
-        return Column { name: name.into(), data: ColumnData::Str(vec![None; raw.len()]) };
-    }
-    if non_null.iter().all(|s| s.parse::<i64>().is_ok()) {
-        return Column { name: name.into(), data: ColumnData::Int64(
-            raw.iter().map(|x| x.as_deref().and_then(|s| s.parse().ok())).collect()
-        )};
-    }
-    if non_null.iter().all(|s| s.parse::<f64>().is_ok()) {
-        return Column { name: name.into(), data: ColumnData::Float64(
-            raw.iter().map(|x| x.as_deref().and_then(|s| s.parse().ok())).collect()
-        )};
-    }
-    Column { name: name.into(), data: ColumnData::Str(raw.iter().cloned().collect()) }
-}
-
-// â”€â”€ Writer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub struct ParquetWriter;
 

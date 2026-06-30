@@ -24,22 +24,22 @@ pub use writer::KoreWriter;
 use kore_core::KoreError;
 
 pub const MAGIC:   &[u8; 4] = b"KORE";
-pub const VERSION: u16       = 1;
+pub const VERSION: u16       = 2;   // v2: native StrDict + f64 dict + NaN sentinel
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum DType { I64 = 1, F64 = 2, Bool = 3, Str = 4 }
+pub enum DType { I64 = 1, F64 = 2, Bool = 3, Str = 4, StrDict = 5 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum Compression { Raw = 0, Rle = 1, Delta = 2 }
+pub enum Compression { Raw = 0, Rle = 1, Delta = 2, Dict = 3, NanRaw = 4, Lz4 = 5 }
 
 impl TryFrom<u8> for DType {
     type Error = KoreError;
     fn try_from(v: u8) -> Result<Self, KoreError> {
         match v {
             1 => Ok(DType::I64), 2 => Ok(DType::F64),
-            3 => Ok(DType::Bool), 4 => Ok(DType::Str),
+            3 => Ok(DType::Bool), 4 => Ok(DType::Str), 5 => Ok(DType::StrDict),
             _ => Err(KoreError::InvalidArgument(format!("unknown dtype {v}"))),
         }
     }
@@ -49,7 +49,9 @@ impl TryFrom<u8> for Compression {
     type Error = KoreError;
     fn try_from(v: u8) -> Result<Self, KoreError> {
         match v {
-            0 => Ok(Compression::Raw), 1 => Ok(Compression::Rle), 2 => Ok(Compression::Delta),
+            0 => Ok(Compression::Raw), 1 => Ok(Compression::Rle),
+            2 => Ok(Compression::Delta), 3 => Ok(Compression::Dict),
+            4 => Ok(Compression::NanRaw), 5 => Ok(Compression::Lz4),
             _ => Err(KoreError::InvalidArgument(format!("unknown compression {v}"))),
         }
     }

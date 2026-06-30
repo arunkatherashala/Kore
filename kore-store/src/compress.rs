@@ -151,3 +151,96 @@ pub fn decode_strs(data: &[u8]) -> Vec<Option<String>> {
     }
     out
 }
+
+// ── NaN-sentinel Float64 (8 bytes/element, fastest read path) ─────────────────
+// NaN = null; all other f64 values are real data.
+pub fn nan_encode_f64(vals: &[Option<f64>]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(vals.len() * 8);
+    for &v in vals { out.extend_from_slice(&v.unwrap_or(f64::NAN).to_le_bytes()); }
+    out
+}
+
+pub fn nan_decode_f64(data: &[u8], n: usize) -> Vec<Option<f64>> {
+    let mut out = Vec::with_capacity(n);
+    let mut i = 0;
+    while i + 8 <= data.len() && out.len() < n {
+        let f = f64::from_le_bytes(data[i..i+8].try_into().unwrap()); i += 8;
+        out.push(if f.is_nan() { None } else { Some(f) });
+    }
+    out
+}
+
+// ── Dictionary Float64 (1 byte/element for low-cardinality columns) ───────────
+// Format: [dict_count:u8] [dict_val_0:f64(8)] ... [code_0:u8] [code_1:u8] ...
+// NaN sentinel used for null dict entry.
+// Returns None if cardinality > 255 (caller falls back to NanRaw).
+pub fn dict_encode_f64(vals: &[Option<f64>]) -> Option<Vec<u8>> {
+    let mut dict: Vec<f64>                     = Vec::new();
+    let mut dict_map: std::collections::HashMap<u64, u8> = std::collections::HashMap::new();
+    let mut codes: Vec<u8>                     = Vec::with_capacity(vals.len());
+    for &v in vals {
+        let bits = v.unwrap_or(f64::NAN).to_bits();
+        if let Some(&code) = dict_map.get(&bits) {
+            codes.push(code);
+        } else {
+            if dict.len() >= 255 { return None; }
+            let code = dict.len() as u8;
+            dict_map.insert(bits, code);
+            dict.push(v.unwrap_or(f64::NAN));
+            codes.push(code);
+        }
+    }
+    let mut out = Vec::with_capacity(1 + dict.len() * 8 + codes.len());
+    out.push(dict.len() as u8);
+    for &f in &dict { out.extend_from_slice(&f.to_le_bytes()); }
+    out.extend_from_slice(&codes);
+    Some(out)
+}
+
+pub fn dict_decode_f64(data: &[u8], n: usize) -> Vec<Option<f64>> {
+    if data.is_empty() { return vec![None; n]; }
+    let dict_len = data[0] as usize;
+    let mut dict: Vec<Option<f64>> = Vec::with_capacity(dict_len);
+    let mut i = 1;
+    for _ in 0..dict_len {
+        if i + 8 > data.len() { break; }
+        let f = f64::from_le_bytes(data[i..i+8].try_into().unwrap()); i += 8;
+        dict.push(if f.is_nan() { None } else { Some(f) });
+    }
+    let mut out = Vec::with_capacity(n);
+    while out.len() < n && i < data.len() {
+        let code = data[i] as usize; i += 1;
+        out.push(dict.get(code).copied().flatten());
+    }
+    out
+}
+
+// ── Native StrDict encoding ────────────────────────────────────────────────────
+// Format: [dict_count:u16] [entry_len:u16 + entry_bytes]... [codes: n * u8]
+// 0xFF = null code (same as in-memory representation).
+pub fn encode_strdict(codes: &[u8], dict: &[String]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(dict.len() as u16).to_le_bytes());
+    for entry in dict {
+        let b = entry.as_bytes();
+        out.extend_from_slice(&(b.len() as u16).to_le_bytes());
+        out.extend_from_slice(b);
+    }
+    out.extend_from_slice(codes);
+    out
+}
+
+pub fn decode_strdict(data: &[u8], n: usize) -> (Vec<u8>, Vec<String>) {
+    if data.len() < 2 { return (vec![u8::MAX; n], vec![]); }
+    let dict_len = u16::from_le_bytes(data[0..2].try_into().unwrap()) as usize;
+    let mut dict = Vec::with_capacity(dict_len);
+    let mut i = 2;
+    for _ in 0..dict_len {
+        if i + 2 > data.len() { break; }
+        let elen = u16::from_le_bytes(data[i..i+2].try_into().unwrap()) as usize; i += 2;
+        if i + elen > data.len() { break; }
+        dict.push(String::from_utf8_lossy(&data[i..i+elen]).into_owned()); i += elen;
+    }
+    let codes = data[i..].iter().take(n).copied().collect();
+    (codes, dict)
+}
