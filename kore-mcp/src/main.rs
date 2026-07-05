@@ -335,16 +335,18 @@ fn tool_schema(args: &Value, session: &mut KoreSession) -> Value {
         Some(block) => {
             let cols: Vec<Value> = block.columns.iter().map(|c| {
                 let dtype = match &c.data {
-                    ColumnData::Int64(_)   => "Int64",
-                    ColumnData::Float64(_) => "Float64",
-                    ColumnData::Bool(_)    => "Bool",
-                    ColumnData::Str(_)     => "Str",
+                    ColumnData::Int64(_)       => "Int64",
+                    ColumnData::Float64(_)     => "Float64",
+                    ColumnData::Bool(_)        => "Bool",
+                    ColumnData::Str(_)         => "Str",
+                    ColumnData::StrDict { .. } => "Str(Dict)",
                 };
                 let nulls = match &c.data {
-                    ColumnData::Int64(v)   => v.iter().filter(|x| x.is_none()).count(),
-                    ColumnData::Float64(v) => v.iter().filter(|x| x.is_none()).count(),
-                    ColumnData::Bool(v)    => v.iter().filter(|x| x.is_none()).count(),
-                    ColumnData::Str(v)     => v.iter().filter(|x| x.is_none()).count(),
+                    ColumnData::Int64(v)       => v.iter().filter(|x| x.is_none()).count(),
+                    ColumnData::Float64(v)     => v.iter().filter(|x| x.is_none()).count(),
+                    ColumnData::Bool(v)        => v.iter().filter(|x| x.is_none()).count(),
+                    ColumnData::Str(v)         => v.iter().filter(|x| x.is_none()).count(),
+                    ColumnData::StrDict { codes, .. } => codes.iter().filter(|&&c| c == u8::MAX).count(),
                 };
                 json!({ "name": c.name, "type": dtype, "nulls": nulls })
             }).collect();
@@ -426,6 +428,10 @@ fn block_to_rows(block: &DataBlock) -> Vec<Vec<Value>> {
             ColumnData::Float64(v) => v.get(r).and_then(|x| *x).map(|f| json!(f)).unwrap_or(Value::Null),
             ColumnData::Bool(v)    => v.get(r).and_then(|x| *x).map(|b| json!(b)).unwrap_or(Value::Null),
             ColumnData::Str(v)     => v.get(r).and_then(|x| x.as_deref()).map(|s| json!(s)).unwrap_or(Value::Null),
+            ColumnData::StrDict { codes, dict } => {
+                let code = codes.get(r).copied().unwrap_or(u8::MAX);
+                if code == u8::MAX { Value::Null } else { dict.get(code as usize).map(|s| json!(s)).unwrap_or(Value::Null) }
+            }
         }).collect()
     }).collect()
 }

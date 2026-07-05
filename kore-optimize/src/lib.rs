@@ -233,6 +233,11 @@ pub fn collect_stats(table_name: &str, block: &kore_core::DataBlock) -> TableSta
                 let nulls = v.iter().filter(|x| x.is_none()).count();
                 (nulls, Some(0.0), Some(1.0), 2)
             }
+            ColumnData::StrDict { codes, dict } => {
+                let nulls = codes.iter().filter(|&&c| c == u8::MAX).count();
+                let distinct = dict.len();
+                (nulls, None, None, distinct)
+            }
         };
         ColumnStats {
             name:         col.name.clone(),

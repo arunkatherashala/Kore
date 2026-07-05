@@ -70,6 +70,28 @@ impl Parser {
             other => Err(KoreError::InvalidArgument(format!("expected identifier, got {:?}", other))),
         }
     }
+
+    /// Like expect_ident but also accepts SQL keywords as alias names (e.g. AVG, COUNT, avg).
+    /// Used after AS keyword in projections and CTEs.
+    fn expect_alias(&mut self) -> Result<String, KoreError> {
+        match self.advance() {
+            Token::Ident(s) => Ok(s),
+            // Allow common keywords used as alias names
+            Token::Avg       => Ok("avg".to_string()),
+            Token::Count     => Ok("count".to_string()),
+            Token::Sum       => Ok("sum".to_string()),
+            Token::Min       => Ok("min".to_string()),
+            Token::Max       => Ok("max".to_string()),
+            Token::Group     => Ok("group".to_string()),
+            Token::Order     => Ok("order".to_string()),
+            Token::From      => Ok("from".to_string()),
+            Token::Where     => Ok("where".to_string()),
+            Token::Asc       => Ok("asc".to_string()),
+            Token::Desc      => Ok("desc".to_string()),
+            Token::Distinct  => Ok("distinct".to_string()),
+            other => Err(KoreError::InvalidArgument(format!("expected alias name, got {:?}", other))),
+        }
+    }
     fn consume_if(&mut self, tok: &Token) -> bool {
         if self.peek() == tok { self.pos += 1; true } else { false }
     }
@@ -253,7 +275,7 @@ impl Parser {
         }
         let expr = self.parse_expr(0)?;
         let alias = if self.consume_if(&Token::As) {
-            Some(self.expect_ident()?)
+            Some(self.expect_alias()?)
         } else if matches!(self.peek(), Token::Ident(_)) {
             Some(self.expect_ident()?)
         } else {
@@ -319,10 +341,11 @@ impl Parser {
     }
 
     fn parse_qualified_col(&mut self) -> Result<String, KoreError> {
-        let name = self.expect_ident()?;
+        // Accept both identifiers and SQL keywords used as column names (e.g. avg, count, sum)
+        let name = self.expect_alias()?;
         if self.peek() == &Token::Dot {
             self.pos += 1;
-            let col = self.expect_ident()?;
+            let col = self.expect_alias()?;
             Ok(format!("{}.{}", name, col))
         } else {
             Ok(name)
@@ -353,25 +376,38 @@ impl Parser {
                 lhs = Expr::Like { expr: Box::new(lhs), pattern: Box::new(pat), negated: false };
                 continue;
             }
-            // IN (...)
+            // IN (...) or IN (SELECT ...)
             if self.peek() == &Token::In {
                 self.pos += 1;
                 self.expect(&Token::LParen)?;
-                let values = self.parse_expr_list()?;
-                self.expect(&Token::RParen)?;
-                lhs = Expr::In { expr: Box::new(lhs), values, negated: false };
+                // Distinguish IN (SELECT ...) from IN (literal, ...)
+                if self.peek() == &Token::Select {
+                    let stmt = self.parse_select()?;
+                    self.expect(&Token::RParen)?;
+                    lhs = Expr::InSubquery { expr: Box::new(lhs), subquery: Box::new(stmt), negated: false };
+                } else {
+                    let values = self.parse_expr_list()?;
+                    self.expect(&Token::RParen)?;
+                    lhs = Expr::In { expr: Box::new(lhs), values, negated: false };
+                }
                 continue;
             }
-            // NOT IN / NOT LIKE
+            // NOT IN / NOT LIKE / NOT IN (SELECT ...)
             if self.peek() == &Token::Not {
                 let next = self.tokens.get(self.pos + 1).cloned().unwrap_or(Token::Eof);
                 match next {
                     Token::In => {
                         self.pos += 2;
                         self.expect(&Token::LParen)?;
-                        let values = self.parse_expr_list()?;
-                        self.expect(&Token::RParen)?;
-                        lhs = Expr::In { expr: Box::new(lhs), values, negated: true };
+                        if self.peek() == &Token::Select {
+                            let stmt = self.parse_select()?;
+                            self.expect(&Token::RParen)?;
+                            lhs = Expr::InSubquery { expr: Box::new(lhs), subquery: Box::new(stmt), negated: true };
+                        } else {
+                            let values = self.parse_expr_list()?;
+                            self.expect(&Token::RParen)?;
+                            lhs = Expr::In { expr: Box::new(lhs), values, negated: true };
+                        }
                         continue;
                     }
                     Token::Like => {
@@ -403,14 +439,39 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, KoreError> {
+        // EXISTS (SELECT ...)
+        if let Token::Ident(ref s) = self.peek().clone() {
+            if s.eq_ignore_ascii_case("EXISTS") {
+                self.pos += 1;
+                self.expect(&Token::LParen)?;
+                let stmt = self.parse_select()?;
+                self.expect(&Token::RParen)?;
+                return Ok(Expr::Exists { subquery: Box::new(stmt), negated: false });
+            }
+        }
         if self.consume_if(&Token::Not) {
+            // NOT EXISTS (SELECT ...)
+            if let Token::Ident(ref s) = self.peek().clone() {
+                if s.eq_ignore_ascii_case("EXISTS") {
+                    self.pos += 1;
+                    self.expect(&Token::LParen)?;
+                    let stmt = self.parse_select()?;
+                    self.expect(&Token::RParen)?;
+                    return Ok(Expr::Exists { subquery: Box::new(stmt), negated: true });
+                }
+            }
             // NOT IN / NOT LIKE / NOT BETWEEN
             if self.peek() == &Token::In {
                 self.pos += 1;
                 self.expect(&Token::LParen)?;
+                // Check if it's IN (SELECT ...) or IN (literal, ...)
+                if self.peek() == &Token::Select {
+                    let stmt = self.parse_select()?;
+                    self.expect(&Token::RParen)?;
+                    return Ok(Expr::InSubquery { expr: Box::new(Expr::Null), subquery: Box::new(stmt), negated: true });
+                }
                 let values = self.parse_expr_list()?;
                 self.expect(&Token::RParen)?;
-                // Will be handled below: wrap outer expr
                 return Ok(Expr::In { expr: Box::new(Expr::Null), values, negated: true });
             }
             return Ok(Expr::Not(Box::new(self.parse_unary()?)));
@@ -421,6 +482,12 @@ impl Parser {
     fn parse_primary(&mut self) -> Result<Expr, KoreError> {
         match self.advance() {
             Token::LParen => {
+                // If next token is SELECT → scalar subquery: (SELECT ...)
+                if self.peek() == &Token::Select {
+                    let stmt = self.parse_select()?;
+                    self.expect(&Token::RParen)?;
+                    return Ok(Expr::ScalarSubquery(Box::new(stmt)));
+                }
                 let e = self.parse_expr(0)?;
                 self.expect(&Token::RParen)?;
                 Ok(e)
@@ -433,6 +500,9 @@ impl Parser {
             Token::Case => self.parse_case(),
             // Aggregate functions — check for OVER (window)
             Token::Count => {
+                if self.peek() != &Token::LParen {
+                    return Ok(Expr::Col("count".to_string()));
+                }
                 self.expect(&Token::LParen)?;
                 let distinct = self.consume_if(&Token::Distinct);
                 let inner = if self.peek() == &Token::Star {
@@ -443,18 +513,28 @@ impl Parser {
                 self.maybe_window(Expr::Agg { func: func.clone(), expr: Box::new(inner) }, func)
             }
             Token::Sum => {
+                if self.peek() != &Token::LParen {
+                    return Ok(Expr::Col("sum".to_string()));
+                }
                 self.expect(&Token::LParen)?;
                 let inner = self.parse_expr(0)?;
                 self.expect(&Token::RParen)?;
                 self.maybe_window(Expr::Agg { func: AggFunc::Sum, expr: Box::new(inner.clone()) }, AggFunc::Sum)
             }
             Token::Avg => {
+                // If NOT followed by '(', treat as column reference (e.g. CTE alias named "avg")
+                if self.peek() != &Token::LParen {
+                    return Ok(Expr::Col("avg".to_string()));
+                }
                 self.expect(&Token::LParen)?;
                 let inner = self.parse_expr(0)?;
                 self.expect(&Token::RParen)?;
                 self.maybe_window(Expr::Agg { func: AggFunc::Avg, expr: Box::new(inner) }, AggFunc::Avg)
             }
             Token::Min => {
+                if self.peek() != &Token::LParen {
+                    return Ok(Expr::Col("min".to_string()));
+                }
                 self.expect(&Token::LParen)?;
                 let inner = self.parse_expr(0)?;
                 self.expect(&Token::RParen)?;

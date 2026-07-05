@@ -27,6 +27,13 @@ pub enum Expr {
     Star,  // SELECT *  (used in COUNT(*))
     /// Scalar function call: UPPER(x), LOWER(x), ROUND(x,2), COALESCE(a,b), …
     FuncCall { name: String, args: Vec<Expr> },
+    // ── Subqueries ────────────────────────────────────────────────────────────
+    /// Scalar subquery: (SELECT single_value ...) used anywhere a value is expected.
+    ScalarSubquery(Box<SelectStmt>),
+    /// IN / NOT IN (SELECT ...): expr IN (SELECT col FROM ...)
+    InSubquery { expr: Box<Expr>, subquery: Box<SelectStmt>, negated: bool },
+    /// EXISTS (SELECT ...): true if subquery returns ≥1 row
+    Exists { subquery: Box<SelectStmt>, negated: bool },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -84,7 +91,7 @@ pub enum FrameBound {
 
 // ── SELECT statement ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SelectStmt {
     pub distinct:     bool,
     pub projections:  Vec<Projection>,
@@ -97,26 +104,26 @@ pub struct SelectStmt {
     pub limit:        Option<u64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Projection {
     Star,
     Expr { expr: Expr, alias: Option<String> },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TableExpr {
     pub name:  String,
     pub alias: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct JoinClause {
     pub join_type: JoinKind,
     pub table:     TableExpr,
     pub on:        JoinOn,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct JoinOn {
     pub left_col:  String,
     pub right_col: String,

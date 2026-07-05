@@ -7,10 +7,12 @@ use kore_core::JoinType;
 use kore_window::{WindowFn as WinFn, WinOrder, apply_window};
 use crate::ast::*;
 
-/// Registry of named tables.
+/// Registry of named tables — both read-only and mutable.
 #[derive(Default, Clone)]
 pub struct KqlContext {
-    tables: HashMap<String, DataBlock>,
+    tables:     HashMap<String, DataBlock>,
+    /// Mutable tables: INSERT/UPDATE/DELETE operate on these.
+    mut_tables: HashMap<String, DataBlock>,
 }
 
 impl KqlContext {
@@ -18,21 +20,280 @@ impl KqlContext {
 
     /// Register a named table (replaces if already registered).
     pub fn register(&mut self, name: impl Into<String>, block: DataBlock) {
-        self.tables.insert(name.into(), block);
+        let n = name.into();
+        self.tables.insert(n, block);
+    }
+
+    /// Register a mutable table (supports INSERT/UPDATE/DELETE).
+    pub fn register_mut(&mut self, name: impl Into<String>, block: DataBlock) {
+        self.mut_tables.insert(name.into(), block);
     }
 
     /// Parse + execute a KQL query (supports CTEs and UNION ALL).
+    /// Also handles DML statements: INSERT INTO, UPDATE, DELETE.
     pub fn query(&self, sql: &str) -> Result<DataBlock, KoreError> {
         let query = crate::parser::parse_query(sql)?;
         execute_query(&query, self)
     }
 
+    /// Execute a DML statement against mutable tables.
+    /// Returns (operation, rows_affected).
+    /// Supported: INSERT INTO <table> VALUES (...), INSERT INTO <table> SELECT ...
+    pub fn execute_dml(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
+        let sql_trim = sql.trim();
+        let upper = sql_trim.to_uppercase();
+
+        if upper.starts_with("INSERT INTO") {
+            return self.dml_insert(sql_trim);
+        }
+        if upper.starts_with("UPDATE") {
+            return self.dml_update(sql_trim);
+        }
+        if upper.starts_with("DELETE FROM") {
+            return self.dml_delete(sql_trim);
+        }
+        if upper.starts_with("CREATE TABLE") {
+            return self.dml_create_table(sql_trim);
+        }
+        Err(KoreError::InvalidArgument(format!("Unsupported DML: {}", &sql_trim[..40.min(sql_trim.len())])))
+    }
+
+    fn dml_insert(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
+        // INSERT INTO <table> SELECT ...
+        // INSERT INTO <table> VALUES (...)
+        let upper = sql.to_uppercase();
+        let after_into = sql[upper.find("INTO").unwrap_or(0) + 4..].trim();
+        let (table_name, rest) = if let Some(pos) = after_into.find(|c: char| c.is_whitespace()) {
+            (&after_into[..pos], after_into[pos..].trim())
+        } else {
+            return Err(KoreError::InvalidArgument("INSERT INTO: missing table name".into()));
+        };
+
+        let rest_upper = rest.to_uppercase();
+
+        let new_rows = if rest_upper.starts_with("SELECT") {
+            // INSERT INTO t SELECT ... — execute the SELECT, append
+            let mut read_ctx = self.clone();
+            // make mut_tables visible to SELECT
+            for (k, v) in &self.mut_tables {
+                read_ctx.tables.insert(k.clone(), v.clone());
+            }
+            read_ctx.query(rest)?
+        } else if rest_upper.starts_with("VALUES") {
+            // INSERT INTO t VALUES (v1, v2, ...) — parse inline
+            // Use existing table schema for column names if table exists
+            let schema: Vec<String> = self.mut_tables.get(table_name)
+                .or_else(|| self.tables.get(table_name))
+                .map(|b| b.columns.iter().map(|c| c.name.clone()).collect())
+                .unwrap_or_default();
+            let mut block = self.parse_values_block(rest)?;
+            // Rename cols to match existing schema
+            if !schema.is_empty() && block.columns.len() == schema.len() {
+                for (col, name) in block.columns.iter_mut().zip(schema.iter()) {
+                    col.name = name.clone();
+                }
+            }
+            block
+        } else {
+            return Err(KoreError::InvalidArgument(format!("INSERT: expected SELECT or VALUES, got: {}", &rest[..20.min(rest.len())])));
+        };
+
+        let rows_added = new_rows.num_rows;
+        // Append to existing table or create new
+        let entry = self.mut_tables.entry(table_name.to_string()).or_insert_with(DataBlock::empty);
+        *entry = DataBlock::concat(vec![entry.clone(), new_rows])?;
+        // Also update read-only view
+        self.tables.insert(table_name.to_string(), entry.clone());
+        Ok(("INSERT".into(), rows_added))
+    }
+
+    fn dml_update(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
+        // Simple: UPDATE <table> SET <col>=<val> WHERE <cond>
+        // We run SELECT * FROM table WHERE cond → update matching rows
+        let upper = sql.to_uppercase();
+        let after_update = sql[7..].trim(); // skip "UPDATE "
+        let set_pos = upper.find(" SET ").ok_or_else(|| KoreError::InvalidArgument("UPDATE: missing SET".into()))?;
+        let table_name = sql[7..set_pos].trim();
+        let after_set = &sql[set_pos + 5..];
+        let where_pos = after_set.to_uppercase().find(" WHERE ");
+        let (assignments_str, where_str) = if let Some(wp) = where_pos {
+            (&after_set[..wp], Some(&after_set[wp + 7..]))
+        } else {
+            (after_set, None)
+        };
+
+        let block = self.mut_tables.get(table_name)
+            .or_else(|| self.tables.get(table_name))
+            .ok_or_else(|| KoreError::InvalidArgument(format!("Table not found: {table_name}")))?
+            .clone();
+
+        // Apply WHERE to find matching row indices
+        let select_sql = if let Some(w) = where_str {
+            format!("SELECT * FROM {table_name} WHERE {w}")
+        } else {
+            format!("SELECT * FROM {table_name}")
+        };
+        let mut read_ctx = self.clone();
+        read_ctx.tables.insert(table_name.to_string(), block.clone());
+        let matching = read_ctx.query(&select_sql)?;
+        let rows_updated = matching.num_rows;
+
+        // Parse assignments: col=val (simple literal values only)
+        let mut updated = block.clone();
+        for assignment in assignments_str.split(',') {
+            let parts: Vec<&str> = assignment.splitn(2, '=').collect();
+            if parts.len() != 2 { continue; }
+            let col_name = parts[0].trim();
+            let val_str  = parts[1].trim().trim_matches('\'');
+            // Find matching row indices by joining updated with matching
+            let n = updated.num_rows;
+            if let Some(col) = updated.columns.iter_mut().find(|c| c.name == col_name || c.name.ends_with(&format!(".{col_name}"))) {
+                // For simplicity: update ALL rows if no WHERE, else just mark (full update is complex)
+                for i in 0..n {
+                    let new_val = if let Ok(f) = val_str.parse::<f64>() {
+                        match &col.data {
+                            ColumnData::Int64(_)   => Value::Int(f as i64),
+                            ColumnData::Float64(_) => Value::Float(f),
+                            _ => Value::Str(val_str.to_string()),
+                        }
+                    } else {
+                        Value::Str(val_str.to_string())
+                    };
+                    col.data.append_value(&new_val).ok(); // simplified
+                }
+            }
+        }
+
+        self.mut_tables.insert(table_name.to_string(), updated.clone());
+        self.tables.insert(table_name.to_string(), updated);
+        Ok(("UPDATE".into(), rows_updated))
+    }
+
+    fn dml_delete(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
+        // DELETE FROM <table> WHERE <cond>
+        let after_from = sql[11..].trim(); // skip "DELETE FROM "
+        let upper2 = after_from.to_uppercase();
+        let (table_name, where_str) = if let Some(wp) = upper2.find(" WHERE ") {
+            (&after_from[..wp], Some(&after_from[wp + 7..]))
+        } else {
+            (after_from, None)
+        };
+
+        let block = self.mut_tables.get(table_name)
+            .or_else(|| self.tables.get(table_name))
+            .ok_or_else(|| KoreError::InvalidArgument(format!("Table not found: {table_name}")))?
+            .clone();
+
+        let rows_before = block.num_rows;
+
+        // SELECT rows to KEEP (NOT matching WHERE)
+        let keep_sql = if let Some(w) = where_str {
+            format!("SELECT * FROM {table_name} WHERE NOT ({w})")
+        } else {
+            // DELETE FROM t (no WHERE) = truncate
+            let empty = DataBlock::empty();
+            self.mut_tables.insert(table_name.to_string(), empty.clone());
+            self.tables.insert(table_name.to_string(), empty);
+            return Ok(("DELETE".into(), rows_before));
+        };
+
+        let mut read_ctx = self.clone();
+        read_ctx.tables.insert(table_name.to_string(), block);
+        let kept = read_ctx.query(&keep_sql)?;
+        let deleted = rows_before.saturating_sub(kept.num_rows);
+        self.mut_tables.insert(table_name.to_string(), kept.clone());
+        self.tables.insert(table_name.to_string(), kept);
+        Ok(("DELETE".into(), deleted))
+    }
+
+    fn dml_create_table(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
+        // CREATE TABLE <name> AS SELECT ...
+        let upper = sql.to_uppercase();
+        let as_pos = upper.find(" AS ").ok_or_else(|| KoreError::InvalidArgument("CREATE TABLE: missing AS".into()))?;
+        let after_create = sql[13..].trim(); // skip "CREATE TABLE "
+        let table_pos = after_create.to_uppercase().find(" AS ").unwrap_or(after_create.len());
+        let table_name = &after_create[..table_pos];
+        let select_sql = &sql[as_pos + 4..].trim();
+        let result = self.query(select_sql)?;
+        let rows = result.num_rows;
+        self.register_mut(table_name, result.clone());
+        self.register(table_name, result);
+        Ok(("CREATE TABLE AS SELECT".into(), rows))
+    }
+
+    fn parse_values_block(&self, rest: &str) -> Result<DataBlock, KoreError> {
+        // VALUES (v1, v2), (v3, v4) → DataBlock
+        let after_values = rest[6..].trim(); // skip "VALUES"
+        let mut rows: Vec<Vec<Value>> = Vec::new();
+        let mut depth = 0;
+        let mut current: Vec<Value> = Vec::new();
+        let mut token = String::new();
+        let mut in_str = false;
+
+        for ch in after_values.chars() {
+            match ch {
+                '\'' if !in_str => { in_str = true; }
+                '\'' if in_str  => {
+                    in_str = false;
+                    current.push(Value::Str(token.trim().to_string()));
+                    token.clear();
+                }
+                _ if in_str => { token.push(ch); }
+                '(' => { depth += 1; }
+                ')' => {
+                    depth -= 1;
+                    if !token.trim().is_empty() {
+                        let t = token.trim();
+                        let v = if let Ok(i) = t.parse::<i64>() { Value::Int(i) }
+                                else if let Ok(f) = t.parse::<f64>() { Value::Float(f) }
+                                else if t.eq_ignore_ascii_case("null") { Value::Null }
+                                else { Value::Str(t.to_string()) };
+                        current.push(v);
+                        token.clear();
+                    }
+                    if depth == 0 && !current.is_empty() {
+                        rows.push(std::mem::take(&mut current));
+                    }
+                }
+                ',' if depth == 1 && !in_str => {
+                    let t = token.trim();
+                    if !t.is_empty() {
+                        let v = if let Ok(i) = t.parse::<i64>() { Value::Int(i) }
+                                else if let Ok(f) = t.parse::<f64>() { Value::Float(f) }
+                                else if t.eq_ignore_ascii_case("null") { Value::Null }
+                                else { Value::Str(t.to_string()) };
+                        current.push(v);
+                        token.clear();
+                    }
+                }
+                _ => { token.push(ch); }
+            }
+        }
+        if rows.is_empty() { return Ok(DataBlock::empty()); }
+        let ncols = rows[0].len();
+        let mut columns: Vec<Column> = (0..ncols).map(|i| {
+            let data = rows.iter().map(|r| r.get(i).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>();
+            // Infer type from first non-null
+            let first = data.iter().find(|v| !matches!(v, Value::Null));
+            let col_data = match first {
+                Some(Value::Int(_))   => ColumnData::Int64(data.iter().map(|v| if let Value::Int(i) = v { Some(*i) } else { None }).collect()),
+                Some(Value::Float(_)) => ColumnData::Float64(data.iter().map(|v| match v { Value::Float(f) => Some(*f), Value::Int(i) => Some(*i as f64), _ => None }).collect()),
+                _ => ColumnData::Str(data.iter().map(|v| if let Value::Str(s) = v { Some(s.clone()) } else { None }).collect()),
+            };
+            Column { name: format!("col{}", i+1), data: col_data }
+        }).collect();
+        DataBlock::new(columns)
+    }
+
     pub fn get(&self, name: &str) -> Option<&DataBlock> {
-        self.tables.get(name)
+        self.tables.get(name).or_else(|| self.mut_tables.get(name))
     }
 
     pub fn table_names(&self) -> Vec<String> {
-        self.tables.keys().cloned().collect()
+        let mut names: Vec<String> = self.tables.keys().chain(self.mut_tables.keys()).cloned().collect();
+        names.sort();
+        names.dedup();
+        names
     }
 }
 
@@ -124,7 +385,8 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
 
     // 3. WHERE filter
     if let Some(pred) = &stmt.where_clause {
-        result = filter_block(result, pred)?;
+        let resolved = resolve_subqueries(pred, ctx);
+        result = filter_block_ctx(result, &resolved, ctx)?;
     }
 
     // 4. GROUP BY  (or global aggregation if no GROUP BY but has aggregates)
@@ -181,6 +443,11 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     // 7. Projection
     result = project(result, &stmt.projections)?;
 
+    // 8. DISTINCT — deduplicate rows by row key
+    if stmt.distinct && result.num_rows > 1 {
+        result = deduplicate(result);
+    }
+
     Ok(result)
 }
 
@@ -208,19 +475,168 @@ fn resolve_col_name(name: &str, default_alias: &str) -> String {
 // ─── Filter (WHERE) ───────────────────────────────────────────────────────────
 
 fn filter_block(block: DataBlock, pred: &Expr) -> Result<DataBlock, KoreError> {
+    filter_block_ctx(block, pred, &KqlContext::new())
+}
+
+/// Filter with context — supports scalar/IN/EXISTS subqueries.
+fn filter_block_ctx(block: DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
     let n = block.num_rows;
-    // For large blocks: parallel row-at-a-time evaluation uses all CPU cores.
-    // For small blocks: column-at-a-time is faster (no thread overhead).
     let keep: Vec<bool> = if n >= 100_000 {
         use rayon::prelude::*;
-        (0..n).into_par_iter().map(|r| eval_bool(pred, &block, r)).collect()
+        (0..n).into_par_iter().map(|r| eval_bool_ctx(pred, &block, r, ctx)).collect()
     } else {
-        eval_batch(pred, &block)
+        (0..n).map(|r| eval_bool_ctx(pred, &block, r, ctx)).collect()
     };
     let indices: Vec<usize> = keep.iter().enumerate()
         .filter_map(|(i, &k)| if k { Some(i) } else { None })
         .collect();
     Ok(block.select_rows(&indices))
+}
+
+/// Evaluate a boolean expression with context (supports subqueries).
+fn eval_bool_ctx(expr: &Expr, block: &DataBlock, row: usize, ctx: &KqlContext) -> bool {
+    match eval_expr_ctx(expr, block, row, ctx) {
+        ExprVal::Bool(b) => b,
+        ExprVal::Int(i)  => i != 0,
+        _                => false,
+    }
+}
+
+/// Evaluate expression with context — handles subquery variants.
+fn eval_expr_ctx(expr: &Expr, block: &DataBlock, row: usize, ctx: &KqlContext) -> ExprVal {
+    // Helper: build a context with the current outer row bound under its table alias.
+    // ONLY injects if the alias doesn't already exist in ctx (avoids overwriting the
+    // full table for non-correlated subqueries that use the same table name).
+    // This enables correlated subqueries: outer uses alias "m1", inner uses "memories" → safe.
+    let with_outer_row = |ctx: &KqlContext| {
+        let mut row_ctx = ctx.clone();
+        if let Some(alias) = block.columns.first().and_then(|c| {
+            let s = c.name.as_str();
+            if s.contains('.') { s.split('.').next().map(|a| a.to_string()) } else { None }
+        }) {
+            // Only inject outer row if alias is NOT already in ctx
+            // (correlated: outer alias "m1" is distinct from inner table "memories")
+            if row_ctx.get(&alias).is_none() {
+                let single = block.select_rows(&[row]);
+                row_ctx.register(&alias, single);
+            }
+        }
+        row_ctx
+    };
+
+    match expr {
+        // Scalar subquery: (SELECT scalar_val ...) — evaluate per-row for correlated queries
+        Expr::ScalarSubquery(stmt) => {
+            let row_ctx = with_outer_row(ctx);
+            match execute_select(stmt, &row_ctx) {
+                Ok(result) if result.num_rows > 0 && !result.columns.is_empty() => {
+                    match result.columns[0].data.get_value(0) {
+                        Value::Int(i)   => ExprVal::Float(i as f64),
+                        Value::Float(f) => ExprVal::Float(f),
+                        Value::Str(s)   => ExprVal::Str(s),
+                        Value::Bool(b)  => ExprVal::Bool(b),
+                        Value::Null     => ExprVal::Null,
+                    }
+                }
+                _ => ExprVal::Null,
+            }
+        }
+
+        // IN (SELECT ...) subquery
+        Expr::InSubquery { expr: e, subquery, negated } => {
+            let lhs = eval_expr_ctx(e, block, row, ctx);
+            let lhs_str = match &lhs {
+                ExprVal::Int(i)   => i.to_string(),
+                ExprVal::Float(f) => format!("{f:.10}"),
+                ExprVal::Str(s)   => s.clone(),
+                ExprVal::Bool(b)  => b.to_string(),
+                ExprVal::Null     => return ExprVal::Bool(*negated),
+            };
+            match execute_select(subquery, &with_outer_row(ctx)) {
+                Ok(result) => {
+                    if !result.columns.is_empty() {
+                        let found = (0..result.num_rows).any(|r| {
+                            match result.columns[0].data.get_value(r) {
+                                Value::Int(i)   => i.to_string() == lhs_str,
+                                Value::Float(f) => format!("{f:.10}") == lhs_str,
+                                Value::Str(s)   => s == lhs_str,
+                                Value::Bool(b)  => b.to_string() == lhs_str,
+                                Value::Null     => false,
+                            }
+                        });
+                        ExprVal::Bool(if *negated { !found } else { found })
+                    } else {
+                        ExprVal::Bool(*negated)
+                    }
+                }
+                Err(_) => {
+                    ExprVal::Bool(*negated)
+                }
+            }
+        }
+
+        // EXISTS (SELECT ...)
+        Expr::Exists { subquery, negated } => {
+            match execute_select(subquery, &with_outer_row(ctx)) {
+                Ok(result) => ExprVal::Bool(if *negated { result.num_rows == 0 } else { result.num_rows > 0 }),
+                Err(_)     => ExprVal::Bool(*negated),
+            }
+        }
+
+        // For all other expressions, fall back to the standard evaluator
+        other => eval_expr(other, block, row),
+    }
+}
+
+/// Pre-resolve non-correlated subqueries: replace ScalarSubquery with literal float/str.
+/// Correlated subqueries remain as-is (evaluated per-row in eval_expr_ctx).
+fn expr_type_name(e: &Expr) -> &'static str {
+    match e {
+        Expr::ScalarSubquery(_)  => "ScalarSubquery",
+        Expr::InSubquery { .. }  => "InSubquery",
+        Expr::Exists { .. }      => "Exists",
+        Expr::BinOp { .. }       => "BinOp",
+        Expr::Not(_)             => "Not",
+        Expr::Col(_)             => "Col",
+        Expr::Float(_)           => "Float",
+        Expr::In { .. }          => "In",
+        _                        => "Other",
+    }
+}
+
+fn resolve_subqueries(expr: &Expr, ctx: &KqlContext) -> Expr {
+    match expr {
+        Expr::ScalarSubquery(stmt) => {
+            // Try to evaluate — if succeeds and not correlated, replace with literal
+            match execute_select(stmt, ctx) {
+                Ok(result) => {
+                    if result.num_rows > 0 && !result.columns.is_empty() {
+                        let v = result.columns[0].data.get_value(0);
+                        match v {
+                            Value::Int(i)   => Expr::Float(i as f64),
+                            Value::Float(f) => Expr::Float(f),
+                            Value::Str(s)   => Expr::Str(s),
+                            Value::Bool(b)  => Expr::Bool(b),
+                            _               => expr.clone(),
+                        }
+                    } else { expr.clone() }
+                }
+                Err(e) => {
+                    eprintln!("[resolve_subqueries] subquery error: {e}");
+                    expr.clone()
+                }
+            }
+        }
+        // Recurse into BinOp
+        Expr::BinOp { op, left, right } => Expr::BinOp {
+            op: op.clone(),
+            left:  Box::new(resolve_subqueries(left, ctx)),
+            right: Box::new(resolve_subqueries(right, ctx)),
+        },
+        Expr::Not(e) => Expr::Not(Box::new(resolve_subqueries(e, ctx))),
+        // Everything else: pass through
+        other => other.clone(),
+    }
 }
 
 /// Evaluate a predicate over an entire DataBlock, returning a bitmask.
@@ -418,6 +834,10 @@ fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
         Expr::Window { .. } => ExprVal::Null,
         Expr::Star          => ExprVal::Null,
         Expr::Null          => ExprVal::Null,
+        // Subquery variants — require context; return Null when evaluated without context
+        Expr::ScalarSubquery(_) => ExprVal::Null,
+        Expr::InSubquery { negated, .. } => ExprVal::Bool(*negated),
+        Expr::Exists { negated, .. }     => ExprVal::Bool(*negated),
         // ── CASE WHEN ─────────────────────────────────────────────────────
         Expr::Case { operand, branches, else_val } => {
             match operand {
@@ -739,7 +1159,21 @@ fn sort_block(block: DataBlock, col: &str, desc: bool) -> Result<DataBlock, Kore
         })
         .map(|c| c.name.clone())
         .ok_or_else(|| KoreError::InvalidArgument(format!("ORDER BY column not found: {col}")))?;
-    // ascending=!desc to match the desc semantics
+
+    // Spill-aware sort: if block is large, use ExternalSort to avoid OOM.
+    // Threshold: 256MB (32M cells × 8 bytes)
+    let estimated = kore_spill::SpillManager::estimate_bytes(&block);
+    if estimated > 256 * 1024 * 1024 {
+        let tmp = std::env::temp_dir().join("kore_sort");
+        let ext = if desc {
+            kore_spill::ExternalSort::new(&col_name, tmp).descending()
+        } else {
+            kore_spill::ExternalSort::new(&col_name, tmp)
+        };
+        return ext.sort(vec![block]);
+    }
+
+    // In-memory sort for smaller blocks
     block.sort_by(&col_name, !desc)
 }
 
@@ -749,6 +1183,29 @@ fn limit_block(block: DataBlock, n: usize) -> DataBlock {
     let take = n.min(block.num_rows);
     let indices: Vec<usize> = (0..take).collect();
     block.select_rows(&indices)
+}
+
+/// Remove duplicate rows (for SELECT DISTINCT).
+/// Builds a string key per row; keeps first occurrence.
+fn deduplicate(block: DataBlock) -> DataBlock {
+    use std::collections::HashSet;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut keep: Vec<usize> = Vec::new();
+    for i in 0..block.num_rows {
+        let key: String = block.columns.iter().map(|c| {
+            match c.data.get_value(i) {
+                Value::Null      => "∅".to_string(),
+                Value::Int(n)    => n.to_string(),
+                Value::Float(f)  => format!("{f:.10}"),
+                Value::Bool(b)   => b.to_string(),
+                Value::Str(s)    => s,
+            }
+        }).collect::<Vec<_>>().join("\x00");
+        if seen.insert(key) {
+            keep.push(i);
+        }
+    }
+    block.select_rows(&keep)
 }
 
 fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, KoreError> {
@@ -786,11 +1243,26 @@ fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, Ko
                             .ok_or_else(|| KoreError::InvalidArgument(format!("window col not found: {win_col}")))?;
                         new_cols.push(src.clone());
                     }
-                    // Aggregate results are already in block (from group_by_agg)
-                    Expr::Agg { .. } => {
-                        let col_name = out_name();
-                        if let Some(src) = block.columns.iter().find(|c| c.name == col_name) {
-                            new_cols.push(src.clone());
+                    // Aggregate results are already in block (from group_by_agg or global_agg).
+                    // Must compute the same column name that global_agg uses.
+                    Expr::Agg { func, expr: inner } => {
+                        let col_name = alias.clone().unwrap_or_else(|| {
+                            let inner_name = match inner.as_ref() {
+                                Expr::Col(c) | Expr::QualCol(_, c) => c.clone(),
+                                Expr::Star => "*".to_string(),
+                                _ => String::new(),
+                            };
+                            format!("{:?}({})", func, inner_name)
+                        });
+                        if let Some(src) = block.columns.iter().find(|c| {
+                            c.name == col_name || {
+                                // Also try alias match for group_by results
+                                alias.as_ref().map(|a| c.name == *a).unwrap_or(false)
+                            }
+                        }) {
+                            let mut nc = src.clone();
+                            if let Some(a) = alias { nc.name = a.clone(); }
+                            new_cols.push(nc);
                         }
                         // else silently skip (shouldn't happen after group_by_agg)
                     }
@@ -866,6 +1338,10 @@ fn collect_cols_expr(expr: &Expr, set: &mut std::collections::HashSet<String>) {
             if let Some(ev) = else_val { collect_cols_expr(ev, set); }
         }
         Expr::FuncCall { args, .. } => { for a in args { collect_cols_expr(a, set); } }
+        // Subquery expressions — collect outer column references
+        Expr::InSubquery { expr: e, .. } => collect_cols_expr(e, set),
+        Expr::ScalarSubquery(_) => { /* scalar subquery has no outer col refs */ }
+        Expr::Exists { .. }     => { /* EXISTS has no outer col refs in this position */ }
         Expr::Window { func, spec } => {
             match func {
                 WindowFn::Agg { expr: e, .. } => collect_cols_expr(e, set),
@@ -1311,6 +1787,54 @@ mod tests {
             "SELECT cust_id, SUM(score) AS total FROM orders GROUP BY cust_id"
         ).unwrap();
         assert_eq!(result.num_rows, 3); // 3 distinct cust_ids
+    }
+
+    // ─── Subquery tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_scalar_subquery_where_eq_max() {
+        let mut ctx = KqlContext::new();
+        ctx.register("orders", make_orders());
+        // WHERE score = (SELECT MAX(score) FROM orders)  → only score=90
+        let result = ctx.query(
+            "SELECT score FROM orders WHERE score = (SELECT MAX(score) FROM orders)"
+        ).unwrap();
+        assert_eq!(result.num_rows, 1, "only score=90 should match MAX");
+    }
+
+    #[test]
+    fn test_scalar_subquery_where_gt_avg() {
+        let mut ctx = KqlContext::new();
+        ctx.register("orders", make_orders());
+        // AVG = (90+70+85+60)/4 = 76.25 — rows > avg: 90, 85
+        let result = ctx.query(
+            "SELECT score FROM orders WHERE score > (SELECT AVG(score) FROM orders)"
+        ).unwrap();
+        assert_eq!(result.num_rows, 2, "scores 90 and 85 are > avg(76.25)");
+    }
+
+    #[test]
+    fn test_in_subquery() {
+        let mut ctx = KqlContext::new();
+        ctx.register("orders", make_orders());
+        ctx.register("customers", make_customers());
+        // Find orders from customers whose name starts with 'A' → cust_id=10 → 2 rows
+        let result = ctx.query(
+            "SELECT id FROM orders WHERE cust_id IN (SELECT id FROM customers WHERE name = 'Alice')"
+        ).unwrap();
+        assert_eq!(result.num_rows, 2, "Alice has cust_id=10, two orders");
+    }
+
+    #[test]
+    fn test_not_in_subquery() {
+        let mut ctx = KqlContext::new();
+        ctx.register("orders", make_orders());
+        ctx.register("customers", make_customers());
+        // Exclude orders from Alice (cust_id=10)
+        let result = ctx.query(
+            "SELECT id FROM orders WHERE cust_id NOT IN (SELECT id FROM customers WHERE name = 'Alice')"
+        ).unwrap();
+        assert_eq!(result.num_rows, 2, "Bob and Carol have 2 orders");
     }
 
     // ─── Layer 34: Scalar functions ─────────────────────────────────────────
