@@ -504,30 +504,31 @@ fn eval_bool_ctx(expr: &Expr, block: &DataBlock, row: usize, ctx: &KqlContext) -
 
 /// Evaluate expression with context — handles subquery variants.
 fn eval_expr_ctx(expr: &Expr, block: &DataBlock, row: usize, ctx: &KqlContext) -> ExprVal {
-    // Helper: build a context with the current outer row bound under its table alias.
-    // ONLY injects if the alias doesn't already exist in ctx (avoids overwriting the
-    // full table for non-correlated subqueries that use the same table name).
-    // This enables correlated subqueries: outer uses alias "m1", inner uses "memories" → safe.
-    let with_outer_row = |ctx: &KqlContext| {
+    // Outer block's table alias (e.g. "m1", "o1", "memories")
+    let outer_alias: Option<String> = block.columns.first().and_then(|c| {
+        let s = c.name.as_str();
+        if s.contains('.') { s.split('.').next().map(|a| a.to_string()) } else { None }
+    });
+
+    // Build row context for subquery evaluation.
+    // For correlated subqueries: injects outer row so inner can access outer.col
+    // For non-correlated: skips injection if inner FROM = outer alias (avoids 1-row override)
+    let make_row_ctx = |inner_from: &str| {
         let mut row_ctx = ctx.clone();
-        if let Some(alias) = block.columns.first().and_then(|c| {
-            let s = c.name.as_str();
-            if s.contains('.') { s.split('.').next().map(|a| a.to_string()) } else { None }
-        }) {
-            // Only inject outer row if alias is NOT already in ctx
-            // (correlated: outer alias "m1" is distinct from inner table "memories")
-            if row_ctx.get(&alias).is_none() {
+        if let Some(ref alias) = outer_alias {
+            // Inject if: alias not in ctx yet, OR inner uses a DIFFERENT table
+            if row_ctx.get(alias.as_str()).is_none() || inner_from != alias.as_str() {
                 let single = block.select_rows(&[row]);
-                row_ctx.register(&alias, single);
+                row_ctx.register(alias.as_str(), single);
             }
         }
         row_ctx
     };
 
     match expr {
-        // Scalar subquery: (SELECT scalar_val ...) — evaluate per-row for correlated queries
+        // Scalar subquery — per-row for correlated queries
         Expr::ScalarSubquery(stmt) => {
-            let row_ctx = with_outer_row(ctx);
+            let row_ctx = make_row_ctx(&stmt.from.name);
             match execute_select(stmt, &row_ctx) {
                 Ok(result) if result.num_rows > 0 && !result.columns.is_empty() => {
                     match result.columns[0].data.get_value(0) {
@@ -552,7 +553,7 @@ fn eval_expr_ctx(expr: &Expr, block: &DataBlock, row: usize, ctx: &KqlContext) -
                 ExprVal::Bool(b)  => b.to_string(),
                 ExprVal::Null     => return ExprVal::Bool(*negated),
             };
-            match execute_select(subquery, &with_outer_row(ctx)) {
+            match execute_select(subquery, &make_row_ctx(&subquery.from.name)) {
                 Ok(result) => {
                     if !result.columns.is_empty() {
                         let found = (0..result.num_rows).any(|r| {
@@ -577,13 +578,51 @@ fn eval_expr_ctx(expr: &Expr, block: &DataBlock, row: usize, ctx: &KqlContext) -
 
         // EXISTS (SELECT ...)
         Expr::Exists { subquery, negated } => {
-            match execute_select(subquery, &with_outer_row(ctx)) {
+            let row_ctx = make_row_ctx(&subquery.from.name);
+            match execute_select(subquery, &row_ctx) {
                 Ok(result) => ExprVal::Bool(if *negated { result.num_rows == 0 } else { result.num_rows > 0 }),
                 Err(_)     => ExprVal::Bool(*negated),
             }
         }
 
-        // For all other expressions, fall back to the standard evaluator
+        // For all other expressions, fall back to the standard evaluator —
+        // EXCEPT for expressions that might contain QualCol outer references.
+        // Handle BinOp, Not, IsNull/IsNotNull recursively with context.
+        Expr::BinOp { op, left, right } => {
+            let lv = eval_expr_ctx(left,  block, row, ctx);
+            let rv = eval_expr_ctx(right, block, row, ctx);
+            eval_binop(op, lv, rv)
+        }
+        Expr::Not(e) => match eval_expr_ctx(e, block, row, ctx) {
+            ExprVal::Bool(b) => ExprVal::Bool(!b),
+            _                => ExprVal::Bool(false),
+        },
+        Expr::IsNull(e) => match eval_expr_ctx(e, block, row, ctx) {
+            ExprVal::Null => ExprVal::Bool(true),
+            _             => ExprVal::Bool(false),
+        },
+        Expr::IsNotNull(e) => match eval_expr_ctx(e, block, row, ctx) {
+            ExprVal::Null => ExprVal::Bool(false),
+            _             => ExprVal::Bool(true),
+        },
+        // QualCol: try block first, then outer table in ctx (enables correlated subqueries)
+        Expr::QualCol(table, col) => {
+            let full = format!("{}.{}", table, col);
+            let v = get_cell(block, &full, row);
+            if matches!(v, ExprVal::Null) {
+                // Try outer table in ctx (correlated subquery: m1.kind where m1 is registered)
+                if let Some(outer_block) = ctx.get(table.as_str()) {
+                    if outer_block.num_rows > 0 {
+                        let val = get_cell(outer_block, col.as_str(), 0);
+                        if row == 0 { eprintln!("[QualCol] {}.{} → {:?} (from ctx, {} rows)", table, col, val, outer_block.num_rows); }
+                        return val;
+                    }
+                }
+                if row == 0 { eprintln!("[QualCol] {}.{} → Null (not in block or ctx)", table, col); }
+            }
+            v
+        }
+        // Col: standard block lookup
         other => eval_expr(other, block, row),
     }
 }
@@ -1308,9 +1347,27 @@ fn exprvals_to_column(name: String, vals: Vec<ExprVal>) -> Column {
 
 // ─── Fast column extraction helpers ──────────────────────────────────────────
 
-/// Collect all bare column names referenced anywhere in an expression.
-fn collect_cols_expr(expr: &Expr, set: &mut std::collections::HashSet<String>) {
+/// Collect outer QualCol references from inside a subquery predicate.
+/// These are columns like m1.kind or o1.cust_id that come from the OUTER query
+/// and must be kept in the outer block's column pruning step.
+fn collect_outer_quals(expr: &Expr, set: &mut std::collections::HashSet<String>) {
     match expr {
+        Expr::QualCol(_, c) => { set.insert(c.clone()); }
+        Expr::BinOp { left, right, .. } => {
+            collect_outer_quals(left, set);
+            collect_outer_quals(right, set);
+        }
+        Expr::Not(e) | Expr::IsNull(e) | Expr::IsNotNull(e) => collect_outer_quals(e, set),
+        Expr::In { expr: e, values, .. } => {
+            collect_outer_quals(e, set);
+            for v in values { collect_outer_quals(v, set); }
+        }
+        _ => {}
+    }
+}
+
+/// Collect all bare column names referenced anywhere in an expression.
+fn collect_cols_expr(expr: &Expr, set: &mut std::collections::HashSet<String>) {    match expr {
         Expr::Col(c)            => { set.insert(c.clone()); }
         Expr::QualCol(_, c)     => { set.insert(c.clone()); }
         Expr::Agg { expr: e, .. } => collect_cols_expr(e, set),
@@ -1340,8 +1397,14 @@ fn collect_cols_expr(expr: &Expr, set: &mut std::collections::HashSet<String>) {
         Expr::FuncCall { args, .. } => { for a in args { collect_cols_expr(a, set); } }
         // Subquery expressions — collect outer column references
         Expr::InSubquery { expr: e, .. } => collect_cols_expr(e, set),
-        Expr::ScalarSubquery(_) => { /* scalar subquery has no outer col refs */ }
-        Expr::Exists { .. }     => { /* EXISTS has no outer col refs in this position */ }
+        // For EXISTS and ScalarSubquery: scan inner WHERE for outer table references (QualCol)
+        // These are the correlated outer columns that the outer query must keep.
+        Expr::ScalarSubquery(stmt) => {
+            if let Some(pred) = &stmt.where_clause { collect_outer_quals(pred, set); }
+        }
+        Expr::Exists { subquery, .. } => {
+            if let Some(pred) = &subquery.where_clause { collect_outer_quals(pred, set); }
+        }
         Expr::Window { func, spec } => {
             match func {
                 WindowFn::Agg { expr: e, .. } => collect_cols_expr(e, set),
@@ -1835,6 +1898,36 @@ mod tests {
             "SELECT id FROM orders WHERE cust_id NOT IN (SELECT id FROM customers WHERE name = 'Alice')"
         ).unwrap();
         assert_eq!(result.num_rows, 2, "Bob and Carol have 2 orders");
+    }
+
+    #[test]
+    fn test_correlated_subquery() {
+        // WHERE score > (SELECT AVG(score) FROM orders o2 WHERE o2.cust_id = o1.cust_id)
+        // cust_id=10: scores [90,85] avg=87.5 → row 90 matches, row 85 does NOT
+        // cust_id=20: scores [70]    avg=70.0 → row 70 does NOT
+        // cust_id=30: scores [60]    avg=60.0 → row 60 does NOT
+        // Expected: 1 row (score=90)
+        let mut ctx = KqlContext::new();
+        ctx.register("o1", make_orders());
+        ctx.register("orders", make_orders());
+        let result = ctx.query(
+            "SELECT score FROM o1 WHERE score > (SELECT AVG(score) FROM orders o2 WHERE o2.cust_id = o1.cust_id)"
+        ).unwrap();
+        assert_eq!(result.num_rows, 1, "only score=90 is above its group avg(87.5)");
+    }
+
+    #[test]
+    fn test_exists_correlated() {
+        // Find orders where there exists another order from the same customer
+        // cust_id=10 has 2 orders → both qualify; cust_id=20,30 have 1 order → don't qualify
+        let mut ctx = KqlContext::new();
+        ctx.register("o1", make_orders());
+        ctx.register("orders", make_orders());
+        // Simple EXISTS: all rows have at least 1 match in orders
+        let result = ctx.query(
+            "SELECT id FROM o1 WHERE EXISTS (SELECT 1 FROM orders o2 WHERE o2.cust_id = o1.cust_id)"
+        ).unwrap();
+        assert_eq!(result.num_rows, 4, "all o1 rows exist in orders by cust_id");
     }
 
     // ─── Layer 34: Scalar functions ─────────────────────────────────────────
