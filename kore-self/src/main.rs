@@ -900,36 +900,43 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         // ── Distributed SQL — all CPU cores ───────────────────────────────────
         "self_distributed_query" => {
             me.shadow.observe_tool("self_distributed_query");
-            let sql = args["sql"].as_str().unwrap_or("").trim();
+            let sql         = args["sql"].as_str().unwrap_or("").trim();
+            let use_cluster = args["cluster"].as_bool().unwrap_or(false);
             if sql.is_empty() {
                 json!({ "content": [{ "type": "text", "text":
                     json!({
-                        "description": "Run SQL using ALL CPU cores in parallel (kore-distributed)",
+                        "description": "Run SQL in distributed mode. Two modes:",
+                        "default_mode": "Rayon parallel (all cores, same machine, fastest)",
+                        "cluster_mode": "cluster=true → TRUE TCP cluster via kore-coord + kore-worker. Multi-machine ready: workers can run on remote hosts.",
                         "examples": [
-                            "SELECT kind, COUNT(*) AS cnt FROM memories GROUP BY kind ORDER BY cnt DESC",
+                            "SELECT kind, COUNT(*) AS cnt FROM memories GROUP BY kind",
                             "SELECT kind, SUM(importance) AS total FROM memories GROUP BY kind",
-                            "SELECT content FROM memories WHERE importance > 0.9",
                         ],
-                        "note": "Best for large tables. Auto-partitions across all cores. Same SQL syntax as self_query."
                     }).to_string()
                 }]})
             } else {
                 me.shadow.observe_query(sql);
                 let block = kore_query::memories_to_block(&me.memories);
-                // Also include DML tables
-                let sql_with_memories = sql.to_string();
-                match kore_distributed::distributed_query(&sql_with_memories, block) {
-                    Ok(result) => {
-                        let text = kore_query::block_to_rows(&result).iter()
+                let result = if use_cluster {
+                    // TRUE TCP cluster: coordinator + workers via real TCP sockets
+                    // On a multi-machine cluster, workers run on remote hosts connecting to coordinator IP
+                    let n = rayon::current_num_threads().min(8).max(2);
+                    kore_distributed::cluster_query(sql, "memories", block, n)
+                } else {
+                    kore_distributed::distributed_query(sql, block)
+                };
+                match result {
+                    Ok(r) => {
+                        let text = kore_query::block_to_rows(&r).iter()
                             .map(|row| row.join(" | "))
-                            .collect::<Vec<_>>()
-                            .join("\n");
+                            .collect::<Vec<_>>().join("\n");
                         json!({ "content": [{ "type": "text", "text":
                             json!({
-                                "rows":    result.num_rows,
-                                "columns": result.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
+                                "rows":    r.num_rows,
+                                "columns": r.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
                                 "data":    text,
-                                "engine":  "kore-distributed (all CPU cores)",
+                                "engine":  if use_cluster { "kore-distributed TCP cluster (coordinator + workers via TCP, multi-machine ready)" } else { "kore-distributed Rayon (all CPU cores)" },
+                                "mode":    if use_cluster { "TCP_CLUSTER" } else { "RAYON_PARALLEL" },
                             }).to_string()
                         }]})
                     }
@@ -1374,9 +1381,10 @@ fn tool_list() -> Value {
         }}
       },
       { "name": "self_distributed_query",
-        "description": "Run SQL using ALL CPU cores in parallel (kore-distributed). Same syntax as self_query but auto-partitions across workers. Best for large tables.",
+        "description": "Run SQL in distributed mode. Default: Rayon parallel (all cores). Pass cluster=true for TRUE TCP cluster (kore-coord + kore-worker via TCP — same code works on multi-machine clusters).",
         "inputSchema": { "type": "object", "properties": {
-          "sql": { "type": "string", "description": "e.g. SELECT kind, COUNT(*) FROM memories GROUP BY kind" }
+          "sql":     { "type": "string", "description": "SQL query to run" },
+          "cluster": { "type": "boolean", "description": "true = TCP cluster mode (multi-machine ready). Default: false (Rayon parallel)" }
         }}
       },
       { "name": "self_delta_save",
