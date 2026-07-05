@@ -278,6 +278,21 @@ impl Parser {
             Some(self.expect_alias()?)
         } else if matches!(self.peek(), Token::Ident(_)) {
             Some(self.expect_ident()?)
+        } else if matches!(self.peek(),
+            Token::Avg | Token::Count | Token::Sum | Token::Min | Token::Max |
+            Token::Asc | Token::Desc | Token::Group | Token::Order | Token::Where |
+            Token::Distinct
+        ) && !matches!(self.peek(), Token::From) {
+            // Keyword used as implicit alias without AS (e.g. SELECT AVG(x) avg ...)
+            // Only consume if it looks like an alias (not a clause keyword)
+            let next_tok = self.peek().clone();
+            match next_tok {
+                // These can be aliases
+                Token::Avg | Token::Count | Token::Sum | Token::Min | Token::Max |
+                Token::Asc | Token::Desc | Token::Distinct => Some(self.expect_alias()?),
+                // These could be aliases but are risky — only take if followed by comma or FROM
+                _ => None,
+            }
         } else {
             None
         };

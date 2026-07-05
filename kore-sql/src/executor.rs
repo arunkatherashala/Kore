@@ -161,9 +161,15 @@ impl KqlContext {
         };
 
         let rows_added = new_rows.num_rows;
-        // Append to existing table or create new
+        // Append to existing table — if table doesn't exist yet, just create it
         let entry = self.mut_tables.entry(table_name.to_string()).or_insert_with(DataBlock::empty);
-        *entry = DataBlock::concat(vec![entry.clone(), new_rows])?;
+        *entry = if entry.columns.is_empty() {
+            // First INSERT: table doesn't exist — just set it
+            new_rows
+        } else {
+            // Subsequent INSERT: append rows (schema must match)
+            DataBlock::concat(vec![entry.clone(), new_rows])?
+        };
         // Also update read-only view
         self.tables.insert(table_name.to_string(), entry.clone());
         Ok(("INSERT".into(), rows_added))
