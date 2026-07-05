@@ -26,6 +26,8 @@ mod broadcast;
 mod assistant;
 
 use std::io::{BufRead, Write};
+use kore_distributed;
+use kore_delta;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 
@@ -881,6 +883,8 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                     Ok(block) => {
                         let rows = block.num_rows;
                         let cols: Vec<_> = block.columns.iter().map(|c| c.name.clone()).collect();
+                        // Store in dml_tables for reuse
+                        me.dml_tables.insert(as_name.to_string(), block);
                         json!({ "content": [{ "type": "text", "text": json!({
                             "status":   "loaded",
                             "table":    as_name,
@@ -890,6 +894,118 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                         }).to_string() }]})
                     }
                     Err(e) => json!({ "content": [{ "type": "text", "text": format!("Load error: {e}") }], "isError": true }),
+                }
+            }
+        }
+        // ── Distributed SQL — all CPU cores ───────────────────────────────────
+        "self_distributed_query" => {
+            me.shadow.observe_tool("self_distributed_query");
+            let sql = args["sql"].as_str().unwrap_or("").trim();
+            if sql.is_empty() {
+                json!({ "content": [{ "type": "text", "text":
+                    json!({
+                        "description": "Run SQL using ALL CPU cores in parallel (kore-distributed)",
+                        "examples": [
+                            "SELECT kind, COUNT(*) AS cnt FROM memories GROUP BY kind ORDER BY cnt DESC",
+                            "SELECT kind, SUM(importance) AS total FROM memories GROUP BY kind",
+                            "SELECT content FROM memories WHERE importance > 0.9",
+                        ],
+                        "note": "Best for large tables. Auto-partitions across all cores. Same SQL syntax as self_query."
+                    }).to_string()
+                }]})
+            } else {
+                me.shadow.observe_query(sql);
+                let block = kore_query::memories_to_block(&me.memories);
+                // Also include DML tables
+                let sql_with_memories = sql.to_string();
+                match kore_distributed::distributed_query(&sql_with_memories, block) {
+                    Ok(result) => {
+                        let text = kore_query::block_to_rows(&result).iter()
+                            .map(|row| row.join(" | "))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        json!({ "content": [{ "type": "text", "text":
+                            json!({
+                                "rows":    result.num_rows,
+                                "columns": result.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
+                                "data":    text,
+                                "engine":  "kore-distributed (all CPU cores)",
+                            }).to_string()
+                        }]})
+                    }
+                    Err(e) => json!({ "content": [{ "type": "text", "text": format!("Distributed error: {e}") }], "isError": true }),
+                }
+            }
+        }
+        // ── ACID via kore-delta ────────────────────────────────────────────────
+        "self_delta_save" => {
+            me.shadow.observe_tool("self_delta_save");
+            let table = args["table"].as_str().unwrap_or("memories");
+            let path  = args["path"].as_str().unwrap_or("").trim();
+            if path.is_empty() {
+                json!({ "content": [{ "type": "text", "text": "Pass 'path'. e.g. self_delta_save({table:'memories', path:'C:/data/memories.delta'})" }]})
+            } else {
+                let block = if table == "memories" {
+                    kore_query::memories_to_block(&me.memories)
+                } else {
+                    me.dml_tables.get(table).cloned().unwrap_or_else(kore_core::DataBlock::empty)
+                };
+                let rows = block.num_rows;
+                // Build schema from block
+                let schema: Vec<kore_delta::SchemaField> = block.columns.iter().map(|c| {
+                    kore_delta::SchemaField {
+                        name:  c.name.clone(),
+                        dtype: match &c.data {
+                            kore_core::ColumnData::Int64(_)   => "INT64".to_string(),
+                            kore_core::ColumnData::Float64(_) => "FLOAT64".to_string(),
+                            kore_core::ColumnData::Bool(_)    => "BOOL".to_string(),
+                            _ => "STR".to_string(),
+                        },
+                        nullable: true,
+                    }
+                }).collect();
+                let delta_path = std::path::Path::new(path);
+                let result = if delta_path.exists() {
+                    // Append to existing delta table
+                    let mut dt = kore_delta::DeltaTable::open(delta_path);
+                    dt.and_then(|mut t| t.insert(block).map(|v| (v, rows)))
+                } else {
+                    // Create new delta table
+                    kore_delta::DeltaTable::create(delta_path, schema)
+                        .and_then(|mut dt| dt.insert(block).map(|v| (v, rows)))
+                };
+                match result {
+                    Ok((version, rows_written)) => json!({ "content": [{ "type": "text", "text":
+                        json!({
+                            "status":  "saved (ACID)",
+                            "path":    path,
+                            "rows":    rows_written,
+                            "version": version,
+                            "features": ["time-travel", "versioning", "rollback"],
+                        }).to_string()
+                    }]}),
+                    Err(e) => json!({ "content": [{ "type": "text", "text": format!("Delta error: {e}") }], "isError": true }),
+                }
+            }
+        }
+        "self_delta_history" => {
+            me.shadow.observe_tool("self_delta_history");
+            let path = args["path"].as_str().unwrap_or("").trim();
+            if path.is_empty() {
+                json!({ "content": [{ "type": "text", "text": "Pass 'path' to a .delta directory." }]})
+            } else {
+                match kore_delta::DeltaTable::open(std::path::Path::new(path)) {
+                    Ok(dt) => {
+                        let history = dt.history();
+                        json!({ "content": [{ "type": "text", "text":
+                            json!({
+                                "path":    path,
+                                "current_version": dt.version(),
+                                "history": history.iter().map(|(v,op,rows)| json!({"version":v,"operation":op,"rows":rows})).collect::<Vec<_>>(),
+                            }).to_string()
+                        }]})
+                    }
+                    Err(e) => json!({ "content": [{ "type": "text", "text": format!("Delta error: {e}") }], "isError": true }),
                 }
             }
         }
@@ -1255,6 +1371,25 @@ fn tool_list() -> Value {
         "inputSchema": { "type": "object", "properties": {
           "path": { "type": "string" },
           "as":   { "type": "string", "description": "Table name to use in self_query. Default: 'loaded'" }
+        }}
+      },
+      { "name": "self_distributed_query",
+        "description": "Run SQL using ALL CPU cores in parallel (kore-distributed). Same syntax as self_query but auto-partitions across workers. Best for large tables.",
+        "inputSchema": { "type": "object", "properties": {
+          "sql": { "type": "string", "description": "e.g. SELECT kind, COUNT(*) FROM memories GROUP BY kind" }
+        }}
+      },
+      { "name": "self_delta_save",
+        "description": "Save a table to a Delta log (ACID). Supports time-travel, versioning, rollback. Use self_delta_history to see versions.",
+        "inputSchema": { "type": "object", "properties": {
+          "table": { "type": "string", "description": "Table name to save. Default: memories" },
+          "path":  { "type": "string", "description": "Output .delta directory path" }
+        }}
+      },
+      { "name": "self_delta_history",
+        "description": "Show ACID transaction history of a Delta table: version, operation, rows changed. Enables time-travel queries.",
+        "inputSchema": { "type": "object", "properties": {
+          "path": { "type": "string" }
         }}
       },
       { "name": "self_context_sync",

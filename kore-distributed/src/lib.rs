@@ -73,71 +73,81 @@ impl DistributedExecutor {
     }
 
     // ── Strategy 1: Distributed GROUP BY ─────────────────────────────────────
-    // Phase 1 — Workers: run WHERE filter only, return all matching rows
-    // Phase 2 — Coordinator: run full GROUP BY on concatenated filtered rows
-    // This is correct and avoids the partial-aggregate re-aggregation problem.
+    // Phase 1 — Each worker runs WHERE + partial GROUP BY on its slice
+    // Phase 2 — Coordinator merges partial results with full GROUP BY
+    // Result: only aggregated rows cross worker boundaries (not raw rows)
 
     fn distributed_group_by(&self, sql: &str, data: DataBlock) -> Result<DataBlock, String> {
         let n = data.num_rows;
         let t = self.num_workers;
         let chunk = ((n + t - 1) / t).max(1);
 
-        // PHASE 1: Parallel WHERE filter — each worker returns its matching rows
-        let filtered_parts: Vec<Result<DataBlock, String>> = (0..t)
+        // PHASE 1: Each worker runs the FULL SQL on its slice (filter + local GROUP BY)
+        // This is the key optimization: instead of returning raw rows, each worker
+        // returns aggregated rows. For 6M rows with 6 groups → 6 rows per worker, not 6M/t rows.
+        let partial_results: Vec<DataBlock> = (0..t)
             .into_par_iter()
-            .map(|w| {
+            .filter_map(|w| {
                 let start = w * chunk;
                 let end   = (start + chunk).min(n);
-                if start >= end { return Ok(DataBlock::empty()); }
+                if start >= end { return None; }
                 let slice = data.select_rows(&(start..end).collect::<Vec<_>>());
-
-                // Extract WHERE conditions and apply via kore-vectorized (fast path)
-                // Fall back to SQL interpreter if vectorized can't handle it
-                Ok(slice)  // For now: return slice, coordinator does full SQL
+                let mut ctx = KqlContext::new();
+                ctx.register("data", slice);
+                // Run full SQL per worker — each gets a partial GROUP BY result
+                // Workers return tiny aggregated results (6 rows for 6-group GROUP BY)
+                ctx.query(&rewrite_table_name(sql, "data")).ok()
+                   .filter(|b| b.num_rows > 0)
             })
             .collect();
 
-        // PHASE 2: Concatenate all slices, run full SQL once on coordinator
-        let parts: Vec<DataBlock> = filtered_parts
-            .into_iter()
-            .filter_map(|r| r.ok())
-            .filter(|b| b.num_rows > 0)
-            .collect();
+        if partial_results.is_empty() { return Ok(DataBlock::empty()); }
 
-        if parts.is_empty() { return Ok(DataBlock::empty()); }
-
-        let combined = DataBlock::concat(parts).map_err(|e| format!("Concat: {e}"))?;
+        // PHASE 2: Merge partial aggregates.
+        // Strategy: concat all partial results, run GROUP BY again to merge sums/counts
+        let merged = DataBlock::concat(partial_results).map_err(|e| format!("Merge: {e}"))?;
         let mut ctx = KqlContext::new();
-        ctx.register("data", combined);
-        ctx.query(&rewrite_table_name(sql, "data"))
-           .map_err(|e| format!("Final GROUP BY: {e}"))
+        ctx.register("data", merged);
+
+        // Build merge SQL: re-aggregate the partial results
+        // Replace the original projections with re-aggregation over partial results
+        let merge_sql = build_merge_sql(sql);
+        ctx.query(&rewrite_table_name(&merge_sql, "data"))
+           .map_err(|e| format!("Phase 2 merge: {e}"))
     }
 
     // ── Strategy 2: Distributed global aggregation (no GROUP BY) ─────────────
-    // Workers: filter in parallel (vectorized), coordinator: final SUM.
+    // Workers: each runs filter + partial aggregation (SUM/COUNT per slice)
+    // Coordinator: re-aggregate partial results
 
     fn distributed_global_agg(&self, sql: &str, data: DataBlock) -> Result<DataBlock, String> {
         let n = data.num_rows;
         let t = self.num_workers;
         let chunk = ((n + t - 1) / t).max(1);
 
-        // Parallel filter — each worker returns its matching rows
+        // Each worker runs full SQL on its slice → tiny aggregated result (1 row)
         let parts: Vec<DataBlock> = (0..t)
             .into_par_iter()
             .filter_map(|w| {
                 let start = w * chunk;
                 let end   = (start + chunk).min(n);
                 if start >= end { return None; }
-                Some(data.select_rows(&(start..end).collect::<Vec<_>>()))
+                let slice = data.select_rows(&(start..end).collect::<Vec<_>>());
+                let mut ctx = KqlContext::new();
+                ctx.register("data", slice);
+                ctx.query(&rewrite_table_name(sql, "data")).ok()
+                   .filter(|b| b.num_rows > 0)
             })
             .collect();
 
         if parts.is_empty() { return Ok(DataBlock::empty()); }
-        let combined = DataBlock::concat(parts).map_err(|e| format!("Concat: {e}"))?;
+        // Re-aggregate the t partial results (t rows) → 1 final row
+        let merged = DataBlock::concat(parts).map_err(|e| format!("Concat: {e}"))?;
         let mut ctx = KqlContext::new();
-        ctx.register("data", combined);
-        ctx.query(&rewrite_table_name(sql, "data"))
-           .map_err(|e| format!("Global agg: {e}"))
+        ctx.register("data", merged);
+        let merge_sql = build_merge_sql(sql);
+        ctx.query(&rewrite_table_name(&merge_sql, "data"))
+           .map_err(|e| format!("Global agg merge: {e}"))
     }
 
     // ── Strategy 3: Distributed filter (no aggregation) ──────────────────────
@@ -240,6 +250,117 @@ impl Default for DistributedContext { fn default() -> Self { Self::new() } }
 
 /// Rewrite FROM <table> to FROM data in the SQL string.
 /// Simple string replacement — works for standard SELECT ... FROM table ...
+/// Build a merge SQL for two-phase aggregation over partial worker results.
+///
+/// Problem: Workers run `SELECT kind, SUM(importance) AS total FROM slice GROUP BY kind`
+/// This gives partial results with columns (kind, total).
+/// The merge must then run `SELECT kind, SUM(total) AS total FROM data GROUP BY kind`
+/// NOT the original SQL (which would try SUM(importance) but only `total` column exists).
+///
+/// Algorithm: parse projection list, detect aggregate functions,
+/// rewrite them to aggregate their alias columns.
+fn build_merge_sql(original_sql: &str) -> String {
+    let lower = original_sql.to_lowercase();
+
+    // Only transform if it has aggregation
+    let has_agg = lower.contains("sum(") || lower.contains("count(")
+               || lower.contains("avg(") || lower.contains("min(")
+               || lower.contains("max(");
+    if !has_agg { return original_sql.to_string(); }
+
+    // Extract: SELECT ... FROM ... WHERE ... GROUP BY ... ORDER BY ... LIMIT ...
+    let select_start = lower.find("select ").map(|p| p + 7).unwrap_or(0);
+    let from_pos = lower.find(" from ").unwrap_or(original_sql.len());
+
+    let projections_str = &original_sql[select_start..from_pos];
+
+    // Parse projections and rewrite aggregates to use their aliases
+    let mut new_projs: Vec<String> = vec![];
+    for proj in split_projections(projections_str) {
+        let proj = proj.trim().to_string();
+        let proj_lower = proj.to_lowercase();
+
+        // Detect aggregate: SUM/COUNT/AVG/MIN/MAX(...)
+        if let Some((func, alias)) = extract_agg_and_alias(&proj) {
+            let alias = alias.unwrap_or_else(|| {
+                // Auto-alias: func_col
+                proj_lower.split('(').next().unwrap_or("agg").to_string()
+            });
+            // COUNT(*) partial → SUM(cnt_alias) in merge
+            let merge_func = if func.eq_ignore_ascii_case("COUNT") { "SUM" } else { &func };
+            new_projs.push(format!("{merge_func}({alias}) AS {alias}"));
+        } else {
+            // Non-aggregate (column, qualified col) — keep as-is
+            // Strip table-qualified names for merged data (use just the column)
+            let col = proj.rsplit('.').next().unwrap_or(&proj).to_string();
+            new_projs.push(col);
+        }
+    }
+
+    // Rebuild: keep FROM data, WHERE (removed for merge), GROUP BY, ORDER BY, LIMIT
+    let after_from = &original_sql[from_pos..];
+    let group_pos = lower.rfind(" group by ").map(|p| p + 1);
+    let order_pos = lower.rfind(" order by ").map(|p| p + 1);
+    let limit_pos = lower.rfind(" limit ").map(|p| p + 1);
+
+    let mut tail = String::new();
+    if let Some(gp) = group_pos {
+        let end = order_pos.or(limit_pos).unwrap_or(original_sql.len());
+        tail.push(' ');
+        tail.push_str(&original_sql[gp..end]);
+    }
+    if let Some(op) = order_pos {
+        let end = limit_pos.unwrap_or(original_sql.len());
+        tail.push(' ');
+        tail.push_str(&original_sql[op..end]);
+    }
+    if let Some(lp) = limit_pos {
+        tail.push(' ');
+        tail.push_str(&original_sql[lp..]);
+    }
+
+    format!("SELECT {} FROM data{tail}", new_projs.join(", "))
+}
+
+fn split_projections(s: &str) -> Vec<&str> {
+    // Split by comma but respect parentheses
+    let mut parts = vec![];
+    let mut depth = 0;
+    let mut start = 0;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+/// Returns (function_name, alias) if this is an aggregate expression.
+fn extract_agg_and_alias(proj: &str) -> Option<(String, Option<String>)> {
+    let proj_lower = proj.to_lowercase();
+    let funcs = ["sum(", "count(", "avg(", "min(", "max("];
+    for f in &funcs {
+        if let Some(pos) = proj_lower.find(f) {
+            let func = f.trim_end_matches('(').to_uppercase();
+            // Find alias after AS or at end
+            let alias = if let Some(as_pos) = proj_lower.rfind(" as ") {
+                Some(proj[as_pos + 4..].trim().to_string())
+            } else {
+                None
+            };
+            return Some((func, alias));
+        }
+    }
+    None
+}
+
 fn rewrite_table_name(sql: &str, new_name: &str) -> String {
     // Already using "data" as table name → no change needed
     if sql.to_lowercase().contains("from data") { return sql.to_string(); }

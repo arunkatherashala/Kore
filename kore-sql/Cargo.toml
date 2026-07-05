@@ -8,6 +8,8 @@ kore-core   = { workspace = true }
 kore-join   = { workspace = true }
 kore-window = { workspace = true }
 kore-spill  = { path = "../kore-spill" }
+kore-store  = { path = "../kore-store" }
+kore-delta  = { path = "../kore-delta" }
 rayon       = { workspace = true }
 thiserror   = { workspace = true }
 serde       = { workspace = true }

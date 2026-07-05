@@ -10,11 +10,13 @@ name = "kore-self"
 path = "src/main.rs"
 
 [dependencies]
-kore-core  = { workspace = true }
-kore-sql   = { workspace = true }
-kore-store = { path = "../kore-store" }
-kore-mcp   = { path = "../kore-mcp" }
-tokio      = { workspace = true }
-serde      = { workspace = true }
-serde_json = { workspace = true }
-rayon      = { workspace = true }
+kore-core        = { workspace = true }
+kore-sql         = { workspace = true }
+kore-store       = { path = "../kore-store" }
+kore-delta       = { path = "../kore-delta" }
+kore-distributed = { path = "../kore-distributed" }
+kore-mcp         = { path = "../kore-mcp" }
+tokio            = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+rayon            = { workspace = true }

@@ -1,6 +1,7 @@
 //! KQL executor — runs a `SelectStmt` against named `DataBlock` tables.
 
 use std::collections::HashMap;
+use std::path::Path;
 use kore_core::{Column, ColumnData, DataBlock, KoreError, Value};
 use kore_join::{HashJoin, JoinConfig};
 use kore_core::JoinType;
@@ -27,6 +28,67 @@ impl KqlContext {
     /// Register a mutable table (supports INSERT/UPDATE/DELETE).
     pub fn register_mut(&mut self, name: impl Into<String>, block: DataBlock) {
         self.mut_tables.insert(name.into(), block);
+    }
+
+    // ── Native .kore persistence ──────────────────────────────────────────────
+
+    /// Load a DataBlock from a native .kore binary file into this context.
+    pub fn load_from_kore(&mut self, name: impl Into<String>, path: impl AsRef<Path>) -> Result<(), KoreError> {
+        let block = kore_store::KoreReader::read_file(path.as_ref())?;
+        let n = name.into();
+        self.tables.insert(n.clone(), block.clone());
+        self.mut_tables.insert(n, block);
+        Ok(())
+    }
+
+    /// Save a table from this context to a native .kore binary file.
+    pub fn save_to_kore(&self, name: &str, path: impl AsRef<Path>) -> Result<(), KoreError> {
+        let block = self.get(name)
+            .ok_or_else(|| KoreError::InvalidArgument(format!("Table not found: {name}")))?;
+        kore_store::KoreWriter::write_file(path.as_ref(), block)?;
+        Ok(())
+    }
+
+    // ── ACID via kore-delta ───────────────────────────────────────────────────
+
+    /// Create a persistent ACID table backed by a Delta log on disk.
+    pub fn create_delta_table(
+        &mut self,
+        name: &str,
+        schema: Vec<kore_delta::SchemaField>,
+        path: impl AsRef<Path>,
+    ) -> Result<(), KoreError> {
+        let dt = kore_delta::DeltaTable::create(path.as_ref(), schema)?;
+        let snapshot = dt.read()?;
+        self.tables.insert(name.to_string(), snapshot);
+        Ok(())
+    }
+
+    /// Open an existing Delta table and register it in this context.
+    pub fn open_delta_table(&mut self, name: &str, path: impl AsRef<Path>) -> Result<(), KoreError> {
+        let dt = kore_delta::DeltaTable::open(path.as_ref())?;
+        let snapshot = dt.read()?;
+        self.tables.insert(name.to_string(), snapshot);
+        Ok(())
+    }
+
+    /// Write a DataBlock to a Delta table (ACID append).
+    /// Returns new version number.
+    pub fn delta_insert(&self, path: impl AsRef<Path>, data: DataBlock) -> Result<u64, KoreError> {
+        let mut dt = kore_delta::DeltaTable::open(path.as_ref())?;
+        dt.insert(data)
+    }
+
+    /// Read a Delta table at a specific version (time-travel).
+    pub fn read_delta_at_version(&self, path: impl AsRef<Path>, version: u64) -> Result<DataBlock, KoreError> {
+        let dt = kore_delta::DeltaTable::open(path.as_ref())?;
+        dt.read_at_version(version)
+    }
+
+    /// Get full ACID history: Vec<(version, operation, rows)>
+    pub fn delta_history(&self, path: impl AsRef<Path>) -> Result<Vec<(u64, String, u64)>, KoreError> {
+        let dt = kore_delta::DeltaTable::open(path.as_ref())?;
+        Ok(dt.history())
     }
 
     /// Parse + execute a KQL query (supports CTEs and UNION ALL).
