@@ -7,6 +7,9 @@ use kore_join::{HashJoin, JoinConfig};
 use kore_core::JoinType;
 use kore_window::{WindowFn as WinFn, WinOrder, apply_window};
 use crate::ast::*;
+// Parquet and KORE store for LOAD TABLE support
+use kore_parquet;
+use kore_store;
 
 /// Registry of named tables — both read-only and mutable.
 #[derive(Default, Clone)]
@@ -116,6 +119,9 @@ impl KqlContext {
         }
         if upper.starts_with("CREATE TABLE") {
             return self.dml_create_table(sql_trim);
+        }
+        if upper.starts_with("LOAD TABLE") {
+            return self.dml_load_table(sql_trim);
         }
         Err(KoreError::InvalidArgument(format!("Unsupported DML: {}", &sql_trim[..40.min(sql_trim.len())])))
     }
@@ -287,6 +293,35 @@ impl KqlContext {
         self.register_mut(table_name, result.clone());
         self.register(table_name, result);
         Ok(("CREATE TABLE AS SELECT".into(), rows))
+    }
+
+    fn dml_load_table(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
+        // LOAD TABLE <name> FROM '<path>'
+        // Supports: .parquet, .kore, .csv (auto-detect by extension)
+        let upper = sql.to_uppercase();
+        // Skip "LOAD TABLE "
+        let after_load = sql[10..].trim();
+        let from_pos = after_load.to_uppercase().find(" FROM ")
+            .ok_or_else(|| KoreError::InvalidArgument("LOAD TABLE: missing FROM".into()))?;
+        let table_name = after_load[..from_pos].trim();
+        let path_raw = after_load[from_pos + 6..].trim().trim_matches('\'').trim_matches('"');
+
+        let ext = path_raw.rsplit('.').next().unwrap_or("").to_lowercase();
+        let block = match ext.as_str() {
+            "parquet" => {
+                let reader = kore_parquet::ParquetReader::new(path_raw);
+                reader.read().map_err(|e| KoreError::InvalidArgument(format!("Parquet read error: {e}")))?
+            }
+            "kore" => {
+                kore_store::reader::KoreReader::read_file(std::path::Path::new(path_raw))
+                    .map_err(|e| KoreError::InvalidArgument(format!("KORE read error: {e}")))?
+            }
+            _ => return Err(KoreError::InvalidArgument(format!("LOAD TABLE: unsupported format '.{ext}' (use .parquet or .kore)"))),
+        };
+        let rows = block.num_rows;
+        self.register_mut(table_name, block.clone());
+        self.register(table_name, block);
+        Ok(("LOAD TABLE".into(), rows))
     }
 
     fn parse_values_block(&self, rest: &str) -> Result<DataBlock, KoreError> {

@@ -10,6 +10,7 @@ kore-window = { workspace = true }
 kore-spill  = { path = "../kore-spill" }
 kore-store  = { path = "../kore-store" }
 kore-delta  = { path = "../kore-delta" }
+kore-parquet= { path = "../kore-parquet" }
 rayon       = { workspace = true }
 thiserror   = { workspace = true }
 serde       = { workspace = true }
