@@ -811,7 +811,17 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                 json!({ "content": [{ "type": "text", "text": schema.to_string() }] })
             } else {
                 me.shadow.observe_query(sql);
-                let result = kore_query::run_user_query(&me.memories, sql);
+                // Build context with memories + any DML tables (LOAD TABLE, CREATE TABLE AS, etc.)
+                use kore_sql::executor::KqlContext;
+                let mut ctx = KqlContext::new();
+                ctx.register("memories", kore_query::memories_to_block(&me.memories));
+                for (name, block) in &me.dml_tables {
+                    ctx.register(name, block.clone());
+                }
+                let result = match ctx.query(sql) {
+                    Ok(block) => kore_query::block_to_display(&block),
+                    Err(e)    => format!("Query error: {e}"),
+                };
                 json!({ "content": [{ "type": "text", "text": result }] })
             }
         }

@@ -46,6 +46,29 @@ pub fn query(memories: &[Memory], sql: &str) -> Result<DataBlock, String> {
     ctx.query(sql).map_err(|e| e.to_string())
 }
 
+/// Format a DataBlock as a human-readable table string. Used by self_query.
+pub fn block_to_display(block: &DataBlock) -> String {
+    if block.num_rows == 0 { return "(no rows)".to_string(); }
+    let headers: Vec<String> = block.columns.iter().map(|c| c.name.clone()).collect();
+    let rows = block_to_rows(block);
+    let widths: Vec<usize> = headers.iter().enumerate()
+        .map(|(i, h)| rows.iter().map(|r| r.get(i).map(|s| s.len()).unwrap_or(0)).max().unwrap_or(0).max(h.len()).min(60))
+        .collect();
+    let sep: String = widths.iter().map(|&w| "-".repeat(w+2)).collect::<Vec<_>>().join("+");
+    let hdr: String = headers.iter().zip(&widths).map(|(h,&w)| format!(" {:w$} ", h)).collect::<Vec<_>>().join("|");
+    let mut out = vec![sep.clone(), hdr, sep.clone()];
+    for row in rows.iter().take(100) {
+        let line: String = row.iter().zip(&widths).map(|(c,&w)| {
+            let s = if c.len()>w { format!("{}…",&c[..w.saturating_sub(1)]) } else { c.clone() };
+            format!(" {:w$} ", s)
+        }).collect::<Vec<_>>().join("|");
+        out.push(line);
+    }
+    out.push(sep);
+    out.push(if block.num_rows>100 { format!("... ({} rows total)", block.num_rows) } else { format!("{} rows", block.num_rows) });
+    out.join("\n")
+}
+
 /// Run a KQL query, return rows as Vec<Vec<String>> for easy display.
 pub fn query_rows(memories: &[Memory], sql: &str) -> Result<Vec<Vec<String>>, String> {
     let block = query(memories, sql)?;
