@@ -1269,7 +1269,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             let cur    = me.becoming.current_reality.clone();
             let needs  = me.needs.status();
             let owner  = me.owner.clone();
-            let curiosity_pct = format!("{:.0}", me.needs.curiosity * 100.0);
+            let curiosity_pct = format!("{:.0}", me.needs.learn * 100.0);
             let profile = format!(
                 "KORE DIGITAL SPECIES PROFILE\n\
                  ==============================\n\
