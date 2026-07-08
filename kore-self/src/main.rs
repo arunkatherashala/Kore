@@ -121,6 +121,15 @@ impl KoreSelf {
         if let Some((memories, id, cs, dr, sh, pred, soc, mort, evo, bc, asst, next_id)) = persistence::load(owner) {
             let count  = memories.len();
             let cycles = cs.cycle;
+            // Restore KORE-BECOMING layer if saved
+            let (needs, temporal_self, story, becoming_eng) =
+                persistence::load_becoming(owner)
+                    .unwrap_or_else(|| (
+                        becoming::NeedEngine::new(),
+                        becoming::TemporalSelf::new(owner, &crate::now()),
+                        becoming::Story::new(owner, &crate::now()),
+                        becoming::BecomingEngine::new(),
+                    ));
             let s = Self {
                 memories,
                 identity:          id,
@@ -139,13 +148,13 @@ impl KoreSelf {
                 last_tick:         Instant::now(),
                 last_dream_tick:   Instant::now(),
                 ingest_since_tick: 0,
-                needs:         becoming::NeedEngine::new(),
-                temporal_self: becoming::TemporalSelf::new(owner, &crate::now()),
-                story:         becoming::Story::new(owner, &crate::now()),
-                becoming:      becoming::BecomingEngine::new(),
+                needs:         needs,
+                temporal_self: temporal_self,
+                story:         story,
+                becoming:      becoming_eng,
             };
-            eprintln!("[kore-self] Restored {} memories | {} cycles | {} patterns | identity: {}",
-                count, cycles, s.dream.discoveries.len(), s.identity.summary());
+            eprintln!("[kore-self] Restored {} memories | {} cycles | lifecycle={} | evolutions={}",
+                count, cycles, s.becoming.lifecycle_stage.name(), s.becoming.evolution_count);
             s
         } else {
             let mut s = Self {
@@ -408,6 +417,12 @@ impl KoreSelf {
             self.next_id,
         ) {
             eprintln!("[kore-self] Save failed: {e}");
+        }
+        // Also persist KORE-BECOMING layer
+        if let Err(e) = persistence::save_becoming(
+            &self.owner, &self.needs, &self.temporal_self, &self.story, &self.becoming,
+        ) {
+            eprintln!("[kore-self] Becoming save failed: {e}");
         }
     }
 
