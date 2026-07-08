@@ -80,6 +80,7 @@ impl Lexer {
             '='  => { self.pos += 1; Token::Eq }
             '!'  if self.peek2() == Some('=') => { self.pos += 2; Token::Ne }
             '<'  => { if self.peek2() == Some('=') { self.pos += 2; Token::Le }
+                      else if self.peek2() == Some('>') { self.pos += 2; Token::Ne }  // <> = !=
                       else { self.pos += 1; Token::Lt } }
             '>'  => { if self.peek2() == Some('=') { self.pos += 2; Token::Ge }
                       else { self.pos += 1; Token::Gt } }

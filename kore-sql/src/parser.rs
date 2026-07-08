@@ -602,6 +602,20 @@ impl Parser {
                     }
                 }
             }
+            // SQL keywords that can also be function names: LEFT(str, n), RIGHT(str, n)
+            Token::Left | Token::Right => {
+                let fname = match &self.tokens[self.pos - 1] { Token::Left => "LEFT", _ => "RIGHT" };
+                if self.peek() == &Token::LParen {
+                    self.pos += 1; // consume LParen
+                    let s    = self.parse_expr(0)?;
+                    self.expect(&Token::Comma)?;
+                    let n    = self.parse_expr(0)?;
+                    self.expect(&Token::RParen)?;
+                    Ok(Expr::FuncCall { name: fname.to_string(), args: vec![s, n] })
+                } else {
+                    Ok(Expr::Col(fname.to_lowercase()))
+                }
+            }
             other => Err(KoreError::InvalidArgument(format!("unexpected token in expr: {:?}", other))),
         }
     }

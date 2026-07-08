@@ -533,9 +533,29 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
             JoinKind::Full  => JoinType::Full,
         };
 
-        // Resolve join keys (may be qualified "alias.col" or bare "col")
-        let lk = resolve_col_name(&join.on.left_col,  base_alias);
-        let rk = resolve_col_name(&join.on.right_col, right_alias);
+        // Resolve join keys — ON clause order is not guaranteed to match left/right tables.
+        // Try both assignments and use whichever pairing matches the blocks.
+        let (lk, rk) = {
+            let a_in_result = find_col_in_block(&join.on.left_col,  &result);
+            let a_in_right  = find_col_in_block(&join.on.left_col,  &right_block);
+            let b_in_result = find_col_in_block(&join.on.right_col, &result);
+            let b_in_right  = find_col_in_block(&join.on.right_col, &right_block);
+
+            if a_in_result.is_some() && b_in_right.is_some() {
+                // Natural: left_col in result, right_col in right_block
+                (a_in_result.unwrap(), b_in_right.unwrap())
+            } else if b_in_result.is_some() && a_in_right.is_some() {
+                // Reversed: right_col in result, left_col in right_block
+                (b_in_result.unwrap(), a_in_right.unwrap())
+            } else if a_in_result.is_some() {
+                // Fallback: left_col in result, right_col uses alias
+                (a_in_result.unwrap(), resolve_col_name(&join.on.right_col, right_alias))
+            } else {
+                // Last resort: use alias-based resolution
+                (resolve_col_name(&join.on.left_col, base_alias),
+                 resolve_col_name(&join.on.right_col, right_alias))
+            }
+        };
 
         let cfg = JoinConfig { left_key: lk.clone(), right_key: rk, join_type: jtype };
 
@@ -633,6 +653,22 @@ fn resolve_col_name(name: &str, default_alias: &str) -> String {
     } else {
         format!("{}.{}", default_alias, name)
     }
+}
+
+/// Search for a column in a DataBlock — handles both bare name and "alias.col" forms.
+/// Returns the exact column name as it appears in the block.
+fn find_col_in_block(bare: &str, block: &DataBlock) -> Option<String> {
+    if bare.contains('.') {
+        // Already qualified — check it exists
+        return if block.columns.iter().any(|c| c.name == bare) { Some(bare.to_string()) } else { None };
+    }
+    // Try exact match first
+    if let Some(col) = block.columns.iter().find(|c| c.name == bare) {
+        return Some(col.name.clone());
+    }
+    // Try "table.bare" match — find a column whose suffix matches bare
+    let suffix = format!(".{}", bare);
+    block.columns.iter().find(|c| c.name.ends_with(&suffix)).map(|c| c.name.clone())
 }
 
 // ─── Filter (WHERE) ───────────────────────────────────────────────────────────
@@ -1130,6 +1166,19 @@ fn eval_func(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> ExprVa
         "TRIM"  => arg_str(0).map(|s| ExprVal::Str(s.trim().to_string())).unwrap_or(ExprVal::Null),
         "LTRIM" => arg_str(0).map(|s| ExprVal::Str(s.trim_start().to_string())).unwrap_or(ExprVal::Null),
         "RTRIM" => arg_str(0).map(|s| ExprVal::Str(s.trim_end().to_string())).unwrap_or(ExprVal::Null),
+        // LEFT(str, n) and RIGHT(str, n)
+        "LEFT"  => {
+            let s = need!(arg_str(0));
+            let n = arg_f64(1).unwrap_or(0.0) as usize;
+            ExprVal::Str(s.chars().take(n).collect())
+        }
+        "RIGHT" => {
+            let s = need!(arg_str(0));
+            let n = arg_f64(1).unwrap_or(0.0) as usize;
+            let chars: Vec<char> = s.chars().collect();
+            let start = chars.len().saturating_sub(n);
+            ExprVal::Str(chars[start..].iter().collect())
+        }
         "LENGTH" | "LEN" | "CHAR_LENGTH" => {
             arg_str(0).map(|s| ExprVal::Int(s.chars().count() as i64)).unwrap_or(ExprVal::Null)
         }
