@@ -10,6 +10,7 @@ use crate::ast::*;
 // Parquet and KORE store for LOAD TABLE support
 use kore_parquet;
 use kore_store;
+use kore_io;
 
 /// Registry of named tables — both read-only and mutable.
 #[derive(Default, Clone)]
@@ -122,6 +123,9 @@ impl KqlContext {
         }
         if upper.starts_with("LOAD TABLE") {
             return self.dml_load_table(sql_trim);
+        }
+        if upper.starts_with("COPY ") {
+            return self.dml_copy_from(sql_trim);
         }
         Err(KoreError::InvalidArgument(format!("Unsupported DML: {}", &sql_trim[..40.min(sql_trim.len())])))
     }
@@ -322,6 +326,62 @@ impl KqlContext {
         self.register_mut(table_name, block.clone());
         self.register(table_name, block);
         Ok(("LOAD TABLE".into(), rows))
+    }
+
+    fn dml_copy_from(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
+        // COPY <table> FROM '<path>' [WITH (HEADER true, DELIMITER ',')]
+        // Also accepts: COPY <table> FROM '<path>'  (defaults: header=true, delim=',')
+        let upper = sql.to_uppercase();
+        // Skip "COPY "
+        let after_copy = sql[5..].trim();
+        // Find FROM
+        let from_pos = after_copy.to_uppercase().find(" FROM ")
+            .ok_or_else(|| KoreError::InvalidArgument("COPY: missing FROM".into()))?;
+        let table_name = after_copy[..from_pos].trim();
+        let rest       = after_copy[from_pos + 6..].trim();
+
+        // Extract path (strip quotes, stop before WITH or end)
+        let with_pos = rest.to_uppercase().find(" WITH ").unwrap_or(rest.len());
+        let path_raw = rest[..with_pos].trim().trim_matches('\'').trim_matches('"');
+
+        // Parse options: HEADER, DELIMITER, FORMAT
+        let opts_str = if with_pos < rest.len() { &rest[with_pos + 6..] } else { "" };
+        let opts_upper = opts_str.to_uppercase();
+        let has_header = !opts_upper.contains("HEADER FALSE") && !opts_upper.contains("HEADER=FALSE");
+        let delimiter: u8 = if opts_upper.contains("DELIMITER '\\t'") || opts_upper.contains("DELIMITER \"\\t\"") {
+            b'\t'
+        } else if let Some(d) = opts_str.to_uppercase().find("DELIMITER '")
+            .and_then(|p| opts_str.as_bytes().get(p + 11).copied()) {
+            d
+        } else {
+            b','
+        };
+
+        // Auto-detect format from extension
+        let ext = path_raw.rsplit('.').next().unwrap_or("").to_lowercase();
+        let block = match ext.as_str() {
+            "parquet" => {
+                kore_parquet::ParquetReader::new(path_raw)
+                    .read()
+                    .map_err(|e| KoreError::InvalidArgument(format!("Parquet: {e}")))?
+            }
+            "kore" => {
+                kore_store::reader::KoreReader::read_file(std::path::Path::new(path_raw))
+                    .map_err(|e| KoreError::InvalidArgument(format!("KORE: {e}")))?
+            }
+            _ => {
+                // CSV / TSV / text
+                let mut reader = kore_io::CsvReader::new(path_raw).delimiter(delimiter);
+                if !has_header { reader = reader.no_header(); }
+                reader.read()
+                    .map_err(|e| KoreError::InvalidArgument(format!("CSV: {e}")))?
+            }
+        };
+
+        let rows = block.num_rows;
+        self.register_mut(table_name, block.clone());
+        self.register(table_name, block);
+        Ok(("COPY FROM".into(), rows))
     }
 
     fn parse_values_block(&self, rest: &str) -> Result<DataBlock, KoreError> {
