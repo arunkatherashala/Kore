@@ -679,6 +679,9 @@ fn filter_block(block: DataBlock, pred: &Expr) -> Result<DataBlock, KoreError> {
 
 /// Filter with context — supports scalar/IN/EXISTS subqueries.
 fn filter_block_ctx(block: DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
+    // Pre-compute all IN subqueries ONCE into value sets (avoids O(n*m) re-execution per row)
+    let pred = precompute_in_subqueries(pred, ctx);
+    let pred = &pred;
     let n = block.num_rows;
     let keep: Vec<bool> = if n >= 100_000 {
         use rayon::prelude::*;
@@ -690,6 +693,38 @@ fn filter_block_ctx(block: DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<D
         .filter_map(|(i, &k)| if k { Some(i) } else { None })
         .collect();
     Ok(block.select_rows(&indices))
+}
+
+/// Pre-compute non-correlated IN subqueries into value lists.
+/// Replaces InSubquery nodes with In{values} so the subquery only runs once.
+fn precompute_in_subqueries(expr: &Expr, ctx: &KqlContext) -> Expr {
+    match expr {
+        Expr::InSubquery { expr: e, subquery, negated } => {
+            // Execute subquery once, collect all values
+            let inner_ctx = ctx.clone();
+            if let Ok(result) = execute_select(subquery, &inner_ctx) {
+                if !result.columns.is_empty() {
+                    let values: Vec<Expr> = (0..result.num_rows)
+                        .filter_map(|r| match result.columns[0].data.get_value(r) {
+                            Value::Int(i)   => Some(Expr::Int(i)),
+                            Value::Float(f) => Some(Expr::Float(f)),
+                            Value::Str(s)   => Some(Expr::Str(s)),
+                            _ => None,
+                        })
+                        .collect();
+                    return Expr::In { expr: e.clone(), values, negated: *negated };
+                }
+            }
+            expr.clone()
+        }
+        Expr::BinOp { op, left, right } => Expr::BinOp {
+            op: op.clone(),
+            left:  Box::new(precompute_in_subqueries(left,  ctx)),
+            right: Box::new(precompute_in_subqueries(right, ctx)),
+        },
+        Expr::Not(inner) => Expr::Not(Box::new(precompute_in_subqueries(inner, ctx))),
+        other => other.clone(),
+    }
 }
 
 /// Evaluate a boolean expression with context (supports subqueries).
@@ -1403,11 +1438,18 @@ fn to_f64(v: &ExprVal) -> Option<f64> {
 fn sort_block(block: DataBlock, col: &str, desc: bool) -> Result<DataBlock, KoreError> {
     // Use DataBlock::sort_by which uses a Schwartzian transform (cache-friendly,
     // avoids calling get_cell() twice per comparison in the comparator).
+    let col_short = col.rsplit('.').next().unwrap_or(col); // bare name without qualifier
     let col_name = block.columns.iter()
         .find(|c| c.name == col || {
+            // match table.col suffix
             let cn = c.name.len(); let m = col.len();
             cn > m && c.name.as_bytes()[cn - m - 1] == b'.' && &c.name[cn - m..] == col
         })
+        .or_else(|| block.columns.iter().find(|c| {
+            // match bare name against short segment
+            let csn = c.name.rsplit('.').next().unwrap_or(&c.name);
+            csn == col_short
+        }))
         .map(|c| c.name.clone())
         .ok_or_else(|| KoreError::InvalidArgument(format!("ORDER BY column not found: {col}")))?;
 

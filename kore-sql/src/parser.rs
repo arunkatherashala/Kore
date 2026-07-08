@@ -89,6 +89,13 @@ impl Parser {
             Token::Asc       => Ok("asc".to_string()),
             Token::Desc      => Ok("desc".to_string()),
             Token::Distinct  => Ok("distinct".to_string()),
+            Token::Left      => Ok("left".to_string()),
+            Token::Right     => Ok("right".to_string()),
+            Token::Inner     => Ok("inner".to_string()),
+            Token::Full      => Ok("full".to_string()),
+            Token::Join      => Ok("join".to_string()),
+            Token::On        => Ok("on".to_string()),
+            Token::By        => Ok("by".to_string()),
             other => Err(KoreError::InvalidArgument(format!("expected alias name, got {:?}", other))),
         }
     }
