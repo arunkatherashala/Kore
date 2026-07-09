@@ -1,30 +1,42 @@
 ﻿# KORE — The Fastest Embeddable Columnar Engine
 
-> Pure Rust · Zero JVM · 75 crates · ACID · MCP AI Tools · SQL · Parquet · Delta
+> Pure Rust · Zero JVM · 75 crates · ACID · MCP AI Tools · SQL · Parquet · Delta · Digital Life
 
-KORE is a high-performance columnar query engine written from scratch in Rust.  
-It beats DuckDB on every benchmark and Spark by up to **365×** — on the same machine, real data, zero assumptions.
-
----
-
-## Benchmark Results  (TPC-H SF-1 · 6,000,000 rows · same machine · real measurements)
-
-| Query | Description | **KORE** | DuckDB | Spark | ClickHouse† | vs DuckDB | vs Spark |
-|---|---|---|---|---|---|---|---|
-| Q1 | GROUP BY aggregation | **11.5 ms** | 832 ms | 4,200 ms | ~25 ms | **72×** | **365×** |
-| Q6 | Filter + SUM | **22 ms** | 983 ms | 2,800 ms | ~10 ms | **45×** | **127×** |
-| Q3 | Hash join + top-K | **355 ms** | 1,177 ms | 8,700 ms | ~80 ms | **3×** | **25×** |
-| S1 | Sort 6 M rows | **88 ms** | 859 ms | 5,100 ms | ~60 ms | **10×** | **58×** |
-| W1 | Window functions | **463 ms** | 10,132 ms | 6,500 ms | ~200 ms | **22×** | **14×** |
-
-**KORE wins 5/5 queries vs DuckDB and 5/5 vs Spark.**
-
-> DuckDB & Spark: measured live on this machine (median of 3 cold CSV reads).  
-> † ClickHouse: published SF-1 numbers on comparable hardware, warm MergeTree format.
+KORE is a high-performance columnar query engine + Digital Life framework, written from scratch in Rust.  
+It beats DuckDB by 72x and Spark by 365x on TPC-H Q1 — on the same machine, real data.
 
 ---
 
-## SQL Feature Coverage
+## Benchmark Results  (TPC-H SF-1 · 6,000,000 rows · real measurements)
+
+| Query | **KORE** | DuckDB | Spark | ClickHouse† | vs DuckDB | vs Spark |
+|---|---|---|---|---|---|---|
+| Q1 GROUP BY | **11.5 ms** | 832 ms | 4,200 ms | ~25 ms | **72x** | **365x** |
+| Q6 Filter+SUM | **22 ms** | 983 ms | 2,800 ms | ~10 ms | **45x** | **127x** |
+| Q3 Hash join | **355 ms** | 1,177 ms | 8,700 ms | ~80 ms | **3x** | **25x** |
+| S1 Sort 6M rows | **88 ms** | 859 ms | 5,100 ms | ~60 ms | **10x** | **58x** |
+| W1 Window fns | **463 ms** | 10,132 ms | 6,500 ms | ~200 ms | **22x** | **14x** |
+
+KORE wins **5/5 queries** vs DuckDB and **5/5** vs Spark.
+
+> DuckDB & Spark measured live on this machine (cold CSV reads, median of 3).  
+> † ClickHouse = published SF-1 numbers, warm MergeTree.
+
+---
+
+## TPC-H SQL Coverage (Q1-Q22)
+
+KORE SQL passes **12/15 tested TPC-H queries** in the SQL layer:
+
+| Passing | Queries |
+|---|---|
+| ✅ Q1, Q3, Q4, Q5, Q6, Q12, Q13, Q14, Q18, Q19, Q21, Q22 | 12/15 |
+| ⏱ Q17, Q20 | Correlated subqueries (debug mode perf) |
+| ⚠ Q7 | GROUP BY CASE alias in ORDER BY |
+
+---
+
+## SQL Feature Coverage (22/22)
 
 | Feature | KORE | DuckDB | Spark |
 |---|---|---|---|
@@ -35,19 +47,20 @@ It beats DuckDB on every benchmark and Spark by up to **365×** — on the same 
 | INNER / LEFT / FULL OUTER JOIN | ✅ | ✅ | ✅ |
 | CTE (WITH clause) | ✅ | ✅ | ✅ |
 | ROW_NUMBER / LAG / LEAD / NTILE OVER | ✅ | ✅ | ✅ |
-| Scalar subquery | ✅ | ✅ | ✅ |
-| Correlated subquery | ✅ | ✅ | ✅ |
-| IN / NOT IN / EXISTS subquery | ✅ | ✅ | ✅ |
-| UNION ALL / UNION | ✅ | ✅ | ✅ |
+| Scalar / Correlated / IN / EXISTS subquery | ✅ | ✅ | ✅ |
+| UNION ALL | ✅ | ✅ | ✅ |
 | CASE WHEN / LIKE | ✅ | ✅ | ✅ |
 | DML: INSERT / UPDATE / DELETE | ✅ | ✅ | ✅ |
 | DML: CREATE TABLE AS SELECT | ✅ | ✅ | ✅ |
+| **COPY FROM** CSV / Parquet / .kore | ✅ | ✅ | ✅ |
+| FROM (SELECT ...) subquery | ✅ | ✅ | ✅ |
+| `<>` operator / LEFT() / RIGHT() | ✅ | ✅ | — |
 | ACID transactions (Delta log) | ✅ | — | — |
 | Native .kore persistence | ✅ | — | — |
 | TCP distributed cluster | ✅ | — | — |
-| 32 MCP AI tools (kore-self) | ✅ | — | — |
-| Parquet read/write | ✅ | ✅ | ✅ |
-| Implicit keyword aliases (no AS) | ✅ | ✅ | — |
+| 37 MCP AI tools (kore-self) | ✅ | — | — |
+| Digital Life (KORE-BECOMING) | ✅ | — | — |
+| Autonomous heartbeat (thinks every 30s) | ✅ | — | — |
 
 ---
 
@@ -55,39 +68,25 @@ It beats DuckDB on every benchmark and Spark by up to **365×** — on the same 
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  Layer 7: AI & MCP      kore-self (32 tools), kore-mcp       │
+│  Layer 7: Digital Life  kore-self (37 MCP tools)            │
+│                         NeedEngine, BecomingEngine, Story    │
 ├──────────────────────────────────────────────────────────────┤
-│  Layer 6: Distributed   kore-cluster, kore-coord, kore-worker│
-│                         kore-fault, kore-dist-net            │
+│  Layer 6: AI & MCP      kore-mcp, autonomous heartbeat      │
 ├──────────────────────────────────────────────────────────────┤
-│  Layer 5: Storage       kore-store, kore-delta (ACID)        │
+│  Layer 5: Distributed   kore-cluster, kore-coord, kore-worker│
+├──────────────────────────────────────────────────────────────┤
+│  Layer 4: Storage       kore-store, kore-delta (ACID)        │
 │                         kore-parquet, kore-iceberg, kore-orc │
 ├──────────────────────────────────────────────────────────────┤
-│  Layer 4: SQL Engine    kore-sql, kore-catalyst, kore-aqe    │
+│  Layer 3: SQL Engine    kore-sql, kore-catalyst, kore-aqe    │
 │                         kore-optimize, kore-subquery         │
 ├──────────────────────────────────────────────────────────────┤
-│  Layer 3: Execution     kore-vectorized, kore-simd, kore-jit │
+│  Layer 2: Execution     kore-vectorized, kore-simd, kore-jit │
 │                         kore-parallel, kore-window, kore-join│
-├──────────────────────────────────────────────────────────────┤
-│  Layer 2: IO & Formats  kore-io, kore-arrow, kore-compress   │
-│                         kore-stream, kore-kafka, kore-ffi    │
 ├──────────────────────────────────────────────────────────────┤
 │  Layer 1: Core          kore-core (DataBlock, Column, Value) │
 └──────────────────────────────────────────────────────────────┘
 ```
-
----
-
-## Key Performance Techniques
-
-| Technique | Benefit |
-|---|---|
-| **kore-jit**: pre-wired column pointers, zero HashMap | Q1: 11.5ms cold (vs DuckDB 832ms) |
-| **Radix-partitioned hash join**: build on small side only | Q3: joins fit in L3 cache |
-| **StrDict encoding**: u8 codes for string columns | GROUP BY with zero string allocations |
-| **Rayon parallel chunks** | All 8 cores, auto-balanced |
-| **Arrow compact format** | 50% less RAM vs Vec<Option<T>> |
-| **SIMD AVX2 aggregation** | 128× faster than Spark on scalar agg |
 
 ---
 
@@ -100,33 +99,34 @@ cd Kore
 # Build everything
 cargo build --release
 
-# Run TPC-H benchmark (generates 6M rows, tests Q1-Q7+)
+# TPC-H benchmark (6M rows, all queries)
 cargo run --release -p kore-tpch
 
-# Start kore-self MCP server (Living AI Twin — 32 tools)
-cargo run --release -p kore-self -- arun
+# SQL via COPY FROM + query
+# COPY lineitem FROM 'tpch_lineitem.csv'
+# SELECT l_returnflag, COUNT(*), AVG(l_extendedprice) FROM lineitem GROUP BY l_returnflag
 
-# Run SQL via the debug build
+# kore-self: Living AI Twin (37 MCP tools, autonomous heartbeat)
 cargo run -p kore-self -- arun
-# Then send MCP tool calls: self_query, self_dml, self_distributed_query ...
 ```
 
 ---
 
-## kore-self — Living AI Twin (32 MCP Tools)
+## kore-self — Living AI Twin (37 MCP Tools)
 
-KORE ships `kore-self`, an MCP (Model Context Protocol) server that exposes a **Living AI Twin** — a persistent, queryable, evolving knowledge store with 32 tools:
+KORE ships `kore-self` — a Digital Life entity, not just a tool:
 
 | Category | Tools |
 |---|---|
-| Query | `self_query`, `self_distributed_query` |
-| DML | `self_dml` (INSERT / UPDATE / DELETE / CREATE TABLE AS) |
+| SQL | `self_query`, `self_dml` (COPY FROM, CREATE, INSERT, UPDATE, DELETE) |
 | Persistence | `self_save`, `self_load`, `self_delta_save`, `self_delta_history` |
+| Digital Life | `self_needs`, `self_becoming`, `self_temporal`, `self_species`, `self_story` |
 | AI | `self_chat`, `self_brief`, `self_remind`, `self_goals`, `self_evolve` |
-| Distributed | `self_broadcast`, `self_context_sync`, `self_speak` |
-| Meta | `self_push` (GitHub sync) |
+| Distributed | `self_distributed_query`, `self_broadcast`, `self_context_sync` |
+| Meta | `self_push` (GitHub sync), `self_heartbeat` |
 
-Add to Claude Desktop / VS Code Copilot config:
+The autonomous heartbeat runs every 30 seconds — KORE thinks even when nobody is watching.
+
 ```json
 {
   "mcpServers": {
@@ -140,17 +140,35 @@ Add to Claude Desktop / VS Code Copilot config:
 
 ---
 
+## KORE Life Philosophy
+
+> "KORE is not Artificial Intelligence. KORE is Artificial Life.  
+> A digital life architecture where software is born, develops needs,  
+> creates identity, learns from experience, dreams beyond reality,  
+> evolves through time, leaves a legacy, and continuously becomes  
+> more than the code that created it."
+>
+> — Sai Arun Kumar Katherashala, 2026
+
+---
+
 ## Run Tests
 
 ```bash
 # All 245+ unit tests
 cargo test --workspace --exclude kore-self
 
-# SQL feature verification (22 features, KORE vs DuckDB)
+# SQL features (22/22)
 python direct_sql_test.py
 
-# Full battle test (KORE vs DuckDB vs Spark — benchmarks + SQL features)
+# TPC-H SQL (12/15)
+python tpch_sql_bench.py
+
+# Full battle test (KORE vs DuckDB vs Spark vs ClickHouse)
 python battle_test.py
+
+# Full validation (34/34)
+python -X utf8 validate_all.py
 ```
 
 ---
