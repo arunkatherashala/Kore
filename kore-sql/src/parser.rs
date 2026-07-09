@@ -309,6 +309,23 @@ impl Parser {
     // ─── Table reference ───────────────────────────────────────────────────
 
     fn parse_table_expr(&mut self) -> Result<TableExpr, KoreError> {
+        // Handle FROM (SELECT ...) alias — subquery as FROM table
+        if self.peek() == &Token::LParen {
+            self.pos += 1; // consume (
+            let subq = self.parse_select()?;
+            self.expect(&Token::RParen)?;
+            // Alias is required for FROM subqueries (e.g. `) c_orders`)
+            let alias = if self.consume_if(&Token::As) {
+                Some(self.expect_ident()?)
+            } else if matches!(self.peek(), Token::Ident(_)) {
+                Some(self.expect_ident()?)
+            } else {
+                Some("_subq".to_string())
+            };
+            let name = alias.clone().unwrap_or_else(|| "_subq".to_string());
+            return Ok(TableExpr { name, alias, subquery: Some(Box::new(subq)) });
+        }
+
         let name = self.expect_ident()?;
         let alias = if self.consume_if(&Token::As) {
             Some(self.expect_ident()?)
@@ -321,7 +338,7 @@ impl Parser {
         } else {
             None
         };
-        Ok(TableExpr { name, alias })
+        Ok(TableExpr { name, alias, subquery: None })
     }
 
     // ─── JOIN clause ───────────────────────────────────────────────────────

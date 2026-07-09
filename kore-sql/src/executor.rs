@@ -488,11 +488,23 @@ pub fn execute_query(query: &Query, ctx: &KqlContext) -> Result<DataBlock, KoreE
 }
 
 pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
-    // 1. Resolve FROM table
+    // 1. Resolve FROM table (or execute FROM subquery)
     let base_name   = &stmt.from.name;
     let base_alias  = stmt.from.alias.as_deref().unwrap_or(base_name.as_str());
-    let base_ref    = ctx.get(base_name)
-        .ok_or_else(|| KoreError::InvalidArgument(format!("unknown table: {base_name}")))?;
+
+    // FROM (SELECT ...) subquery — execute it first, then use as temp table
+    let subq_block: Option<DataBlock> = if let Some(subq) = &stmt.from.subquery {
+        Some(execute_select(subq, ctx)?)
+    } else {
+        None
+    };
+
+    let base_ref = if let Some(ref sb) = subq_block {
+        sb
+    } else {
+        ctx.get(base_name)
+            .ok_or_else(|| KoreError::InvalidArgument(format!("unknown table: {base_name}")))?
+    };
 
     // Column pruning: for simple queries (no JOIN, no SELECT *) only clone columns
     // actually referenced by projections/WHERE/GROUP BY/ORDER BY.
@@ -612,9 +624,12 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         }
     }
 
-    // 5. ORDER BY
+    // 5. ORDER BY — resolve column names, also checking SELECT aliases
     for item in stmt.order_by.iter().rev() {
-        let col = resolve_col_name(&item.col, "");
+        let col_raw = resolve_col_name(&item.col, "");
+        // Try to find a SELECT alias that matches this ORDER BY expression
+        let col = find_order_col_in_result(&col_raw, &result, &stmt.projections)
+            .unwrap_or(col_raw);
         result = sort_block(result, &col, item.desc)?;
     }
 
@@ -653,6 +668,65 @@ fn resolve_col_name(name: &str, default_alias: &str) -> String {
     } else {
         format!("{}.{}", default_alias, name)
     }
+}
+
+/// Find the actual column name in `result` for an ORDER BY expression.
+/// Checks: exact name, suffix match, prefix+short match, SELECT aliases.
+fn find_order_col_in_result(col: &str, result: &DataBlock, projections: &[Projection]) -> Option<String> {
+    // 1. Exact column name in result block
+    if result.columns.iter().any(|c| c.name == col) {
+        return Some(col.to_string());
+    }
+    // 2. Suffix match: "orders.col" matches column ending with ".orders.col"
+    let m = result.columns.iter().len(); let cl = col.len();
+    if let Some(c) = result.columns.iter().find(|c| {
+        let cn = c.name.len();
+        cn > cl && c.name.as_bytes()[cn - cl - 1] == b'.' && &c.name[cn - cl..] == col
+    }) { return Some(c.name.clone()); }
+
+    // 3. Prefix+short match: "n1.n_name" matches "n1.nation.n_name"
+    let col_short  = col.rsplit('.').next().unwrap_or(col);
+    let col_prefix = if col.contains('.') { col.split('.').next() } else { None };
+    if let Some(pfx) = col_prefix {
+        if let Some(c) = result.columns.iter().find(|c| {
+            c.name.starts_with(&format!("{pfx}.")) &&
+            c.name.rsplit('.').next().map_or(false, |s| s == col_short)
+        }) { return Some(c.name.clone()); }
+    }
+
+    // 4. Check SELECT aliases: if SELECT n1.n_name supp_nation, ORDER BY n1.n_name → supp_nation
+    for proj in projections {
+        if let Projection::Expr { expr, alias: Some(alias) } = proj {
+            let expr_col = match expr {
+                Expr::Col(c)        => c.as_str(),
+                Expr::QualCol(t, c) => {
+                    // Check "t.c" matches ORDER BY col
+                    let qualified = format!("{}.{}", t, c);
+                    if qualified == col || c.as_str() == col_short {
+                        // This projection aliases to `alias` — look for alias in result
+                        if result.columns.iter().any(|rc| rc.name == alias.as_str() || rc.name.ends_with(&format!(".{}", alias))) {
+                            return Some(alias.clone());
+                        }
+                    }
+                    continue;
+                }
+                _ => continue,
+            };
+            if expr_col == col || expr_col == col_short {
+                if result.columns.iter().any(|rc| rc.name == alias.as_str()) {
+                    return Some(alias.clone());
+                }
+            }
+        }
+    }
+
+    // 5. Unambiguous bare name
+    let matches: Vec<_> = result.columns.iter()
+        .filter(|c| c.name.rsplit('.').next().unwrap_or(&c.name) == col_short)
+        .collect();
+    if matches.len() == 1 { return Some(matches[0].name.clone()); }
+
+    None
 }
 
 /// Search for a column in a DataBlock — handles both bare name and "alias.col" forms.
@@ -1438,18 +1512,32 @@ fn to_f64(v: &ExprVal) -> Option<f64> {
 fn sort_block(block: DataBlock, col: &str, desc: bool) -> Result<DataBlock, KoreError> {
     // Use DataBlock::sort_by which uses a Schwartzian transform (cache-friendly,
     // avoids calling get_cell() twice per comparison in the comparator).
-    let col_short = col.rsplit('.').next().unwrap_or(col); // bare name without qualifier
+    let col_short  = col.rsplit('.').next().unwrap_or(col); // bare name e.g. "n_name"
+    let col_prefix = if col.contains('.') { col.split('.').next() } else { None }; // e.g. "n1"
     let col_name = block.columns.iter()
         .find(|c| c.name == col || {
-            // match table.col suffix
+            // exact suffix match: "table.col" → column ends with ".table.col"
             let cn = c.name.len(); let m = col.len();
             cn > m && c.name.as_bytes()[cn - m - 1] == b'.' && &c.name[cn - m..] == col
         })
-        .or_else(|| block.columns.iter().find(|c| {
-            // match bare name against short segment
-            let csn = c.name.rsplit('.').next().unwrap_or(&c.name);
-            csn == col_short
-        }))
+        .or_else(|| {
+            // Qualified prefix match: "n1.n_name" matches "n1.nation.n_name"
+            // — starts with "n1." and ends with "n_name"
+            if let Some(pfx) = col_prefix {
+                block.columns.iter().find(|c| {
+                    let starts = c.name.starts_with(&format!("{pfx}."));
+                    let ends   = c.name.rsplit('.').next().map_or(false, |s| s == col_short);
+                    starts && ends
+                })
+            } else { None }
+        })
+        .or_else(|| {
+            // bare name match (unambiguous if only one column has this short name)
+            let matches: Vec<_> = block.columns.iter()
+                .filter(|c| c.name.rsplit('.').next().unwrap_or(&c.name) == col_short)
+                .collect();
+            if matches.len() == 1 { Some(matches[0]) } else { None }
+        })
         .map(|c| c.name.clone())
         .ok_or_else(|| KoreError::InvalidArgument(format!("ORDER BY column not found: {col}")))?;
 

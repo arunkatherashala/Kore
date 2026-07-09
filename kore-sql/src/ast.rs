@@ -112,8 +112,10 @@ pub enum Projection {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableExpr {
-    pub name:  String,
-    pub alias: Option<String>,
+    pub name:     String,
+    pub alias:    Option<String>,
+    /// For FROM (SELECT ...) alias subqueries
+    pub subquery: Option<Box<SelectStmt>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
