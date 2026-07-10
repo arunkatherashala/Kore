@@ -581,10 +581,10 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     // 3. WHERE filter
     if let Some(pred) = &stmt.where_clause {
         let resolved = resolve_subqueries(pred, ctx);
-        // Decorrelate any scalar subqueries: pre-compute per-key results into ctx
-        let (filter_expr, filter_ctx_owned) = decorrelate_scalar_subqueries(&resolved, &result, ctx);
-        let effective_ctx = filter_ctx_owned.as_ref().unwrap_or(ctx);
-        result = filter_block_ctx(result, &filter_expr, effective_ctx)?;
+        // Decorrelate correlated scalar subqueries: pre-compute GROUP BY, inject threshold columns
+        // This converts O(n²) correlated subqueries to O(n) — e.g. Q17, Q20
+        let (new_pred, new_block) = decorrelate_scalar_subqueries(&resolved, result, ctx);
+        result = filter_block_ctx(new_block, &new_pred, ctx)?;
     }
 
     // 4. GROUP BY  (or global aggregation if no GROUP BY but has aggregates)
@@ -630,24 +630,32 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         }
     }
 
-    // 5. ORDER BY — resolve column names, also checking SELECT aliases
+    // 5. Projection — done BEFORE ORDER BY so ORDER BY can reference SELECT aliases
+    // (especially important when GROUP BY uses CASE expression aliases)
+    let has_order = !stmt.order_by.is_empty();
+    if !has_order || !stmt.group_by.is_empty() {
+        result = project(result, &stmt.projections)?;
+    }
+
+    // 6. ORDER BY — resolve column names, also checking SELECT aliases
     for item in stmt.order_by.iter().rev() {
         let col_raw = resolve_col_name(&item.col, "");
-        // Try to find a SELECT alias that matches this ORDER BY expression
         let col = find_order_col_in_result(&col_raw, &result, &stmt.projections)
             .unwrap_or(col_raw);
         result = sort_block(result, &col, item.desc)?;
     }
 
-    // 6. LIMIT
+    // 7. LIMIT
     if let Some(n) = stmt.limit {
         result = limit_block(result, n as usize);
     }
 
-    // 7. Projection
-    result = project(result, &stmt.projections)?;
+    // 8. Projection (only if not already done above)
+    if has_order && stmt.group_by.is_empty() {
+        result = project(result, &stmt.projections)?;
+    }
 
-    // 8. DISTINCT — deduplicate rows by row key
+    // 9. DISTINCT — deduplicate rows by row key
     if stmt.distinct && result.num_rows > 1 {
         result = deduplicate(result);
     }
@@ -783,57 +791,63 @@ fn filter_block_ctx(block: DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<D
 /// Returns (possibly modified predicate, optional enriched context).
 fn decorrelate_scalar_subqueries(
     pred: &Expr,
-    outer_block: &DataBlock,
+    outer_block: DataBlock,
     ctx: &KqlContext,
-) -> (Expr, Option<KqlContext>) {
-    use std::collections::HashMap;
-
-    // Walk the predicate looking for ScalarSubquery nodes
-    let mut new_ctx: Option<KqlContext> = None;
-    let new_pred = decorrelate_expr(pred, outer_block, ctx, &mut new_ctx);
-    (new_pred, new_ctx)
+) -> (Expr, DataBlock) {
+    let mut block = outer_block;
+    let mut counter = 0usize;
+    let new_pred = decorrelate_expr(pred, &mut block, ctx, &mut counter);
+    (new_pred, block)
 }
 
 fn decorrelate_expr(
     expr: &Expr,
-    outer_block: &DataBlock,
+    outer_block: &mut DataBlock,
     ctx: &KqlContext,
-    enriched: &mut Option<KqlContext>,
+    counter: &mut usize,
 ) -> Expr {
     match expr {
         Expr::ScalarSubquery(sq) => {
-            // Check if this is a correlated subquery with a simple equality WHERE
-            // Pattern: SELECT [scalar *] AGG(col) FROM t WHERE t.key = outer.col
+            // Pattern: SELECT [factor *] AGG(col) FROM t WHERE t.key = outer.key
             if sq.group_by.is_empty() {
                 if let Some(where_expr) = &sq.where_clause {
                     if let Expr::BinOp { op: BinOpKind::Eq, left, right } = where_expr {
                         let inner_table = &sq.from.name;
-                        // Determine which side is inner (has the inner table's column)
-                        let (inner_col, outer_col_expr) = match (left.as_ref(), right.as_ref()) {
+                        // Determine which side is the inner table's column
+                        let (inner_col, outer_col) = match (left.as_ref(), right.as_ref()) {
                             (Expr::QualCol(t, c), other) if t == inner_table => (c.clone(), other),
                             (other, Expr::QualCol(t, c)) if t == inner_table => (c.clone(), other),
-                            (Expr::Col(c), other) => {
-                                // Assume left is inner if outer_block has the col on right
-                                if let Expr::Col(oc) = other {
-                                    if outer_block.columns.iter().any(|col| col.name.ends_with(oc.as_str())) {
-                                        (c.clone(), other)
-                                    } else {
-                                        (c.clone(), other)
-                                    }
-                                } else { return expr.clone(); }
-                            }
+                            (Expr::Col(c), other) => (c.clone(), other),
+                            (other, Expr::Col(c)) => (c.clone(), other),
                             _ => return expr.clone(),
                         };
                         if let Some(inner_block) = ctx.get(inner_table) {
-                            // Pre-compute: for each unique inner_col value, compute the scalar
-                            // Group all inner rows by inner_col, compute AGG
-                            let mut groups: std::collections::HashMap<String, Vec<f64>> =
-                                std::collections::HashMap::new();
                             let inner_col_full = find_col_in_block(&inner_col, inner_block)
                                 .unwrap_or_else(|| inner_col.clone());
 
-                            // Get the agg projection expression
-                            if let Some(Projection::Expr { expr: agg_expr, alias: _ }) = sq.projections.first() {
+                            // Get the aggregation projection
+                            if let Some(Projection::Expr { expr: proj_expr, .. }) = sq.projections.first() {
+                                // Pre-compute GROUP BY inner_col, AGG
+                                let mut groups: std::collections::HashMap<String, Vec<f64>> =
+                                    std::collections::HashMap::new();
+                                // Collect inner values per key
+                                let inner_agg_col: Option<&Column> = match proj_expr {
+                                    Expr::Agg { expr: inner_e, .. } => match inner_e.as_ref() {
+                                        Expr::Col(c) | Expr::QualCol(_, c) => find_col(inner_block, c),
+                                        _ => None,
+                                    },
+                                    Expr::BinOp { left: lf, right: rf, .. } => {
+                                        let agg_side = if matches!(lf.as_ref(), Expr::Agg{..}) { lf.as_ref() } else { rf.as_ref() };
+                                        if let Expr::Agg { expr: inner_e, .. } = agg_side {
+                                            match inner_e.as_ref() {
+                                                Expr::Col(c) | Expr::QualCol(_, c) => find_col(inner_block, c),
+                                                _ => None,
+                                            }
+                                        } else { None }
+                                    }
+                                    _ => None,
+                                };
+
                                 for row in 0..inner_block.num_rows {
                                     let key = match get_cell(inner_block, &inner_col_full, row) {
                                         ExprVal::Int(i)   => i.to_string(),
@@ -841,88 +855,78 @@ fn decorrelate_expr(
                                         ExprVal::Str(s)   => s,
                                         _ => continue,
                                     };
-                                    let val = match eval_expr(agg_expr, inner_block, row) {
-                                        ExprVal::Float(f) => f,
-                                        ExprVal::Int(i)   => i as f64,
-                                        _ => continue,
-                                    };
-                                    groups.entry(key).or_default().push(val);
+                                    if let Some(col) = inner_agg_col {
+                                        let v = match &col.data {
+                                            ColumnData::Float64(vs) => vs.get(row).and_then(|x| *x).unwrap_or(0.0),
+                                            ColumnData::Int64(vs)   => vs.get(row).and_then(|x| *x).unwrap_or(0) as f64,
+                                            _ => 0.0,
+                                        };
+                                        groups.entry(key).or_default().push(v);
+                                    }
                                 }
 
-                                // Build lookup DataBlock: two columns (key, result)
-                                let mut keys: Vec<Option<String>> = Vec::new();
-                                let mut vals: Vec<Option<f64>>    = Vec::new();
-                                for (k, vs) in &groups {
-                                    let agg_result = match sq.projections.first() {
-                                        Some(Projection::Expr { expr: e, .. }) => {
-                                            // Determine the agg function
-                                            match e {
-                                                Expr::Agg { func: AggFunc::Avg, .. } => {
-                                                    if vs.is_empty() { 0.0 } else { vs.iter().sum::<f64>() / vs.len() as f64 }
-                                                }
-                                                Expr::Agg { func: AggFunc::Sum, .. } => vs.iter().sum(),
-                                                Expr::Agg { func: AggFunc::Count, .. } => vs.len() as f64,
-                                                Expr::Agg { func: AggFunc::Min, .. } => vs.iter().cloned().fold(f64::MAX, f64::min),
-                                                Expr::Agg { func: AggFunc::Max, .. } => vs.iter().cloned().fold(f64::MIN, f64::max),
-                                                // For expressions like 0.2 * AVG(col): compute AVG then apply factor
-                                                Expr::BinOp { op: BinOpKind::Mul, left: lf, right: rf } => {
-                                                    let avg = if vs.is_empty() { 0.0 } else { vs.iter().sum::<f64>() / vs.len() as f64 };
-                                                    let factor = match lf.as_ref() {
-                                                        Expr::Float(f) => *f,
-                                                        Expr::Int(i)   => *i as f64,
-                                                        _ => match rf.as_ref() {
-                                                            Expr::Float(f) => *f,
-                                                            Expr::Int(i)   => *i as f64,
-                                                            _ => 1.0,
-                                                        }
-                                                    };
-                                                    avg * factor
-                                                }
-                                                _ => if vs.is_empty() { 0.0 } else { vs.iter().sum::<f64>() / vs.len() as f64 },
-                                            }
+                                // Compute final agg values per key
+                                let mut lookup: std::collections::HashMap<String, f64> =
+                                    std::collections::HashMap::new();
+                                let factor = match proj_expr {
+                                    Expr::BinOp { left: lf, right: rf, .. } => {
+                                        match (lf.as_ref(), rf.as_ref()) {
+                                            (Expr::Float(f), _) | (_, Expr::Float(f)) => *f,
+                                            (Expr::Int(i), _)   | (_, Expr::Int(i))   => *i as f64,
+                                            _ => 1.0,
                                         }
+                                    }
+                                    _ => 1.0,
+                                };
+                                let agg_fn = match proj_expr {
+                                    Expr::Agg { func, .. } => func.clone(),
+                                    Expr::BinOp { left: lf, right: rf, .. } => {
+                                        let side = if matches!(lf.as_ref(), Expr::Agg{..}) { lf.as_ref() } else { rf.as_ref() };
+                                        if let Expr::Agg { func, .. } = side { func.clone() } else { AggFunc::Avg }
+                                    }
+                                    _ => AggFunc::Avg,
+                                };
+                                for (k, vs) in &groups {
+                                    let agg = match agg_fn {
+                                        AggFunc::Avg   => if vs.is_empty() { 0.0 } else { vs.iter().sum::<f64>() / vs.len() as f64 },
+                                        AggFunc::Sum   => vs.iter().sum(),
+                                        AggFunc::Count => vs.len() as f64,
+                                        AggFunc::Min   => vs.iter().cloned().fold(f64::MAX, f64::min),
+                                        AggFunc::Max   => vs.iter().cloned().fold(f64::MIN, f64::max),
                                         _ => 0.0,
                                     };
-                                    keys.push(Some(k.clone()));
-                                    vals.push(Some(agg_result));
+                                    lookup.insert(k.clone(), agg * factor);
                                 }
 
-                                let sq_table_name = format!("kore_sq_{}", groups.len());
-                                let lookup_block = DataBlock {
-                                    num_rows: keys.len(),
-                                    columns:  vec![
-                                        kore_core::Column {
-                                            name: format!("{}.key", sq_table_name),
-                                            data: kore_core::ColumnData::Str(keys),
-                                        },
-                                        kore_core::Column {
-                                            name: format!("{}.val", sq_table_name),
-                                            data: kore_core::ColumnData::Float64(vals),
-                                        },
-                                    ],
-                                };
+                                // Inject threshold column into outer_block
+                                let col_name = format!("__decorr_{}__", counter);
+                                *counter += 1;
 
-                                // Register in context
-                                let ctx_to_enrich = enriched.get_or_insert_with(|| ctx.clone());
-                                ctx_to_enrich.register(&sq_table_name, lookup_block);
-
-                                // Replace ScalarSubquery with a lookup expression:
-                                // Find outer_col value, look up in sq_table.val
-                                let outer_key = match outer_col_expr {
-                                    Expr::Col(c) => c.clone(),
-                                    Expr::QualCol(t, c) => format!("{}.{}", t, c),
+                                // Get outer key column name
+                                let outer_key = match outer_col {
+                                    Expr::Col(c) | Expr::QualCol(_, c) => c.clone(),
                                     _ => return expr.clone(),
                                 };
+                                let outer_key_full = find_col_in_block(&outer_key, outer_block)
+                                    .unwrap_or_else(|| outer_key.clone());
 
-                                // Return a special "precomputed scalar" that will be evaluated
-                                // as a lookup. We encode this as QualCol for now.
-                                // IMPORTANT: store the lookup table in ctx so eval can find it
-                                // Return the scalar subquery but the ctx now has the precomputed table
-                                // For the filter, the eval_expr_ctx will still run the subquery per row
-                                // but now the inner execute_select can short-circuit via the ctx lookup
-                                // We leave the predicate as-is but with enriched context
-                                // This approach doesn't fully decorrelate but makes the inner
-                                // execute_select much faster since the table is pre-registered
+                                let thresholds: Vec<Option<f64>> = (0..outer_block.num_rows).map(|r| {
+                                    let k = match get_cell(outer_block, &outer_key_full, r) {
+                                        ExprVal::Int(i)   => i.to_string(),
+                                        ExprVal::Float(f) => format!("{:.6}", f),
+                                        ExprVal::Str(s)   => s,
+                                        _ => return None,
+                                    };
+                                    lookup.get(&k).copied()
+                                }).collect();
+
+                                outer_block.columns.push(kore_core::Column {
+                                    name: col_name.clone(),
+                                    data: kore_core::ColumnData::Float64(thresholds),
+                                });
+
+                                // Replace ScalarSubquery with Col reference to threshold
+                                return Expr::Col(col_name);
                             }
                         }
                     }
@@ -932,10 +936,10 @@ fn decorrelate_expr(
         }
         Expr::BinOp { op, left, right } => Expr::BinOp {
             op: op.clone(),
-            left:  Box::new(decorrelate_expr(left,  outer_block, ctx, enriched)),
-            right: Box::new(decorrelate_expr(right, outer_block, ctx, enriched)),
+            left:  Box::new(decorrelate_expr(left,  outer_block, ctx, counter)),
+            right: Box::new(decorrelate_expr(right, outer_block, ctx, counter)),
         },
-        Expr::Not(inner) => Expr::Not(Box::new(decorrelate_expr(inner, outer_block, ctx, enriched))),
+        Expr::Not(inner) => Expr::Not(Box::new(decorrelate_expr(inner, outer_block, ctx, counter))),
         other => other.clone(),
     }
 }
@@ -1854,7 +1858,18 @@ fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, Ko
                         // else silently skip (shouldn't happen after group_by_agg)
                     }
                     // Everything else: evaluate row-by-row
+                    // BUT: if this alias was already computed (e.g. by group_by_agg or
+                    // materialize_groupby_aliases), use the existing column to avoid
+                    // re-evaluating with missing source columns after GROUP BY.
                     _ => {
+                        let alias_name = alias.as_deref().unwrap_or("");
+                        // Check if the alias column already exists in the block (pre-computed)
+                        if !alias_name.is_empty() {
+                            if let Some(src) = block.columns.iter().find(|c| c.name == alias_name) {
+                                new_cols.push(src.clone());
+                                continue;
+                            }
+                        }
                         let n = block.num_rows;
                         let vals: Vec<ExprVal> = (0..n).map(|r| eval_expr(expr, &block, r)).collect();
                         new_cols.push(exprvals_to_column(out_name(), vals));
@@ -2256,15 +2271,49 @@ fn group_by_agg(
                         });
                     }
                     other => {
+                        // For Col/QualCol: copy directly from agg_block by name
+                        // For CASE/FuncCall/BinOp etc: check if alias column was pre-materialized,
+                        // otherwise evaluate the expression for each representative row
                         let col_name = match other {
-                            Expr::Col(c)        => c.clone(),
-                            Expr::QualCol(_, c) => c.clone(),
-                            _ => continue,
+                            Expr::Col(c)        => Some(c.clone()),
+                            Expr::QualCol(_, c) => Some(c.clone()),
+                            _ => None,
                         };
-                        if let Some(src) = find_col(&agg_block, &col_name) {
-                            let mut nc = src.clone();
-                            if let Some(a) = alias { nc.name = a.clone(); }
-                            new_cols.push(nc);
+
+                        if let Some(cn) = col_name {
+                            if let Some(src) = find_col(&agg_block, &cn) {
+                                let mut nc = src.clone();
+                                if let Some(a) = alias { nc.name = a.clone(); }
+                                new_cols.push(nc);
+                            }
+                        } else {
+                            // Complex expr (CASE WHEN, FuncCall, etc.)
+                            // First: check if alias already exists in agg_block (from materialize_groupby_aliases)
+                            let alias_name = alias.as_deref().unwrap_or("");
+                            if !alias_name.is_empty() {
+                                if let Some(src) = find_col(&agg_block, alias_name) {
+                                    let mut nc = src.clone();
+                                    nc.name = alias_name.to_string();
+                                    new_cols.push(nc);
+                                    continue;
+                                }
+                            }
+                            // Fallback: evaluate expression for each representative row
+                            let n = first_rows.len();
+                            let values: Vec<Option<String>> = first_rows.iter().map(|&r| {
+                                Some(match eval_expr(other, &block, r) {
+                                    ExprVal::Str(s)   => s,
+                                    ExprVal::Int(i)   => i.to_string(),
+                                    ExprVal::Float(f) => format!("{f:.4}"),
+                                    ExprVal::Bool(b)  => b.to_string(),
+                                    ExprVal::Null     => return None,
+                                })
+                            }).collect();
+                            let name = alias.clone().unwrap_or_else(|| format!("col{}", new_cols.len()));
+                            new_cols.push(Column {
+                                name,
+                                data: ColumnData::Str(values),
+                            });
                         }
                     }
                 }
