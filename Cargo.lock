@@ -1094,12 +1094,16 @@ dependencies = [
 name = "kore-distributed"
 version = "0.1.0"
 dependencies = [
+ "kore-coord",
  "kore-core",
+ "kore-net",
  "kore-sql",
  "kore-vectorized",
+ "kore-worker",
  "rayon",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -1367,11 +1371,14 @@ dependencies = [
 
 [[package]]
 name = "kore-self"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "kore-core",
+ "kore-delta",
+ "kore-distributed",
  "kore-mcp",
  "kore-sql",
+ "kore-store",
  "rayon",
  "serde",
  "serde_json",
@@ -1426,7 +1433,12 @@ name = "kore-sql"
 version = "0.1.0"
 dependencies = [
  "kore-core",
+ "kore-delta",
+ "kore-io",
  "kore-join",
+ "kore-parquet",
+ "kore-spill",
+ "kore-store",
  "kore-window",
  "rayon",
  "serde",
