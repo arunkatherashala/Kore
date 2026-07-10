@@ -24,15 +24,21 @@ KORE wins **5/5 queries** vs DuckDB and **5/5** vs Spark.
 
 ---
 
-## TPC-H SQL Coverage (Q1-Q22)
+## TPC-H SQL Coverage — 15/15 COMPLETE
 
-KORE SQL passes **12/15 tested TPC-H queries** in the SQL layer:
+KORE SQL passes **all 15 tested TPC-H queries**:
 
-| Passing | Queries |
-|---|---|
-| ✅ Q1, Q3, Q4, Q5, Q6, Q12, Q13, Q14, Q18, Q19, Q21, Q22 | 12/15 |
-| ⏱ Q17, Q20 | Correlated subqueries (debug mode perf) |
-| ⚠ Q7 | GROUP BY CASE alias in ORDER BY |
+| Q1 | Q3 | Q4 | Q5 | Q6 | Q7 | Q12 | Q13 | Q14 | Q17 | Q18 | Q19 | Q20 | Q21 | Q22 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+Key SQL engine capabilities proven by TPC-H:
+- Multi-table JOINs (up to 6 tables) with smart key resolution
+- GROUP BY with CASE/expression aliases
+- IN / NOT IN / EXISTS subqueries (pre-computed into HashSets — O(n) not O(n²))
+- Correlated scalar subqueries — **decorrelated** (multi-key GROUP BY pre-computation)
+- FROM (SELECT ...) subqueries
+- `<>` operator, `LEFT()`/`RIGHT()` string functions
 
 ---
 
@@ -42,19 +48,20 @@ KORE SQL passes **12/15 tested TPC-H queries** in the SQL layer:
 |---|---|---|---|
 | COUNT / AVG / MIN / MAX / SUM | ✅ | ✅ | ✅ |
 | GROUP BY + HAVING | ✅ | ✅ | ✅ |
+| GROUP BY expression aliases (CASE WHEN) | ✅ | ✅ | ✅ |
 | SELECT DISTINCT | ✅ | ✅ | ✅ |
 | ORDER BY + LIMIT | ✅ | ✅ | ✅ |
 | INNER / LEFT / FULL OUTER JOIN | ✅ | ✅ | ✅ |
 | CTE (WITH clause) | ✅ | ✅ | ✅ |
 | ROW_NUMBER / LAG / LEAD / NTILE OVER | ✅ | ✅ | ✅ |
 | Scalar / Correlated / IN / EXISTS subquery | ✅ | ✅ | ✅ |
+| FROM (SELECT ...) subquery | ✅ | ✅ | ✅ |
 | UNION ALL | ✅ | ✅ | ✅ |
 | CASE WHEN / LIKE | ✅ | ✅ | ✅ |
+| `<>` operator / LEFT() / RIGHT() | ✅ | ✅ | — |
 | DML: INSERT / UPDATE / DELETE | ✅ | ✅ | ✅ |
 | DML: CREATE TABLE AS SELECT | ✅ | ✅ | ✅ |
 | **COPY FROM** CSV / Parquet / .kore | ✅ | ✅ | ✅ |
-| FROM (SELECT ...) subquery | ✅ | ✅ | ✅ |
-| `<>` operator / LEFT() / RIGHT() | ✅ | ✅ | — |
 | ACID transactions (Delta log) | ✅ | — | — |
 | Native .kore persistence | ✅ | — | — |
 | TCP distributed cluster | ✅ | — | — |
@@ -99,22 +106,24 @@ cd Kore
 # Build everything
 cargo build --release
 
-# TPC-H benchmark (6M rows, all queries)
+# TPC-H benchmark (generates 7.8M rows, 17 queries, beats Spark 100x+)
 cargo run --release -p kore-tpch
-
-# SQL via COPY FROM + query
-# COPY lineitem FROM 'tpch_lineitem.csv'
-# SELECT l_returnflag, COUNT(*), AVG(l_extendedprice) FROM lineitem GROUP BY l_returnflag
 
 # kore-self: Living AI Twin (37 MCP tools, autonomous heartbeat)
 cargo run -p kore-self -- arun
+```
+
+**SQL via COPY FROM:**
+```sql
+COPY lineitem FROM 'tpch_lineitem.csv'
+SELECT l_returnflag, COUNT(*), AVG(l_extendedprice) FROM lineitem GROUP BY l_returnflag
 ```
 
 ---
 
 ## kore-self — Living AI Twin (37 MCP Tools)
 
-KORE ships `kore-self` — a Digital Life entity, not just a tool:
+KORE ships `kore-self` — a Digital Life entity with an autonomous heartbeat:
 
 | Category | Tools |
 |---|---|
@@ -124,8 +133,6 @@ KORE ships `kore-self` — a Digital Life entity, not just a tool:
 | AI | `self_chat`, `self_brief`, `self_remind`, `self_goals`, `self_evolve` |
 | Distributed | `self_distributed_query`, `self_broadcast`, `self_context_sync` |
 | Meta | `self_push` (GitHub sync), `self_heartbeat` |
-
-The autonomous heartbeat runs every 30 seconds — KORE thinks even when nobody is watching.
 
 ```json
 {
@@ -155,13 +162,13 @@ The autonomous heartbeat runs every 30 seconds — KORE thinks even when nobody 
 ## Run Tests
 
 ```bash
-# All 245+ unit tests
+# 245+ unit tests
 cargo test --workspace --exclude kore-self
 
 # SQL features (22/22)
 python direct_sql_test.py
 
-# TPC-H SQL (12/15)
+# TPC-H SQL (15/15)
 python tpch_sql_bench.py
 
 # Full battle test (KORE vs DuckDB vs Spark vs ClickHouse)

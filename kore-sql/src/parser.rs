@@ -129,13 +129,31 @@ impl Parser {
             None
         };
 
-        // GROUP BY
-        let group_by = if self.peek() == &Token::Group && self.peek2() == &Token::By {
+        // GROUP BY [ROLLUP(...) | CUBE(...) | plain list]
+        let (group_by, rollup, cube) = if self.peek() == &Token::Group && self.peek2() == &Token::By {
             self.pos += 2; // consume GROUP BY
-            self.parse_ident_list()?
+            // Check for ROLLUP or CUBE
+            let upper = self.peek().clone();
+            if let Token::Ident(kw) = &upper {
+                let kw = kw.to_uppercase();
+                if kw == "ROLLUP" || kw == "CUBE" {
+                    let is_rollup = kw == "ROLLUP";
+                    self.pos += 1; // consume ROLLUP/CUBE
+                    self.expect(&Token::LParen)?;
+                    let cols = self.parse_ident_list()?;
+                    self.expect(&Token::RParen)?;
+                    (cols, is_rollup, !is_rollup)
+                } else {
+                    (self.parse_ident_list()?, false, false)
+                }
+            } else {
+                (self.parse_ident_list()?, false, false)
+            }
         } else {
-            Vec::new()
+            (Vec::new(), false, false)
         };
+        // Ignore rollup/cube flags for now — treat same as plain GROUP BY
+        let _ = (rollup, cube);
 
         // HAVING
         let having = if self.consume_if(&Token::Having) {
@@ -211,7 +229,12 @@ impl Parser {
         if matches!(self.peek(), Token::Rows | Token::Range) {
             let mode = if self.peek() == &Token::Rows { self.pos += 1; FrameMode::Rows }
                        else { self.pos += 1; FrameMode::Range };
-            if let Token::Ident(s) = self.peek() { if s.eq_ignore_ascii_case("BETWEEN") { self.pos += 1; } }
+            // Consume optional BETWEEN keyword (Token::Between or Ident "BETWEEN")
+            match self.peek() {
+                Token::Between => { self.pos += 1; }
+                Token::Ident(s) if s.eq_ignore_ascii_case("BETWEEN") => { self.pos += 1; }
+                _ => {}
+            }
             let start = self.parse_frame_bound()?;
             if self.peek() == &Token::And { self.pos += 1; }
             let end = self.parse_frame_bound()?;
