@@ -1812,6 +1812,29 @@ fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, Ko
             Projection::Expr { expr, alias } => {
                 let out_name = || alias.clone().unwrap_or_else(|| "expr".into());
 
+                // Fast path: if alias already exists in block (from group_by_agg or
+                // materialize_groupby_aliases), use it directly — avoids re-evaluation
+                // with stale/missing columns after GROUP BY projection.
+                if let Some(a) = alias {
+                    if let Some(src) = block.columns.iter().find(|c| c.name == a.as_str()) {
+                        // Only use pre-computed alias for complex exprs or when source col is gone
+                        let source_col_missing = match expr {
+                            Expr::Col(c) | Expr::QualCol(_, c) => {
+                                let full = match expr { Expr::QualCol(t, c2) => format!("{}.{}", t, c2), _ => c.clone() };
+                                !block.columns.iter().any(|col| {
+                                    let cn = col.name.len(); let nm = full.len();
+                                    col.name == full || (cn > nm && col.name.as_bytes()[cn-nm-1] == b'.' && &col.name[cn-nm..] == full)
+                                })
+                            }
+                            _ => true, // complex exprs always prefer pre-computed
+                        };
+                        if source_col_missing {
+                            new_cols.push(src.clone());
+                            continue;
+                        }
+                    }
+                }
+
                 match expr {
                     Expr::Col(c) | Expr::QualCol(_, c) => {
                         let col_name = match expr {
