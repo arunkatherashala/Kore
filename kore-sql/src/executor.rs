@@ -808,54 +808,57 @@ fn decorrelate_expr(
 ) -> Expr {
     match expr {
         Expr::ScalarSubquery(sq) => {
-            // Pattern: SELECT [factor *] AGG(col) FROM t WHERE t.key = outer.key
+            // Decorrelate: pre-compute GROUP BY + AGG, inject threshold column
+            // Handles both single-key (Q17) and multi-key (Q20) correlations
+            // and filters non-correlation WHERE conditions before aggregation
             if sq.group_by.is_empty() {
                 if let Some(where_expr) = &sq.where_clause {
-                    if let Expr::BinOp { op: BinOpKind::Eq, left, right } = where_expr {
-                        let inner_table = &sq.from.name;
-                        // Determine which side is the inner table's column
-                        let (inner_col, outer_col) = match (left.as_ref(), right.as_ref()) {
-                            (Expr::QualCol(t, c), other) if t == inner_table => (c.clone(), other),
-                            (other, Expr::QualCol(t, c)) if t == inner_table => (c.clone(), other),
-                            (Expr::Col(c), other) => (c.clone(), other),
-                            (other, Expr::Col(c)) => (c.clone(), other),
-                            _ => return expr.clone(),
-                        };
-                        if let Some(inner_block) = ctx.get(inner_table) {
-                            let inner_col_full = find_col_in_block(&inner_col, inner_block)
-                                .unwrap_or_else(|| inner_col.clone());
+                    let inner_table = &sq.from.name;
+                    if let Some(inner_block) = ctx.get(inner_table) {
+                        // Collect correlation pairs and filter conditions from WHERE
+                        let mut corr: Vec<(String, Expr)> = Vec::new(); // (inner_col, outer_expr)
+                        let mut filters: Vec<Expr>         = Vec::new();
+                        collect_corr_and_filters(where_expr, inner_table, &mut corr, &mut filters);
 
-                            // Get the aggregation projection
+                        if !corr.is_empty() {
                             if let Some(Projection::Expr { expr: proj_expr, .. }) = sq.projections.first() {
-                                // Pre-compute GROUP BY inner_col, AGG
-                                let mut groups: std::collections::HashMap<String, Vec<f64>> =
-                                    std::collections::HashMap::new();
-                                // Collect inner values per key
-                                let inner_agg_col: Option<&Column> = match proj_expr {
-                                    Expr::Agg { expr: inner_e, .. } => match inner_e.as_ref() {
-                                        Expr::Col(c) | Expr::QualCol(_, c) => find_col(inner_block, c),
-                                        _ => None,
-                                    },
-                                    Expr::BinOp { left: lf, right: rf, .. } => {
-                                        let agg_side = if matches!(lf.as_ref(), Expr::Agg{..}) { lf.as_ref() } else { rf.as_ref() };
-                                        if let Expr::Agg { expr: inner_e, .. } = agg_side {
-                                            match inner_e.as_ref() {
-                                                Expr::Col(c) | Expr::QualCol(_, c) => find_col(inner_block, c),
-                                                _ => None,
-                                            }
+                                // Apply non-correlation filters to inner block first
+                                let mut filtered = inner_block.clone();
+                                for fc in &filters {
+                                    if let Ok(f) = filter_block(filtered, fc) { filtered = f; } else { return expr.clone(); }
+                                }
+
+                                // Find the agg source column
+                                let agg_col: Option<&Column> = match proj_expr {
+                                    Expr::Agg { expr: ie, .. } | Expr::BinOp { left: ie, .. }
+                                        if matches!(ie.as_ref(), Expr::Agg{..}) => {
+                                        if let Expr::Agg { expr: ie2, .. } = ie.as_ref() {
+                                            match ie2.as_ref() { Expr::Col(c)|Expr::QualCol(_,c) => find_col(&filtered, c), _ => None }
                                         } else { None }
                                     }
+                                    Expr::Agg { expr: ie, .. } => match ie.as_ref() { Expr::Col(c)|Expr::QualCol(_,c) => find_col(&filtered, c), _ => None },
+                                    Expr::BinOp { right: re, .. } => if let Expr::Agg { expr: ie, .. } = re.as_ref() {
+                                        match ie.as_ref() { Expr::Col(c)|Expr::QualCol(_,c) => find_col(&filtered, c), _ => None }
+                                    } else { None },
                                     _ => None,
                                 };
 
-                                for row in 0..inner_block.num_rows {
-                                    let key = match get_cell(inner_block, &inner_col_full, row) {
-                                        ExprVal::Int(i)   => i.to_string(),
-                                        ExprVal::Float(f) => format!("{:.6}", f),
-                                        ExprVal::Str(s)   => s,
-                                        _ => continue,
-                                    };
-                                    if let Some(col) = inner_agg_col {
+                                // Build composite-key GROUP BY
+                                let key_cols: Vec<String> = corr.iter().map(|(ic, _)| {
+                                    find_col_in_block(ic, &filtered).unwrap_or_else(|| ic.clone())
+                                }).collect();
+                                let mut groups: std::collections::HashMap<String, Vec<f64>> =
+                                    std::collections::HashMap::new();
+                                for row in 0..filtered.num_rows {
+                                    let key: String = key_cols.iter().map(|kc| {
+                                        match get_cell(&filtered, kc, row) {
+                                            ExprVal::Int(i)   => i.to_string(),
+                                            ExprVal::Float(f) => format!("{:.6}", f),
+                                            ExprVal::Str(s)   => s,
+                                            _ => String::new(),
+                                        }
+                                    }).collect::<Vec<_>>().join(",");
+                                    if let Some(col) = agg_col {
                                         let v = match &col.data {
                                             ColumnData::Float64(vs) => vs.get(row).and_then(|x| *x).unwrap_or(0.0),
                                             ColumnData::Int64(vs)   => vs.get(row).and_then(|x| *x).unwrap_or(0) as f64,
@@ -865,31 +868,26 @@ fn decorrelate_expr(
                                     }
                                 }
 
-                                // Compute final agg values per key
-                                let mut lookup: std::collections::HashMap<String, f64> =
-                                    std::collections::HashMap::new();
                                 let factor = match proj_expr {
-                                    Expr::BinOp { left: lf, right: rf, .. } => {
-                                        match (lf.as_ref(), rf.as_ref()) {
-                                            (Expr::Float(f), _) | (_, Expr::Float(f)) => *f,
-                                            (Expr::Int(i), _)   | (_, Expr::Int(i))   => *i as f64,
-                                            _ => 1.0,
-                                        }
-                                    }
-                                    _ => 1.0,
+                                    Expr::BinOp { left: lf, right: rf, .. } => match (lf.as_ref(), rf.as_ref()) {
+                                        (Expr::Float(f),_)|(_, Expr::Float(f)) => *f,
+                                        (Expr::Int(i),_)|(_, Expr::Int(i))     => *i as f64, _ => 1.0,
+                                    }, _ => 1.0,
                                 };
                                 let agg_fn = match proj_expr {
                                     Expr::Agg { func, .. } => func.clone(),
                                     Expr::BinOp { left: lf, right: rf, .. } => {
                                         let side = if matches!(lf.as_ref(), Expr::Agg{..}) { lf.as_ref() } else { rf.as_ref() };
-                                        if let Expr::Agg { func, .. } = side { func.clone() } else { AggFunc::Avg }
+                                        if let Expr::Agg { func, .. } = side { func.clone() } else { AggFunc::Sum }
                                     }
-                                    _ => AggFunc::Avg,
+                                    _ => AggFunc::Sum,
                                 };
+                                let mut lookup: std::collections::HashMap<String, f64> =
+                                    std::collections::HashMap::new();
                                 for (k, vs) in &groups {
                                     let agg = match agg_fn {
-                                        AggFunc::Avg   => if vs.is_empty() { 0.0 } else { vs.iter().sum::<f64>() / vs.len() as f64 },
                                         AggFunc::Sum   => vs.iter().sum(),
+                                        AggFunc::Avg   => if vs.is_empty() { 0.0 } else { vs.iter().sum::<f64>() / vs.len() as f64 },
                                         AggFunc::Count => vs.len() as f64,
                                         AggFunc::Min   => vs.iter().cloned().fold(f64::MAX, f64::min),
                                         AggFunc::Max   => vs.iter().cloned().fold(f64::MIN, f64::max),
@@ -898,34 +896,25 @@ fn decorrelate_expr(
                                     lookup.insert(k.clone(), agg * factor);
                                 }
 
-                                // Inject threshold column into outer_block
+                                // Inject threshold column
                                 let col_name = format!("__decorr_{}__", counter);
                                 *counter += 1;
-
-                                // Get outer key column name
-                                let outer_key = match outer_col {
-                                    Expr::Col(c) | Expr::QualCol(_, c) => c.clone(),
-                                    _ => return expr.clone(),
-                                };
-                                let outer_key_full = find_col_in_block(&outer_key, outer_block)
-                                    .unwrap_or_else(|| outer_key.clone());
-
+                                let outer_exprs: Vec<Expr> = corr.iter().map(|(_, oe)| oe.clone()).collect();
                                 let thresholds: Vec<Option<f64>> = (0..outer_block.num_rows).map(|r| {
-                                    let k = match get_cell(outer_block, &outer_key_full, r) {
-                                        ExprVal::Int(i)   => i.to_string(),
-                                        ExprVal::Float(f) => format!("{:.6}", f),
-                                        ExprVal::Str(s)   => s,
-                                        _ => return None,
-                                    };
+                                    let k: String = outer_exprs.iter().map(|oe| {
+                                        match eval_expr(oe, outer_block, r) {
+                                            ExprVal::Int(i)   => i.to_string(),
+                                            ExprVal::Float(f) => format!("{:.6}", f),
+                                            ExprVal::Str(s)   => s,
+                                            _ => String::new(),
+                                        }
+                                    }).collect::<Vec<_>>().join(",");
                                     lookup.get(&k).copied()
                                 }).collect();
-
                                 outer_block.columns.push(kore_core::Column {
                                     name: col_name.clone(),
                                     data: kore_core::ColumnData::Float64(thresholds),
                                 });
-
-                                // Replace ScalarSubquery with Col reference to threshold
                                 return Expr::Col(col_name);
                             }
                         }
@@ -941,6 +930,57 @@ fn decorrelate_expr(
         },
         Expr::Not(inner) => Expr::Not(Box::new(decorrelate_expr(inner, outer_block, ctx, counter))),
         other => other.clone(),
+    }
+}
+
+/// Decompose a WHERE clause into correlation conditions (inner.key = outer.expr)
+/// and plain filter conditions. The inner_table name is used to identify which
+/// side of an equality is the "inner" correlated column.
+fn collect_corr_and_filters<'a>(
+    expr: &'a Expr,
+    inner_table: &str,
+    corr: &mut Vec<(String, Expr)>,
+    filters: &mut Vec<Expr>,
+) {
+    match expr {
+        Expr::BinOp { op: BinOpKind::And, left, right } => {
+            collect_corr_and_filters(left,  inner_table, corr, filters);
+            collect_corr_and_filters(right, inner_table, corr, filters);
+        }
+        Expr::BinOp { op: BinOpKind::Eq, left, right } => {
+            // Detect correlation: one side is a qualified col (inner table or alias),
+            // the other side is an unqualified col (outer reference) or vice versa.
+            let col_name = |e: &Expr| match e {
+                Expr::QualCol(_, c) | Expr::Col(c) => c.clone(),
+                _ => String::new(),
+            };
+            // Case 1: QualCol with inner_table qualifier = inner, other = outer
+            let left_exact_inner  = matches!(left.as_ref(),  Expr::QualCol(t, _) if t == inner_table);
+            let right_exact_inner = matches!(right.as_ref(), Expr::QualCol(t, _) if t == inner_table);
+            if left_exact_inner && !right_exact_inner {
+                corr.push((col_name(left), *right.clone()));
+            } else if right_exact_inner && !left_exact_inner {
+                corr.push((col_name(right), *left.clone()));
+            } else {
+                // Case 2: QualCol(any) vs Col — QualCol is inner (table alias), Col is outer
+                let left_is_qual  = matches!(left.as_ref(),  Expr::QualCol(_, _));
+                let right_is_qual = matches!(right.as_ref(), Expr::QualCol(_, _));
+                let left_is_col   = matches!(left.as_ref(),  Expr::Col(_));
+                let right_is_col  = matches!(right.as_ref(), Expr::Col(_));
+                if left_is_qual && right_is_col && !right_exact_inner {
+                    // QualCol(alias, col) = outer.col → inner.col = outer.col
+                    corr.push((col_name(left), *right.clone()));
+                } else if right_is_qual && left_is_col && !left_exact_inner {
+                    corr.push((col_name(right), *left.clone()));
+                } else if left_is_col && right_is_col {
+                    // Both unqualified: assume first is inner (best-effort)
+                    corr.push((col_name(left), *right.clone()));
+                } else {
+                    filters.push(expr.clone());
+                }
+            }
+        }
+        _ => filters.push(expr.clone()),
     }
 }
 

@@ -401,7 +401,7 @@ def main():
 
     for label, sql, _ in TPCH_QUERIES:
         # Correlated subqueries need more time in debug mode
-        timeout = 60 if label in ("Q17 SmallQty", "Q20 Potential") else 20
+        timeout = 90 if label in ("Q17 SmallQty", "Q20 Potential") else 20
         ok, result, ms = kore_run_query(paths, sql, timeout=timeout)
         if "TIMEOUT" in str(result):
             icon = "TIME"; kore_timeout += 1
