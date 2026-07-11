@@ -415,7 +415,8 @@ impl Parser {
         let name = self.expect_ident()?;
         let alias = if self.consume_if(&Token::As) {
             Some(self.expect_ident()?)
-        } else if matches!(self.peek(), Token::Ident(_)) && !self.is_join_keyword()
+        } else if matches!(self.peek(), Token::Ident(s) if !["WHERE","ORDER","GROUP","LIMIT","HAVING","QUALIFY","UNION","INTERSECT","EXCEPT","FETCH","OFFSET","ON","SET","INTO"].contains(&s.to_ascii_uppercase().as_str()))
+               && !self.is_join_keyword()
                && self.peek() != &Token::Where
                && self.peek() != &Token::Order
                && self.peek() != &Token::Group
