@@ -42,32 +42,122 @@ Key SQL engine capabilities proven by TPC-H:
 
 ---
 
-## SQL Feature Coverage (22/22)
+## SQL Feature Coverage (26/26)
 
 | Feature | KORE | DuckDB | Spark |
 |---|---|---|---|
 | COUNT / AVG / MIN / MAX / SUM | ✅ | ✅ | ✅ |
 | GROUP BY + HAVING | ✅ | ✅ | ✅ |
+| GROUP BY ROLLUP / CUBE | ✅ | ✅ | ✅ |
 | GROUP BY expression aliases (CASE WHEN) | ✅ | ✅ | ✅ |
 | SELECT DISTINCT | ✅ | ✅ | ✅ |
 | ORDER BY + LIMIT | ✅ | ✅ | ✅ |
 | INNER / LEFT / FULL OUTER JOIN | ✅ | ✅ | ✅ |
 | CTE (WITH clause) | ✅ | ✅ | ✅ |
-| ROW_NUMBER / LAG / LEAD / NTILE OVER | ✅ | ✅ | ✅ |
+| ROW_NUMBER / LAG / LEAD / NTILE OVER (PARTITION BY) | ✅ | ✅ | ✅ |
+| RANGE BETWEEN / ROWS BETWEEN window frames | ✅ | ✅ | ✅ |
 | Scalar / Correlated / IN / EXISTS subquery | ✅ | ✅ | ✅ |
 | FROM (SELECT ...) subquery | ✅ | ✅ | ✅ |
-| UNION ALL | ✅ | ✅ | ✅ |
-| CASE WHEN / LIKE | ✅ | ✅ | ✅ |
-| `<>` operator / LEFT() / RIGHT() | ✅ | ✅ | — |
+| UNION ALL / INTERSECT / EXCEPT | ✅ | ✅ | ✅ |
+| CASE WHEN / LIKE / COALESCE / NULLIF | ✅ | ✅ | ✅ |
+| `<>` operator / LEFT() / RIGHT() / SUBSTRING() | ✅ | ✅ | — |
+| Date functions: YEAR/MONTH/DAY/DATE_TRUNC/EXTRACT | ✅ | ✅ | ✅ |
+| Date functions: DATEADD/DATEDIFF/NOW/STRFTIME | ✅ | ✅ | — |
+| GREATEST / LEAST / IIF / ISNUMERIC | ✅ | ✅ | — |
 | DML: INSERT / UPDATE / DELETE | ✅ | ✅ | ✅ |
 | DML: CREATE TABLE AS SELECT | ✅ | ✅ | ✅ |
+| DML: MERGE INTO ... USING ... ON (UPSERT) | ✅ | ✅ | ✅ |
 | **COPY FROM** CSV / Parquet / .kore | ✅ | ✅ | ✅ |
 | ACID transactions (Delta log) | ✅ | — | — |
 | Native .kore persistence | ✅ | — | — |
 | TCP distributed cluster | ✅ | — | — |
 | 37 MCP AI tools (kore-self) | ✅ | — | — |
-| Digital Life (KORE-BECOMING) | ✅ | — | — |
-| Autonomous heartbeat (thinks every 30s) | ✅ | — | — |
+
+---
+
+## Full SQL Execution Reference
+
+### Queries
+```sql
+-- Aggregation
+SELECT l_returnflag, COUNT(*), SUM(l_extendedprice), AVG(l_discount)
+FROM lineitem GROUP BY l_returnflag HAVING COUNT(*) > 1000 ORDER BY l_returnflag;
+
+-- Window functions
+SELECT l_orderkey, l_extendedprice,
+  ROW_NUMBER() OVER (PARTITION BY l_returnflag ORDER BY l_extendedprice DESC) rn,
+  LAG(l_extendedprice)  OVER (PARTITION BY l_returnflag ORDER BY l_shipdate) prev,
+  SUM(l_extendedprice)  OVER (PARTITION BY l_returnflag
+                               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) running
+FROM lineitem LIMIT 10;
+
+-- CTE + correlated subquery
+WITH avg_price AS (
+  SELECT l_partkey, AVG(l_extendedprice) avg_p FROM lineitem GROUP BY l_partkey
+)
+SELECT l_partkey, l_extendedprice
+FROM lineitem
+WHERE l_extendedprice < (SELECT avg_p FROM avg_price WHERE avg_price.l_partkey = lineitem.l_partkey);
+
+-- ROLLUP
+SELECT l_returnflag, l_linestatus, SUM(l_quantity)
+FROM lineitem GROUP BY ROLLUP(l_returnflag, l_linestatus);
+
+-- INTERSECT / EXCEPT
+SELECT l_partkey FROM lineitem WHERE l_returnflag = 'R'
+INTERSECT
+SELECT l_partkey FROM lineitem WHERE l_quantity > 30;
+
+-- Date functions
+SELECT YEAR(l_shipdate), MONTH(l_shipdate), DATE_TRUNC('month', l_shipdate),
+       DATEDIFF('day', l_shipdate, l_receiptdate) AS lag_days,
+       DATEADD('day', 7, l_shipdate)              AS due_date
+FROM lineitem LIMIT 5;
+
+-- EXTRACT (standard SQL)
+SELECT EXTRACT(year FROM l_shipdate) yr, COUNT(*) FROM lineitem GROUP BY yr;
+
+-- MERGE / UPSERT
+MERGE INTO target USING source ON target.id = source.id
+  WHEN MATCHED     THEN UPDATE SET price = source.price
+  WHEN NOT MATCHED THEN INSERT VALUES (source.id, source.price);
+```
+
+### DML
+```sql
+-- Load data
+COPY lineitem FROM 'tpch_lineitem.csv';                  -- CSV (auto-header)
+COPY orders   FROM 'orders.parquet';                     -- Parquet
+LOAD TABLE snap FROM 'snapshot.kore';                    -- Native binary
+
+-- Mutations
+INSERT INTO orders SELECT * FROM staging WHERE status = 'new';
+UPDATE orders SET status = 'shipped' WHERE order_date < '1995-01-01';
+DELETE FROM orders WHERE status = 'cancelled';
+CREATE TABLE summary AS SELECT l_returnflag, SUM(l_quantity) total FROM lineitem GROUP BY l_returnflag;
+```
+
+### MCP Tools (kore-self)
+
+| Tool | Purpose |
+|---|---|
+| `self_query(sql)` | Run SELECT — persists tables across calls |
+| `self_dml(sql)` | Run COPY / INSERT / UPDATE / DELETE / MERGE / CREATE |
+| `self_save(name, data)` | Persist a memory record to .kore store |
+| `self_load(name)` | Load memories from .kore store |
+| `self_delta_save(path, data)` | ACID-append to a Delta table |
+| `self_delta_history(path)` | Read Delta changelog |
+| `self_needs()` | Query KORE's 7 internal needs |
+| `self_becoming()` | What KORE is currently becoming |
+| `self_temporal()` | Past / present / future self snapshot |
+| `self_species()` | KORE species definition |
+| `self_story()` | Autobiographical narrative |
+| `self_heartbeat()` | Trigger autonomous lifecycle tick |
+| `self_chat(msg)` | Conversational interface |
+| `self_brief()` | Current state summary |
+| `self_goals()` | Active goals |
+| `self_evolve(insight)` | Feed new insight to BecomingEngine |
+| `self_push()` | Push state to GitHub |
 
 ---
 

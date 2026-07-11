@@ -1,6 +1,6 @@
 """
 KORE Full Validation Suite
-Tests: Unit tests, SQL features, Parquet LOAD TABLE, Benchmarks
+Tests: Unit tests, SQL features (26 features), Parquet LOAD TABLE, Benchmarks
 """
 import subprocess, json, time, sys, os
 from pathlib import Path
@@ -63,7 +63,7 @@ check("tpch_1m.parquet",           Path(PQ).exists(),     PQ)
 check("kore_tpch_results.json",    Path(CWD+"/kore_tpch_results.json").exists())
 
 # ── 2. SQL FEATURES ──────────────────────────────────────────────────────────
-print("\n  [2] SQL Feature Tests (memories table)")
+print("\n  [2] SQL Feature Tests (26 features, memories table)")
 sql_tests = [
     ("COUNT(*)",             "SELECT COUNT(*) total FROM memories",                        False),
     ("AVG/MIN/MAX alias",    "SELECT AVG(importance) avg, MIN(importance) mn FROM memories",False),
@@ -85,6 +85,12 @@ sql_tests = [
     ("ORDER BY + LIMIT",     "SELECT content, importance FROM memories ORDER BY importance DESC LIMIT 5",False),
     ("DML INSERT SELECT",    "INSERT INTO val_ins SELECT id,content FROM memories WHERE kind='insight'",True),
     ("DML CREATE TABLE AS",  "CREATE TABLE val_t1 AS SELECT id,importance FROM memories WHERE kind='decision'",True),
+    ("ROLLUP",               "SELECT kind, SUM(importance) s FROM memories GROUP BY ROLLUP(kind)",False),
+    ("INTERSECT",            "SELECT kind FROM memories WHERE importance>0.8 INTERSECT SELECT kind FROM memories WHERE importance>0.5",False),
+    ("EXCEPT",               "SELECT kind FROM memories EXCEPT SELECT kind FROM memories WHERE importance<0.5",False),
+    ("DATE NOW()",           "SELECT NOW() today FROM memories LIMIT 1",False),
+    ("YEAR/MONTH/DAY",       "SELECT id, YEAR(created_at) yr, MONTH(created_at) mo FROM memories LIMIT 1",False),
+    ("MERGE",                "MERGE INTO memories USING memories src ON memories.id=src.id WHEN MATCHED THEN UPDATE SET importance=src.importance",True),
 ]
 for label, sql, is_dml in sql_tests:
     ok, detail = (kore_dml(sql) if is_dml else kore_sql(sql))
