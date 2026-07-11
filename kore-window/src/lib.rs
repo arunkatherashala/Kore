@@ -25,6 +25,8 @@ pub enum WindowFn {
     RowNumber,
     Rank,
     DenseRank,
+    PercentRank,
+    CumeDist,
     Ntile(usize),
     Lag  { col: String, offset: usize },
     Lead { col: String, offset: usize },
@@ -295,7 +297,8 @@ fn compute_fn_values(
     let mut values = vec![0.0f64; m];
 
     match func {
-        WindowFn::RowNumber | WindowFn::Rank | WindowFn::DenseRank => {
+        WindowFn::RowNumber | WindowFn::Rank | WindowFn::DenseRank
+        | WindowFn::PercentRank | WindowFn::CumeDist => {
             for i in 0..m { values[i] = (i + 1) as f64; }
         }
         WindowFn::Ntile(buckets) => {
@@ -386,6 +389,18 @@ fn compute_fn_for_partition(
         WindowFn::DenseRank => {
             for (rank, &orig_i) in sorted.iter().enumerate() {
                 result[orig_i] = (rank + 1) as f64;
+            }
+        }
+        WindowFn::PercentRank => {
+            let n = m as f64;
+            for (rank, &orig_i) in sorted.iter().enumerate() {
+                result[orig_i] = if n <= 1.0 { 0.0 } else { rank as f64 / (n - 1.0) };
+            }
+        }
+        WindowFn::CumeDist => {
+            let n = m as f64;
+            for (rank, &orig_i) in sorted.iter().enumerate() {
+                result[orig_i] = (rank + 1) as f64 / n;
             }
         }
         WindowFn::Ntile(buckets) => {

@@ -120,9 +120,13 @@ impl Parser {
         // projections
         let projections = self.parse_projections()?;
 
-        // FROM
-        self.expect(&Token::From)?;
-        let from = self.parse_table_expr()?;
+        // FROM (optional — allows SELECT 1+1, SELECT NOW() etc.)
+        let from = if self.peek() == &Token::From {
+            self.pos += 1;
+            self.parse_table_expr()?
+        } else {
+            TableExpr { name: "__dual__".to_string(), alias: None, subquery: None, values: None }
+        };
 
         // JOINs
         let mut joins = Vec::new();
@@ -170,6 +174,14 @@ impl Parser {
             None
         };
 
+        // QUALIFY (filter on window function results)
+        let qualify = if self.peek_ident_upper() == "QUALIFY" {
+            self.pos += 1;
+            Some(self.parse_expr(0)?)
+        } else {
+            None
+        };
+
         // ORDER BY
         let order_by = if self.peek() == &Token::Order && self.peek2() == &Token::By {
             self.pos += 2;
@@ -211,7 +223,7 @@ impl Parser {
         };
 
         Ok(SelectStmt { distinct, projections, from, joins, where_clause,
-                         group_by, having, order_by, limit, offset })
+                         group_by, having, qualify, order_by, limit, offset })
     }
 
     // ── Window spec helpers ────────────────────────────────────────────────
@@ -296,9 +308,11 @@ impl Parser {
 
     fn parse_window_fn_args(&mut self, name: &str) -> Result<WindowFn, KoreError> {
         Ok(match name.to_ascii_uppercase().as_str() {
-            "ROW_NUMBER" => WindowFn::RowNumber,
-            "RANK"       => WindowFn::Rank,
-            "DENSE_RANK" => WindowFn::DenseRank,
+            "ROW_NUMBER"   => WindowFn::RowNumber,
+            "RANK"         => WindowFn::Rank,
+            "DENSE_RANK"   => WindowFn::DenseRank,
+            "PERCENT_RANK" => WindowFn::PercentRank,
+            "CUME_DIST"    => WindowFn::CumeDist,
             "NTILE"      => WindowFn::Ntile(Box::new(self.parse_expr(0)?)),
             "LAG"  => { let e = self.parse_expr(0)?;
                         let o = if self.consume_if(&Token::Comma) { self.parse_expr(0)? } else { Expr::Int(1) };
@@ -362,12 +376,31 @@ impl Parser {
     // ─── Table reference ───────────────────────────────────────────────────
 
     fn parse_table_expr(&mut self) -> Result<TableExpr, KoreError> {
+        // VALUES (r1c1, r1c2), (r2c1, r2c2) AS t — inline table
+        if self.peek_ident_upper() == "VALUES" {
+            self.pos += 1;
+            let mut rows: Vec<Vec<Expr>> = Vec::new();
+            loop {
+                self.expect(&Token::LParen)?;
+                let mut row = vec![self.parse_expr(0)?];
+                while self.consume_if(&Token::Comma) { row.push(self.parse_expr(0)?); }
+                self.expect(&Token::RParen)?;
+                rows.push(row);
+                if !self.consume_if(&Token::Comma) { break; }
+            }
+            let alias = if self.consume_if(&Token::As) { Some(self.expect_alias()?) }
+                        else if matches!(self.peek(), Token::Ident(_)) { Some(self.expect_alias()?) }
+                        else { Some("_values".to_string()) };
+            let name = alias.clone().unwrap_or_else(|| "_values".to_string());
+            return Ok(TableExpr { name, alias, subquery: None, values: Some(rows) });
+        }
+
         // Handle FROM (SELECT ...) alias — subquery as FROM table
         if self.peek() == &Token::LParen {
             self.pos += 1; // consume (
+            // Could be VALUES inside parens too
             let subq = self.parse_select()?;
             self.expect(&Token::RParen)?;
-            // Alias is required for FROM subqueries (e.g. `) c_orders`)
             let alias = if self.consume_if(&Token::As) {
                 Some(self.expect_ident()?)
             } else if matches!(self.peek(), Token::Ident(_)) {
@@ -376,7 +409,7 @@ impl Parser {
                 Some("_subq".to_string())
             };
             let name = alias.clone().unwrap_or_else(|| "_subq".to_string());
-            return Ok(TableExpr { name, alias, subquery: Some(Box::new(subq)) });
+            return Ok(TableExpr { name, alias, subquery: Some(Box::new(subq)), values: None });
         }
 
         let name = self.expect_ident()?;
@@ -391,7 +424,7 @@ impl Parser {
         } else {
             None
         };
-        Ok(TableExpr { name, alias, subquery: None })
+        Ok(TableExpr { name, alias, subquery: None, values: None })
     }
 
     // ─── JOIN clause ───────────────────────────────────────────────────────
@@ -682,7 +715,7 @@ impl Parser {
             // Identifier: plain column OR window function name
             Token::Ident(name) => {
                 match name.to_ascii_uppercase().as_str() {
-                    "ROW_NUMBER" | "RANK" | "DENSE_RANK" | "NTILE" |
+                    "ROW_NUMBER" | "RANK" | "DENSE_RANK" | "PERCENT_RANK" | "CUME_DIST" | "NTILE" |
                     "LAG" | "LEAD" | "FIRST_VALUE" | "LAST_VALUE" | "CUMSUM" | "CUM_SUM" => {
                         self.expect(&Token::LParen)?;
                         let wfn = self.parse_window_fn_args(&name)?;
@@ -800,7 +833,14 @@ impl Parser {
             let col = self.parse_qualified_col()?;
             let desc = if self.consume_if(&Token::Desc) { true }
                        else { self.consume_if(&Token::Asc); false };
-            list.push(OrderByItem { col, desc });
+            // NULLS FIRST / NULLS LAST
+            let nulls_first = if self.peek_ident_upper() == "NULLS" {
+                self.pos += 1;
+                let first = self.peek_ident_upper() == "FIRST";
+                self.pos += 1; // consume FIRST or LAST
+                Some(first)
+            } else { None };
+            list.push(OrderByItem { col, desc, nulls_first });
             if !self.consume_if(&Token::Comma) { break; }
         }
         Ok(list)

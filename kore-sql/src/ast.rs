@@ -59,6 +59,8 @@ pub enum WindowFn {
     RowNumber,
     Rank,
     DenseRank,
+    PercentRank,
+    CumeDist,
     Ntile(Box<Expr>),
     Lag  { expr: Box<Expr>, offset: Box<Expr> },
     Lead { expr: Box<Expr>, offset: Box<Expr> },
@@ -105,6 +107,7 @@ pub struct SelectStmt {
     pub where_clause: Option<Expr>,
     pub group_by:     Vec<String>,
     pub having:       Option<Expr>,
+    pub qualify:      Option<Expr>,  // QUALIFY (window filter)
     pub order_by:     Vec<OrderByItem>,
     pub limit:        Option<u64>,
     pub offset:       Option<u64>,
@@ -122,6 +125,8 @@ pub struct TableExpr {
     pub alias:    Option<String>,
     /// For FROM (SELECT ...) alias subqueries
     pub subquery: Option<Box<SelectStmt>>,
+    /// For FROM (VALUES (...), (...)) AS t(cols)
+    pub values:   Option<Vec<Vec<Expr>>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -142,8 +147,9 @@ pub enum JoinKind { Inner, Left, Right, Full }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderByItem {
-    pub col:  String,
-    pub desc: bool,
+    pub col:        String,
+    pub desc:       bool,
+    pub nulls_first: Option<bool>,  // None = default (NULLs last for ASC, first for DESC)
 }
 
 // ── Top-level query (CTEs + UNION ALL) ───────────────────────────────────────

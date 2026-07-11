@@ -98,7 +98,52 @@ impl KqlContext {
     /// Parse + execute a KQL query (supports CTEs and UNION ALL).
     /// Also handles DML statements: INSERT INTO, UPDATE, DELETE.
     pub fn query(&self, sql: &str) -> Result<DataBlock, KoreError> {
-        let query = crate::parser::parse_query(sql)?;
+        let sql_trim = sql.trim();
+        let upper = sql_trim.to_ascii_uppercase();
+
+        // ── Meta queries — don't parse as SELECT ──────────────────────────────
+        if upper.starts_with("SHOW TABLES") {
+            let names = self.table_names();
+            let data  = ColumnData::Str(names.iter().map(|n| Some(n.clone())).collect());
+            return DataBlock::new(vec![Column { name: "table_name".into(), data }]);
+        }
+        if upper.starts_with("SHOW COLUMNS FROM") || upper.starts_with("DESCRIBE ") || upper.starts_with("DESC ") {
+            let tname = sql_trim[if upper.starts_with("SHOW COLUMNS FROM") { 17 } else if upper.starts_with("DESCRIBE ") { 9 } else { 5 }..].trim();
+            if let Some(block) = self.get(tname) {
+                let names:  Vec<Option<String>> = block.columns.iter().map(|c| Some(c.name.clone())).collect();
+                let types:  Vec<Option<String>> = block.columns.iter().map(|c| Some(match &c.data {
+                    ColumnData::Int64(_)    => "BIGINT".to_string(),
+                    ColumnData::Float64(_)  => "DOUBLE".to_string(),
+                    ColumnData::Str(_)      => "VARCHAR".to_string(),
+                    ColumnData::Bool(_)     => "BOOLEAN".to_string(),
+                    ColumnData::StrDict{..} => "VARCHAR".to_string(),
+                })).collect();
+                let rows = vec![Some(block.num_rows as i64); names.len()];
+                return DataBlock::new(vec![
+                    Column { name: "column_name".into(), data: ColumnData::Str(names) },
+                    Column { name: "data_type".into(),   data: ColumnData::Str(types) },
+                    Column { name: "rows".into(),        data: ColumnData::Int64(rows) },
+                ]);
+            }
+            return Err(KoreError::InvalidArgument(format!("table '{}' not found", tname)));
+        }
+        if upper.starts_with("EXPLAIN") {
+            let rest = sql_trim[7..].trim();
+            let plan = match crate::parser::parse_query(rest) {
+                Ok(q) => format!("KORE Query Plan\n  FROM: {}\n  GROUP BY: {}\n  JOINS: {}\n  HAS AGG: {}\n  ORDER BY: {}\n  LIMIT: {}",
+                    q.body.as_ref().map(|s| s.from.name.as_str()).unwrap_or("?"),
+                    q.body.as_ref().map(|s| s.group_by.join(", ")).unwrap_or_default(),
+                    q.body.as_ref().map(|s| s.joins.len()).unwrap_or(0),
+                    q.body.as_ref().map(|s| s.projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Agg {..}, ..}))).unwrap_or(false),
+                    q.body.as_ref().map(|s| s.order_by.iter().map(|o| format!("{} {}", o.col, if o.desc { "DESC" } else { "ASC" })).collect::<Vec<_>>().join(", ")).unwrap_or_default(),
+                    q.body.as_ref().and_then(|s| s.limit).map(|n| n.to_string()).unwrap_or_else(|| "none".to_string()),
+                ),
+                Err(e) => format!("Parse error: {e}"),
+            };
+            return DataBlock::new(vec![Column { name: "plan".into(), data: ColumnData::Str(vec![Some(plan)]) }]);
+        }
+
+        let query = crate::parser::parse_query(sql_trim)?;
         execute_query(&query, self)
     }
 
@@ -623,23 +668,54 @@ pub fn execute_query(query: &Query, ctx: &KqlContext) -> Result<DataBlock, KoreE
 }
 
 pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
-    // 1. Resolve FROM table (or execute FROM subquery)
+    // 1. Resolve FROM table (or execute FROM subquery / VALUES / __dual__)
     let base_name   = &stmt.from.name;
     let base_alias  = stmt.from.alias.as_deref().unwrap_or(base_name.as_str());
 
-    // FROM (SELECT ...) subquery — execute it first, then use as temp table
-    let subq_block: Option<DataBlock> = if let Some(subq) = &stmt.from.subquery {
-        Some(execute_select(subq, ctx)?)
-    } else {
-        None
-    };
+    // FROM VALUES (...) — build inline DataBlock
+    let values_block: Option<DataBlock> = if let Some(rows) = &stmt.from.values {
+        if rows.is_empty() { Some(DataBlock::empty()) } else {
+            let ncols = rows[0].len();
+            let dummy = DataBlock::empty();
+            let mut cols: Vec<Vec<ExprVal>> = vec![Vec::new(); ncols];
+            for row in rows {
+                for (ci, expr) in row.iter().enumerate() {
+                    cols[ci].push(eval_expr(expr, &dummy, 0));
+                }
+            }
+            let columns: Vec<Column> = cols.into_iter().enumerate().map(|(i, vals)| {
+                let first = vals.iter().find(|v| !matches!(v, ExprVal::Null));
+                let data = match first {
+                    Some(ExprVal::Int(_))   => ColumnData::Int64(vals.iter().map(|v| if let ExprVal::Int(i) = v { Some(*i) } else { None }).collect()),
+                    Some(ExprVal::Float(_)) => ColumnData::Float64(vals.iter().map(|v| if let ExprVal::Float(f) = v { Some(*f) } else { None }).collect()),
+                    _ => ColumnData::Str(vals.iter().map(|v| if let ExprVal::Str(s) = v { Some(s.clone()) } else { None }).collect()),
+                };
+                Column { name: format!("col{}", i+1), data }
+            }).collect();
+            Some(DataBlock::new(columns).map_err(|e| KoreError::InvalidArgument(e.to_string()))?)
+        }
+    } else { None };
 
-    let base_ref = if let Some(ref sb) = subq_block {
-        sb
-    } else {
-        ctx.get(base_name)
-            .ok_or_else(|| KoreError::InvalidArgument(format!("unknown table: {base_name}")))?
-    };
+    // FROM (SELECT ...) subquery — execute it first, then use as temp table
+    let subq_block: Option<DataBlock> = if stmt.from.values.is_none() {
+        if let Some(subq) = &stmt.from.subquery {
+            Some(execute_select(subq, ctx)?)
+        } else { None }
+    } else { None };
+
+    // __dual__ — virtual single-row table for SELECT 1+1, SELECT NOW() etc.
+    let dual_block: Option<DataBlock> = if base_name == "__dual__" && subq_block.is_none() && values_block.is_none() {
+        Some(DataBlock::new(vec![Column { name: "__dual__".into(), data: ColumnData::Int64(vec![Some(1)]) }])
+            .unwrap_or_else(|_| DataBlock::empty()))
+    } else { None };
+
+    let base_ref: &DataBlock = if let Some(ref vb) = values_block { vb }
+        else if let Some(ref sb) = subq_block { sb }
+        else if let Some(ref db) = dual_block { db }
+        else {
+            ctx.get(base_name)
+                .ok_or_else(|| KoreError::InvalidArgument(format!("unknown table: {base_name}")))?
+        };
 
     // Column pruning: for simple queries (no JOIN, no SELECT *) only clone columns
     // actually referenced by projections/WHERE/GROUP BY/ORDER BY.
@@ -765,6 +841,11 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         }
     }
 
+    // 4.6 QUALIFY — filter on window function results (like WHERE but post-window)
+    if let Some(qualify) = &stmt.qualify {
+        result = filter_block(result, qualify)?;
+    }
+
     // 5. Projection — done BEFORE ORDER BY so ORDER BY can reference SELECT aliases
     // (especially important when GROUP BY uses CASE expression aliases)
     let has_order = !stmt.order_by.is_empty();
@@ -777,7 +858,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         let col_raw = resolve_col_name(&item.col, "");
         let col = find_order_col_in_result(&col_raw, &result, &stmt.projections)
             .unwrap_or(col_raw);
-        result = sort_block(result, &col, item.desc)?;
+        result = sort_block_nulls(result, &col, item.desc, item.nulls_first)?;
     }
 
     // 7. LIMIT + OFFSET
@@ -1911,6 +1992,82 @@ fn eval_func(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> ExprVa
         "IIF" => {
             if eval_bool(&args[0], block, row) { arg(1) } else { arg(2) }
         }
+        // ── Missing string functions ─────────────────────────────────────────
+        "CHARINDEX" | "INSTR" | "LOCATE" | "POSITION_OF" => {
+            let needle = arg_str(0).unwrap_or_default();
+            let haystack = arg_str(1).unwrap_or_default();
+            let pos = haystack.find(&needle).map(|p| p as i64 + 1).unwrap_or(0);
+            ExprVal::Int(pos)
+        }
+        "INITCAP" | "PROPERCASE" => {
+            let s = arg_str(0).unwrap_or_default();
+            let result: String = s.split_whitespace()
+                .map(|w| {
+                    let mut c = w.chars();
+                    match c.next() {
+                        None => String::new(),
+                        Some(f) => f.to_uppercase().collect::<String>() + &c.as_str().to_lowercase(),
+                    }
+                })
+                .collect::<Vec<_>>().join(" ");
+            ExprVal::Str(result)
+        }
+        "SPACE" => {
+            let n = arg_f64(0).unwrap_or(0.0) as usize;
+            ExprVal::Str(" ".repeat(n))
+        }
+        "SPLIT_PART" => {
+            let s   = arg_str(0).unwrap_or_default();
+            let sep = arg_str(1).unwrap_or_else(|| ",".into());
+            let n   = arg_f64(2).unwrap_or(1.0) as usize;
+            ExprVal::Str(s.split(&*sep).nth(n.saturating_sub(1)).unwrap_or("").to_string())
+        }
+        "TRANSLATE" => {
+            let s    = arg_str(0).unwrap_or_default();
+            let from = arg_str(1).unwrap_or_default();
+            let to   = arg_str(2).unwrap_or_default();
+            let to_chars: Vec<char> = to.chars().collect();
+            let result: String = s.chars().map(|c| {
+                if let Some(i) = from.chars().position(|f| f == c) {
+                    to_chars.get(i).copied().unwrap_or('\0')
+                } else { c }
+            }).filter(|&c| c != '\0').collect();
+            ExprVal::Str(result)
+        }
+        "ASCII" | "ORD" => {
+            let s = arg_str(0).unwrap_or_default();
+            ExprVal::Int(s.chars().next().map(|c| c as i64).unwrap_or(0))
+        }
+        "CHR" | "CHAR" => {
+            let n = arg_f64(0).unwrap_or(0.0) as u32;
+            ExprVal::Str(char::from_u32(n).map(|c| c.to_string()).unwrap_or_default())
+        }
+        // ── Missing math functions ───────────────────────────────────────────
+        "SIGN" => match arg(0) {
+            ExprVal::Int(i)   => ExprVal::Int(i.signum()),
+            ExprVal::Float(f) => ExprVal::Float(f.signum()),
+            _ => ExprVal::Null,
+        },
+        "TRUNCATE" | "TRUNC" => {
+            let f  = need!(arg_f64(0));
+            let dp = arg_f64(1).unwrap_or(0.0) as u32;
+            let m  = 10f64.powi(dp as i32);
+            ExprVal::Float((f * m).trunc() / m)
+        }
+        "LOG2"  => arg_f64(0).map(|f| ExprVal::Float(f.log2())).unwrap_or(ExprVal::Null),
+        "LN"    => arg_f64(0).map(|f| ExprVal::Float(f.ln())).unwrap_or(ExprVal::Null),
+        "PI"    => ExprVal::Float(std::f64::consts::PI),
+        "RAND" | "RANDOM" => {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_nanos() as u64;
+            ExprVal::Float(((seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407) >> 33) as f64) / (u32::MAX as f64))
+        }
+        "CBRT"  => arg_f64(0).map(|f| ExprVal::Float(f.cbrt())).unwrap_or(ExprVal::Null),
+        "DEGREES" => arg_f64(0).map(|f| ExprVal::Float(f.to_degrees())).unwrap_or(ExprVal::Null),
+        "RADIANS" => arg_f64(0).map(|f| ExprVal::Float(f.to_radians())).unwrap_or(ExprVal::Null),
+        "SIN" => arg_f64(0).map(|f| ExprVal::Float(f.sin())).unwrap_or(ExprVal::Null),
+        "COS" => arg_f64(0).map(|f| ExprVal::Float(f.cos())).unwrap_or(ExprVal::Null),
+        "TAN" => arg_f64(0).map(|f| ExprVal::Float(f.tan())).unwrap_or(ExprVal::Null),
         // ── Date / Time functions ─────────────────────────────────────────────
         "YEAR" => { let d = date_to_int(&arg(0)); ExprVal::Int(d / 10000) }
         "MONTH" => { let d = date_to_int(&arg(0)); ExprVal::Int((d / 100) % 100) }
@@ -2154,19 +2311,22 @@ fn to_f64(v: &ExprVal) -> Option<f64> {
 // ─── Sort ─────────────────────────────────────────────────────────────────────
 
 fn sort_block(block: DataBlock, col: &str, desc: bool) -> Result<DataBlock, KoreError> {
-    // Use DataBlock::sort_by which uses a Schwartzian transform (cache-friendly,
-    // avoids calling get_cell() twice per comparison in the comparator).
-    let col_short  = col.rsplit('.').next().unwrap_or(col); // bare name e.g. "n_name"
-    let col_prefix = if col.contains('.') { col.split('.').next() } else { None }; // e.g. "n1"
+    sort_block_nulls(block, col, desc, None)
+}
+
+fn sort_block_nulls(block: DataBlock, col: &str, desc: bool, nulls_first: Option<bool>) -> Result<DataBlock, KoreError> {
+    // NULLS FIRST/LAST: default is NULLs last for ASC, NULLs first for DESC
+    let nf = nulls_first.unwrap_or(desc);
+
+    // Find the column name (handles qualified names)
+    let col_short  = col.rsplit('.').next().unwrap_or(col);
+    let col_prefix = if col.contains('.') { col.split('.').next() } else { None };
     let col_name = block.columns.iter()
         .find(|c| c.name == col || {
-            // exact suffix match: "table.col" → column ends with ".table.col"
             let cn = c.name.len(); let m = col.len();
             cn > m && c.name.as_bytes()[cn - m - 1] == b'.' && &c.name[cn - m..] == col
         })
         .or_else(|| {
-            // Qualified prefix match: "n1.n_name" matches "n1.nation.n_name"
-            // — starts with "n1." and ends with "n_name"
             if let Some(pfx) = col_prefix {
                 block.columns.iter().find(|c| {
                     let starts = c.name.starts_with(&format!("{pfx}."));
@@ -2176,7 +2336,6 @@ fn sort_block(block: DataBlock, col: &str, desc: bool) -> Result<DataBlock, Kore
             } else { None }
         })
         .or_else(|| {
-            // bare name match (unambiguous if only one column has this short name)
             let matches: Vec<_> = block.columns.iter()
                 .filter(|c| c.name.rsplit('.').next().unwrap_or(&c.name) == col_short)
                 .collect();
@@ -2185,8 +2344,35 @@ fn sort_block(block: DataBlock, col: &str, desc: bool) -> Result<DataBlock, Kore
         .map(|c| c.name.clone())
         .ok_or_else(|| KoreError::InvalidArgument(format!("ORDER BY column not found: {col}")))?;
 
-    // Spill-aware sort: if block is large, use ExternalSort to avoid OOM.
-    // Threshold: 256MB (32M cells × 8 bytes)
+    // If NULLS FIRST/LAST is non-default, do a custom sort with null sentinels
+    if nulls_first.is_some() {
+        // Build sort keys: (is_null, value) with null sentinel controlled by nf
+        let n = block.num_rows;
+        let col_data = block.columns.iter().find(|c| c.name == col_name).unwrap();
+        let mut indices: Vec<usize> = (0..n).collect();
+        let keys: Vec<(bool, f64)> = (0..n).map(|i| {
+            match &col_data.data {
+                ColumnData::Int64(v)   => match v.get(i).and_then(|x| *x) { Some(x) => (false, x as f64), None => (true, 0.0) },
+                ColumnData::Float64(v) => match v.get(i).and_then(|x| *x) { Some(x) => (false, x), None => (true, 0.0) },
+                ColumnData::Str(v)     => match v.get(i).and_then(|x| x.as_deref()) {
+                    Some(s) => (false, s.as_bytes().first().copied().unwrap_or(0) as f64),
+                    None    => (true, 0.0)
+                },
+                _ => (true, 0.0),
+            }
+        }).collect();
+        indices.sort_by(|&a, &b| {
+            let (an, av) = keys[a]; let (bn, bv) = keys[b];
+            match (an, bn) {
+                (true, false) => if nf { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater },
+                (false, true) => if nf { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Less },
+                _ => if desc { bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal) }
+                     else    { av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal) },
+            }
+        });
+        return Ok(block.select_rows(&indices));
+    }
+
     let estimated = kore_spill::SpillManager::estimate_bytes(&block);
     if estimated > 256 * 1024 * 1024 {
         let tmp = std::env::temp_dir().join("kore_sort");
@@ -2198,7 +2384,6 @@ fn sort_block(block: DataBlock, col: &str, desc: bool) -> Result<DataBlock, Kore
         return ext.sort(vec![block]);
     }
 
-    // In-memory sort for smaller blocks
     block.sort_by(&col_name, !desc)
 }
 
@@ -2933,6 +3118,8 @@ fn ast_to_win_fn(ast: &WindowFn) -> WinFn {
         WindowFn::RowNumber   => WinFn::RowNumber,
         WindowFn::Rank        => WinFn::Rank,
         WindowFn::DenseRank   => WinFn::DenseRank,
+        WindowFn::PercentRank => WinFn::PercentRank,
+        WindowFn::CumeDist    => WinFn::CumeDist,
         WindowFn::Ntile(n)    => WinFn::Ntile(match n.as_ref() { Expr::Int(i) => *i as usize, _ => 4 }),
         WindowFn::Lag  { expr, offset } => WinFn::Lag  { col: col_name_from_expr(expr), offset: match offset.as_ref() { Expr::Int(i) => *i as usize, _ => 1 } },
         WindowFn::Lead { expr, offset } => WinFn::Lead { col: col_name_from_expr(expr), offset: match offset.as_ref() { Expr::Int(i) => *i as usize, _ => 1 } },
