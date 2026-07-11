@@ -26,11 +26,12 @@ pub fn parse_query(sql: &str) -> Result<Query, KoreError> {
     // Main SELECT
     let body = Some(p.parse_select()?);
 
-    // UNION ALL / UNION
+    // UNION ALL / UNION / INTERSECT / EXCEPT
     let mut union_all = vec![];
-    while p.peek() == &Token::Union {
+    while matches!(p.peek(), Token::Union | Token::Intersect | Token::Except) {
         p.pos += 1;
         p.consume_if(&Token::All);   // UNION ALL or UNION (dedup not implemented)
+        p.consume_if(&Token::Distinct);
         union_all.push(p.parse_select()?);
     }
 
@@ -662,6 +663,18 @@ impl Parser {
                 } else {
                     Ok(Expr::Col(fname.to_lowercase()))
                 }
+            }
+            // EXTRACT(field FROM date) → FuncCall("EXTRACT", [field_str, date])
+            Token::Extract => {
+                self.expect(&Token::LParen)?;
+                // Field name: YEAR, MONTH, DAY, etc. (parsed as Ident or keyword)
+                let field = self.expect_alias()?;
+                // consume FROM keyword
+                if let Token::From = self.peek() { self.pos += 1; }
+                else if let Token::Ident(s) = self.peek() { if s.eq_ignore_ascii_case("FROM") { self.pos += 1; } }
+                let date_expr = self.parse_expr(0)?;
+                self.expect(&Token::RParen)?;
+                Ok(Expr::FuncCall { name: "EXTRACT".to_string(), args: vec![Expr::Str(field), date_expr] })
             }
             other => Err(KoreError::InvalidArgument(format!("unexpected token in expr: {:?}", other))),
         }

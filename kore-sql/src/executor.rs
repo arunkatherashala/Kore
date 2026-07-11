@@ -127,6 +127,9 @@ impl KqlContext {
         if upper.starts_with("COPY ") {
             return self.dml_copy_from(sql_trim);
         }
+        if upper.starts_with("MERGE ") || upper.starts_with("MERGE INTO") {
+            return self.dml_merge(sql_trim);
+        }
         Err(KoreError::InvalidArgument(format!("Unsupported DML: {}", &sql_trim[..40.min(sql_trim.len())])))
     }
 
@@ -457,6 +460,138 @@ impl KqlContext {
         names.sort();
         names.dedup();
         names
+    }
+
+    /// MERGE INTO target USING source ON cond
+    /// WHEN MATCHED THEN UPDATE SET col=val,...
+    /// WHEN NOT MATCHED THEN INSERT VALUES (v,...)
+    fn dml_merge(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
+        let upper = sql.to_uppercase();
+        // Parse target table name
+        let after_merge = sql[upper.find("INTO").map(|p| p + 4).unwrap_or(5)..].trim();
+        let (target_name, after_target) = if let Some(p) = after_merge.find(|c: char| c.is_whitespace()) {
+            (after_merge[..p].trim(), after_merge[p..].trim())
+        } else {
+            return Err(KoreError::InvalidArgument("MERGE: missing target table".into()));
+        };
+        let after_upper = after_target.to_uppercase();
+        // Parse USING source
+        let using_start = after_upper.find("USING").ok_or_else(|| KoreError::InvalidArgument("MERGE: missing USING".into()))?;
+        let after_using = after_target[using_start + 5..].trim();
+        let (source_name, after_source) = if let Some(p) = after_using.find(|c: char| c.is_whitespace()) {
+            (after_using[..p].trim(), after_using[p..].trim())
+        } else {
+            return Err(KoreError::InvalidArgument("MERGE: missing source table".into()));
+        };
+        let after_source_upper = after_source.to_uppercase();
+        let on_start = after_source_upper.find(" ON ").ok_or_else(|| KoreError::InvalidArgument("MERGE: missing ON".into()))?;
+        let after_on = after_source[on_start + 4..].trim();
+        // Split ON condition from WHEN clauses
+        let when_pos = after_on.to_uppercase().find("WHEN").unwrap_or(after_on.len());
+        let on_cond = after_on[..when_pos].trim();
+        let when_clauses = after_on[when_pos..].trim();
+
+        // Get source rows
+        let source = self.get(source_name)
+            .cloned()
+            .or_else(|| { let r = self.query(source_name).ok(); r })
+            .ok_or_else(|| KoreError::InvalidArgument(format!("MERGE: source table '{}' not found", source_name)))?;
+
+        // Parse WHEN MATCHED / WHEN NOT MATCHED clauses
+        let wc_upper = when_clauses.to_uppercase();
+        let has_update = wc_upper.contains("WHEN MATCHED THEN UPDATE");
+        let has_insert = wc_upper.contains("WHEN NOT MATCHED THEN INSERT");
+
+        // Extract UPDATE SET assignments
+        let update_pairs: Vec<(String, String)> = if has_update {
+            let set_pos = wc_upper.find("UPDATE SET").map(|p| p + 10).unwrap_or(0);
+            let set_str = when_clauses[set_pos..].trim();
+            let set_end = set_str.to_uppercase().find("WHEN").unwrap_or(set_str.len());
+            let set_part = set_str[..set_end].trim();
+            set_part.split(',').filter_map(|pair| {
+                let eq = pair.find('=')?;
+                let col = pair[..eq].trim().to_string();
+                let val = pair[eq + 1..].trim().to_string();
+                Some((col, val))
+            }).collect()
+        } else { vec![] };
+
+        // Extract INSERT VALUES (simplified: use source row values)
+        // Build: parse the ON condition as "<target_col> = <source_col>"
+        let (join_target_col, join_source_col) = {
+            let eq = on_cond.find('=').unwrap_or(on_cond.len());
+            let lhs = on_cond[..eq].trim().split('.').last().unwrap_or("").trim();
+            let rhs = on_cond[eq + 1..].trim().split('.').last().unwrap_or("").trim();
+            (lhs.to_string(), rhs.to_string())
+        };
+
+        let target = match self.mut_tables.get(target_name).cloned() {
+            Some(t) => t,
+            None => match self.tables.get(target_name).cloned() {
+                Some(t) => t,
+                None => return Err(KoreError::InvalidArgument(format!("MERGE: target table '{}' not found", target_name))),
+            },
+        };
+
+        let mut matched = 0usize;
+        let mut inserted = 0usize;
+        let nrows_target = target.num_rows;
+        let nrows_source = source.num_rows;
+
+        // Find join key column index in target and source
+        let target_key_idx = target.columns.iter().position(|c| c.name == join_target_col || c.name.ends_with(&format!(".{}", join_target_col)));
+        let source_key_idx = source.columns.iter().position(|c| c.name == join_source_col || c.name.ends_with(&format!(".{}", join_source_col)));
+
+        // Build set of matched target row indices
+        let mut matched_target_rows = std::collections::HashSet::new();
+        if let (Some(tki), Some(ski)) = (target_key_idx, source_key_idx) {
+            for si in 0..nrows_source {
+                let src_key = get_col_val(&source, ski, si);
+                for ti in 0..nrows_target {
+                    let tgt_key = get_col_val(&target, tki, ti);
+                    if expr_val_eq(&src_key, &tgt_key) {
+                        matched_target_rows.insert(ti);
+                        matched += 1;
+                        if has_update {
+                            // Apply UPDATE SET assignments
+                            let mut new_target = self.mut_tables.get(target_name).cloned().unwrap_or(target.clone());
+                            for (col, val_str) in &update_pairs {
+                                if let Some(col_idx) = new_target.columns.iter().position(|c| &c.name == col || c.name.ends_with(&format!(".{}", col))) {
+                                    let new_val = if let Ok(i) = val_str.parse::<i64>() { ExprVal::Int(i) }
+                                        else if let Ok(f) = val_str.parse::<f64>() { ExprVal::Float(f) }
+                                        else { ExprVal::Str(val_str.clone()) };
+                                    set_col_val(&mut new_target, col_idx, ti, new_val);
+                                }
+                            }
+                            self.mut_tables.insert(target_name.to_string(), new_target.clone());
+                            self.tables.insert(target_name.to_string(), new_target);
+                        }
+                    }
+                }
+            }
+        }
+
+        if has_insert {
+            // Insert source rows with no matching target row
+            for si in 0..nrows_source {
+                if let Some(ski) = source_key_idx {
+                    let src_key = get_col_val(&source, ski, si);
+                    let is_matched = (0..nrows_target).any(|ti| {
+                        target_key_idx.map(|tki| expr_val_eq(&get_col_val(&target, tki, ti), &src_key)).unwrap_or(false)
+                    });
+                    if !is_matched {
+                        // Insert source row into target
+                        let mut new_target = self.mut_tables.get(target_name).cloned().unwrap_or(target.clone());
+                        append_row(&mut new_target, &source, si);
+                        inserted += 1;
+                        self.mut_tables.insert(target_name.to_string(), new_target.clone());
+                        self.tables.insert(target_name.to_string(), new_target);
+                    }
+                }
+            }
+        }
+
+        Ok(("MERGE".into(), matched + inserted))
     }
 }
 
@@ -1634,6 +1769,98 @@ fn eval_func(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> ExprVa
             };
             if eq { ExprVal::Null } else { a }
         }
+        // ── Date / Time functions ─────────────────────────────────────────
+        // Dates stored as YYYYMMDD integers OR 'YYYY-MM-DD' strings
+        "YEAR" | "EXTRACT_YEAR" => {
+            let d = date_to_int(&arg(0));
+            ExprVal::Int((d / 10000) as i64)
+        }
+        "MONTH" | "EXTRACT_MONTH" => {
+            let d = date_to_int(&arg(0));
+            ExprVal::Int(((d / 100) % 100) as i64)
+        }
+        "DAY" | "EXTRACT_DAY" => {
+            let d = date_to_int(&arg(0));
+            ExprVal::Int((d % 100) as i64)
+        }
+        "DATE_TRUNC" => {
+            // DATE_TRUNC('year', date) or DATE_TRUNC('month', date)
+            let part = arg_str(0).unwrap_or_default().to_lowercase();
+            let d    = date_to_int(&arg(1));
+            let (y, m, _dy) = (d / 10000, (d / 100) % 100, d % 100);
+            let result = match part.as_str() {
+                "year"    => format!("{:04}-01-01", y),
+                "month"   => format!("{:04}-{:02}-01", y, m),
+                "quarter" => format!("{:04}-{:02}-01", y, ((m - 1) / 3) * 3 + 1),
+                _         => arg_str(1).unwrap_or_default(),
+            };
+            ExprVal::Str(result)
+        }
+        "EXTRACT" => {
+            // EXTRACT(year FROM date) — parser passes as FuncCall with args [field, date]
+            let field = arg_str(0).unwrap_or_default().to_lowercase();
+            let d     = date_to_int(&arg(1));
+            let (y, m, dy) = (d / 10000, (d / 100) % 100, d % 100);
+            let v = match field.as_str() {
+                "year"    => y as i64,
+                "month"   => m as i64,
+                "day"     => dy as i64,
+                "quarter" => (((m as i64 - 1) / 3) + 1),
+                _         => 0,
+            };
+            ExprVal::Int(v)
+        }
+        "DATEADD" | "DATE_ADD" => {
+            // DATEADD('day', n, date) or DATE_ADD(date, n, 'day')
+            let part   = arg_str(0).unwrap_or("day".into()).to_lowercase();
+            let n      = arg_f64(1).unwrap_or(0.0) as i64;
+            let d      = date_to_int(&arg(2));
+            let result = date_add_days(d, match part.as_str() { "year" => n * 365, "month" => n * 30, _ => n });
+            ExprVal::Str(result)
+        }
+        "DATEDIFF" | "DATE_DIFF" => {
+            // DATEDIFF('day', start, end)
+            let d1 = date_to_int(&arg(1));
+            let d2 = date_to_int(&arg(2));
+            let diff = date_to_julian(d2) - date_to_julian(d1);
+            ExprVal::Int(diff)
+        }
+        "NOW" | "CURRENT_TIMESTAMP" | "CURRENT_DATE" => {
+            ExprVal::Str(executor_date_now())
+        }
+        "TO_DATE" | "DATE" => {
+            // TO_DATE(str, format) — just return the string as-is for now
+            arg(0)
+        }
+        "STRFTIME" | "FORMAT_DATE" => {
+            // STRFTIME('%Y', date) — return year as string
+            let fmt = arg_str(0).unwrap_or_default();
+            let d   = date_to_int(&arg(1));
+            let (y, m, dy) = (d / 10000, (d / 100) % 100, d % 100);
+            let result = fmt
+                .replace("%Y", &format!("{:04}", y))
+                .replace("%m", &format!("{:02}", m))
+                .replace("%d", &format!("{:02}", dy));
+            ExprVal::Str(result)
+        }
+        // ── Conditional / NULL handling (already implemented above, aliases) ─
+        "IF" => {
+            if eval_bool(&args[0], block, row) { arg(1) } else { arg(2) }
+        }
+        "GREATEST" => {
+            args.iter().map(|a| eval_expr(a, block, row)).max_by(|a, b| {
+                let af = to_f64(a).unwrap_or(f64::MIN);
+                let bf = to_f64(b).unwrap_or(f64::MIN);
+                af.partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Equal)
+            }).unwrap_or(ExprVal::Null)
+        }
+        "LEAST" => {
+            args.iter().map(|a| eval_expr(a, block, row)).min_by(|a, b| {
+                let af = to_f64(a).unwrap_or(f64::MAX);
+                let bf = to_f64(b).unwrap_or(f64::MAX);
+                af.partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Equal)
+            }).unwrap_or(ExprVal::Null)
+        }
         // ── Cast ────────────────────────────────────────────────────────────
         "CAST" => {
             let val = arg(0);
@@ -1675,9 +1902,167 @@ fn eval_func(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> ExprVa
         "IIF" => {
             if eval_bool(&args[0], block, row) { arg(1) } else { arg(2) }
         }
+        // ── Date / Time functions ─────────────────────────────────────────────
+        "YEAR" => { let d = date_to_int(&arg(0)); ExprVal::Int(d / 10000) }
+        "MONTH" => { let d = date_to_int(&arg(0)); ExprVal::Int((d / 100) % 100) }
+        "DAY" => { let d = date_to_int(&arg(0)); ExprVal::Int(d % 100) }
+        "QUARTER" => { let d = date_to_int(&arg(0)); ExprVal::Int(((d / 100 % 100 - 1) / 3) + 1) }
+        "DATE_TRUNC" => {
+            let part = arg_str(0).unwrap_or_default().to_lowercase();
+            let d = date_to_int(&arg(1));
+            let (y, m) = (d / 10000, (d / 100) % 100);
+            let r = match part.as_str() {
+                "year"    => format!("{:04}-01-01", y),
+                "month"   => format!("{:04}-{:02}-01", y, m),
+                "quarter" => format!("{:04}-{:02}-01", y, ((m - 1) / 3) * 3 + 1),
+                _         => arg_str(1).unwrap_or_default(),
+            };
+            ExprVal::Str(r)
+        }
+        "EXTRACT" => {
+            let field = arg_str(0).unwrap_or_default().to_lowercase();
+            let d = date_to_int(&arg(1));
+            let v = match field.as_str() {
+                "year" => d / 10000, "month" => (d / 100) % 100, "day" => d % 100,
+                "quarter" => ((d / 100 % 100 - 1) / 3) + 1, _ => 0,
+            };
+            ExprVal::Int(v)
+        }
+        "DATEADD" | "DATE_ADD" => {
+            let part = arg_str(0).unwrap_or(String::from("day")).to_lowercase();
+            let n = arg_f64(1).unwrap_or(0.0) as i64;
+            let d = date_to_int(&arg(2));
+            let days = match part.as_str() { "year" => n * 365, "month" => n * 30, _ => n };
+            ExprVal::Str(date_add_days(d, days))
+        }
+        "DATEDIFF" | "DATE_DIFF" => {
+            let d1 = date_to_int(&arg(1));
+            let d2 = date_to_int(&arg(2));
+            ExprVal::Int(date_to_julian(d2) - date_to_julian(d1))
+        }
+        "NOW" | "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "TODAY" => {
+            ExprVal::Str(executor_date_now())
+        }
+        "TO_DATE" | "DATE" => arg(0),
+        "STRFTIME" | "FORMAT_DATE" => {
+            let fmt = arg_str(0).unwrap_or_default();
+            let d = date_to_int(&arg(1));
+            let (y, m, dy) = (d / 10000, (d / 100) % 100, d % 100);
+            ExprVal::Str(fmt.replace("%Y", &format!("{:04}", y))
+                           .replace("%m", &format!("{:02}", m))
+                           .replace("%d", &format!("{:02}", dy)))
+        }
+        // ── Greatest / Least ─────────────────────────────────────────────────
+        "GREATEST" => {
+            args.iter().map(|a| eval_expr(a, block, row))
+                .max_by(|a, b| to_f64(a).unwrap_or(f64::MIN).partial_cmp(&to_f64(b).unwrap_or(f64::MIN)).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or(ExprVal::Null)
+        }
+        "LEAST" => {
+            args.iter().map(|a| eval_expr(a, block, row))
+                .min_by(|a, b| to_f64(a).unwrap_or(f64::MAX).partial_cmp(&to_f64(b).unwrap_or(f64::MAX)).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or(ExprVal::Null)
+        }
         // ── Fallthrough ─────────────────────────────────────────────────────
         _ => ExprVal::Null,
     }
+}
+
+// ─── Date helpers ─────────────────────────────────────────────────────────────
+
+fn date_to_int(v: &ExprVal) -> i64 {
+    match v {
+        ExprVal::Int(i) => *i,
+        ExprVal::Float(f) => *f as i64,
+        ExprVal::Str(s) => {
+            let s = s.trim();
+            if s.len() >= 10 && s.as_bytes().get(4) == Some(&b'-') {
+                let y: i64 = s[0..4].parse().unwrap_or(0);
+                let m: i64 = s[5..7].parse().unwrap_or(0);
+                let d: i64 = s[8..10].parse().unwrap_or(0);
+                y * 10000 + m * 100 + d
+            } else { s.parse().unwrap_or(0) }
+        }
+        _ => 0,
+    }
+}
+
+fn date_add_days(d: i64, days: i64) -> String {
+    let julian = date_to_julian(d) + days;
+    julian_to_date_str(julian)
+}
+
+fn date_to_julian(d: i64) -> i64 {
+    let y = d / 10000; let m = (d / 100) % 100; let dy = d % 100;
+    let a = (14 - m) / 12; let yr = y + 4800 - a; let mo = m + 12 * a - 3;
+    dy + (153 * mo + 2) / 5 + 365 * yr + yr / 4 - yr / 100 + yr / 400 - 32045
+}
+
+fn julian_to_date_str(j: i64) -> String {
+    let a = j + 32044; let b = (4 * a + 3) / 146097; let c = a - 146097 * b / 4;
+    let d = (4 * c + 3) / 1461; let e = c - 1461 * d / 4; let m = (5 * e + 2) / 153;
+    let day   = e - (153 * m + 2) / 5 + 1;
+    let month = m + 3 - 12 * (m / 10);
+    let year  = 100 * b + d - 4800 + m / 10;
+    format!("{:04}-{:02}-{:02}", year, month, day)
+}
+
+fn executor_date_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    julian_to_date_str(2440588 + (secs / 86400) as i64)
+}
+
+// ─── MERGE helpers ─────────────────────────────────────────────────────────────
+
+fn expr_val_eq(a: &ExprVal, b: &ExprVal) -> bool {
+    match (a, b) {
+        (ExprVal::Int(x),   ExprVal::Int(y))   => x == y,
+        (ExprVal::Float(x), ExprVal::Float(y)) => x == y,
+        (ExprVal::Str(x),   ExprVal::Str(y))   => x == y,
+        (ExprVal::Int(x),   ExprVal::Float(y)) => (*x as f64) == *y,
+        (ExprVal::Float(x), ExprVal::Int(y))   => *x == (*y as f64),
+        _ => false,
+    }
+}
+
+fn get_col_val(block: &DataBlock, col_idx: usize, row: usize) -> ExprVal {
+    match block.columns.get(col_idx).map(|c| &c.data) {
+        Some(ColumnData::Int64(v))   => v.get(row).and_then(|x| x.as_ref()).map(|&i| ExprVal::Int(i)).unwrap_or(ExprVal::Null),
+        Some(ColumnData::Float64(v)) => v.get(row).and_then(|x| x.as_ref()).map(|&f| ExprVal::Float(f)).unwrap_or(ExprVal::Null),
+        Some(ColumnData::Str(v))     => v.get(row).and_then(|x| x.as_ref()).map(|s| ExprVal::Str(s.clone())).unwrap_or(ExprVal::Null),
+        _ => ExprVal::Null,
+    }
+}
+
+fn set_col_val(block: &mut DataBlock, col_idx: usize, row: usize, val: ExprVal) {
+    if let Some(col) = block.columns.get_mut(col_idx) {
+        match (&mut col.data, val) {
+            (ColumnData::Int64(v), ExprVal::Int(i))     => { if let Some(x) = v.get_mut(row) { *x = Some(i); } }
+            (ColumnData::Float64(v), ExprVal::Float(f)) => { if let Some(x) = v.get_mut(row) { *x = Some(f); } }
+            (ColumnData::Str(v), ExprVal::Str(s))       => { if let Some(x) = v.get_mut(row) { *x = Some(s); } }
+            _ => {} // Bool, StrDict, cross-type: no-op
+        }
+    }
+}
+
+fn append_row(target: &mut DataBlock, source: &DataBlock, src_row: usize) {
+    for tc in target.columns.iter_mut() {
+        let src_val = source.columns.iter().find(|sc| sc.name == tc.name)
+            .map(|sc| get_col_val(source, source.columns.iter().position(|x| x.name == sc.name).unwrap_or(0), src_row))
+            .unwrap_or(ExprVal::Null);
+        match (&mut tc.data, src_val) {
+            (ColumnData::Int64(v), ExprVal::Int(i))     => v.push(Some(i)),
+            (ColumnData::Float64(v), ExprVal::Float(f)) => v.push(Some(f)),
+            (ColumnData::Str(v), ExprVal::Str(s))       => v.push(Some(s)),
+            (ColumnData::Int64(v), _)                   => v.push(None),
+            (ColumnData::Float64(v), _)                 => v.push(None),
+            (ColumnData::Str(v), _)                     => v.push(None),
+            (ColumnData::Bool(v), _)                    => v.push(None),
+            (ColumnData::StrDict { codes, .. }, _)      => codes.push(0),
+        }
+    }
+    target.num_rows += 1;
 }
 
 fn get_cell(block: &DataBlock, col_name: &str, row: usize) -> ExprVal {    // Try exact match, then suffix match (for qualified names)
