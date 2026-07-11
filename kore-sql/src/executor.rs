@@ -780,7 +780,16 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         result = sort_block(result, &col, item.desc)?;
     }
 
-    // 7. LIMIT
+    // 7. LIMIT + OFFSET
+    if let Some(off) = stmt.offset {
+        let off = off as usize;
+        if off >= result.num_rows {
+            result = DataBlock::empty();
+        } else {
+            let rows: Vec<usize> = (off..result.num_rows).collect();
+            result = result.select_rows(&rows);
+        }
+    }
     if let Some(n) = stmt.limit {
         result = limit_block(result, n as usize);
     }
@@ -2530,7 +2539,59 @@ fn global_agg(block: DataBlock, projections: &[Projection]) -> Result<DataBlock,
                 AggFunc::Avg => if vals.is_empty() { None } else { Some(vals.iter().sum::<f64>() / vals.len() as f64) },
                 AggFunc::Min => vals.iter().copied().reduce(f64::min),
                 AggFunc::Max => vals.iter().copied().reduce(f64::max),
+                AggFunc::Stddev => {
+                    if vals.len() < 2 { None } else {
+                        let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                        let var = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (vals.len() - 1) as f64;
+                        Some(var.sqrt())
+                    }
+                }
+                AggFunc::Variance => {
+                    if vals.len() < 2 { None } else {
+                        let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                        Some(vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (vals.len() - 1) as f64)
+                    }
+                }
+                AggFunc::Median => {
+                    if vals.is_empty() { None } else {
+                        let mut s = vals.clone(); s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        let m = s.len() / 2;
+                        if s.len() % 2 == 0 { Some((s[m-1] + s[m]) / 2.0) } else { Some(s[m]) }
+                    }
+                }
+                AggFunc::Percentile { p } => {
+                    let pct: f64 = p.parse().unwrap_or(0.5);
+                    if vals.is_empty() { None } else {
+                        let mut s = vals.clone(); s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        let idx = ((s.len() - 1) as f64 * pct) as usize;
+                        Some(s[idx.min(s.len()-1)])
+                    }
+                }
+                AggFunc::StringAgg { sep } => {
+                    // StringAgg returns a string — handled separately below via str_agg_vals
+                    let _ = sep; None
+                }
             };
+            // Handle StringAgg as a Str column
+            if let AggFunc::StringAgg { sep } = func {
+                let strs: Vec<String> = if is_direct {
+                    agg_col.map(|c| match &c.data {
+                        ColumnData::Str(v) => v.iter().filter_map(|x| x.clone()).collect(),
+                        _ => vec![],
+                    }).unwrap_or_default()
+                } else {
+                    (0..block.num_rows).filter_map(|r| match eval_expr(inner, &block, r) {
+                        ExprVal::Str(s) => Some(s),
+                        ExprVal::Int(i) => Some(i.to_string()),
+                        ExprVal::Float(f) => Some(f.to_string()),
+                        _ => None,
+                    }).collect()
+                };
+                let agg_str = strs.join(sep);
+                let name = alias.clone().unwrap_or_else(|| format!("string_agg({})", col_name));
+                new_cols.push(Column { name, data: ColumnData::Str(vec![Some(agg_str)]) });
+                continue;
+            }
             let name = alias.clone().unwrap_or_else(|| format!("{:?}({})", func, col_name));
             new_cols.push(Column { name, data: ColumnData::Float64(vec![v]) });
         }
@@ -2709,8 +2770,59 @@ fn group_by_agg(
                                 AggFunc::Avg   => if vals.is_empty() { None } else { Some(vals.iter().sum::<f64>() / vals.len() as f64) },
                                 AggFunc::Min   => vals.iter().copied().reduce(f64::min),
                                 AggFunc::Max   => vals.iter().copied().reduce(f64::max),
+                                AggFunc::Stddev => {
+                                    if vals.len() < 2 { None } else {
+                                        let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                                        let var = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (vals.len() - 1) as f64;
+                                        Some(var.sqrt())
+                                    }
+                                }
+                                AggFunc::Variance => {
+                                    if vals.len() < 2 { None } else {
+                                        let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                                        Some(vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (vals.len() - 1) as f64)
+                                    }
+                                }
+                                AggFunc::Median => {
+                                    if vals.is_empty() { None } else {
+                                        let mut s = vals.clone(); s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                                        let m = s.len() / 2;
+                                        if s.len() % 2 == 0 { Some((s[m-1] + s[m]) / 2.0) } else { Some(s[m]) }
+                                    }
+                                }
+                                AggFunc::Percentile { p } => {
+                                    let pct: f64 = p.parse().unwrap_or(0.5);
+                                    if vals.is_empty() { None } else {
+                                        let mut s = vals.clone(); s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                                        let idx = ((s.len() - 1) as f64 * pct) as usize;
+                                        Some(s[idx.min(s.len()-1)])
+                                    }
+                                }
+                                AggFunc::StringAgg { .. } => None, // handled below as Str column
                             };
                             agg_vals.push(v);
+                        }
+                        // StringAgg — build a Str column
+                        if let AggFunc::StringAgg { sep } = func {
+                            let mut str_agg_vals: Vec<Option<String>> = Vec::new();
+                            for (_, idxs) in &groups {
+                                let strs: Vec<String> = if is_direct {
+                                    agg_col.map(|c| match &c.data {
+                                        ColumnData::Str(v) => idxs.iter().filter_map(|&r| v.get(r).and_then(|x| x.clone())).collect(),
+                                        _ => vec![],
+                                    }).unwrap_or_default()
+                                } else {
+                                    idxs.iter().filter_map(|&r| match eval_expr(inner, &block, r) {
+                                        ExprVal::Str(s) => Some(s),
+                                        ExprVal::Int(i) => Some(i.to_string()),
+                                        _ => None,
+                                    }).collect()
+                                };
+                                str_agg_vals.push(Some(strs.join(sep)));
+                            }
+                            let name = alias.clone().unwrap_or_else(|| format!("string_agg({})", col_name));
+                            new_cols.push(Column { name, data: ColumnData::Str(str_agg_vals) });
+                            continue;
                         }
                         let name = alias.clone().unwrap_or_else(|| format!("{:?}({})", func, col_name));
                         new_cols.push(Column {
@@ -2830,6 +2942,10 @@ fn ast_to_win_fn(ast: &WindowFn) -> WinFn {
             AggFunc::Count | AggFunc::CountDistinct => WinFn::Count(col_name_from_expr(expr)),
             AggFunc::Min   => WinFn::Min  (col_name_from_expr(expr)),
             AggFunc::Max   => WinFn::Max  (col_name_from_expr(expr)),
+            // New agg funcs fall back to Sum window for now
+            AggFunc::Stddev | AggFunc::Variance | AggFunc::Median |
+            AggFunc::StringAgg { .. } | AggFunc::Percentile { .. }
+                           => WinFn::Sum  (col_name_from_expr(expr)),
         },
         WindowFn::CumSum(e)    => WinFn::CumSum    (col_name_from_expr(e)),
         WindowFn::FirstValue(e) => WinFn::FirstValue(col_name_from_expr(e)),

@@ -45,7 +45,12 @@ pub enum BinOpKind {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum AggFunc { Count, CountDistinct, Sum, Avg, Min, Max }
+pub enum AggFunc {
+    Count, CountDistinct, Sum, Avg, Min, Max,
+    Stddev, Variance, Median,
+    StringAgg { sep: String },
+    Percentile { p: String },   // p stored as string "0.5" etc.
+}
 
 // ── Window function types ─────────────────────────────────────────────────────
 
@@ -102,6 +107,7 @@ pub struct SelectStmt {
     pub having:       Option<Expr>,
     pub order_by:     Vec<OrderByItem>,
     pub limit:        Option<u64>,
+    pub offset:       Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -52,6 +52,13 @@ impl Parser {
     fn peek2(&self) -> &Token {
         self.tokens.get(self.pos + 1).unwrap_or(&Token::Eof)
     }
+    /// Returns the uppercase string if the next token is an Ident, else "".
+    fn peek_ident_upper(&self) -> String {
+        match self.tokens.get(self.pos) {
+            Some(Token::Ident(s)) => s.to_ascii_uppercase(),
+            _ => String::new(),
+        }
+    }
     fn advance(&mut self) -> Token {
         let t = self.tokens[self.pos].clone();
         self.pos += 1;
@@ -177,12 +184,34 @@ impl Parser {
                 Token::Int(n) => Some(n as u64),
                 other => return Err(KoreError::InvalidArgument(format!("LIMIT expects integer, got {:?}", other))),
             }
+        } else if self.peek_ident_upper() == "FETCH" {
+            // FETCH FIRST n ROWS ONLY
+            self.pos += 1; // consume FETCH
+            self.pos += 1; // consume FIRST (or NEXT)
+            let n = match self.advance() { Token::Int(n) => n as u64, _ => 1 };
+            // consume ROWS ONLY
+            while !matches!(self.peek(), Token::Eof) {
+                if self.peek_ident_upper() == "ONLY" { self.pos += 1; break; }
+                self.pos += 1;
+            }
+            Some(n)
+        } else {
+            None
+        };
+
+        // OFFSET n ROWS
+        let offset = if self.peek_ident_upper() == "OFFSET" {
+            self.pos += 1;
+            let n = match self.advance() { Token::Int(n) => n as u64, _ => 0 };
+            // skip optional ROWS
+            if self.peek_ident_upper() == "ROWS" { self.pos += 1; }
+            Some(n)
         } else {
             None
         };
 
         Ok(SelectStmt { distinct, projections, from, joins, where_clause,
-                         group_by, having, order_by, limit })
+                         group_by, having, order_by, limit, offset })
     }
 
     // ── Window spec helpers ────────────────────────────────────────────────
@@ -608,6 +637,47 @@ impl Parser {
                 let inner = self.parse_expr(0)?;
                 self.expect(&Token::RParen)?;
                 self.maybe_window(Expr::Agg { func: AggFunc::Max, expr: Box::new(inner) }, AggFunc::Max)
+            }
+            // ── Extended aggregate functions ──────────────────────────────────────
+            Token::Ident(ref name) if matches!(name.to_ascii_uppercase().as_str(),
+                "STDDEV" | "STDEV" | "STDDEV_POP" | "STDDEV_SAMP" | "STD" |
+                "VARIANCE" | "VAR_POP" | "VAR_SAMP" |
+                "MEDIAN" | "STRING_AGG" | "GROUP_CONCAT" | "LISTAGG" |
+                "PERCENTILE_CONT" | "PERCENTILE_DISC"
+            ) => {
+                let fname = name.to_ascii_uppercase();
+                // token already consumed by parse_primary's advance()
+                if self.peek() != &Token::LParen {
+                    return Ok(Expr::Col(fname.to_lowercase()));
+                }
+                self.expect(&Token::LParen)?;
+                let inner = self.parse_expr(0)?;
+                let func = match fname.as_str() {
+                    "STDDEV" | "STDEV" | "STDDEV_SAMP" | "STDDEV_POP" | "STD" => AggFunc::Stddev,
+                    "VARIANCE" | "VAR_POP" | "VAR_SAMP" => AggFunc::Variance,
+                    "MEDIAN" => AggFunc::Median,
+                    "STRING_AGG" | "LISTAGG" | "GROUP_CONCAT" => {
+                        let sep = if self.consume_if(&Token::Comma) {
+                            match self.advance() { Token::Str(s) => s, _ => ",".to_string() }
+                        } else { ",".to_string() };
+                        AggFunc::StringAgg { sep }
+                    }
+                    "PERCENTILE_CONT" | "PERCENTILE_DISC" => {
+                        let p_str = match &inner { Expr::Float(f) => format!("{}", f), Expr::Int(i) => format!("{}", i), _ => "0.5".to_string() };
+                        self.expect(&Token::RParen)?;
+                        if self.peek_ident_upper() == "WITHIN" { self.pos += 1; }
+                        if self.peek_ident_upper() == "GROUP"  { self.pos += 1; }
+                        if self.peek() == &Token::LParen { self.pos += 1; }
+                        if self.peek_ident_upper() == "ORDER"  { self.pos += 1; }
+                        if let Token::Ident(s) = self.peek().clone() { if s.eq_ignore_ascii_case("BY") { self.pos += 1; } }
+                        let order_col = self.parse_expr(0)?;
+                        if self.peek() == &Token::RParen { self.pos += 1; }
+                        return Ok(Expr::Agg { func: AggFunc::Percentile { p: p_str }, expr: Box::new(order_col) });
+                    }
+                    _ => AggFunc::Avg,
+                };
+                self.expect(&Token::RParen)?;
+                Ok(Expr::Agg { func, expr: Box::new(inner) })
             }
             // Identifier: plain column OR window function name
             Token::Ident(name) => {

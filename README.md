@@ -88,7 +88,7 @@ Key SQL engine capabilities proven by TPC-H:
 
 ---
 
-## SQL Feature Coverage (26/26)
+## SQL Feature Coverage (30/30)
 
 | Feature | KORE | DuckDB | Spark |
 |---|---|---|---|
@@ -97,7 +97,7 @@ Key SQL engine capabilities proven by TPC-H:
 | GROUP BY ROLLUP / CUBE | ✅ | ✅ | ✅ |
 | GROUP BY expression aliases (CASE WHEN) | ✅ | ✅ | ✅ |
 | SELECT DISTINCT | ✅ | ✅ | ✅ |
-| ORDER BY + LIMIT | ✅ | ✅ | ✅ |
+| ORDER BY + LIMIT + **OFFSET** + **FETCH FIRST n ROWS** | ✅ | ✅ | ✅ |
 | INNER / LEFT / FULL OUTER JOIN | ✅ | ✅ | ✅ |
 | CTE (WITH clause) | ✅ | ✅ | ✅ |
 | ROW_NUMBER / LAG / LEAD / NTILE OVER (PARTITION BY) | ✅ | ✅ | ✅ |
@@ -110,14 +110,18 @@ Key SQL engine capabilities proven by TPC-H:
 | Date functions: YEAR/MONTH/DAY/DATE_TRUNC/EXTRACT | ✅ | ✅ | ✅ |
 | Date functions: DATEADD/DATEDIFF/NOW/STRFTIME | ✅ | ✅ | — |
 | GREATEST / LEAST / IIF / ISNUMERIC | ✅ | ✅ | — |
+| **STDDEV / VARIANCE** (sample) | ✅ | ✅ | ✅ |
+| **MEDIAN** | ✅ | ✅ | ✅ |
+| **PERCENTILE_CONT / PERCENTILE_DISC** WITHIN GROUP | ✅ | ✅ | ✅ |
+| **STRING_AGG / GROUP_CONCAT / LISTAGG** | ✅ | ✅ | ✅ |
 | DML: INSERT / UPDATE / DELETE | ✅ | ✅ | ✅ |
 | DML: CREATE TABLE AS SELECT | ✅ | ✅ | ✅ |
 | DML: MERGE INTO ... USING ... ON (UPSERT) | ✅ | ✅ | ✅ |
 | **COPY FROM** CSV / Parquet / .kore | ✅ | ✅ | ✅ |
 | ACID transactions (Delta log) | ✅ | — | — |
 | Native .kore persistence | ✅ | — | — |
-| TCP distributed cluster | ✅ | — | — |
-| 37 MCP AI tools (kore-self) | ✅ | — | — |
+| TCP distributed cluster (Coordinator + Workers) | ✅ | — | — |
+| 37 MCP AI tools (kore-self) + Digital Life | ✅ | — | — |
 
 ---
 
