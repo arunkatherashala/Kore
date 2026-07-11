@@ -123,7 +123,7 @@ Key SQL engine capabilities proven by TPC-H:
 | ACID transactions (Delta log) | ✅ | — | — |
 | Native .kore persistence | ✅ | — | — |
 | TCP distributed cluster (Coordinator + Workers) | ✅ | — | — |
-| 37 MCP AI tools (kore-self) + Digital Life | ✅ | — | — |
+| **47 MCP AI tools** (kore-self) + Digital Life | ✅ | — | — |
 
 ---
 
@@ -269,12 +269,13 @@ KORE ships `kore-self` — a Digital Life entity with an autonomous heartbeat:
 
 | Category | Tools |
 |---|---|
-| SQL | `self_query`, `self_dml` (COPY FROM, CREATE, INSERT, UPDATE, DELETE) |
+| SQL | `self_query`, `self_dml` (COPY FROM, CREATE, INSERT, UPDATE, DELETE, MERGE) |
+| Introspection | `self_tables`, `self_describe`, `self_metrics`, `self_version` |
 | Persistence | `self_save`, `self_load`, `self_delta_save`, `self_delta_history` |
 | Digital Life | `self_needs`, `self_becoming`, `self_temporal`, `self_species`, `self_story` |
 | AI | `self_chat`, `self_brief`, `self_remind`, `self_goals`, `self_evolve` |
 | Distributed | `self_distributed_query`, `self_broadcast`, `self_context_sync` |
-| Meta | `self_push` (GitHub sync), `self_heartbeat` |
+| Meta | `self_push` (GitHub sync), `self_heartbeat`, `self_version` |
 
 ```json
 {

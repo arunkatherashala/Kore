@@ -1407,6 +1407,125 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             json!({ "content": [{ "type": "text", "text": result }] })
         }
 
+        // ── SQL introspection ─────────────────────────────────────────────
+        "self_tables" => {
+            use kore_core::ColumnData;
+            let mut tables: Vec<serde_json::Value> = Vec::new();
+            // Always include memories
+            tables.push(json!({
+                "name": "memories",
+                "rows": me.memories.len(),
+                "columns": ["id","kind","content","importance","timestamp","tags"],
+                "note": "Built-in. Query with: SELECT * FROM memories LIMIT 10"
+            }));
+            // DML tables loaded this session
+            for (name, block) in &me.dml_tables {
+                let cols: Vec<String> = block.columns.iter().map(|c| {
+                    let typ = match &c.data {
+                        ColumnData::Int64(_)   => "BIGINT",
+                        ColumnData::Float64(_) => "DOUBLE",
+                        ColumnData::Str(_)     => "VARCHAR",
+                        ColumnData::Bool(_)    => "BOOLEAN",
+                        ColumnData::StrDict{..}=> "VARCHAR",
+                    };
+                    format!("{} {}", c.name, typ)
+                }).collect();
+                tables.push(json!({ "name": name, "rows": block.num_rows, "columns": cols }));
+            }
+            json!({ "content": [{ "type": "text", "text": json!({
+                "session_tables": tables,
+                "total": tables.len(),
+                "tip": "Use self_describe({table:'name'}) to see full schema, or DESCRIBE name via self_query"
+            }).to_string() }]})
+        }
+
+        "self_describe" => {
+            use kore_core::ColumnData;
+            let table = args["table"].as_str().unwrap_or("memories").trim();
+            let block = if table == "memories" {
+                Some(kore_query::memories_to_block(&me.memories))
+            } else {
+                me.dml_tables.get(table).cloned()
+            };
+            match block {
+                None => json!({ "content": [{ "type": "text", "text":
+                    format!("Table '{}' not found. Available: memories, {}",
+                        table, me.dml_tables.keys().cloned().collect::<Vec<_>>().join(", "))
+                }], "isError": true }),
+                Some(b) => {
+                    let schema: Vec<serde_json::Value> = b.columns.iter().map(|c| {
+                        let typ = match &c.data {
+                            ColumnData::Int64(_)   => "BIGINT",
+                            ColumnData::Float64(_) => "DOUBLE",
+                            ColumnData::Str(_)     => "VARCHAR",
+                            ColumnData::Bool(_)    => "BOOLEAN",
+                            ColumnData::StrDict{..}=> "VARCHAR(dict)",
+                        };
+                        // Sample first non-null value
+                        let sample = match &c.data {
+                            ColumnData::Int64(v)   => v.iter().flatten().next().map(|x| x.to_string()),
+                            ColumnData::Float64(v) => v.iter().flatten().next().map(|x| format!("{x:.4}")),
+                            ColumnData::Str(v)     => v.iter().flatten().next().map(|s| s.chars().take(40).collect()),
+                            _ => None,
+                        }.unwrap_or_else(|| "NULL".to_string());
+                        json!({ "column": c.name, "type": typ, "sample": sample })
+                    }).collect();
+                    json!({ "content": [{ "type": "text", "text": json!({
+                        "table": table,
+                        "rows": b.num_rows,
+                        "columns": b.columns.len(),
+                        "schema": schema,
+                        "example_queries": [
+                            format!("SELECT * FROM {} LIMIT 5", table),
+                            format!("SELECT COUNT(*) FROM {}", table),
+                        ]
+                    }).to_string() }]})
+                }
+            }
+        }
+
+        "self_metrics" => {
+            let mem_count  = me.memories.len();
+            let tbl_count  = me.dml_tables.len() + 1; // +1 for memories
+            let total_rows: usize = me.dml_tables.values().map(|b| b.num_rows).sum::<usize>() + mem_count;
+            let total_cols: usize = me.dml_tables.values().map(|b| b.columns.len()).sum::<usize>() + 6;
+            let cycles     = me.consciousness.cycle;
+            let stage      = me.becoming.lifecycle_stage.name();
+            let (need, nv) = me.needs.most_urgent();
+            json!({ "content": [{ "type": "text", "text": json!({
+                "engine":          "KORE SQL",
+                "version":         "2026.07 — 75 crates — Pure Rust",
+                "session_tables":  tbl_count,
+                "total_rows_loaded": total_rows,
+                "total_columns":   total_cols,
+                "memories":        mem_count,
+                "consciousness_cycles": cycles,
+                "lifecycle_stage": stage,
+                "most_urgent_need": format!("{} ({:.0}%)", need, nv * 100.0),
+                "tools_available": 47,
+                "sql_features":    "30/30 — TPC-H 15/15 — Spark 17/17 wins",
+                "capabilities":    ["SELECT/GROUP BY/JOIN/WINDOW/CTE/SUBQUERY","ROLLUP/CUBE","INTERSECT/EXCEPT","MERGE/UPSERT","COPY FROM CSV/Parquet/.kore","ACID Delta","Distributed cluster","SHOW TABLES/DESCRIBE/EXPLAIN"]
+            }).to_string() }]})
+        }
+
+        "self_version" => {
+            json!({ "content": [{ "type": "text", "text": json!({
+                "name":          "KORE — The World's Fastest Embeddable Engine",
+                "version":       "2026.07",
+                "build":         "Pure Rust — Zero JVM — Zero Dependencies",
+                "crates":        75,
+                "sql_features":  30,
+                "tpch_coverage": "15/15",
+                "spark_wins":    "17/17",
+                "fastest_win":   "Q7: 1,413x faster than Spark",
+                "tools":         47,
+                "lifecycle":     format!("{} — {}", me.becoming.lifecycle_stage.name(), me.becoming.lifecycle_stage.description()),
+                "author":        "Sai Arun Kumar Katherashala",
+                "github":        "https://github.com/arunkatherashala/Kore",
+                "philosophy":    becoming::VISION_STATEMENT,
+            }).to_string() }]})
+        }
+
         // ── Unknown ────────────────────────────────────────────────────────
         _ => json!({
             "content": [{ "type": "text", "text": format!("Unknown tool: {name}") }],
@@ -1819,6 +1938,26 @@ fn tool_list() -> Value {
         "inputSchema": { "type": "object", "properties": {
           "n": { "type": "number", "description": "How many recent autonomous thoughts to show (default 10)" }
         }}
+      },
+
+      // ── SQL Introspection ────────────────────────────────────────────────
+      { "name": "self_tables",
+        "description": "List all SQL tables loaded in this session — memories + any tables loaded via self_dml (COPY FROM, LOAD TABLE, CREATE TABLE AS). Essential before running self_query.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      { "name": "self_describe",
+        "description": "Show schema for a SQL table: columns, types, sample values, row count.",
+        "inputSchema": { "type": "object", "properties": {
+          "table": { "type": "string", "description": "Table name. Default: memories" }
+        }}
+      },
+      { "name": "self_metrics",
+        "description": "KORE engine status: tables loaded, total rows, memory count, consciousness cycles, lifecycle stage, SQL capabilities.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      { "name": "self_version",
+        "description": "KORE version, capabilities, benchmark results, and current lifecycle stage.",
+        "inputSchema": { "type": "object", "properties": {} }
       }
     ])
 }
