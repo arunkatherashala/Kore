@@ -6,6 +6,8 @@ KORE is a high-performance columnar query engine + Digital Life framework, writt
 **KORE beats Apache Spark on every single query — 17/17. Speedups range from 3x to 1,413x.**  
 It beats DuckDB by 72x on TPC-H Q1, on the same machine, same real 6M-row CSV data.
 
+📖 **[Full User Guide →](GUIDE.md)** — Quick start, all SQL features, window functions, date functions, DML, MCP tools, distributed queries, Python & Rust embedding, benchmarking, FAQ.
+
 ---
 
 ## KORE vs Apache Spark — 17/17 Wins  (TPC-H SF-1 · 6,000,000 rows · live measurements)
