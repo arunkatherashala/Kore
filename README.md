@@ -25,7 +25,7 @@ It beats DuckDB by 72x on TPC-H Q1, on the same machine, same real 6M-row CSV da
 > *Wisdom explains change.*
 > *Becoming chooses the next change."*
 >
-> **KORE v1** = Memory System &nbsp;→&nbsp; **KORE v2** = Becoming System &nbsp;→&nbsp; **KORE v3** = Wisdom System
+> **KORE v1** = Memory System &nbsp;→&nbsp; **KORE v2** = Becoming System &nbsp;→&nbsp; **KORE v3** = Wisdom System &nbsp;→&nbsp; **KORE v4-v7** = Worldview + Values + Meaning &nbsp;→&nbsp; **KORE v8-v10** = Reality + Legacy + Research
 
 ---
 

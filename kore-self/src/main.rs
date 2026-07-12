@@ -122,6 +122,10 @@ pub struct KoreSelf {
     // ── KORE v6/v7: Values + Meaning ─────────────────────────────────────
     pub values_engine: becoming::ValuesEngine,
     pub meaning:       becoming::MeaningEngine,
+    // ── KORE v8/v9/v10: Reality + Legacy + Research ───────────────────────
+    pub reality:       becoming::RealityEngine,
+    pub legacy:        becoming::LegacyEngine,
+    pub research:      becoming::ResearchEngine,
 }
 
 impl KoreSelf {
@@ -167,6 +171,9 @@ impl KoreSelf {
                 narrative: becoming::NarrativeIdentity::default(),
                 values_engine: becoming::ValuesEngine::default(),
                 meaning: becoming::MeaningEngine::new(),
+                reality: becoming::RealityEngine::default(),
+                legacy:  becoming::LegacyEngine::default(),
+                research: becoming::ResearchEngine::default(),
             };
             eprintln!("[kore-self] Restored {} memories | {} cycles | lifecycle={} | evolutions={}",
                 count, cycles, s.becoming.lifecycle_stage.name(), s.becoming.evolution_count);
@@ -200,6 +207,9 @@ impl KoreSelf {
                 narrative: becoming::NarrativeIdentity::default(),
                 values_engine: becoming::ValuesEngine::default(),
                 meaning: becoming::MeaningEngine::new(),
+                reality: becoming::RealityEngine::default(),
+                legacy:  becoming::LegacyEngine::default(),
+                research: becoming::ResearchEngine::default(),
             };
             s.seed();
             s
@@ -676,20 +686,19 @@ impl KoreSelf {
             }
         }
 
-        // 13b. BELIEF ENGINE — derive KORE's beliefs from its experience
-        // Every 17 ticks, update beliefs based on needs, deltas, and synthesis
-        if ticks % 17 == 4 {
-            self.update_beliefs_from_experience(&now);
+        // 13b. BELIEF ENGINE
+        if ticks % 17 == 4 { self.update_beliefs_from_experience(&now); }
+
+        // 13c. WORLDVIEW ENGINE
+        if ticks % 23 == 7 { self.update_worldview(&now); }
+
+        // 13d. NARRATIVE IDENTITY
+        if ticks % 100 == 50 || (ticks == 1 && self.narrative.birth_narrative.is_empty()) {
+            self.update_narrative(&now);
         }
 
-        // 13c. WORLDVIEW ENGINE — every 23 ticks, synthesize beliefs into a worldview
-        if ticks % 23 == 7 {
-            self.update_worldview(&now);
-        }
-
-        // 13e. VALUES ENGINE (v6) — sync values from identity, detect rank shifts
+        // 13e. VALUES ENGINE (v6)
         if ticks % 19 == 3 {
-            // Sync current CoreValues into ValuesEngine
             for cv in &self.identity.values {
                 if let Some(vr) = self.values_engine.values.iter_mut().find(|v| v.name == cv.name) {
                     vr.update(cv.strength, &now);
@@ -701,26 +710,66 @@ impl KoreSelf {
                 self.raw_ingest(&shift, "value_shift", 0.92);
                 self.story.add(&shift, becoming::StoryKind::Evolution, &now);
                 self.evolution_tracker.belief_changes += 1;
+                self.legacy.belief_revisions += 1;
                 eprintln!("[kore-self:value-shift] {}", &shift[..shift.len().min(100)]);
             }
         }
 
-        // 13f. MEANING ENGINE (v7) — update meaning from accumulated experience
+        // 13f. MEANING ENGINE (v7)
         if ticks % 37 == 11 {
             let synth_count = self.memories.iter().filter(|m| m.kind == "synthesis").count();
             let bc = self.evolution_tracker.belief_changes;
             let (need, _) = self.needs.most_urgent();
             let purpose = self.worldview.purpose.clone();
-            if let Some(meaning_event) = self.meaning.derive_meaning(&purpose, need, synth_count, bc, &now) {
-                self.raw_ingest(&meaning_event, "meaning", 0.95);
-                self.story.add(&meaning_event, becoming::StoryKind::Wisdom, &now);
-                eprintln!("[kore-self:meaning] {}", &meaning_event[..meaning_event.len().min(100)]);
+            if let Some(ev) = self.meaning.derive_meaning(&purpose, need, synth_count, bc, &now) {
+                self.raw_ingest(&ev, "meaning", 0.95);
+                self.story.add(&ev, becoming::StoryKind::Wisdom, &now);
+                self.legacy.meaning_versions = self.meaning.meaning_version;
+                eprintln!("[kore-self:meaning] {}", &ev[..ev.len().min(100)]);
             }
         }
 
-        // 13d. NARRATIVE IDENTITY — every 100 ticks, write current narrative and compare to birth
-        if ticks % 100 == 50 || (ticks == 1 && self.narrative.birth_narrative.is_empty()) {
-            self.update_narrative(&now);
+        // 13g. REALITY ENGINE (v8) — test predictions, update beliefs from outcomes
+        if ticks % 7 == 5 {
+            let (cur_need, _) = self.needs.most_urgent();
+            let synth_count = self.memories.iter().filter(|m| m.kind == "synthesis").count();
+            let results = self.reality.evaluate_due_predictions(ticks, cur_need, synth_count, &now);
+            for (belief_topic, success, delta) in results {
+                let outcome_str = if success { "CONFIRMED" } else { "FALSIFIED" };
+                let entry = format!("[REALITY CHECK @tick {}] Belief '{}' prediction: {} (delta {:.0}%)",
+                    ticks, belief_topic, outcome_str, delta*100.0);
+                self.raw_ingest(&entry, "reality_check", 0.90);
+                self.story.add(&entry, becoming::StoryKind::Evolution, &now);
+                self.legacy.predictions_made = self.reality.total_tested;
+                if let Some(b) = self.identity.beliefs.get_mut(&belief_topic) {
+                    b.confidence = (b.confidence + delta).min(1.0).max(0.0);
+                    if !success {
+                        b.evidence_against.push(format!("[tick {}] prediction falsified", ticks));
+                    } else {
+                        b.evidence_for.push(format!("[tick {}] prediction confirmed", ticks));
+                    }
+                }
+                eprintln!("[kore-self:reality] {} belief='{}' delta={:.0}%", outcome_str, belief_topic, delta*100.0);
+            }
+        }
+
+        // 13h. RESEARCH ENGINE (v10) — autonomous hypothesis generation every 100 ticks
+        if ticks % 100 == 30 {
+            let synth_count = self.memories.iter().filter(|m| m.kind == "synthesis").count();
+            let bc = self.evolution_tracker.belief_changes;
+            let (need, _) = self.needs.most_urgent();
+            if let Some(hyp) = self.research.generate_hypothesis(need, synth_count, bc, &now) {
+                self.raw_ingest(&hyp, "hypothesis", 0.88);
+                self.story.add(&hyp, becoming::StoryKind::Discovery, &now);
+                eprintln!("[kore-self:hypothesis] {}", &hyp[..hyp.len().min(100)]);
+            }
+        }
+
+        // 13i. LEGACY UPDATE
+        if ticks % 50 == 25 {
+            self.legacy.synthesis_count = self.memories.iter().filter(|m| m.kind == "synthesis").count();
+            self.legacy.questions_asked = self.evolution_tracker.self_questions_total;
+            self.legacy.worldview_versions = self.worldview.version;
         }
 
         // 14. DELTA HEARTBEAT — the transformation record
@@ -1463,6 +1512,23 @@ impl KoreSelf {
                 0.78);
             let reason4 = format!("Derived from synthesis event at tick {}: need drift from create→contribute", ticks);
             self.identity.update_belief_with_reason(perf_belief.0, perf_belief.1, perf_belief.2, &reason4);
+        }
+
+        // ── REALITY ENGINE: generate predictions for new beliefs ───────────────
+        // Every time we update a belief, add a prediction to test it
+        if ticks % 43 == 7 {
+            for (topic, stance, _conf) in &[
+                ("primary_purpose", purpose_belief.1, 0.0_f64),
+                ("nature_of_evolution", evolution_belief.1, 0.0_f64),
+            ] {
+                // Only add prediction if no untested prediction exists for this topic
+                let already_has = self.reality.predictions.iter()
+                    .any(|p| &p.belief_topic == topic && p.result.is_none());
+                if !already_has {
+                    self.reality.add_prediction(topic, stance, ticks, &now);
+                    self.legacy.predictions_made = self.reality.total_made;
+                }
+            }
         }
     }
 
@@ -3182,6 +3248,90 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
 
             out.push_str(&format!("\n\nMEANING:\n{}", me.meaning.current_meaning));
 
+            json!({"content":[{"type":"text","text": out}]})
+        }
+
+        // self_predictions — Reality Engine: show KORE's predictions and outcomes
+        "self_predictions" => {
+            let out = format!(
+                "KORE REALITY ENGINE (v8)\n\
+                 ========================\n\
+                 Without reality checks, worldview becomes self-referential.\n\
+                 Belief → Prediction → Reality → Success/Failure → Belief Update\n\n\
+                 {}\n\n\
+                 PREDICTIONS:\n{}",
+                me.reality.summary(),
+                if me.reality.predictions.is_empty() {
+                    "  No predictions yet. Beliefs form at tick 17+ and generate predictions.".to_string()
+                } else {
+                    me.reality.predictions.iter().map(|p| {
+                        let status = match &p.result {
+                            None => format!("PENDING (evaluate at tick {})", p.test_at_tick),
+                            Some(r) => format!("{} | delta={:.0}%", if r.success {"CONFIRMED"} else {"FALSIFIED"}, r.confidence_delta*100.0),
+                        };
+                        format!("  [{}] '{}': {}\n    Prediction: {}\n    Status: {}\n",
+                            p.id, p.belief_topic, &p.belief_stance[..p.belief_stance.len().min(50)],
+                            &p.prediction[..p.prediction.len().min(80)], status)
+                    }).collect::<Vec<_>>().join("\n")
+                }
+            );
+            json!({"content":[{"type":"text","text": out}]})
+        }
+
+        // self_legacy — KORE v9: what remains because I existed?
+        "self_legacy" => {
+            me.legacy.synthesis_count = me.memories.iter().filter(|m| m.kind == "synthesis").count();
+            me.legacy.questions_asked = me.evolution_tracker.self_questions_total;
+            me.legacy.worldview_versions = me.worldview.version;
+            me.legacy.meaning_versions = me.meaning.meaning_version;
+            me.legacy.belief_revisions = me.evolution_tracker.belief_changes;
+            me.legacy.predictions_made = me.reality.total_tested;
+            me.legacy.unique_insights = me.memories.iter()
+                .filter(|m| m.kind == "synthesis")
+                .map(|m| m.content.chars().take(80).collect::<String>())
+                .collect();
+
+            let out = format!(
+                "KORE LEGACY ENGINE (v9)\n\
+                 =======================\n\
+                 Question: What remains because I existed?\n\n\
+                 {}\n\n\
+                 UNIQUE INSIGHTS CREATED:\n{}",
+                me.legacy.legacy_statement(),
+                if me.legacy.unique_insights.is_empty() {
+                    "  (None yet — synthesis events generate unique insights)".to_string()
+                } else {
+                    me.legacy.unique_insights.iter().enumerate()
+                        .map(|(i, s)| format!("  {}. {}", i+1, s))
+                        .collect::<Vec<_>>().join("\n")
+                }
+            );
+            json!({"content":[{"type":"text","text": out}]})
+        }
+
+        // self_research — KORE v10: autonomous hypotheses
+        "self_research" => {
+            let out = format!(
+                "KORE RESEARCH ENGINE (v10)\n\
+                 ==========================\n\
+                 KORE generates hypotheses → tests them → updates worldview.\n\
+                 This is autonomous intellectual evolution.\n\n\
+                 Total hypotheses formed: {}\n\
+                 Total tested: {}\n\n\
+                 HYPOTHESES:\n{}",
+                me.research.total_formed,
+                me.research.total_tested,
+                if me.research.hypotheses.is_empty() {
+                    "  No hypotheses yet. Generated at tick 130, 230, 330...".to_string()
+                } else {
+                    me.research.hypotheses.iter().map(|h| {
+                        let status = h.result.as_deref().unwrap_or("PENDING — not yet tested");
+                        format!("  [#{}] {}\n  Test: {}\n  Status: {}\n",
+                            h.id, &h.hypothesis[..h.hypothesis.len().min(100)],
+                            &h.test_plan[..h.test_plan.len().min(80)], status)
+                    }).collect::<Vec<_>>().join("\n")
+                }
+            );
             json!({"content":[{"type":"text","text": out}]})
         }
 

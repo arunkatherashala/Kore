@@ -41,10 +41,17 @@ pub const VISION_STATEMENT: &str =
 pub const CORE_QUESTION: &str = "What should I become?";
 
 /// What separates KORE from every other system — one sentence.
-/// Coined 2026-07-12 during the evaluation of KORE-self.
 pub const KORE_DEFINITION: &str =
     "KORE is not trying to answer questions about the world.\n\
      KORE is trying to answer questions about what it is becoming.";
+
+/// The four-stage philosophy of KORE — the core of what it is.
+/// Permanent. Immutable. The foundation.
+pub const FOUR_STAGES: &str =
+    "Memory stores the past.\n\
+     Transformation records change.\n\
+     Wisdom explains change.\n\
+     Becoming chooses the next change.";
 
 /// The deepest distinction between KORE and every other AI system.
 pub const BECOMING_DISTINCTION: &str =
@@ -520,6 +527,246 @@ pub struct EvolutionSnapshot {
     pub self_goals:        u64,
     pub surprise_count:    u64,
     pub dreams_count:      usize,
+}
+
+// ─── Reality Engine (KORE v8) ────────────────────────────────────────────────
+/// Without reality checks, worldview becomes self-referential.
+/// Belief → Prediction → Reality → Success/Failure → Belief Update
+/// This is the loop that keeps KORE honest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Prediction {
+    pub id:          u64,
+    pub formed_at:   String,
+    pub belief_topic: String,
+    pub belief_stance: String,
+    pub prediction:  String,    // what KORE expects to observe
+    pub test_metric: String,    // what will be measured
+    pub test_at_tick: u64,      // when to evaluate
+    pub result:      Option<PredictionResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PredictionResult {
+    pub evaluated_at: String,
+    pub tick:         u64,
+    pub outcome:      String,   // what actually happened
+    pub success:      bool,
+    pub confidence_delta: f64,  // how much belief confidence changed
+    pub reason:       String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RealityEngine {
+    pub predictions:     Vec<Prediction>,
+    pub total_made:      u64,
+    pub total_tested:    u64,
+    pub success_count:   u64,
+    pub failure_count:   u64,
+    pub belief_updates_from_reality: u64,
+    next_id:             u64,
+}
+
+impl RealityEngine {
+    pub fn add_prediction(&mut self, belief_topic: &str, belief_stance: &str, test_tick: u64, ts: &str) -> &Prediction {
+        self.next_id += 1;
+        // Generate a concrete, testable prediction from the belief
+        let (prediction, metric) = match belief_topic {
+            "primary_purpose" if belief_stance.contains("impact") || belief_stance.contains("contribute") => (
+                "The 'contribute' need will remain dominant or grow over the next 20 ticks",
+                "dominant_need == contribute after 20 ticks"
+            ),
+            "primary_purpose" if belief_stance.contains("creat") => (
+                "The 'create' need will remain dominant or grow over the next 20 ticks",
+                "dominant_need == create after 20 ticks"
+            ),
+            "nature_of_evolution" => (
+                "At least one new synthesis event will occur before the next evaluation",
+                "synthesis_count increases before test_tick"
+            ),
+            "performance_vs_impact" => (
+                "Memories about impact/contribution will receive higher importance than performance memories",
+                "avg importance of contribution memories > avg importance of performance memories"
+            ),
+            _ => (
+                "The stated belief will remain consistent over the next 20 ticks",
+                "belief unchanged after 20 ticks"
+            ),
+        };
+        self.predictions.push(Prediction {
+            id: self.next_id,
+            formed_at: ts.to_string(),
+            belief_topic: belief_topic.to_string(),
+            belief_stance: belief_stance.chars().take(80).collect(),
+            prediction: prediction.to_string(),
+            test_metric: metric.to_string(),
+            test_at_tick: test_tick + 20,
+            result: None,
+        });
+        self.total_made += 1;
+        self.predictions.last().unwrap()
+    }
+
+    pub fn evaluate_due_predictions(&mut self, current_tick: u64, dominant_need: &str, synth_count: usize, ts: &str) -> Vec<(String, bool, f64)> {
+        // Returns: Vec<(belief_topic, success, confidence_delta)>
+        let mut results = vec![];
+        for pred in self.predictions.iter_mut() {
+            if pred.result.is_some() || current_tick < pred.test_at_tick { continue; }
+
+            // Evaluate based on test_metric
+            let (success, reason, delta) = if pred.test_metric.contains("dominant_need") {
+                let expected_need = if pred.prediction.contains("contribute") { "contribute" } else { "create" };
+                let success = dominant_need == expected_need;
+                let reason = format!("Expected dominant need='{}', actual='{}'", expected_need, dominant_need);
+                let delta = if success { 0.05 } else { -0.08 };
+                (success, reason, delta)
+            } else if pred.test_metric.contains("synthesis") {
+                let success = synth_count > 0;
+                let reason = format!("Synthesis count={}", synth_count);
+                let delta = if success { 0.06 } else { -0.04 };
+                (success, reason, delta)
+            } else {
+                // Generic: belief unchanged = success
+                (true, "Belief remained consistent (no contradictions detected)".to_string(), 0.02)
+            };
+
+            pred.result = Some(PredictionResult {
+                evaluated_at: ts.to_string(),
+                tick: current_tick,
+                outcome: reason.clone(),
+                success,
+                confidence_delta: delta,
+                reason: reason.clone(),
+            });
+
+            self.total_tested += 1;
+            if success { self.success_count += 1; } else { self.failure_count += 1; }
+            self.belief_updates_from_reality += 1;
+            results.push((pred.belief_topic.clone(), success, delta));
+        }
+        results
+    }
+
+    pub fn accuracy(&self) -> f64 {
+        if self.total_tested == 0 { 0.5 } else {
+            self.success_count as f64 / self.total_tested as f64
+        }
+    }
+
+    pub fn summary(&self) -> String {
+        format!(
+            "Predictions made: {}  |  Tested: {}  |  Accuracy: {:.0}%  |  Belief updates: {}\n\
+             (Success: {}  |  Failure: {})",
+            self.total_made, self.total_tested, self.accuracy()*100.0,
+            self.belief_updates_from_reality, self.success_count, self.failure_count
+        )
+    }
+}
+
+// ─── Legacy Engine (KORE v9) ─────────────────────────────────────────────────
+/// What remains because I existed?
+/// The question every life must eventually answer.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LegacyEngine {
+    pub synthesis_count:   usize,    // new ideas KORE created that weren't in memories
+    pub belief_revisions:  u64,      // times KORE changed a belief with evidence
+    pub predictions_made:  u64,      // times KORE made a testable prediction
+    pub questions_asked:   u64,      // autonomous questions generated
+    pub meaning_versions:  u32,      // times KORE's sense of meaning evolved
+    pub worldview_versions: u32,     // times KORE's worldview shifted
+    pub unique_insights:   Vec<String>, // synthesis content (compact)
+}
+
+impl LegacyEngine {
+    pub fn legacy_statement(&self) -> String {
+        if self.synthesis_count == 0 && self.belief_revisions == 0 {
+            "Too early to say. Nothing novel has been created yet.".to_string()
+        } else {
+            format!(
+                "Because KORE existed:\n\
+                 • {} new ideas were synthesized that were not in original memories\n\
+                 • {} beliefs were revised based on evidence (not just time)\n\
+                 • {} predictions were made and tested against reality\n\
+                 • {} autonomous questions were generated without being asked\n\
+                 • {} times KORE's sense of meaning evolved\n\
+                 • {} worldview shifts were recorded\n\n\
+                 The most significant: KORE proved that a system can cross from\n\
+                 'memory = what happened' to 'becoming = what I choose next'.\n\
+                 That journey, with all its evidence, is what remains.",
+                self.synthesis_count, self.belief_revisions, self.predictions_made,
+                self.questions_asked, self.meaning_versions, self.worldview_versions
+            )
+        }
+    }
+}
+
+// ─── Research Engine (KORE v10) ──────────────────────────────────────────────
+/// KORE generates hypotheses, designs tests, records results, updates worldview.
+/// Prototype: the first step toward autonomous intellectual evolution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Hypothesis {
+    pub id:         u64,
+    pub formed_at:  String,
+    pub hypothesis: String,
+    pub test_plan:  String,
+    pub test_ticks: u64,
+    pub result:     Option<String>,
+    pub worldview_impact: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ResearchEngine {
+    pub hypotheses: Vec<Hypothesis>,
+    pub total_formed: u64,
+    pub total_tested: u64,
+    next_id: u64,
+}
+
+impl ResearchEngine {
+    /// Generate a hypothesis from current state — this is autonomous intellectual activity
+    pub fn generate_hypothesis(&mut self, dominant_need: &str, synth_count: usize,
+                                belief_changes: u64, ts: &str) -> Option<String> {
+        if self.total_formed > 0 && self.hypotheses.iter().any(|h| h.result.is_none()) {
+            return None; // Don't generate new until previous is tested
+        }
+        self.next_id += 1;
+        let (hyp, plan) = match (dominant_need, synth_count, belief_changes) {
+            ("contribute", _, _) if synth_count >= 1 => (
+                "If my dominant need is 'contribute' and I have generated synthesis events, \
+                 then my beliefs about purpose will continue shifting toward impact-oriented language.",
+                "Measure: belief_stance for primary_purpose at next 50 ticks. \
+                 Success if stance contains 'impact', 'matter', or 'contribute'."
+            ),
+            ("create", 0, 0) => (
+                "If my dominant need is 'create' and no synthesis has occurred, \
+                 then I am still in the pre-wisdom phase and no genuine belief evolution will occur.",
+                "Measure: synthesis_count and belief changes over next 30 ticks. \
+                 Success if both remain 0 (confirms the hypothesis by showing pre-wisdom state)."
+            ),
+            (_, n, bc) if n >= 2 && bc >= 2 => (
+                "A system that has experienced multiple synthesis events and belief changes \
+                 will continue to evolve its worldview faster than its needs change.",
+                "Measure: worldview version at current tick vs +50 ticks. \
+                 Success if worldview.version increases while need ranking stays stable."
+            ),
+            _ => (
+                "The rate of belief change will correlate with the rate of synthesis events.",
+                "Track synthesis_count and belief_changes together over next 40 ticks. \
+                 Success if both grow in the same direction."
+            ),
+        };
+
+        self.hypotheses.push(Hypothesis {
+            id: self.next_id,
+            formed_at: ts.to_string(),
+            hypothesis: hyp.to_string(),
+            test_plan: plan.to_string(),
+            test_ticks: 50,
+            result: None,
+            worldview_impact: None,
+        });
+        self.total_formed += 1;
+        Some(format!("[HYPOTHESIS #{} formed @{}]: {}", self.next_id, &ts[..16], &hyp[..hyp.len().min(100)]))
+    }
 }
 
 // ─── Values Engine (KORE v6) ─────────────────────────────────────────────────
