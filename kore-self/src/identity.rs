@@ -46,13 +46,20 @@ pub struct VoiceProfile {
 
 /// A tracked belief about a topic — including full contradiction history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// A tracked belief — with evidence, contradiction history, and wisdom.
+/// KORE v3: beliefs are not just stances. They are living epistemic records.
 pub struct Belief {
-    pub topic:      String,
-    pub stance:     String,
-    pub confidence: f64,
-    pub formed_at:  String,
-    pub updated_at: String,
-    pub history:    Vec<String>,  // past stances with timestamps
+    pub topic:          String,
+    pub stance:         String,
+    pub confidence:     f64,
+    pub formed_at:      String,
+    pub updated_at:     String,
+    pub history:        Vec<String>,   // past stances with timestamps
+    // ── Wisdom layer additions ─────────────────────────────────────────────
+    pub evidence_for:   Vec<String>,   // memories/events that support this belief
+    pub evidence_against: Vec<String>, // what contradicts it
+    pub change_reason:  String,        // why the last change happened
+    pub version:        u32,           // how many times this belief has changed
 }
 
 impl IdentityModel {
@@ -147,34 +154,78 @@ impl IdentityModel {
 
     /// Update or create a belief. Returns Some(msg) if a contradiction was detected.
     pub fn update_belief(&mut self, topic: &str, stance: &str, confidence: f64) -> Option<String> {
+        self.update_belief_with_reason(topic, stance, confidence, "")
+    }
+
+    /// Update a belief with explicit change_reason and optional evidence.
+    pub fn update_belief_with_reason(&mut self, topic: &str, stance: &str, confidence: f64, reason: &str) -> Option<String> {
         let ts = crate::now();
         if let Some(b) = self.beliefs.get_mut(topic) {
             if b.stance != stance {
-                // ── CONTRADICTION DETECTED ─────────────────────────────────
+                // ── CONTRADICTION → WISDOM EVENT ──────────────────────────
                 let old = b.stance.clone();
-                b.history.push(format!("[{}] was: '{}'", b.updated_at, old));
-                b.stance      = stance.to_string();
-                b.confidence  = confidence;
-                b.updated_at  = ts;
+                let old_conf = b.confidence;
+                b.history.push(format!("[{}] was: '{}' ({:.0}%)", b.updated_at, old, old_conf*100.0));
+                // Move old stance to evidence_against (it was believed but is now rejected)
+                b.evidence_against.push(format!("[{}] old belief: '{}' ({:.0}% confidence)", &b.updated_at[..10], &old[..old.len().min(60)], old_conf*100.0));
+                b.stance       = stance.to_string();
+                b.confidence   = confidence;
+                b.updated_at   = ts;
+                b.change_reason = if reason.is_empty() { format!("Stance reversed from '{}'", &old[..old.len().min(40)]) } else { reason.to_string() };
+                b.version     += 1;
                 return Some(format!(
-                    "Contradiction Engine: '{}' changed from '{}' → '{}' ({} time(s) changed)",
-                    topic, old, stance, b.history.len()
+                    "BELIEF CHANGED [v{}]: '{}'\n\
+                     Was:    '{}' ({:.0}% confidence)\n\
+                     Now:    '{}' ({:.0}% confidence)\n\
+                     Reason: {}\n\
+                     This belief has changed {} time(s).",
+                    b.version, topic,
+                    old, old_conf*100.0,
+                    stance, confidence*100.0,
+                    b.change_reason,
+                    b.history.len()
                 ));
             }
-            // Same stance — reinforce confidence
+            // Same stance — reinforce confidence + add supporting evidence
             b.confidence = lerp(b.confidence, confidence, 0.1);
             b.updated_at = ts;
+            if !reason.is_empty() {
+                b.evidence_for.push(format!("[{}] {}", &b.updated_at[..10], &reason[..reason.len().min(80)]));
+                if b.evidence_for.len() > 10 { b.evidence_for.drain(0..5); }
+            }
         } else {
+            let mut initial_evidence = vec![];
+            if !reason.is_empty() { initial_evidence.push(format!("[formed] {}", &reason[..reason.len().min(80)])); }
             self.beliefs.insert(topic.to_string(), Belief {
-                topic:      topic.to_string(),
-                stance:     stance.to_string(),
+                topic:          topic.to_string(),
+                stance:         stance.to_string(),
                 confidence,
-                formed_at:  ts.clone(),
-                updated_at: ts,
-                history:    vec![],
+                formed_at:      ts.clone(),
+                updated_at:     ts,
+                history:        vec![],
+                evidence_for:   initial_evidence,
+                evidence_against: vec![],
+                change_reason:  String::new(),
+                version:        0,
             });
         }
         None
+    }
+
+    /// Add evidence for or against a belief without changing the stance.
+    pub fn add_evidence(&mut self, topic: &str, evidence: &str, supports: bool) {
+        if let Some(b) = self.beliefs.get_mut(topic) {
+            let entry = format!("[{}] {}", &crate::now()[..10], &evidence[..evidence.len().min(100)]);
+            if supports {
+                b.evidence_for.push(entry);
+                b.confidence = (b.confidence + 0.02).min(1.0);
+                if b.evidence_for.len() > 10 { b.evidence_for.drain(0..5); }
+            } else {
+                b.evidence_against.push(entry);
+                b.confidence = (b.confidence - 0.03).max(0.0);
+                if b.evidence_against.len() > 10 { b.evidence_against.drain(0..5); }
+            }
+        }
     }
 
     pub fn top_values(&self, n: usize) -> &[CoreValue] {
