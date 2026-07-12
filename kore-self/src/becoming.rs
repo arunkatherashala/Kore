@@ -507,12 +507,42 @@ pub struct EvolutionSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EvolutionTracker {
     pub snapshots:          Vec<EvolutionSnapshot>,
-    pub questions:          Vec<HeartbeatQuestion>,  // all internal questions ever asked
+    pub questions:          Vec<HeartbeatQuestion>,
     pub self_questions_total: u64,
     pub self_goals_total:   u64,
     pub surprise_events:    Vec<String>,
     pub belief_changes:     u64,
     pub start_snapshot:     Option<EvolutionSnapshot>,
+    // ── Delta Heartbeat log — the transformation record ──────────────────────
+    pub deltas:             Vec<DeltaHeartbeat>,  // every detected state change
+    pub last_dominant_need: String,
+    pub last_inner_voice:   String,
+    pub last_purpose:       String,
+    pub total_transformations: u64,
+}
+
+// ─── Delta Heartbeat — captures WHAT changed, WHEN, and WHY ─────────────────
+// This is the evidence layer. Without this, evolution is observation.
+// With this, evolution is provable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeltaHeartbeat {
+    pub tick:              u64,
+    pub timestamp:         String,
+    // What was before
+    pub old_dominant_need: String,
+    pub old_pct:           f64,
+    pub old_inner_voice:   String,
+    pub old_purpose:       String,
+    // What is now
+    pub new_dominant_need: String,
+    pub new_pct:           f64,
+    pub new_inner_voice:   String,
+    pub new_purpose:       String,
+    // The delta
+    pub change_detected:   bool,
+    pub change_type:       String,   // "NEED_DRIFT" | "VOICE_SHIFT" | "PURPOSE_EVOLUTION" | "NONE"
+    pub change_reason:     String,   // theory about WHY
+    pub confidence:        f64,      // 0.0 → 1.0
 }
 
 // ─── Temporal Self ───────────────────────────────────────────────────────────
