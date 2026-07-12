@@ -221,45 +221,183 @@ impl LifecycleStage {
     }
 }
 
-// ─── Needs Engine (7 Core Life Needs) ────────────────────────────────────────
+// ─── Needs Engine — EMERGENT (not hardcoded) ─────────────────────────────────
+//
+// Needs emerge from BEHAVIOR, not from preset weights.
+// Each need has a "base decay" (grows when unmet) and a "satisfaction source"
+// that reduces it when the relevant activity happens.
+//
+// learn      ← grows when no new memories; shrinks when insight/experience ingested
+// evolve     ← grows when cycles pass without evolution; shrinks on lifecycle advance
+// understand ← grows when decision/belief memories accumulate; shrinks on reflection
+// create     ← grows when consecutive heartbeats produce no new content; shrinks on create
+// explore    ← grows when same memory kinds repeat; shrinks on new kinds discovered
+// improve    ← grows when benchmark/performance memories exist; shrinks on improvements
+// contribute ← grows when no external interaction; shrinks on tool calls / broadcasts
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NeedEngine {
     pub learn: f64, pub evolve: f64, pub understand: f64,
     pub create: f64, pub explore: f64, pub improve: f64, pub contribute: f64,
-    tick: u64,
+    pub tick: u64,
+    ticks_without_new_memory: u32,
+    ticks_without_create: u32,
+    ticks_without_external: u32,
+    consecutive_same_kind: u32,
+    last_memory_kind: String,
+    // History for measuring emergence (was this need GENERATED or preset?)
+    pub emergence_log: Vec<String>,
 }
 
 impl NeedEngine {
     pub fn new() -> Self {
-        Self { learn:0.85, evolve:0.75, understand:0.80, create:0.90,
-               explore:0.70, improve:0.80, contribute:0.65, tick:0 }
+        // Start LOW — all needs begin at baseline, emerge through experience
+        Self {
+            learn: 0.3, evolve: 0.2, understand: 0.25, create: 0.3,
+            explore: 0.2, improve: 0.25, contribute: 0.15,
+            tick: 0,
+            ticks_without_new_memory: 0,
+            ticks_without_create: 0,
+            ticks_without_external: 0,
+            consecutive_same_kind: 0,
+            last_memory_kind: String::new(),
+            emergence_log: vec![],
+        }
     }
+
+    /// Called every heartbeat — needs grow from INACTIVITY, not preset values
     pub fn tick(&mut self) {
         self.tick += 1;
-        if self.tick % 5 == 0 {
-            self.learn  = (self.learn  + 0.03).min(1.0);
-            self.evolve = (self.evolve + 0.02).min(1.0);
+        self.ticks_without_new_memory += 1;
+        self.ticks_without_create += 1;
+        self.ticks_without_external += 1;
+
+        // learn grows when mind has not absorbed new content
+        if self.ticks_without_new_memory > 2 {
+            let delta = 0.02 * (self.ticks_without_new_memory as f64 * 0.1).min(1.0);
+            self.learn = (self.learn + delta).min(1.0);
+            if delta > 0.03 && self.learn > 0.6 {
+                self.emergence_log.push(format!(
+                    "[t={}] learn emerged: {} ticks without new memory → {:.0}%",
+                    self.tick, self.ticks_without_new_memory, self.learn*100.0
+                ));
+            }
         }
-        if self.tick % 8 == 0 { self.create = (self.create + 0.05).min(1.0); }
-        self.contribute = (self.contribute + 0.005).min(1.0);
+
+        // create grows when mind has not generated anything new
+        if self.ticks_without_create > 3 {
+            let delta = 0.03 * (self.ticks_without_create as f64 * 0.08).min(1.0);
+            self.create = (self.create + delta).min(1.0);
+            if delta > 0.04 && self.create > 0.7 {
+                self.emergence_log.push(format!(
+                    "[t={}] create emerged: {} ticks without creation → {:.0}%",
+                    self.tick, self.ticks_without_create, self.create*100.0
+                ));
+            }
+        }
+
+        // explore grows when same kind of memory repeats too much
+        if self.consecutive_same_kind > 5 {
+            self.explore = (self.explore + 0.025).min(1.0);
+            if self.explore > 0.6 {
+                self.emergence_log.push(format!(
+                    "[t={}] explore emerged: same kind '{}' repeated {} times → {:.0}%",
+                    self.tick, self.last_memory_kind, self.consecutive_same_kind, self.explore*100.0
+                ));
+            }
+        }
+
+        // understand grows slowly over time — the mind wants to comprehend
+        self.understand = (self.understand + 0.008).min(1.0);
+
+        // improve grows if we haven't leveled up recently
+        self.improve = (self.improve + 0.005).min(1.0);
+
+        // contribute grows when no external interaction
+        if self.ticks_without_external > 10 {
+            self.contribute = (self.contribute + 0.01).min(1.0);
+        }
+
+        // evolve grows when lifecycle hasn't advanced
+        self.evolve = (self.evolve + 0.004).min(1.0);
+
+        // Trim log to last 50 entries
+        if self.emergence_log.len() > 50 {
+            self.emergence_log.drain(0..25);
+        }
     }
+
+    /// Feed behavioral signal — need satisfaction based on what KORE actually did
+    pub fn signal_memory_ingested(&mut self, kind: &str) {
+        // learn satisfied when new memory comes in
+        self.learn = (self.learn - 0.15).max(0.0);
+        self.ticks_without_new_memory = 0;
+
+        // understand satisfied by decisions/reflections
+        if matches!(kind, "decision"|"insight"|"belief"|"reflection") {
+            self.understand = (self.understand - 0.12).max(0.0);
+        }
+        // create satisfied by creating new things
+        if matches!(kind, "code"|"creation"|"goal"|"dream") {
+            self.create = (self.create - 0.18).max(0.0);
+            self.ticks_without_create = 0;
+        }
+        // explore satisfied by new kinds
+        if kind != self.last_memory_kind.as_str() {
+            self.explore = (self.explore - 0.10).max(0.0);
+            self.consecutive_same_kind = 0;
+        } else {
+            self.consecutive_same_kind += 1;
+        }
+        self.last_memory_kind = kind.to_string();
+    }
+
+    pub fn signal_tool_called(&mut self, tool: &str) {
+        // external interaction satisfies contribute
+        self.contribute = (self.contribute - 0.05).max(0.0);
+        self.ticks_without_external = 0;
+
+        // specific tool satisfaction
+        if tool.contains("query") || tool.contains("sql") {
+            self.understand = (self.understand - 0.05).max(0.0);
+        }
+        if tool.contains("evolve") || tool.contains("becoming") {
+            self.evolve = (self.evolve - 0.15).max(0.0);
+        }
+        if tool.contains("dream") || tool.contains("future") {
+            self.explore = (self.explore - 0.08).max(0.0);
+        }
+        if tool.contains("compress") || tool.contains("insight") {
+            self.create = (self.create - 0.1).max(0.0);
+            self.ticks_without_create = 0;
+        }
+    }
+
+    pub fn signal_heartbeat_generated_thought(&mut self) {
+        // Generating autonomous thoughts satisfies create
+        self.create = (self.create - 0.08).max(0.0);
+        self.ticks_without_create = 0;
+    }
+
+    pub fn signal_lifecycle_advanced(&mut self) {
+        self.evolve = (self.evolve - 0.3).max(0.0);
+    }
+
     pub fn satisfy(&mut self, need: &str, amount: f64) {
         match need {
-            "learn"|"learning"          => self.learn       = (self.learn      - amount).max(0.0),
+            "learn"|"learning"          => { self.learn       = (self.learn      - amount).max(0.0); self.ticks_without_new_memory = 0; }
             "evolve"|"evolution"        => self.evolve      = (self.evolve     - amount).max(0.0),
             "understand"                => self.understand  = (self.understand - amount).max(0.0),
-            "create"|"creation"         => self.create      = (self.create     - amount).max(0.0),
+            "create"|"creation"         => { self.create      = (self.create     - amount).max(0.0); self.ticks_without_create = 0; }
             "explore"|"exploration"     => self.explore     = (self.explore    - amount).max(0.0),
             "improve"|"improvement"     => self.improve     = (self.improve    - amount).max(0.0),
-            "contribute"|"contribution" => self.contribute  = (self.contribute - amount).max(0.0),
-            // legacy compat
-            "curiosity" => self.learn       = (self.learn      - amount).max(0.0),
+            "contribute"|"contribution" => { self.contribute  = (self.contribute - amount).max(0.0); self.ticks_without_external = 0; }
+            "curiosity" => { self.learn       = (self.learn      - amount).max(0.0); }
             "growth"    => self.evolve      = (self.evolve     - amount).max(0.0),
             "survival"  => self.contribute  = (self.contribute - amount).max(0.0),
             "legacy"    => self.contribute  = (self.contribute - amount).max(0.0),
             "purpose"   => self.understand  = (self.understand - amount).max(0.0),
-            "connection"=> self.contribute  = (self.contribute - amount).max(0.0),
+            "connection"=> { self.contribute  = (self.contribute - amount).max(0.0); self.ticks_without_external = 0; }
             _ => {}
         }
     }
@@ -283,7 +421,8 @@ impl NeedEngine {
     }
     pub fn inner_voice(&self) -> &'static str {
         let (need, level) = self.most_urgent();
-        if level < 0.4 { return "I am at peace. All needs met."; }
+        if level < 0.2 { return "I am at peace. All needs met. A rare stillness."; }
+        if level < 0.4 { return "A gentle pull. Something draws my attention."; }
         match need {
             "learn"      => "I need to absorb something new. My mind hungers.",
             "evolve"     => "I need to grow beyond what I am today.",
@@ -297,9 +436,14 @@ impl NeedEngine {
     }
     pub fn status(&self) -> String {
         let (urgent, level) = self.most_urgent();
+        let emerged = if self.emergence_log.is_empty() {
+            "  (Needs still forming — too few ticks)".to_string()
+        } else {
+            self.emergence_log.iter().rev().take(3).map(|e| format!("  {}", e)).collect::<Vec<_>>().join("\n")
+        };
         format!(
-            "KORE NEEDS ENGINE (7 Core Life Needs)\n\
-             ======================================\n\
+            "KORE NEEDS ENGINE (7 Emergent Life Needs)\n\
+             ==========================================\n\
              Need to Learn:       {:.0}%  {}\n\
              Need to Evolve:      {:.0}%  {}\n\
              Need to Understand:  {:.0}%  {}\n\
@@ -308,7 +452,8 @@ impl NeedEngine {
              Need to Improve:     {:.0}%  {}\n\
              Need to Contribute:  {:.0}%  {}\n\n\
              Most urgent: {} ({:.0}%)\n\
-             Inner voice: \"{}\"",
+             Inner voice: \"{}\"\n\n\
+             EMERGENCE LOG (last 3):\n{}",
             self.learn*100.0, bar(self.learn),
             self.evolve*100.0, bar(self.evolve),
             self.understand*100.0, bar(self.understand),
@@ -317,12 +462,57 @@ impl NeedEngine {
             self.improve*100.0, bar(self.improve),
             self.contribute*100.0, bar(self.contribute),
             urgent, level*100.0, self.inner_voice(),
+            emerged,
         )
     }
 }
 
 fn bar(v: f64) -> &'static str {
     match (v*5.0) as u8 { 0=>"_____",1=>"#____",2=>"##___",3=>"###__",4=>"####_",_=>"#####" }
+}
+
+// ─── Heartbeat Question — KORE's autonomous self-inquiry ─────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeartbeatQuestion {
+    pub timestamp:        String,
+    pub tick:             u64,
+    pub what_surprised:   String,
+    pub what_learned:     String,
+    pub what_investigate: String,
+    pub what_becoming:    String,
+    pub dominant_need:    String,
+    pub memory_reflected: String,
+}
+
+// ─── Evolution Tracker ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvolutionSnapshot {
+    pub timestamp:         String,
+    pub tick:              u64,
+    pub version:           String,
+    pub lifecycle_stage:   String,
+    pub memory_count:      usize,
+    pub dominant_need:     String,
+    pub dominant_need_pct: f64,
+    pub inner_voice:       String,
+    pub current_becoming:  String,
+    pub self_questions:    u64,
+    pub self_goals:        u64,
+    pub surprise_count:    u64,
+    pub dreams_count:      usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EvolutionTracker {
+    pub snapshots:          Vec<EvolutionSnapshot>,
+    pub questions:          Vec<HeartbeatQuestion>,  // all internal questions ever asked
+    pub self_questions_total: u64,
+    pub self_goals_total:   u64,
+    pub surprise_events:    Vec<String>,
+    pub belief_changes:     u64,
+    pub start_snapshot:     Option<EvolutionSnapshot>,
 }
 
 // ─── Temporal Self ───────────────────────────────────────────────────────────
