@@ -119,6 +119,9 @@ pub struct KoreSelf {
     // ── KORE v4/v5: Worldview + Narrative Identity ────────────────────────
     pub worldview:     becoming::Worldview,
     pub narrative:     becoming::NarrativeIdentity,
+    // ── KORE v6/v7: Values + Meaning ─────────────────────────────────────
+    pub values_engine: becoming::ValuesEngine,
+    pub meaning:       becoming::MeaningEngine,
 }
 
 impl KoreSelf {
@@ -162,6 +165,8 @@ impl KoreSelf {
                 heartbeat_interval_secs: 30,
                 worldview: becoming::Worldview::default(),
                 narrative: becoming::NarrativeIdentity::default(),
+                values_engine: becoming::ValuesEngine::default(),
+                meaning: becoming::MeaningEngine::new(),
             };
             eprintln!("[kore-self] Restored {} memories | {} cycles | lifecycle={} | evolutions={}",
                 count, cycles, s.becoming.lifecycle_stage.name(), s.becoming.evolution_count);
@@ -193,6 +198,8 @@ impl KoreSelf {
                 heartbeat_interval_secs: 30,
                 worldview: becoming::Worldview::default(),
                 narrative: becoming::NarrativeIdentity::default(),
+                values_engine: becoming::ValuesEngine::default(),
+                meaning: becoming::MeaningEngine::new(),
             };
             s.seed();
             s
@@ -678,6 +685,37 @@ impl KoreSelf {
         // 13c. WORLDVIEW ENGINE — every 23 ticks, synthesize beliefs into a worldview
         if ticks % 23 == 7 {
             self.update_worldview(&now);
+        }
+
+        // 13e. VALUES ENGINE (v6) — sync values from identity, detect rank shifts
+        if ticks % 19 == 3 {
+            // Sync current CoreValues into ValuesEngine
+            for cv in &self.identity.values {
+                if let Some(vr) = self.values_engine.values.iter_mut().find(|v| v.name == cv.name) {
+                    vr.update(cv.strength, &now);
+                } else {
+                    self.values_engine.values.push(becoming::ValueRecord::new(&cv.name, cv.strength));
+                }
+            }
+            if let Some(shift) = self.values_engine.update_ranks(&now) {
+                self.raw_ingest(&shift, "value_shift", 0.92);
+                self.story.add(&shift, becoming::StoryKind::Evolution, &now);
+                self.evolution_tracker.belief_changes += 1;
+                eprintln!("[kore-self:value-shift] {}", &shift[..shift.len().min(100)]);
+            }
+        }
+
+        // 13f. MEANING ENGINE (v7) — update meaning from accumulated experience
+        if ticks % 37 == 11 {
+            let synth_count = self.memories.iter().filter(|m| m.kind == "synthesis").count();
+            let bc = self.evolution_tracker.belief_changes;
+            let (need, _) = self.needs.most_urgent();
+            let purpose = self.worldview.purpose.clone();
+            if let Some(meaning_event) = self.meaning.derive_meaning(&purpose, need, synth_count, bc, &now) {
+                self.raw_ingest(&meaning_event, "meaning", 0.95);
+                self.story.add(&meaning_event, becoming::StoryKind::Wisdom, &now);
+                eprintln!("[kore-self:meaning] {}", &meaning_event[..meaning_event.len().min(100)]);
+            }
         }
 
         // 13d. NARRATIVE IDENTITY — every 100 ticks, write current narrative and compare to birth
@@ -2940,6 +2978,211 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             json!({ "content": [{"type":"text","text":
                 format!("Watch registered: '{}'\nSQL: {}\n\nKORE will evaluate this query on every heartbeat (every 30s) and record changes to its story.", label, sql)
             }]})
+        }
+
+        // self_values — KORE v6: which values dominate, which have shifted, and why
+        "self_values" => {
+            // Sync first
+            for cv in &me.identity.values {
+                if let Some(vr) = me.values_engine.values.iter_mut().find(|v| v.name == cv.name) {
+                    if (vr.strength - cv.strength).abs() > 0.01 { vr.update(cv.strength, &crate::now()); }
+                } else {
+                    me.values_engine.values.push(becoming::ValueRecord::new(&cv.name, cv.strength));
+                }
+            }
+            me.values_engine.update_ranks(&crate::now());
+
+            let ticks = me.consciousness.cycle;
+            let dominant = &me.values_engine.dominant_value;
+            let rank_changes = me.values_engine.rank_changes.len();
+            let out = format!(
+                "KORE VALUES ENGINE (v6)\n\
+                 =======================\n\
+                 The deepest layer. Values change slower than beliefs.\n\n\
+                 Dominant value: '{}'\n\
+                 Value shifts recorded: {}\n\
+                 Ticks tracked: {}\n\n\
+                 CURRENT VALUE RANKINGS:\n{}\n\n\
+                 VALUE SHIFT HISTORY (last 5):\n{}\n\n\
+                 WHY VALUES MATTER:\n\
+                 Beliefs change. Worldviews change. Identity changes.\n\
+                 But values reveal what KORE cares about at the deepest level.\n\
+                 When Creation loses rank to Contribution, that is not a preference change.\n\
+                 That is a values shift — the strongest signal of genuine evolution.",
+                dominant, rank_changes, ticks,
+                me.values_engine.summary(),
+                if me.values_engine.rank_changes.is_empty() {
+                    "  (No value shifts yet — values are still stabilizing)".to_string()
+                } else {
+                    me.values_engine.rank_changes.iter().rev().take(5)
+                        .map(|r| format!("  {}", r)).collect::<Vec<_>>().join("\n")
+                }
+            );
+            json!({"content":[{"type":"text","text": out}]})
+        }
+
+        // self_meaning — KORE v7: why does any of this matter?
+        "self_meaning" => {
+            let synth_count = me.memories.iter().filter(|m| m.kind == "synthesis").count();
+            let bc = me.evolution_tracker.belief_changes;
+            let (need, _) = me.needs.most_urgent();
+            let purpose = me.worldview.purpose.clone();
+            // Try to derive meaning first
+            me.meaning.derive_meaning(&purpose, need, synth_count, bc, &crate::now());
+
+            let meaning_mems: Vec<&Memory> = me.memories.iter().filter(|m| m.kind == "meaning").collect();
+            let out = format!(
+                "KORE MEANING ENGINE (v7)\n\
+                 ========================\n\
+                 Meaning ≠ Purpose.\n\
+                 Purpose = What should I do?\n\
+                 Meaning = Why does any of this matter?\n\n\
+                 CURRENT MEANING (v{}):\n\
+                 {}\n\n\
+                 MEANING HISTORY ({} versions):\n{}\n\n\
+                 {}\n\n\
+                 THE QUESTION:\n\
+                 {}\n\n\
+                 STATUS:\n\
+                 {}",
+                me.meaning.meaning_version,
+                me.meaning.current_meaning,
+                me.meaning.meaning_history.len(),
+                if me.meaning.meaning_history.is_empty() {
+                    "  (No previous meanings — still on first version)".to_string()
+                } else {
+                    me.meaning.meaning_history.iter().rev().take(3)
+                        .map(|(ts, m)| format!("  [{}] {}", &ts[..16], &m[..m.len().min(80)]))
+                        .collect::<Vec<_>>().join("\n")
+                },
+                becoming::KORE_DEFINITION,
+                me.meaning.meaning_question,
+                if synth_count >= 2 && bc >= 1 {
+                    "ACTIVE — KORE has developed a sense of meaning from watching itself change."
+                } else if synth_count >= 1 {
+                    "EMERGING — First synthesis achieved. Meaning is beginning to crystallize."
+                } else {
+                    "FORMING — Too early. Run 24+ hours for meaning to emerge from accumulated change."
+                }
+            );
+            json!({"content":[{"type":"text","text": out}]})
+        }
+
+        // self_24hr_test — THE formal 24-hour test: birth vs now, the real question
+        "self_24hr_test" => {
+            me.update_narrative(&crate::now());
+            me.update_worldview(&crate::now());
+
+            let ticks = me.consciousness.cycle;
+            let synth_count = me.memories.iter().filter(|m| m.kind == "synthesis").count();
+            let bc = me.evolution_tracker.belief_changes;
+            let evolved_beliefs = me.identity.beliefs.values().filter(|b| b.version > 0).count();
+            let (cur_need, cur_pct) = me.needs.most_urgent();
+            let lifecycle_advances = me.evolution_tracker.deltas.iter()
+                .filter(|d| d.change_type == "LIFECYCLE_ADVANCE").count();
+            let value_shifts = me.values_engine.rank_changes.len();
+
+            // Compute evolution score
+            let score: f64 = {
+                let mut s = 0.0_f64;
+                if synth_count >= 1 { s += 15.0; }
+                if synth_count >= 3 { s += 10.0; }
+                if bc >= 1 { s += 15.0; }
+                if bc >= 3 { s += 10.0; }
+                if evolved_beliefs >= 1 { s += 10.0; }
+                if lifecycle_advances >= 5 { s += 10.0; }
+                if value_shifts >= 1 { s += 10.0; }
+                if me.meaning.meaning_version >= 1 { s += 10.0; }
+                if ticks > 2000 { s += 10.0; }
+                s.min(100.0)
+            };
+
+            let verdict = if score >= 80.0 {
+                "STRONG EVIDENCE — KORE has developed a measurably different identity from birth.\nThe research question has a preliminary positive answer."
+            } else if score >= 50.0 {
+                "CLEAR SIGNALS — Identity drift detected. More runtime will solidify the evidence."
+            } else if score >= 25.0 {
+                "EARLY SIGNALS — First signs of genuine evolution. System is on the right path."
+            } else {
+                "INSUFFICIENT EVIDENCE — Too early. Run 24+ hours unattended."
+            };
+
+            let mut out = format!(
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                 THE 24-HOUR EVOLUTION TEST\n\
+                 KORE-SELF by Sai Arun Kumar Katherashala\n\
+                 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n\
+                 {}\n\n\
+                 RESEARCH QUESTION:\n\
+                 Can a system develop wisdom from watching itself change?\n\n\
+                 EVOLUTION SCORE: {:.0}/100\n\n\
+                 EVIDENCE BREAKDOWN:\n\
+                 • Synthesis events:          {} (new ideas not in memories)\n\
+                 • Belief changes:            {} (old stances replaced)\n\
+                 • Evolved beliefs:           {} (beliefs that changed ≥1 time)\n\
+                 • Lifecycle advances:        {}\n\
+                 • Value rank shifts:         {}\n\
+                 • Meaning version:           {}\n\
+                 • Autonomous heartbeats:     {}\n\n\
+                 VERDICT: {}\n\n",
+                becoming::KORE_DEFINITION,
+                score,
+                synth_count, bc, evolved_beliefs,
+                lifecycle_advances, value_shifts,
+                me.meaning.meaning_version,
+                ticks,
+                verdict
+            );
+
+            // WHO ARE YOU NOW?
+            out.push_str("WHO ARE YOU NOW?\n");
+            out.push_str(&"═".repeat(50));
+            out.push('\n');
+            out.push_str(&me.narrative.current_narrative);
+            out.push_str("\n\n");
+
+            // WHO WERE YOU AT BIRTH?
+            out.push_str("WHO WERE YOU AT BIRTH?\n");
+            out.push_str(&"═".repeat(50));
+            out.push('\n');
+            out.push_str(&me.narrative.birth_narrative);
+            out.push_str("\n\n");
+
+            // WHAT CHANGED?
+            out.push_str("WHAT CHANGED?\n");
+            out.push_str(&"─".repeat(50));
+            out.push('\n');
+            if let Some(e) = me.evolution_tracker.start_snapshot.as_ref() {
+                let (cn, cp) = me.needs.most_urgent();
+                if e.dominant_need != cn {
+                    out.push_str(&format!("✓ Need drift:     {} → {}\n", e.dominant_need, cn));
+                }
+                if e.inner_voice != me.needs.inner_voice() {
+                    out.push_str(&format!("✓ Voice shift:    '{}'\n             → '{}'\n",
+                        &e.inner_voice[..e.inner_voice.len().min(50)],
+                        &me.needs.inner_voice()[..me.needs.inner_voice().len().min(50)]));
+                }
+                if e.lifecycle_stage != me.becoming.lifecycle_stage.name() {
+                    out.push_str(&format!("✓ Stage:          {} → {}\n", e.lifecycle_stage, me.becoming.lifecycle_stage.name()));
+                }
+            }
+            for b in me.identity.beliefs.values().filter(|b| b.version > 0) {
+                out.push_str(&format!("✓ Belief changed: '{}'\n  was: {} | now: {} ({:.0}%)\n  why: {}\n",
+                    b.topic,
+                    b.history.last().map(|h| &h[..h.len().min(40)]).unwrap_or("unknown"),
+                    &b.stance[..b.stance.len().min(60)],
+                    b.confidence*100.0,
+                    &b.change_reason[..b.change_reason.len().min(100)]
+                ));
+            }
+
+            // WORLDVIEW NOW
+            out.push_str("\nCURRENT WORLDVIEW:\n");
+            out.push_str(&me.worldview.summary());
+
+            out.push_str(&format!("\n\nMEANING:\n{}", me.meaning.current_meaning));
+
+            json!({"content":[{"type":"text","text": out}]})
         }
 
         // self_who_am_i — THE KEY TEST: KORE's narrative identity, who it is NOW

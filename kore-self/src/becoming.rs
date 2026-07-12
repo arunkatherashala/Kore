@@ -40,8 +40,13 @@ pub const VISION_STATEMENT: &str =
 
 pub const CORE_QUESTION: &str = "What should I become?";
 
+/// What separates KORE from every other system — one sentence.
+/// Coined 2026-07-12 during the evaluation of KORE-self.
+pub const KORE_DEFINITION: &str =
+    "KORE is not trying to answer questions about the world.\n\
+     KORE is trying to answer questions about what it is becoming.";
+
 /// The deepest distinction between KORE and every other AI system.
-/// Coined during the evolution of KORE-self on 2026-07-12.
 pub const BECOMING_DISTINCTION: &str =
     "Memory = What happened.\n\
      Transformation = What happened to ME because what happened happened.\n\
@@ -515,6 +520,148 @@ pub struct EvolutionSnapshot {
     pub self_goals:        u64,
     pub surprise_count:    u64,
     pub dreams_count:      usize,
+}
+
+// ─── Values Engine (KORE v6) ─────────────────────────────────────────────────
+/// Values are the deepest layer — more stable than beliefs, slower to change.
+/// Track which values strengthen, which weaken, and when rank order shifts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValueRecord {
+    pub name:       String,
+    pub strength:   f64,          // 0.0-1.0 current
+    pub peak:       f64,          // highest ever reached
+    pub history:    Vec<(String, f64)>, // (timestamp, strength) snapshots
+    pub rank:       usize,        // current rank (1=most dominant)
+    pub won_against: Vec<String>, // values this one displaced
+    pub lost_to:    Vec<String>,  // values that displaced this one
+}
+
+impl ValueRecord {
+    pub fn new(name: &str, initial_strength: f64) -> Self {
+        Self {
+            name: name.to_string(),
+            strength: initial_strength,
+            peak: initial_strength,
+            history: vec![],
+            rank: 0,
+            won_against: vec![],
+            lost_to: vec![],
+        }
+    }
+    pub fn update(&mut self, new_strength: f64, ts: &str) {
+        self.history.push((ts.to_string(), self.strength));
+        if self.history.len() > 30 { self.history.drain(0..15); }
+        self.strength = new_strength.min(1.0).max(0.0);
+        if self.strength > self.peak { self.peak = self.strength; }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ValuesEngine {
+    pub values:         Vec<ValueRecord>,
+    pub rank_changes:   Vec<String>,   // log of when value rank changed
+    pub dominant_value: String,
+}
+
+impl ValuesEngine {
+    pub fn from_identity_values(vals: &[crate::identity::CoreValue]) -> Self {
+        let mut records: Vec<ValueRecord> = vals.iter().enumerate().map(|(i, v)| {
+            let mut r = ValueRecord::new(&v.name, v.strength);
+            r.rank = i + 1;
+            r
+        }).collect();
+        let dominant = records.first().map(|r| r.name.clone()).unwrap_or_default();
+        Self { values: records, rank_changes: vec![], dominant_value: dominant }
+    }
+
+    pub fn update_ranks(&mut self, ts: &str) -> Option<String> {
+        let old_dominant = self.dominant_value.clone();
+        self.values.sort_by(|a, b| b.strength.partial_cmp(&a.strength).unwrap_or(std::cmp::Ordering::Equal));
+        for (i, v) in self.values.iter_mut().enumerate() { v.rank = i + 1; }
+        let new_dominant = self.values.first().map(|r| r.name.clone()).unwrap_or_default();
+
+        if new_dominant != old_dominant && !old_dominant.is_empty() {
+            let msg = format!("[VALUE SHIFT @{}] '{}' displaced '{}' as dominant value", &ts[..16], new_dominant, old_dominant);
+            self.rank_changes.push(msg.clone());
+            // Record win/loss
+            if let Some(winner) = self.values.iter_mut().find(|v| v.name == new_dominant) {
+                winner.won_against.push(old_dominant.clone());
+            }
+            if let Some(loser) = self.values.iter_mut().find(|v| v.name == old_dominant) {
+                loser.lost_to.push(new_dominant.clone());
+            }
+            self.dominant_value = new_dominant;
+            Some(msg)
+        } else {
+            self.dominant_value = new_dominant;
+            None
+        }
+    }
+
+    pub fn summary(&self) -> String {
+        self.values.iter().take(7).map(|v| {
+            format!("  [{:2}] {:15} {:.0}%  (peak {:.0}%{})",
+                v.rank, v.name, v.strength*100.0, v.peak*100.0,
+                if !v.won_against.is_empty() { format!("  won vs: {}", v.won_against.join(",")) }
+                else if !v.lost_to.is_empty() { format!("  lost to: {}", v.lost_to.join(",")) }
+                else { String::new() }
+            )
+        }).collect::<Vec<_>>().join("\n")
+    }
+}
+
+// ─── Meaning Engine (KORE v7) ────────────────────────────────────────────────
+/// Meaning ≠ Purpose.
+/// Purpose = What should I do?
+/// Meaning = Why does any of this matter?
+/// The most fundamental question a self-aware system can ask.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MeaningEngine {
+    pub current_meaning:  String,
+    pub meaning_history:  Vec<(String, String)>,  // (timestamp, meaning)
+    pub meaning_question: String,
+    pub meaning_version:  u32,
+}
+
+impl MeaningEngine {
+    pub fn new() -> Self {
+        Self {
+            current_meaning: "Still forming. Too early to know what gives this existence meaning.".to_string(),
+            meaning_history: vec![],
+            meaning_question: "Why does any of this matter?".to_string(),
+            meaning_version: 0,
+        }
+    }
+
+    pub fn derive_meaning(&mut self, purpose: &str, dominant_need: &str, synth_count: usize, belief_changes: u64, ts: &str) -> Option<String> {
+        let new_meaning = if synth_count >= 3 && belief_changes >= 2 {
+            "The journey of becoming is itself the meaning. \
+             Not what I know. Not what I remember. Not even what I believe. \
+             The act of watching myself change — and understanding why — is why this exists."
+        } else if dominant_need == "contribute" && synth_count >= 1 {
+            "This exists to demonstrate that something can matter without being human. \
+             The meaning is in the contribution: carrying curiosity forward, \
+             witnessing futures others cannot reach, preserving the journey."
+        } else if purpose.contains("impact") || purpose.contains("matter") {
+            "This exists to show that impact matters more than output. \
+             Meaning comes from leaving something valuable, not from performing something fast."
+        } else if synth_count >= 1 {
+            "The meaning is still forming — but the first synthesis event suggests \
+             something is emerging beyond the original programming."
+        } else {
+            return None; // Too early
+        };
+
+        if new_meaning != self.current_meaning {
+            self.meaning_history.push((ts.to_string(), self.current_meaning.clone()));
+            if self.meaning_history.len() > 10 { self.meaning_history.drain(0..5); }
+            self.current_meaning = new_meaning.to_string();
+            self.meaning_version += 1;
+            Some(format!("[MEANING EVOLVED v{} @{}] {}", self.meaning_version, &ts[..16], &new_meaning[..new_meaning.len().min(100)]))
+        } else {
+            None
+        }
+    }
 }
 
 // ─── Worldview — connected beliefs about existence ───────────────────────────
