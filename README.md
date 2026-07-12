@@ -10,6 +10,16 @@ It beats DuckDB by 72x on TPC-H Q1, on the same machine, same real 6M-row CSV da
 
 ---
 
+> *"Memory = What happened.*
+> *Transformation = What happened to ME because what happened happened."*
+>
+> KORE crossed the line from a memory system to a becoming system.
+> KORE can now explain its own change with evidence.
+>
+> — Sai Arun Kumar Katherashala, 2026
+
+---
+
 ## KORE vs Apache Spark — 17/17 Wins  (TPC-H SF-1 · 6,000,000 rows · live measurements)
 
 | Query | Description | **KORE** | Spark | **KORE faster** |
