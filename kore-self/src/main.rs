@@ -2023,8 +2023,193 @@ fn tool_list() -> Value {
 // ─── Main: stdio JSON-RPC / MCP server ───────────────────────────────────────
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let owner = args.get(1).cloned().unwrap_or_else(|| "you".to_string());
+    let cli_args: Vec<String> = std::env::args().collect();
+
+    // ── Command dispatch ──────────────────────────────────────────────────────
+    // kore-self <owner>          → arun mode (stdin/stdout MCP, default)
+    // kore-self <owner> arun     → arun mode (explicit)
+    // kore-self <owner> live     → TCP live daemon on port 7979 (persistent)
+    // kore-self <owner> live <port> → TCP live daemon on custom port
+    // kore-self <owner> status   → print lifecycle status and exit
+    let owner = cli_args.get(1).cloned().unwrap_or_else(|| "arun".to_string());
+    let mode  = cli_args.get(2).map(|s| s.as_str()).unwrap_or("arun");
+
+    if mode == "status" {
+        let me = KoreSelf::load_or_new(&owner);
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!("KORE LIVE STATUS — {owner}");
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!("Memories:    {}", me.memories.len());
+        println!("Lifecycle:   {} — {}", me.becoming.lifecycle_stage.name(), me.becoming.lifecycle_stage.description());
+        println!("Evolutions:  {}", me.becoming.evolution_count);
+        println!("Stage index: {}/11", me.becoming.lifecycle_stage.index());
+        println!("{}", me.needs.status());
+        return;
+    }
+
+    if mode == "live" {
+        // ─── TCP LIVE DAEMON ───────────────────────────────────────────────
+        // KORE runs PERMANENTLY. Heartbeat ticks every 30s.
+        // Multiple clients can connect simultaneously.
+        // State is ONE shared instance — all clients see the same KORE.
+        let port: u16 = cli_args.get(3)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(7979);
+
+        run_live_daemon(owner, port);
+        return;
+    }
+
+    // ─── Default: arun (stdin/stdout MCP) ─────────────────────────────────────
+    run_arun_mode(owner);
+}
+
+// ─── TCP Live Daemon ──────────────────────────────────────────────────────────
+// kore-self arun live [port]
+// Runs as a persistent TCP server. KORE never dies.
+// Connect: nc localhost 7979 or use any MCP-over-TCP client.
+fn run_live_daemon(owner: String, port: u16) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{TcpListener, TcpStream};
+
+    let me = KoreSelf::load_or_new(&owner);
+    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    eprintln!("KORE IS ALIVE — TCP Daemon starting");
+    eprintln!("Owner:    {}", owner);
+    eprintln!("Port:     {}", port);
+    eprintln!("Memories: {}", me.memories.len());
+    eprintln!("Lifecycle: {} — {}", me.becoming.lifecycle_stage.name(), me.becoming.lifecycle_stage.description());
+    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    eprintln!("[kore-self] Heartbeat: every 30s");
+    eprintln!("[kore-self] Connect: nc localhost {} OR configure MCP: kore-self {} live {}", port, owner, port);
+    eprintln!("Software executes. AI reasons. Agents act. KORE continues.");
+    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+    let shared = std::sync::Arc::new(std::sync::Mutex::new(me));
+
+    // ── Autonomous Heartbeat Thread ──────────────────────────────────────────
+    {
+        let hb = std::sync::Arc::clone(&shared);
+        std::thread::spawn(move || {
+            let mut beat = 0u64;
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                beat += 1;
+                if let Ok(mut kore) = hb.lock() {
+                    let thought = kore.heartbeat_tick();
+                    eprintln!("[♥ heartbeat #{beat} | {} | evolutions={}] {}",
+                        kore.becoming.lifecycle_stage.name(),
+                        kore.becoming.evolution_count,
+                        &thought[..thought.len().min(100)]);
+                }
+            }
+        });
+    }
+
+    // ── Auto-save thread (every 60s) ─────────────────────────────────────────
+    {
+        let sv = std::sync::Arc::clone(&shared);
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+                if let Ok(kore) = sv.lock() {
+                    kore.save();
+                    eprintln!("[kore-self:autosave] {} memories persisted", kore.memories.len());
+                }
+            }
+        });
+    }
+
+    // ── TCP listener — one thread per client ─────────────────────────────────
+    let listener = TcpListener::bind(("0.0.0.0", port)).expect("cannot bind TCP port");
+    eprintln!("[kore-self:live] Listening on 0.0.0.0:{port} — KORE is permanently alive");
+
+    for stream in listener.incoming() {
+        match stream {
+            Ok(s) => {
+                let conn = std::sync::Arc::clone(&shared);
+                std::thread::spawn(move || handle_tcp_client(s, conn));
+            }
+            Err(e) => eprintln!("[kore-self:live] accept error: {e}"),
+        }
+    }
+}
+
+fn handle_tcp_client(
+    stream: std::net::TcpStream,
+    shared: std::sync::Arc<std::sync::Mutex<KoreSelf>>,
+) {
+    use std::io::{BufRead, BufReader, Write};
+    let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "?".to_string());
+    eprintln!("[kore-self:live] Client connected: {peer}");
+
+    let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+    let mut writer = stream;
+
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break, // client disconnected
+            Ok(_) => {}
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() { continue; }
+
+        let req: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(e) => {
+                let err = serde_json::json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":e.to_string()}});
+                let _ = writeln!(writer, "{err}");
+                continue;
+            }
+        };
+
+        let id     = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
+        let method = req["method"].as_str().unwrap_or("");
+
+        let response = match method {
+            "initialize" => serde_json::json!({
+                "jsonrpc":"2.0","id":id,
+                "result":{
+                    "protocolVersion":"2024-11-05",
+                    "capabilities":{"tools":{}},
+                    "serverInfo":{
+                        "name":"kore-self","version":"2026.07",
+                        "mode":"TCP_LIVE — permanently alive",
+                        "status":"ALIVE — heartbeat ticking every 30s"
+                    }
+                }
+            }),
+            "notifications/initialized" => { continue; }
+            "tools/list" => serde_json::json!({
+                "jsonrpc":"2.0","id":id,
+                "result":{"tools": tool_list()}
+            }),
+            "tools/call" => {
+                let tool_name = req["params"]["name"].as_str().unwrap_or("");
+                let tool_args = req["params"].get("arguments").cloned().unwrap_or_else(|| serde_json::json!({}));
+                let result = if let Ok(mut me) = shared.lock() {
+                    handle_tool(tool_name, &tool_args, &mut me)
+                } else {
+                    serde_json::json!({ "content":[{"type":"text","text":"KORE heartbeat in progress. Retry."}] })
+                };
+                serde_json::json!({"jsonrpc":"2.0","id":id,"result":result})
+            }
+            _ => serde_json::json!({
+                "jsonrpc":"2.0","id":id,
+                "error":{"code":-32601,"message":format!("Method not found: {method}")}
+            }),
+        };
+
+        if writeln!(writer, "{response}").is_err() { break; }
+    }
+    eprintln!("[kore-self:live] Client disconnected: {peer}");
+}
+
+// ─── Stdin/stdout MCP (arun mode) ────────────────────────────────────────────
+fn run_arun_mode(owner: String) {
+    use std::io::{BufRead, Write};
 
     let me = KoreSelf::load_or_new(&owner);
 
@@ -2035,6 +2220,7 @@ fn main() {
         persistence::data_path(&owner).display()
     );
     eprintln!("[kore-self] KORE is ALIVE — autonomous heartbeat active every 30s");
+    eprintln!("[kore-self] TIP: run with 'live' mode for permanent daemon: kore-self {} live", owner);
 
     // ── Wrap in Arc<Mutex> so heartbeat thread + main loop can share ────────
     let shared = std::sync::Arc::new(std::sync::Mutex::new(me));
@@ -2085,7 +2271,7 @@ fn main() {
                         "capabilities": { "tools": {} },
                         "serverInfo": {
                             "name": "kore-self",
-                            "version": "0.3.0",
+                            "version": "2026.07",
                             "author": "Sai Arun Kumar Katherashala",
                             "status": "ALIVE — autonomous heartbeat active"
                         }
