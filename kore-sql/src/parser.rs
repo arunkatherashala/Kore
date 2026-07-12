@@ -602,6 +602,16 @@ impl Parser {
             }
             return Ok(Expr::Not(Box::new(self.parse_unary()?)));
         }
+        // Unary minus: -expr → (0 - expr)
+        if self.peek() == &Token::Minus {
+            self.pos += 1;
+            let inner = self.parse_primary()?;
+            return Ok(Expr::BinOp {
+                left: Box::new(Expr::Int(0)),
+                op:   BinOpKind::Sub,
+                right: Box::new(inner),
+            });
+        }
         self.parse_primary()
     }
 

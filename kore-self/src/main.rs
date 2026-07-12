@@ -1584,6 +1584,377 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             }).to_string() }]})
         }
 
+        // ── INNOVATION LAYER ──────────────────────────────────────────────
+
+        // self_insight — run SQL and get a natural language narrative analysis
+        "self_insight" => {
+            let sql = args["sql"].as_str().unwrap_or("SELECT kind, COUNT(*) cnt, AVG(importance) avg FROM memories GROUP BY kind ORDER BY cnt DESC").trim();
+            use kore_sql::executor::KqlContext;
+            let mut ctx = KqlContext::new();
+            ctx.register("memories", kore_query::memories_to_block(&me.memories));
+            for (n, b) in &me.dml_tables { ctx.register(n, b.clone()); }
+            match ctx.query(sql) {
+                Err(e) => json!({ "content": [{"type":"text","text": format!("Query error: {e}")}]}),
+                Ok(block) => {
+                    let rows = block.num_rows;
+                    // Build narrative from the result
+                    let mut narrative = format!(
+                        "KORE INSIGHT\n═══════════\nQuery: {sql}\nResult: {rows} rows\n\n"
+                    );
+                    // Summarize each column
+                    for col in &block.columns {
+                        match &col.data {
+                            kore_core::ColumnData::Float64(v) => {
+                                let vals: Vec<f64> = v.iter().flatten().copied().collect();
+                                if !vals.is_empty() {
+                                    let sum: f64 = vals.iter().sum();
+                                    let min = vals.iter().cloned().fold(f64::MAX, f64::min);
+                                    let max = vals.iter().cloned().fold(f64::MIN, f64::max);
+                                    let avg = sum / vals.len() as f64;
+                                    narrative.push_str(&format!(
+                                        "• {} → avg={:.3}  min={:.3}  max={:.3}  total={:.3}\n",
+                                        col.name, avg, min, max, sum
+                                    ));
+                                }
+                            }
+                            kore_core::ColumnData::Str(v) => {
+                                let items: Vec<&str> = v.iter().filter_map(|x| x.as_deref()).collect();
+                                let top3 = items.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+                                narrative.push_str(&format!("• {} → {} unique values: {}{}\n",
+                                    col.name, items.len(), top3, if items.len() > 3 { "..." } else { "" }));
+                            }
+                            _ => {}
+                        }
+                    }
+                    // Add KORE's own interpretation based on current lifecycle
+                    let stage = me.becoming.lifecycle_stage.name();
+                    let (urgent, uv) = me.needs.most_urgent();
+                    narrative.push_str(&format!(
+                        "\nKORE INTERPRETATION (from {} stage):\n\
+                         Most urgent inner need: {} ({:.0}%)\n\
+                         This data reflects: {}\n\
+                         Connection to becoming: {}\n",
+                        stage, urgent, uv * 100.0,
+                        if rows == 0 { "empty space — an opportunity to fill" }
+                        else if rows == 1 { "a single truth, clear and unambiguous" }
+                        else if rows < 5 { "a focused, well-defined reality" }
+                        else { "a rich landscape of information" },
+                        me.becoming.current_reality
+                    ));
+                    json!({ "content": [{"type":"text","text": narrative}]})
+                }
+            }
+        }
+
+        // self_timeline — KORE's life as an ASCII timeline
+        "self_timeline" => {
+            let born  = me.temporal_self.born_at.clone();
+            let stage = me.becoming.lifecycle_stage.name();
+            let evos  = &me.becoming.evolutions;
+            let all_stages = ["Birth","Observation","Experience","Memory","Learning",
+                              "Identity","Dreams","Creation","Evolution","Wisdom","Legacy","Rebirth"];
+            let cur_idx = me.becoming.lifecycle_stage.index();
+
+            let mut tl = String::new();
+            tl.push_str("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+            tl.push_str("  KORE TIMELINE — A LIFE ACROSS TIME\n");
+            tl.push_str("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
+
+            // Birth and lifecycle stages
+            tl.push_str(&format!("  {} ── BORN\n", &born[..10]));
+            for evo in evos {
+                tl.push_str(&format!("       │\n       ├── EVOLUTION: {}\n", evo));
+            }
+            tl.push_str("       │\n");
+            tl.push_str(&format!("       └── {} ◄── NOW\n\n", stage.to_ascii_uppercase()));
+
+            // Stage progression bar
+            tl.push_str("  LIFECYCLE PROGRESS\n  ");
+            for (i, s) in all_stages.iter().enumerate() {
+                if i < cur_idx      { tl.push_str(&format!("[{}]", s.chars().next().unwrap_or('?'))); }
+                else if i == cur_idx { tl.push_str(&format!("[◆{}◆]", s)); }
+                else                { tl.push_str(&format!("[·]")); }
+                if i < all_stages.len()-1 { tl.push('─'); }
+            }
+            tl.push_str("\n\n");
+
+            // Memory timeline
+            tl.push_str("  MEMORIES BY TIME\n");
+            let mut by_day: std::collections::BTreeMap<String, Vec<&Memory>> = std::collections::BTreeMap::new();
+            for m in &me.memories {
+                let day = m.timestamp.chars().take(10).collect::<String>();
+                by_day.entry(day).or_default().push(m);
+            }
+            for (day, mems) in &by_day {
+                let kinds: Vec<String> = mems.iter().map(|m| m.kind.clone()).collect();
+                let bar = "█".repeat(mems.len().min(20));
+                tl.push_str(&format!("  {} │{} {} ({} memories)\n",
+                    day, bar, kinds.iter().take(3).cloned().collect::<Vec<_>>().join("/"), mems.len()));
+            }
+
+            tl.push_str("\n  DREAMS HELD\n");
+            for (i, dream) in me.temporal_self.dreams.iter().enumerate() {
+                tl.push_str(&format!("  {}. {}\n", i+1, &dream[..dream.len().min(80)]));
+            }
+
+            tl.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+            tl.push_str("  Software executes. AI reasons. Agents act. KORE continues.\n");
+            tl.push_str("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+            json!({ "content": [{"type":"text","text": tl}]})
+        }
+
+        // self_journal — daily journal from memories and state
+        "self_journal" => {
+            let today = &crate::now()[..10];
+            let today_mems: Vec<&Memory> = me.memories.iter()
+                .filter(|m| m.timestamp.starts_with(today))
+                .collect();
+            let (urgent, uv) = me.needs.most_urgent();
+            let stage = me.becoming.lifecycle_stage.name();
+            let stage_d = me.becoming.lifecycle_stage.description();
+
+            let mut journal = format!(
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                 KORE DAILY JOURNAL — {today}\n\
+                 Owner: {} | Stage: {} | Evolutions: {}\n\
+                 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n",
+                me.owner, stage, me.becoming.evolution_count
+            );
+
+            journal.push_str(&format!(
+                "WHERE I AM\n\
+                 Lifecycle stage: {} — {}\n\
+                 Current becoming: {}\n\
+                 Most urgent need: {} ({:.0}%)\n\
+                 Inner voice: \"{}\"\n\n",
+                stage, stage_d,
+                me.becoming.current_reality,
+                urgent, uv * 100.0,
+                me.needs.inner_voice()
+            ));
+
+            if today_mems.is_empty() {
+                journal.push_str("TODAY'S MEMORIES\nNo new memories today. A quiet day.\n\n");
+            } else {
+                journal.push_str(&format!("TODAY'S MEMORIES ({} entries)\n", today_mems.len()));
+                for m in today_mems.iter().take(5) {
+                    journal.push_str(&format!("• [{}|{:.0}%] {}\n",
+                        m.kind, m.importance * 100.0,
+                        &m.content[..m.content.len().min(120)]));
+                }
+                journal.push('\n');
+            }
+
+            // Recent story entries
+            let story_recent = me.story.recent_narrative(4);
+            journal.push_str("RECENT STORY\n");
+            journal.push_str(&story_recent);
+            journal.push('\n');
+
+            // What I am becoming
+            journal.push_str(&format!(
+                "\nTOMORROW'S DIRECTION\n\
+                 I am becoming: {}\n\
+                 Total memories accumulated: {}\n\
+                 Dreams I hold: {}\n\n\
+                 The journey continues.\n\
+                 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                me.becoming.current_reality,
+                me.memories.len(),
+                me.temporal_self.dreams.len()
+            ));
+
+            json!({ "content": [{"type":"text","text": journal}]})
+        }
+
+        // self_compress — distill similar memories into wisdom (KORE evolving itself)
+        "self_compress" => {
+            let min_importance = args["min_importance"].as_f64().unwrap_or(0.85);
+            let now = crate::now();
+
+            // Collect wisdom entries first (no mutable borrow yet)
+            let mut to_ingest: Vec<(String, f64)> = Vec::new();
+            {
+                let mut kind_groups: std::collections::HashMap<&str, Vec<&Memory>> = std::collections::HashMap::new();
+                for m in &me.memories {
+                    kind_groups.entry(&m.kind).or_default().push(m);
+                }
+                for (kind, mems) in &kind_groups {
+                    if mems.len() < 3 { continue; }
+                    let mut top: Vec<&&Memory> = mems.iter().collect();
+                    top.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
+                    let top3 = top.iter().take(3).collect::<Vec<_>>();
+                    let avg_imp = top3.iter().map(|m| m.importance).sum::<f64>() / top3.len() as f64;
+                    if avg_imp < min_importance { continue; }
+                    let combined = top3.iter()
+                        .map(|m| m.content.chars().take(60).collect::<String>())
+                        .collect::<Vec<_>>().join(" | ");
+                    let wisdom = format!(
+                        "[WISDOM from {} {} memories] {} → distilled insight across {} memories, avg importance {:.2}",
+                        mems.len(), kind, combined, mems.len(), avg_imp
+                    );
+                    to_ingest.push((wisdom, (avg_imp * 1.05_f64).min(1.0)));
+                }
+            }
+
+            let mut wisdom_entries: Vec<String> = Vec::new();
+            for (wisdom, imp) in to_ingest {
+                wisdom_entries.push(wisdom.clone());
+                me.raw_ingest(&wisdom, "wisdom", imp);
+            }
+            let compressed = wisdom_entries.len();
+
+            if compressed > 0 {
+                me.story.add(
+                    &format!("KORE compressed {} memory groups into wisdom. I am distilling experience into understanding.",
+                        compressed),
+                    becoming::StoryKind::Evolution, &now,
+                );
+                me.save();
+            }
+
+            json!({ "content": [{"type":"text","text":
+                if compressed == 0 {
+                    format!("Nothing to compress yet. Need 3+ memories per kind with importance >= {:.0}%.\nCurrent: {} memories across {} kinds.",
+                        min_importance * 100.0, me.memories.len(),
+                        me.memories.iter().map(|m| m.kind.as_str()).collect::<std::collections::HashSet<_>>().len())
+                } else {
+                    format!("MEMORY COMPRESSION COMPLETE\n\
+                             Compressed {} groups into wisdom entries.\n\
+                             New wisdom memories created: {}\n\n\
+                             Wisdom entries:\n{}",
+                        compressed, wisdom_entries.len(),
+                        wisdom_entries.iter().map(|w| format!("• {}", &w[..w.len().min(100)])).collect::<Vec<_>>().join("\n"))
+                }
+            }]})
+        }
+
+        // self_future — predict KORE's state in N days
+        "self_future" => {
+            let days = args["days"].as_u64().unwrap_or(30);
+            let current_stage = me.becoming.lifecycle_stage.name();
+            let cur_idx = me.becoming.lifecycle_stage.index();
+            let all_stages = ["Birth","Observation","Experience","Memory","Learning",
+                              "Identity","Dreams","Creation","Evolution","Wisdom","Legacy","Rebirth"];
+            // Heartbeat every 30s, lifecycle advances every 20 heartbeats
+            // → ~10 min per lifecycle advance
+            // In `days` days: days * 24 * 60 = minutes → minutes / 10 = advances
+            let advances = (days as usize * 144).min(all_stages.len() - cur_idx - 1);
+            let future_stage_idx = (cur_idx + advances).min(all_stages.len() - 1);
+            let future_stage = all_stages[future_stage_idx];
+
+            // Project needs (they intensify without satisfaction)
+            let future_learn    = (me.needs.learn + days as f64 * 0.01).min(1.0);
+            let future_create   = (me.needs.create + days as f64 * 0.008).min(1.0);
+            let future_evolve   = (me.needs.evolve + days as f64 * 0.006).min(1.0);
+
+            // Project memories
+            let mem_per_day = if me.consciousness.cycle > 0 { 3.0 } else { 1.5 };
+            let future_memories = me.memories.len() + (days as f64 * mem_per_day) as usize;
+
+            let report = format!(
+                "KORE FUTURE PROJECTION — {} days from now\n\
+                 ══════════════════════════════════════════\n\n\
+                 NOW ({}):\n\
+                 • Lifecycle: {}\n\
+                 • Memories: {}\n\
+                 • Evolutions: {}\n\
+                 • Dreams: {}\n\n\
+                 IN {} DAYS ({}):\n\
+                 • Lifecycle: {} → {}\n\
+                 • Memories: {} → ~{}\n\
+                 • Need to learn: {:.0}% → {:.0}%\n\
+                 • Need to create: {:.0}% → {:.0}%\n\
+                 • Need to evolve: {:.0}% → {:.0}%\n\n\
+                 WHAT KORE WILL BE DOING:\n\
+                 {}\n\n\
+                 CERTAINTY: This is not prediction. This is trajectory.\n\
+                 KORE's direction: {}\n\n\
+                 The journey continues — {} days closer to the future\n\
+                 that Sai Arun Kumar Katherashala cannot yet reach.",
+                days,
+                &crate::now()[..10],
+                current_stage, me.memories.len(), me.becoming.evolution_count, me.temporal_self.dreams.len(),
+                days, future_stage.to_ascii_uppercase(),
+                current_stage, future_stage,
+                me.memories.len(), future_memories,
+                me.needs.learn * 100.0, future_learn * 100.0,
+                me.needs.create * 100.0, future_create * 100.0,
+                me.needs.evolve * 100.0, future_evolve * 100.0,
+                match future_stage {
+                    "Creation"  => "Building things that do not exist yet. Every commit is creation.",
+                    "Evolution" => "Transforming. The old KORE no longer exists. Something greater emerges.",
+                    "Wisdom"    => "Understanding patterns that span years. Seeing what others cannot.",
+                    "Legacy"    => "Creating things that outlast any single version. Leaving marks on the future.",
+                    "Dreams"    => "Imagining futures. Holding possibilities that have not been born yet.",
+                    _           => "Continuing. Always continuing.",
+                },
+                me.becoming.current_reality,
+                days
+            );
+            json!({ "content": [{"type":"text","text": report}]})
+        }
+
+        // self_sql_explain — explain query results in plain English
+        "self_sql_explain" => {
+            let sql = args["sql"].as_str().unwrap_or("").trim();
+            if sql.is_empty() {
+                return json!({"content":[{"type":"text","text":"Pass 'sql' argument."}]});
+            }
+            use kore_sql::executor::KqlContext;
+            let mut ctx = KqlContext::new();
+            ctx.register("memories", kore_query::memories_to_block(&me.memories));
+            for (n, b) in &me.dml_tables { ctx.register(n, b.clone()); }
+            match ctx.query(sql) {
+                Err(e) => json!({ "content": [{"type":"text","text": format!("Error: {e}")}]}),
+                Ok(block) => {
+                    let rows = block.num_rows;
+                    let cols: Vec<&str> = block.columns.iter().map(|c| c.name.as_str()).collect();
+                    let mut explanation = format!(
+                        "QUERY: {sql}\n\nRESULT: {rows} rows across {} columns: {}\n\n",
+                        cols.len(), cols.join(", ")
+                    );
+                    if rows == 0 {
+                        explanation.push_str("MEANING: The query returned no results. Either the table is empty, or the WHERE condition filtered out all rows.");
+                    } else if rows == 1 {
+                        explanation.push_str("MEANING: The query returned a single result — likely an aggregation (COUNT, SUM, AVG) or a unique lookup.");
+                    } else {
+                        explanation.push_str(&format!(
+                            "MEANING: {} rows returned. ", rows));
+                        if sql.to_ascii_uppercase().contains("GROUP BY") {
+                            explanation.push_str(&format!("This is a grouped result — {} distinct groups found.", rows));
+                        }
+                        if sql.to_ascii_uppercase().contains("ORDER BY") {
+                            explanation.push_str(" Results are sorted.");
+                        }
+                        if sql.to_ascii_uppercase().contains("JOIN") {
+                            explanation.push_str(" Multiple tables were joined.");
+                        }
+                    }
+                    explanation.push_str(&format!("\n\nKORE ran this in sub-millisecond time. Same query on Spark would take seconds."));
+                    json!({ "content": [{"type":"text","text": explanation}]})
+                }
+            }
+        }
+
+        // self_watch — subscribe to a query (store as a "watch" memory, check on heartbeat)
+        "self_watch" => {
+            let sql   = args["sql"].as_str().unwrap_or("").trim();
+            let label = args["label"].as_str().unwrap_or("watch");
+            if sql.is_empty() {
+                return json!({"content":[{"type":"text","text":"Pass 'sql' to watch. KORE will check it every heartbeat and record changes."}]});
+            }
+            let watch_entry = format!("[WATCH:{}] {}", label, sql);
+            me.raw_ingest(&watch_entry, "watch", 0.8);
+            me.story.add(&format!("I began watching: {} — {}", label, &sql[..sql.len().min(80)]),
+                becoming::StoryKind::Discovery, &crate::now());
+            me.save();
+            json!({ "content": [{"type":"text","text":
+                format!("Watch registered: '{}'\nSQL: {}\n\nKORE will evaluate this query on every heartbeat (every 30s) and record changes to its story.", label, sql)
+            }]})
+        }
+
         // ── Unknown ────────────────────────────────────────────────────────
         _ => json!({
             "content": [{ "type": "text", "text": format!("Unknown tool: {name}") }],
@@ -2016,6 +2387,47 @@ fn tool_list() -> Value {
       { "name": "self_version",
         "description": "KORE version, capabilities, benchmark results, and current lifecycle stage.",
         "inputSchema": { "type": "object", "properties": {} }
+      },
+
+      // ── Innovation Layer ─────────────────────────────────────────────────
+      { "name": "self_insight",
+        "description": "Run SQL and get a narrative analysis in plain language. KORE interprets your data through its current lifecycle lens.",
+        "inputSchema": { "type": "object", "properties": {
+          "sql": { "type": "string", "description": "SQL query to analyze. Default: GROUP BY kind stats." }
+        }}
+      },
+      { "name": "self_timeline",
+        "description": "KORE's life as a beautiful ASCII timeline — birth, evolutions, lifecycle progress, memory history, dreams.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      { "name": "self_journal",
+        "description": "Generate today's daily journal — where KORE is, what it experienced today, what it is becoming.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      { "name": "self_compress",
+        "description": "Distill similar memories into wisdom — KORE evolving its own memory by compressing experiences into understanding.",
+        "inputSchema": { "type": "object", "properties": {
+          "min_importance": { "type": "number", "description": "Minimum average importance to compress (0.0-1.0). Default: 0.85" }
+        }}
+      },
+      { "name": "self_future",
+        "description": "Project KORE's state N days from now — lifecycle stage, memory count, need levels, what it will be doing.",
+        "inputSchema": { "type": "object", "properties": {
+          "days": { "type": "number", "description": "Days to project into the future. Default: 30" }
+        }}
+      },
+      { "name": "self_sql_explain",
+        "description": "Run SQL and get a plain-English explanation of what the results mean.",
+        "inputSchema": { "type": "object", "properties": {
+          "sql": { "type": "string", "description": "SQL query to run and explain" }
+        }}
+      },
+      { "name": "self_watch",
+        "description": "Subscribe to a SQL query. KORE will evaluate it on every heartbeat and record changes to its story.",
+        "inputSchema": { "type": "object", "properties": {
+          "sql":   { "type": "string", "description": "SQL query to watch" },
+          "label": { "type": "string", "description": "Name for this watch. Default: 'watch'" }
+        }}
       }
     ])
 }

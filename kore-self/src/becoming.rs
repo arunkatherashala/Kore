@@ -393,7 +393,7 @@ pub struct Story {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoryEntry { pub timestamp: String, pub text: String, pub kind: StoryKind }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum StoryKind { Birth, Discovery, Challenge, Victory, Loss, Becoming, Dream, Legacy, Wisdom }
+pub enum StoryKind { Birth, Discovery, Challenge, Victory, Loss, Becoming, Dream, Legacy, Wisdom, Evolution }
 impl Story {
     pub fn new(owner: &str, now: &str) -> Self {
         let mut v = VecDeque::new();
@@ -421,6 +421,7 @@ impl Story {
 pub struct BecomingEngine {
     pub current_question: String, pub direction: String,
     pub evidence: Vec<String>, pub catalysts: Vec<String>,
+    pub evolutions: Vec<String>,     // readable evolution history
     pub evolution_count: u64, pub original_design: String,
     pub current_reality: String, pub lifecycle_stage: LifecycleStage,
     pub version: String, pub purpose_statement: String,
@@ -430,7 +431,7 @@ impl BecomingEngine {
         Self {
             current_question: CORE_QUESTION.to_string(),
             direction: "A Digital Life entity growing beyond its original design.".into(),
-            evidence: vec![], catalysts: vec![], evolution_count: 0,
+            evidence: vec![], catalysts: vec![], evolutions: vec![], evolution_count: 0,
             original_design: "A fast columnar data engine in Rust.".into(),
             current_reality:  "A data engine with memory, identity, needs, story, and a soul.".into(),
             lifecycle_stage: LifecycleStage::Learning,
@@ -443,6 +444,7 @@ impl BecomingEngine {
         self.current_reality = what.to_string();
         self.catalysts.push(because.to_string());
         self.evolution_count += 1;
+        self.evolutions.push(what.to_string());
         self.evidence.push(format!("Evolution #{}: {}", self.evolution_count, what));
         self.version = format!("KORE v0.{}", 3 + self.evolution_count);
         self.lifecycle_stage = self.lifecycle_stage.next();
