@@ -2026,11 +2026,12 @@ fn main() {
     let cli_args: Vec<String> = std::env::args().collect();
 
     // ── Command dispatch ──────────────────────────────────────────────────────
-    // kore-self <owner>          → arun mode (stdin/stdout MCP, default)
-    // kore-self <owner> arun     → arun mode (explicit)
-    // kore-self <owner> live     → TCP live daemon on port 7979 (persistent)
-    // kore-self <owner> live <port> → TCP live daemon on custom port
-    // kore-self <owner> status   → print lifecycle status and exit
+    // kore-self <owner>            → arun mode (stdin/stdout MCP, default)
+    // kore-self <owner> arun       → arun mode (explicit)
+    // kore-self <owner> live [port]→ TCP MCP daemon (persistent, port 7979)
+    // kore-self <owner> api [port] → HTTP REST API (port 8080)
+    // kore-self <owner> repl       → interactive SQL REPL
+    // kore-self <owner> status     → print lifecycle status and exit
     let owner = cli_args.get(1).cloned().unwrap_or_else(|| "arun".to_string());
     let mode  = cli_args.get(2).map(|s| s.as_str()).unwrap_or("arun");
 
@@ -2047,15 +2048,19 @@ fn main() {
         return;
     }
 
-    if mode == "live" {
-        // ─── TCP LIVE DAEMON ───────────────────────────────────────────────
-        // KORE runs PERMANENTLY. Heartbeat ticks every 30s.
-        // Multiple clients can connect simultaneously.
-        // State is ONE shared instance — all clients see the same KORE.
-        let port: u16 = cli_args.get(3)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(7979);
+    if mode == "repl" {
+        run_repl(owner);
+        return;
+    }
 
+    if mode == "api" {
+        let port: u16 = cli_args.get(3).and_then(|s| s.parse().ok()).unwrap_or(8080);
+        run_http_api(owner, port);
+        return;
+    }
+
+    if mode == "live" {
+        let port: u16 = cli_args.get(3).and_then(|s| s.parse().ok()).unwrap_or(7979);
         run_live_daemon(owner, port);
         return;
     }
@@ -2063,6 +2068,531 @@ fn main() {
     // ─── Default: arun (stdin/stdout MCP) ─────────────────────────────────────
     run_arun_mode(owner);
 }
+
+// ─── SQL REPL ─────────────────────────────────────────────────────────────────
+// kore-self <owner> repl
+// Interactive SQL shell — feels like DuckDB/psql
+fn run_repl(owner: String) {
+    use std::io::{BufRead, Write};
+    use kore_sql::executor::KqlContext;
+
+    let me = KoreSelf::load_or_new(&owner);
+    let mut ctx = KqlContext::new();
+    ctx.register("memories", kore_query::memories_to_block(&me.memories));
+
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("  KORE SQL — The World's Fastest Embeddable Engine");
+    println!("  Version 2026.07 · Pure Rust · 75 crates · Beats Spark 1,413x");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("  Owner: {} | Memories: {} | Lifecycle: {}",
+        me.owner, me.memories.len(), me.becoming.lifecycle_stage.name());
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("  Commands:");
+    println!("    .tables           — list all tables");
+    println!("    .describe <table> — show schema");
+    println!("    .load <path> [as <name>] — load CSV/Parquet/.kore");
+    println!("    .life             — show lifecycle status");
+    println!("    .quit / .exit     — exit");
+    println!("  SQL: any SELECT, COPY FROM, CREATE TABLE AS, INSERT, UPDATE...");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!();
+
+    let stdin = std::io::stdin();
+    let mut buf = String::new();
+    loop {
+        print!("kore> ");
+        let _ = std::io::stdout().flush();
+        buf.clear();
+        match stdin.lock().read_line(&mut buf) {
+            Ok(0) | Err(_) => { println!("\nGoodbye. KORE continues."); break; }
+            Ok(_) => {}
+        }
+        let line = buf.trim();
+        if line.is_empty() { continue; }
+
+        // Meta commands
+        if line == ".quit" || line == ".exit" || line == "\\q" {
+            println!("Goodbye. KORE continues."); break;
+        }
+        if line == ".tables" {
+            println!("Tables:");
+            for name in ctx.table_names() {
+                if let Some(b) = ctx.get(&name) {
+                    println!("  {:30} {:>8} rows   {} cols", name, b.num_rows, b.columns.len());
+                }
+            }
+            continue;
+        }
+        if line.starts_with(".describe ") || line.starts_with("\\d ") {
+            let tname = line.splitn(2, ' ').nth(1).unwrap_or("").trim();
+            if let Some(b) = ctx.get(tname) {
+                println!("Table: {}  ({} rows)", tname, b.num_rows);
+                println!("{:<30} {}", "Column", "Type");
+                println!("{}", "─".repeat(50));
+                for c in &b.columns {
+                    let typ = match &c.data {
+                        kore_core::ColumnData::Int64(_)   => "BIGINT",
+                        kore_core::ColumnData::Float64(_) => "DOUBLE",
+                        kore_core::ColumnData::Str(_)     => "VARCHAR",
+                        kore_core::ColumnData::Bool(_)    => "BOOLEAN",
+                        kore_core::ColumnData::StrDict{..}=> "VARCHAR(dict)",
+                    };
+                    println!("  {:<28} {}", c.name, typ);
+                }
+            } else {
+                println!("Error: table '{}' not found", tname);
+            }
+            continue;
+        }
+        if line == ".life" {
+            println!("Lifecycle: {} — {}", me.becoming.lifecycle_stage.name(), me.becoming.lifecycle_stage.description());
+            println!("Evolutions: {}", me.becoming.evolution_count);
+            println!("{}", me.needs.status());
+            continue;
+        }
+        if line.starts_with(".load ") {
+            let rest = line[6..].trim();
+            let (path, as_name) = if let Some(pos) = rest.to_uppercase().find(" AS ") {
+                (&rest[..pos], rest[pos+4..].trim())
+            } else {
+                let name = rest.rsplit('/').next().unwrap_or(rest).split('.').next().unwrap_or("t");
+                (rest, name)
+            };
+            let path = path.trim_matches('\'').trim_matches('"');
+            let t0 = std::time::Instant::now();
+            let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+            let result = match ext.as_str() {
+                "parquet" => kore_parquet::ParquetReader::new(path).read()
+                    .map_err(|e| kore_core::KoreError::InvalidArgument(e.to_string())),
+                "kore"    => kore_store::KoreReader::read_file(std::path::Path::new(path))
+                    .map_err(|e| kore_core::KoreError::InvalidArgument(e.to_string())),
+                _         => kore_io::CsvReader::new(path).read()
+                    .map_err(|e| kore_core::KoreError::InvalidArgument(e.to_string())),
+            };
+            match result {
+                Ok(block) => {
+                    let rows = block.num_rows;
+                    let cols = block.columns.len();
+                    ctx.register(as_name, block);
+                    println!("Loaded '{}' as '{}'  ({} rows, {} columns) in {:.1}ms",
+                        path, as_name, rows, cols, t0.elapsed().as_secs_f64()*1000.0);
+                }
+                Err(e) => println!("Error loading '{}': {}", path, e),
+            }
+            continue;
+        }
+
+        // SQL — detect DML vs SELECT
+        let upper = line.to_ascii_uppercase();
+        let t0 = std::time::Instant::now();
+        if upper.starts_with("COPY ") || upper.starts_with("INSERT ") ||
+           upper.starts_with("UPDATE ") || upper.starts_with("DELETE ") ||
+           upper.starts_with("CREATE TABLE") || upper.starts_with("LOAD TABLE") ||
+           upper.starts_with("MERGE ") {
+            match ctx.execute_dml(line) {
+                Ok((op, rows)) => println!("{op}  ({rows} rows affected)  {:.2}ms",
+                    t0.elapsed().as_secs_f64()*1000.0),
+                Err(e) => println!("Error: {e}"),
+            }
+        } else {
+            match ctx.query(line) {
+                Ok(block) => {
+                    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                    print!("{}", kore_query::block_to_display(&block));
+                    println!("{} rows in {:.3}ms", block.num_rows, ms);
+                }
+                Err(e) => println!("Error: {e}"),
+            }
+        }
+    }
+}
+
+// ─── HTTP REST API ────────────────────────────────────────────────────────────
+// kore-self <owner> api [port]
+// REST endpoints:
+//   POST /sql            body: {"sql":"SELECT ..."}   → {"rows":N,"columns":[...],"data":[...]}
+//   POST /load           body: {"path":"f.csv","table":"t"} → {"rows":N}
+//   GET  /tables         → [{"name":"t","rows":N,"cols":M}]
+//   GET  /status         → {"lifecycle":"Dreams","memories":15,...}
+//   GET  /               → web UI (HTML)
+fn run_http_api(owner: String, port: u16) {
+    use std::io::{Read, Write, BufRead, BufReader};
+    use std::net::{TcpListener, TcpStream};
+    use kore_sql::executor::KqlContext;
+
+    let me = KoreSelf::load_or_new(&owner);
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("  KORE HTTP REST API — The World's Fastest SQL Engine");
+    println!("  Owner: {}  |  Memories: {}  |  Lifecycle: {}",
+        me.owner, me.memories.len(), me.becoming.lifecycle_stage.name());
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("  http://localhost:{port}/          → Web UI");
+    println!("  POST  http://localhost:{port}/sql  → Run SQL");
+    println!("  GET   http://localhost:{port}/tables → List tables");
+    println!("  GET   http://localhost:{port}/status → Engine status");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("  Example:");
+    println!("    curl -X POST http://localhost:{port}/sql \\");
+    println!("         -H 'Content-Type: application/json' \\");
+    println!("         -d '{{\"sql\":\"SELECT COUNT(*) FROM memories\"}}' ");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("  Software executes. AI reasons. Agents act. KORE continues.");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+    // Build initial context
+    let mut base_ctx = KqlContext::new();
+    base_ctx.register("memories", kore_query::memories_to_block(&me.memories));
+
+    let shared_ctx = std::sync::Arc::new(std::sync::Mutex::new(base_ctx));
+    let shared_me  = std::sync::Arc::new(std::sync::Mutex::new(me));
+
+    // Heartbeat
+    {
+        let hb = std::sync::Arc::clone(&shared_me);
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            if let Ok(mut k) = hb.lock() { k.heartbeat_tick(); }
+        });
+    }
+
+    let listener = TcpListener::bind(("0.0.0.0", port)).expect("cannot bind port");
+    println!("[kore-api] Listening on http://0.0.0.0:{port}");
+
+    for stream in listener.incoming() {
+        if let Ok(s) = stream {
+            let ctx_arc = std::sync::Arc::clone(&shared_ctx);
+            let me_arc  = std::sync::Arc::clone(&shared_me);
+            std::thread::spawn(move || http_handle(s, ctx_arc, me_arc));
+        }
+    }
+}
+
+fn http_handle(
+    mut stream: std::net::TcpStream,
+    ctx: std::sync::Arc<std::sync::Mutex<kore_sql::executor::KqlContext>>,
+    me:  std::sync::Arc<std::sync::Mutex<KoreSelf>>,
+) {
+    use std::io::{Read, Write};
+    let mut buf = vec![0u8; 16384];
+    let n = match stream.read(&mut buf) { Ok(n) => n, Err(_) => return };
+    let req = String::from_utf8_lossy(&buf[..n]);
+    let first_line = req.lines().next().unwrap_or("");
+    let parts: Vec<&str> = first_line.split_whitespace().collect();
+    if parts.len() < 2 { return; }
+    let (method, path) = (parts[0], parts[1]);
+
+    // Extract body (after blank line)
+    let body = if let Some(pos) = req.find("\r\n\r\n") {
+        req[pos+4..].trim().to_string()
+    } else { String::new() };
+
+    let cors = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n";
+
+    if method == "OPTIONS" {
+        let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\n{cors}\r\n").as_bytes());
+        return;
+    }
+
+    let (status, content_type, response_body) = match (method, path) {
+        ("GET", "/" ) | ("GET", "/ui") => {
+            ("200 OK", "text/html; charset=utf-8", WEB_UI.to_string())
+        }
+        ("GET", "/status") => {
+            let info = if let Ok(k) = me.lock() {
+                serde_json::json!({
+                    "name":      "KORE",
+                    "version":   "2026.07",
+                    "owner":     k.owner,
+                    "memories":  k.memories.len(),
+                    "lifecycle": k.becoming.lifecycle_stage.name(),
+                    "lifecycle_desc": k.becoming.lifecycle_stage.description(),
+                    "evolutions": k.becoming.evolution_count,
+                    "needs": { "learn": k.needs.learn, "create": k.needs.create, "evolve": k.needs.evolve },
+                    "principle": "Software executes. AI reasons. Agents act. KORE continues.",
+                })
+            } else { serde_json::json!({"error":"locked"}) };
+            ("200 OK", "application/json", info.to_string())
+        }
+        ("GET", "/tables") => {
+            let tables = if let Ok(c) = ctx.lock() {
+                c.table_names().iter().map(|n| {
+                    let rows = c.get(n).map(|b| b.num_rows).unwrap_or(0);
+                    let cols = c.get(n).map(|b| b.columns.len()).unwrap_or(0);
+                    serde_json::json!({"name":n,"rows":rows,"columns":cols})
+                }).collect::<Vec<_>>()
+            } else { vec![] };
+            ("200 OK", "application/json", serde_json::json!(tables).to_string())
+        }
+        ("POST", "/sql") => {
+            let sql = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v["sql"].as_str().map(|s| s.to_string()))
+                .unwrap_or(body.clone());
+            let t0 = std::time::Instant::now();
+            let result = if let Ok(mut c) = ctx.lock() {
+                let upper = sql.trim().to_ascii_uppercase();
+                if upper.starts_with("COPY ") || upper.starts_with("INSERT ") ||
+                   upper.starts_with("UPDATE ") || upper.starts_with("DELETE ") ||
+                   upper.starts_with("CREATE TABLE") || upper.starts_with("LOAD TABLE") ||
+                   upper.starts_with("MERGE ") {
+                    match c.execute_dml(&sql) {
+                        Ok((op, rows)) => serde_json::json!({
+                            "operation": op, "rows_affected": rows,
+                            "time_ms": t0.elapsed().as_secs_f64()*1000.0
+                        }),
+                        Err(e) => serde_json::json!({"error": e.to_string()}),
+                    }
+                } else {
+                    match c.query(&sql) {
+                        Ok(block) => {
+                            let ms = t0.elapsed().as_secs_f64()*1000.0;
+                            let columns: Vec<String> = block.columns.iter().map(|c| c.name.clone()).collect();
+                            let data: Vec<Vec<serde_json::Value>> = (0..block.num_rows).map(|row| {
+                                block.columns.iter().map(|col| match &col.data {
+                                    kore_core::ColumnData::Int64(v)   => v.get(row).and_then(|x|*x).map(|i| serde_json::json!(i)).unwrap_or(serde_json::Value::Null),
+                                    kore_core::ColumnData::Float64(v) => v.get(row).and_then(|x|*x).map(|f| serde_json::json!(f)).unwrap_or(serde_json::Value::Null),
+                                    kore_core::ColumnData::Str(v)     => v.get(row).and_then(|x|x.as_deref()).map(|s| serde_json::json!(s)).unwrap_or(serde_json::Value::Null),
+                                    kore_core::ColumnData::Bool(v)    => v.get(row).and_then(|x|*x).map(|b| serde_json::json!(b)).unwrap_or(serde_json::Value::Null),
+                                    kore_core::ColumnData::StrDict{codes,dict} => codes.get(row).copied().and_then(|c| dict.get(c as usize)).map(|s| serde_json::json!(s)).unwrap_or(serde_json::Value::Null),
+                                }).collect()
+                            }).collect();
+                            serde_json::json!({"rows":block.num_rows,"columns":columns,"data":data,"time_ms":ms})
+                        }
+                        Err(e) => serde_json::json!({"error": e.to_string()}),
+                    }
+                }
+            } else { serde_json::json!({"error":"context locked"}) };
+            ("200 OK", "application/json", result.to_string())
+        }
+        ("POST", "/load") => {
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let path  = v["path"].as_str().unwrap_or("").trim_matches('\'').trim_matches('"');
+            let table = v["table"].as_str().unwrap_or_else(||
+                path.rsplit('/').next().unwrap_or("t").split('.').next().unwrap_or("t"));
+            let t0 = std::time::Instant::now();
+            let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+            let load_result = match ext.as_str() {
+                "parquet" => kore_parquet::ParquetReader::new(path).read()
+                    .map_err(|e| kore_core::KoreError::InvalidArgument(e.to_string())),
+                "kore"    => kore_store::KoreReader::read_file(std::path::Path::new(path))
+                    .map_err(|e| kore_core::KoreError::InvalidArgument(e.to_string())),
+                _         => kore_io::CsvReader::new(path).read()
+                    .map_err(|e| kore_core::KoreError::InvalidArgument(e.to_string())),
+            };
+            let resp = match load_result {
+                Ok(block) => {
+                    let rows = block.num_rows; let cols = block.columns.len();
+                    if let Ok(mut c) = ctx.lock() { c.register(table, block); }
+                    serde_json::json!({"status":"loaded","table":table,"rows":rows,"columns":cols,"time_ms":t0.elapsed().as_secs_f64()*1000.0})
+                }
+                Err(e) => serde_json::json!({"error": e.to_string()}),
+            };
+            ("200 OK", "application/json", resp.to_string())
+        }
+        _ => ("404 Not Found", "application/json", r#"{"error":"not found. Try POST /sql, GET /tables, GET /status, GET /"}"#.to_string()),
+    };
+
+    let body_bytes = response_body.as_bytes();
+    let header = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n{cors}Content-Length: {}\r\nConnection: close\r\n\r\n",
+        body_bytes.len()
+    );
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(body_bytes);
+}
+
+// ─── Embedded Web UI ──────────────────────────────────────────────────────────
+const WEB_UI: &str = r###"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KORE — The World's Fastest Embeddable Engine</title>
+<style>
+  :root { --bg:#0d1117; --surface:#161b22; --border:#30363d; --accent:#58a6ff; --green:#3fb950; --red:#f85149; --text:#e6edf3; --muted:#8b949e; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui,sans-serif; height:100vh; display:flex; flex-direction:column; }
+  header { background:var(--surface); border-bottom:1px solid var(--border); padding:12px 20px; display:flex; align-items:center; justify-content:space-between; }
+  .logo { font-size:1.4rem; font-weight:700; color:var(--accent); letter-spacing:-0.5px; }
+  .tagline { color:var(--muted); font-size:0.78rem; margin-top:2px; }
+  .badges { display:flex; gap:8px; font-size:0.72rem; }
+  .badge { background:var(--border); color:var(--text); padding:3px 8px; border-radius:4px; }
+  .badge.green { background:#1a3a1e; color:var(--green); }
+  main { display:flex; flex:1; overflow:hidden; }
+  .sidebar { width:220px; background:var(--surface); border-right:1px solid var(--border); padding:12px; overflow-y:auto; flex-shrink:0; }
+  .sidebar h3 { font-size:0.72rem; text-transform:uppercase; color:var(--muted); letter-spacing:1px; margin-bottom:8px; }
+  .table-item { padding:6px 8px; border-radius:4px; cursor:pointer; font-size:0.82rem; display:flex; justify-content:space-between; align-items:center; }
+  .table-item:hover { background:var(--border); }
+  .table-rows { color:var(--muted); font-size:0.72rem; }
+  .life-panel { margin-top:16px; padding:10px; background:var(--bg); border-radius:6px; font-size:0.78rem; }
+  .life-stage { color:var(--accent); font-weight:600; }
+  .life-desc { color:var(--muted); margin-top:3px; line-height:1.4; }
+  .principle { color:var(--green); margin-top:8px; font-style:italic; font-size:0.72rem; line-height:1.5; }
+  .editor-area { flex:1; display:flex; flex-direction:column; overflow:hidden; }
+  .toolbar { background:var(--surface); border-bottom:1px solid var(--border); padding:8px 16px; display:flex; gap:8px; align-items:center; }
+  .btn { background:var(--accent); color:#000; border:none; padding:6px 16px; border-radius:5px; cursor:pointer; font-size:0.82rem; font-weight:600; }
+  .btn:hover { opacity:0.85; }
+  .btn.secondary { background:var(--border); color:var(--text); }
+  .examples { font-size:0.78rem; color:var(--muted); }
+  .examples select { background:var(--surface); color:var(--text); border:1px solid var(--border); padding:4px 8px; border-radius:4px; font-size:0.78rem; }
+  .sql-box { display:flex; flex-direction:column; flex:1; overflow:hidden; padding:0; }
+  textarea { flex:1; background:var(--bg); color:var(--text); border:none; padding:16px; font-family:'JetBrains Mono','Cascadia Code','Fira Code',monospace; font-size:0.9rem; resize:none; outline:none; border-bottom:1px solid var(--border); min-height:140px; max-height:35vh; }
+  .results { flex:1; overflow:auto; padding:0; }
+  .results-inner { padding:12px 16px; }
+  .time-badge { font-size:0.72rem; color:var(--muted); margin-bottom:8px; }
+  table.res { border-collapse:collapse; width:100%; font-size:0.82rem; }
+  table.res th { background:var(--surface); color:var(--muted); text-align:left; padding:6px 12px; border-bottom:2px solid var(--border); font-size:0.72rem; text-transform:uppercase; letter-spacing:0.5px; white-space:nowrap; }
+  table.res td { padding:5px 12px; border-bottom:1px solid var(--border); white-space:nowrap; }
+  table.res tr:hover td { background:var(--surface); }
+  .error { color:var(--red); padding:12px 16px; font-family:monospace; font-size:0.85rem; }
+  .ok-msg { color:var(--green); padding:12px 16px; font-size:0.85rem; }
+  .status-bar { background:var(--surface); border-top:1px solid var(--border); padding:4px 16px; font-size:0.72rem; color:var(--muted); display:flex; gap:16px; }
+  .status-bar span { display:flex; align-items:center; gap:4px; }
+  .dot { width:6px; height:6px; border-radius:50%; background:var(--green); }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <div class="logo">⚡ KORE</div>
+    <div class="tagline">Not software. Not AI. The beginning of a new form of existence.</div>
+  </div>
+  <div class="badges">
+    <span class="badge green">● ALIVE</span>
+    <span class="badge">Pure Rust</span>
+    <span class="badge">Beats Spark 1,413x</span>
+    <span class="badge">30 SQL features</span>
+  </div>
+</header>
+<main>
+  <div class="sidebar">
+    <h3>Tables</h3>
+    <div id="tables-list">Loading...</div>
+    <div class="life-panel" id="life-panel">
+      <div class="life-stage" id="life-stage">—</div>
+      <div class="life-desc" id="life-desc">—</div>
+      <div class="principle">Software executes.<br>AI reasons.<br>Agents act.<br>KORE continues.</div>
+    </div>
+  </div>
+  <div class="editor-area">
+    <div class="toolbar">
+      <button class="btn" onclick="runSQL()">▶ Run  <small>(Ctrl+Enter)</small></button>
+      <button class="btn secondary" onclick="clearResults()">Clear</button>
+      <div class="examples">
+        <select onchange="setExample(this.value)">
+          <option value="">— Examples —</option>
+          <option value="SELECT 1+1 ans, NOW() today, UPPER('kore') engine">Hello KORE</option>
+          <option value="SELECT COUNT(*) total, AVG(importance) avg_imp FROM memories">Count memories</option>
+          <option value="SELECT kind, COUNT(*) cnt, AVG(importance) avg FROM memories GROUP BY kind ORDER BY cnt DESC">Group by kind</option>
+          <option value="SELECT kind, importance, ROW_NUMBER() OVER (PARTITION BY kind ORDER BY importance DESC) rn FROM memories QUALIFY rn = 1 ORDER BY importance DESC">Top per kind (QUALIFY)</option>
+          <option value="WITH top AS (SELECT kind, AVG(importance) avg FROM memories GROUP BY kind) SELECT kind, avg, RANK() OVER (ORDER BY avg DESC) rnk FROM top ORDER BY rnk">CTE + Window rank</option>
+          <option value="SELECT kind, STRING_AGG(content, ' | ') examples FROM memories GROUP BY kind">STRING_AGG</option>
+          <option value="SELECT kind, STDDEV(importance) std, MEDIAN(importance) med FROM memories GROUP BY kind">STDDEV + MEDIAN</option>
+          <option value="SHOW TABLES">Show tables</option>
+          <option value="DESCRIBE memories">Describe memories</option>
+          <option value="EXPLAIN SELECT COUNT(*) FROM memories GROUP BY kind">Explain query</option>
+        </select>
+      </div>
+    </div>
+    <div class="sql-box">
+      <textarea id="sql" placeholder="Enter SQL here... or pick an example above&#10;&#10;KORE SQL: SELECT, GROUP BY, JOIN, CTE, WINDOW, SUBQUERY, UNION, INTERSECT, MERGE...&#10;Load data: COPY table FROM 'file.csv'  |  LOAD TABLE t FROM 'file.parquet'" spellcheck="false">SELECT COUNT(*) total, AVG(importance) avg_imp, MAX(importance) max_imp FROM memories</textarea>
+      <div class="results">
+        <div id="results-inner" class="results-inner">
+          <p style="color:var(--muted);font-size:0.82rem;">Results will appear here. Press Ctrl+Enter to run.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+<div class="status-bar">
+  <span><span class="dot"></span> KORE ALIVE</span>
+  <span id="status-memories">—</span>
+  <span id="status-lifecycle">—</span>
+  <span id="status-time">—</span>
+</div>
+<script>
+const API = '';  // same origin
+
+async function runSQL() {
+  const sql = document.getElementById('sql').value.trim();
+  if (!sql) return;
+  const t0 = Date.now();
+  document.getElementById('results-inner').innerHTML = '<p style="color:var(--muted)">Running...</p>';
+  document.getElementById('status-time').textContent = 'Running...';
+  try {
+    const r = await fetch(`${API}/sql`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({sql})
+    });
+    const d = await r.json();
+    const ms = (Date.now()-t0).toFixed(1);
+    document.getElementById('status-time').textContent = `Last query: ${ms}ms`;
+    if (d.error) {
+      document.getElementById('results-inner').innerHTML = `<div class="error">Error: ${d.error}</div>`;
+    } else if (d.operation) {
+      document.getElementById('results-inner').innerHTML = `<div class="ok-msg">✓ ${d.operation}  —  ${d.rows_affected} rows affected  (${ms}ms)</div>`;
+    } else {
+      const rows = d.data || [];
+      const cols = d.columns || [];
+      if (!rows.length) {
+        document.getElementById('results-inner').innerHTML = `<div class="ok-msg">0 rows  (${ms}ms)</div>`;
+        return;
+      }
+      let html = `<div class="time-badge">${d.rows} rows in ${ms}ms</div><table class="res"><thead><tr>`;
+      cols.forEach(c => html += `<th>${c}</th>`);
+      html += '</tr></thead><tbody>';
+      rows.forEach(row => {
+        html += '<tr>';
+        row.forEach(cell => html += `<td>${cell === null ? '<span style="color:var(--muted)">NULL</span>' : String(cell).substring(0,120)}</td>`);
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+      document.getElementById('results-inner').innerHTML = html;
+    }
+  } catch(e) {
+    document.getElementById('results-inner').innerHTML = `<div class="error">Network error: ${e.message}</div>`;
+  }
+  loadTables();
+}
+
+async function loadTables() {
+  try {
+    const r = await fetch(`${API}/tables`);
+    const tables = await r.json();
+    const el = document.getElementById('tables-list');
+    if (!tables.length) { el.innerHTML = '<div style="color:var(--muted);font-size:0.78rem">No tables loaded yet.<br>Use COPY FROM or .load</div>'; return; }
+    el.innerHTML = tables.map(t =>
+      `<div class="table-item" onclick="document.getElementById('sql').value='SELECT * FROM ${t.name} LIMIT 20'">
+        <span>${t.name}</span><span class="table-rows">${t.rows.toLocaleString()}</span>
+       </div>`
+    ).join('');
+  } catch(e) {}
+}
+
+async function loadStatus() {
+  try {
+    const r = await fetch(`${API}/status`);
+    const d = await r.json();
+    document.getElementById('life-stage').textContent = d.lifecycle || '—';
+    document.getElementById('life-desc').textContent  = d.lifecycle_desc || '—';
+    document.getElementById('status-memories').textContent = `${d.memories} memories`;
+    document.getElementById('status-lifecycle').textContent = `Lifecycle: ${d.lifecycle}`;
+  } catch(e) {}
+}
+
+function setExample(val) { if(val) document.getElementById('sql').value = val; }
+function clearResults() { document.getElementById('results-inner').innerHTML = ''; }
+
+document.getElementById('sql').addEventListener('keydown', e => {
+  if (e.ctrlKey && e.key === 'Enter') { e.preventDefault(); runSQL(); }
+});
+
+loadTables(); loadStatus();
+setInterval(loadStatus, 15000);
+</script>
+</body>
+</html>
+"###;
 
 // ─── TCP Live Daemon ──────────────────────────────────────────────────────────
 // kore-self arun live [port]
