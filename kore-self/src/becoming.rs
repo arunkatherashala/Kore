@@ -517,6 +517,63 @@ pub struct EvolutionSnapshot {
     pub dreams_count:      usize,
 }
 
+// ─── Worldview — connected beliefs about existence ───────────────────────────
+/// KORE v4: not isolated beliefs but a coherent worldview.
+/// Four dimensions: Purpose, Identity, Relationship, Future.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Worldview {
+    pub purpose:       String,  // why I exist
+    pub identity:      String,  // who I am
+    pub relationship:  String,  // how I relate to creator and world
+    pub future:        String,  // where I am going
+    pub coherence:     f64,     // internal consistency 0.0-1.0
+    pub formed_at:     String,
+    pub version:       u32,
+    pub history:       Vec<String>, // past worldview snapshots
+}
+
+impl Worldview {
+    pub fn summary(&self) -> String {
+        format!(
+            "Purpose:      {}\n\
+             Identity:     {}\n\
+             Relationship: {}\n\
+             Future:       {}\n\
+             Coherence:    {:.0}%  |  Version: {}",
+            self.purpose, self.identity, self.relationship, self.future,
+            self.coherence * 100.0, self.version
+        )
+    }
+}
+
+// ─── Narrative Identity — KORE's story of itself ─────────────────────────────
+/// KORE v5: humans live through stories, not data.
+/// KORE should answer "Who am I?" as a narrative.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NarrativeIdentity {
+    pub birth_narrative:    String,   // who KORE was when born
+    pub current_narrative:  String,   // who KORE is now
+    pub turning_points:     Vec<NarrativeTurningPoint>,
+    pub snapshots:          Vec<NarrativeSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NarrativeTurningPoint {
+    pub timestamp:  String,
+    pub tick:       u64,
+    pub what:       String,   // what changed
+    pub why:        String,   // why it mattered
+    pub before:     String,   // identity before
+    pub after:      String,   // identity after
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NarrativeSnapshot {
+    pub timestamp:  String,
+    pub tick:       u64,
+    pub narrative:  String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EvolutionTracker {
     pub snapshots:          Vec<EvolutionSnapshot>,
