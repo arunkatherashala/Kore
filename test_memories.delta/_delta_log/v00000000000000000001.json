@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "actions": [
+    {
+      "op": "CommitInfo",
+      "timestamp": 1783257423083,
+      "operation": "INSERT",
+      "user": "kore"
+    },
+    {
+      "op": "AddFile",
+      "path": "data/part-00000000000000000001.json",
+      "stats": {
+        "rows": 14,
+        "size_bytes": 2864
+      }
+    }
+  ]
+}

@@ -9,6 +9,7 @@ pub enum Token {
     As, Group, By, Order, Asc, Desc, Limit, And, Or, Not, Distinct,
     Count, Sum, Avg, Min, Max, Is, Null, Having, Union, All, With,
     Like, In, Case, When, Then, Else, End, Between,
+    Intersect, Except, Merge, Extract,
     // ─── Window function keywords ─────────────────────────────────
     Over, Partition, Rows, Range, Unbounded, Preceding, Following, Current,
     // ─── Punctuation / operators ──────────────────────────────────
@@ -80,6 +81,7 @@ impl Lexer {
             '='  => { self.pos += 1; Token::Eq }
             '!'  if self.peek2() == Some('=') => { self.pos += 2; Token::Ne }
             '<'  => { if self.peek2() == Some('=') { self.pos += 2; Token::Le }
+                      else if self.peek2() == Some('>') { self.pos += 2; Token::Ne }  // <> = !=
                       else { self.pos += 1; Token::Lt } }
             '>'  => { if self.peek2() == Some('=') { self.pos += 2; Token::Ge }
                       else { self.pos += 1; Token::Gt } }
@@ -185,6 +187,10 @@ impl Lexer {
             "PRECEDING" => Token::Preceding,
             "FOLLOWING" => Token::Following,
             "CURRENT"   => Token::Current,
+            "INTERSECT" => Token::Intersect,
+            "EXCEPT"    => Token::Except,
+            "MERGE"     => Token::Merge,
+            "EXTRACT"   => Token::Extract,
             _           => Token::Ident(s),
         }
     }

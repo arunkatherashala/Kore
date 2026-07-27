@@ -1,0 +1,15 @@
+C:\Users\skathera\Downloads\asistent\kore\KoreTestCs\bin\Debug\net9.0\KoreTestCs.exe
+C:\Users\skathera\Downloads\asistent\kore\KoreTestCs\bin\Debug\net9.0\KoreTestCs.deps.json
+C:\Users\skathera\Downloads\asistent\kore\KoreTestCs\bin\Debug\net9.0\KoreTestCs.runtimeconfig.json
+C:\Users\skathera\Downloads\asistent\kore\KoreTestCs\bin\Debug\net9.0\KoreTestCs.dll
+C:\Users\skathera\Downloads\asistent\kore\KoreTestCs\bin\Debug\net9.0\KoreTestCs.pdb
+C:\Users\skathera\Downloads\asistent\kore\KoreTestCs\obj\Debug\net9.0\KoreTestCs.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\skathera\Downloads\asistent\kore\KoreTestCs\obj\Debug\net9.0\KoreTestCs.AssemblyInfoInputs.cache
+C:\Users\skathera\Downloads\asistent\kore\KoreTestCs\obj\Debug\net9.0\KoreTestCs.AssemblyInfo.cs
+C:\Users\skathera\Downloads\asistent\kore\KoreTestCs\obj\Debug\net9.0\KoreTestCs.csproj.CoreCompileInputs.cache
+C:\Users\skathera\Downloads\asistent\kore\KoreTestCs\obj\Debug\net9.0\KoreTestCs.sourcelink.json
+C:\Users\skathera\Downloads\asistent\kore\KoreTestCs\obj\Debug\net9.0\KoreTestCs.dll
+C:\Users\skathera\Downloads\asistent\kore\KoreTestCs\obj\Debug\net9.0\refint\KoreTestCs.dll
+C:\Users\skathera\Downloads\asistent\kore\KoreTestCs\obj\Debug\net9.0\KoreTestCs.pdb
+C:\Users\skathera\Downloads\asistent\kore\KoreTestCs\obj\Debug\net9.0\KoreTestCs.genruntimeconfig.cache
+C:\Users\skathera\Downloads\asistent\kore\KoreTestCs\obj\Debug\net9.0\ref\KoreTestCs.dll

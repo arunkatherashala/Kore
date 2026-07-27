@@ -26,6 +26,10 @@ Thumbs.db
 # Benchmark outputs (keep .csv but not binary files)
 *.kore
 *.kore.*
+
+# Large TPC-H data files (too big for GitHub)
+tpch_*.csv
+_tpch_tables/
 bench_split/
 benchmark.kore.idx/
 

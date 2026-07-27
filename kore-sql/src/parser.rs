@@ -26,11 +26,12 @@ pub fn parse_query(sql: &str) -> Result<Query, KoreError> {
     // Main SELECT
     let body = Some(p.parse_select()?);
 
-    // UNION ALL / UNION
+    // UNION ALL / UNION / INTERSECT / EXCEPT
     let mut union_all = vec![];
-    while p.peek() == &Token::Union {
+    while matches!(p.peek(), Token::Union | Token::Intersect | Token::Except) {
         p.pos += 1;
         p.consume_if(&Token::All);   // UNION ALL or UNION (dedup not implemented)
+        p.consume_if(&Token::Distinct);
         union_all.push(p.parse_select()?);
     }
 
@@ -51,6 +52,13 @@ impl Parser {
     fn peek2(&self) -> &Token {
         self.tokens.get(self.pos + 1).unwrap_or(&Token::Eof)
     }
+    /// Returns the uppercase string if the next token is an Ident, else "".
+    fn peek_ident_upper(&self) -> String {
+        match self.tokens.get(self.pos) {
+            Some(Token::Ident(s)) => s.to_ascii_uppercase(),
+            _ => String::new(),
+        }
+    }
     fn advance(&mut self) -> Token {
         let t = self.tokens[self.pos].clone();
         self.pos += 1;
@@ -70,6 +78,35 @@ impl Parser {
             other => Err(KoreError::InvalidArgument(format!("expected identifier, got {:?}", other))),
         }
     }
+
+    /// Like expect_ident but also accepts SQL keywords as alias names (e.g. AVG, COUNT, avg).
+    /// Used after AS keyword in projections and CTEs.
+    fn expect_alias(&mut self) -> Result<String, KoreError> {
+        match self.advance() {
+            Token::Ident(s) => Ok(s),
+            // Allow common keywords used as alias names
+            Token::Avg       => Ok("avg".to_string()),
+            Token::Count     => Ok("count".to_string()),
+            Token::Sum       => Ok("sum".to_string()),
+            Token::Min       => Ok("min".to_string()),
+            Token::Max       => Ok("max".to_string()),
+            Token::Group     => Ok("group".to_string()),
+            Token::Order     => Ok("order".to_string()),
+            Token::From      => Ok("from".to_string()),
+            Token::Where     => Ok("where".to_string()),
+            Token::Asc       => Ok("asc".to_string()),
+            Token::Desc      => Ok("desc".to_string()),
+            Token::Distinct  => Ok("distinct".to_string()),
+            Token::Left      => Ok("left".to_string()),
+            Token::Right     => Ok("right".to_string()),
+            Token::Inner     => Ok("inner".to_string()),
+            Token::Full      => Ok("full".to_string()),
+            Token::Join      => Ok("join".to_string()),
+            Token::On        => Ok("on".to_string()),
+            Token::By        => Ok("by".to_string()),
+            other => Err(KoreError::InvalidArgument(format!("expected alias name, got {:?}", other))),
+        }
+    }
     fn consume_if(&mut self, tok: &Token) -> bool {
         if self.peek() == tok { self.pos += 1; true } else { false }
     }
@@ -83,9 +120,13 @@ impl Parser {
         // projections
         let projections = self.parse_projections()?;
 
-        // FROM
-        self.expect(&Token::From)?;
-        let from = self.parse_table_expr()?;
+        // FROM (optional — allows SELECT 1+1, SELECT NOW() etc.)
+        let from = if self.peek() == &Token::From {
+            self.pos += 1;
+            self.parse_table_expr()?
+        } else {
+            TableExpr { name: "__dual__".to_string(), alias: None, subquery: None, values: None }
+        };
 
         // JOINs
         let mut joins = Vec::new();
@@ -100,16 +141,42 @@ impl Parser {
             None
         };
 
-        // GROUP BY
-        let group_by = if self.peek() == &Token::Group && self.peek2() == &Token::By {
+        // GROUP BY [ROLLUP(...) | CUBE(...) | plain list]
+        let (group_by, rollup, cube) = if self.peek() == &Token::Group && self.peek2() == &Token::By {
             self.pos += 2; // consume GROUP BY
-            self.parse_ident_list()?
+            // Check for ROLLUP or CUBE
+            let upper = self.peek().clone();
+            if let Token::Ident(kw) = &upper {
+                let kw = kw.to_uppercase();
+                if kw == "ROLLUP" || kw == "CUBE" {
+                    let is_rollup = kw == "ROLLUP";
+                    self.pos += 1; // consume ROLLUP/CUBE
+                    self.expect(&Token::LParen)?;
+                    let cols = self.parse_ident_list()?;
+                    self.expect(&Token::RParen)?;
+                    (cols, is_rollup, !is_rollup)
+                } else {
+                    (self.parse_ident_list()?, false, false)
+                }
+            } else {
+                (self.parse_ident_list()?, false, false)
+            }
         } else {
-            Vec::new()
+            (Vec::new(), false, false)
         };
+        // Ignore rollup/cube flags for now — treat same as plain GROUP BY
+        let _ = (rollup, cube);
 
         // HAVING
         let having = if self.consume_if(&Token::Having) {
+            Some(self.parse_expr(0)?)
+        } else {
+            None
+        };
+
+        // QUALIFY (filter on window function results)
+        let qualify = if self.peek_ident_upper() == "QUALIFY" {
+            self.pos += 1;
             Some(self.parse_expr(0)?)
         } else {
             None
@@ -129,12 +196,34 @@ impl Parser {
                 Token::Int(n) => Some(n as u64),
                 other => return Err(KoreError::InvalidArgument(format!("LIMIT expects integer, got {:?}", other))),
             }
+        } else if self.peek_ident_upper() == "FETCH" {
+            // FETCH FIRST n ROWS ONLY
+            self.pos += 1; // consume FETCH
+            self.pos += 1; // consume FIRST (or NEXT)
+            let n = match self.advance() { Token::Int(n) => n as u64, _ => 1 };
+            // consume ROWS ONLY
+            while !matches!(self.peek(), Token::Eof) {
+                if self.peek_ident_upper() == "ONLY" { self.pos += 1; break; }
+                self.pos += 1;
+            }
+            Some(n)
+        } else {
+            None
+        };
+
+        // OFFSET n ROWS
+        let offset = if self.peek_ident_upper() == "OFFSET" {
+            self.pos += 1;
+            let n = match self.advance() { Token::Int(n) => n as u64, _ => 0 };
+            // skip optional ROWS
+            if self.peek_ident_upper() == "ROWS" { self.pos += 1; }
+            Some(n)
         } else {
             None
         };
 
         Ok(SelectStmt { distinct, projections, from, joins, where_clause,
-                         group_by, having, order_by, limit })
+                         group_by, having, qualify, order_by, limit, offset })
     }
 
     // ── Window spec helpers ────────────────────────────────────────────────
@@ -182,7 +271,12 @@ impl Parser {
         if matches!(self.peek(), Token::Rows | Token::Range) {
             let mode = if self.peek() == &Token::Rows { self.pos += 1; FrameMode::Rows }
                        else { self.pos += 1; FrameMode::Range };
-            if let Token::Ident(s) = self.peek() { if s.eq_ignore_ascii_case("BETWEEN") { self.pos += 1; } }
+            // Consume optional BETWEEN keyword (Token::Between or Ident "BETWEEN")
+            match self.peek() {
+                Token::Between => { self.pos += 1; }
+                Token::Ident(s) if s.eq_ignore_ascii_case("BETWEEN") => { self.pos += 1; }
+                _ => {}
+            }
             let start = self.parse_frame_bound()?;
             if self.peek() == &Token::And { self.pos += 1; }
             let end = self.parse_frame_bound()?;
@@ -214,9 +308,11 @@ impl Parser {
 
     fn parse_window_fn_args(&mut self, name: &str) -> Result<WindowFn, KoreError> {
         Ok(match name.to_ascii_uppercase().as_str() {
-            "ROW_NUMBER" => WindowFn::RowNumber,
-            "RANK"       => WindowFn::Rank,
-            "DENSE_RANK" => WindowFn::DenseRank,
+            "ROW_NUMBER"   => WindowFn::RowNumber,
+            "RANK"         => WindowFn::Rank,
+            "DENSE_RANK"   => WindowFn::DenseRank,
+            "PERCENT_RANK" => WindowFn::PercentRank,
+            "CUME_DIST"    => WindowFn::CumeDist,
             "NTILE"      => WindowFn::Ntile(Box::new(self.parse_expr(0)?)),
             "LAG"  => { let e = self.parse_expr(0)?;
                         let o = if self.consume_if(&Token::Comma) { self.parse_expr(0)? } else { Expr::Int(1) };
@@ -253,9 +349,24 @@ impl Parser {
         }
         let expr = self.parse_expr(0)?;
         let alias = if self.consume_if(&Token::As) {
-            Some(self.expect_ident()?)
+            Some(self.expect_alias()?)
         } else if matches!(self.peek(), Token::Ident(_)) {
             Some(self.expect_ident()?)
+        } else if matches!(self.peek(),
+            Token::Avg | Token::Count | Token::Sum | Token::Min | Token::Max |
+            Token::Asc | Token::Desc | Token::Group | Token::Order | Token::Where |
+            Token::Distinct
+        ) && !matches!(self.peek(), Token::From) {
+            // Keyword used as implicit alias without AS (e.g. SELECT AVG(x) avg ...)
+            // Only consume if it looks like an alias (not a clause keyword)
+            let next_tok = self.peek().clone();
+            match next_tok {
+                // These can be aliases
+                Token::Avg | Token::Count | Token::Sum | Token::Min | Token::Max |
+                Token::Asc | Token::Desc | Token::Distinct => Some(self.expect_alias()?),
+                // These could be aliases but are risky — only take if followed by comma or FROM
+                _ => None,
+            }
         } else {
             None
         };
@@ -265,10 +376,47 @@ impl Parser {
     // ─── Table reference ───────────────────────────────────────────────────
 
     fn parse_table_expr(&mut self) -> Result<TableExpr, KoreError> {
+        // VALUES (r1c1, r1c2), (r2c1, r2c2) AS t — inline table
+        if self.peek_ident_upper() == "VALUES" {
+            self.pos += 1;
+            let mut rows: Vec<Vec<Expr>> = Vec::new();
+            loop {
+                self.expect(&Token::LParen)?;
+                let mut row = vec![self.parse_expr(0)?];
+                while self.consume_if(&Token::Comma) { row.push(self.parse_expr(0)?); }
+                self.expect(&Token::RParen)?;
+                rows.push(row);
+                if !self.consume_if(&Token::Comma) { break; }
+            }
+            let alias = if self.consume_if(&Token::As) { Some(self.expect_alias()?) }
+                        else if matches!(self.peek(), Token::Ident(_)) { Some(self.expect_alias()?) }
+                        else { Some("_values".to_string()) };
+            let name = alias.clone().unwrap_or_else(|| "_values".to_string());
+            return Ok(TableExpr { name, alias, subquery: None, values: Some(rows) });
+        }
+
+        // Handle FROM (SELECT ...) alias — subquery as FROM table
+        if self.peek() == &Token::LParen {
+            self.pos += 1; // consume (
+            // Could be VALUES inside parens too
+            let subq = self.parse_select()?;
+            self.expect(&Token::RParen)?;
+            let alias = if self.consume_if(&Token::As) {
+                Some(self.expect_ident()?)
+            } else if matches!(self.peek(), Token::Ident(_)) {
+                Some(self.expect_ident()?)
+            } else {
+                Some("_subq".to_string())
+            };
+            let name = alias.clone().unwrap_or_else(|| "_subq".to_string());
+            return Ok(TableExpr { name, alias, subquery: Some(Box::new(subq)), values: None });
+        }
+
         let name = self.expect_ident()?;
         let alias = if self.consume_if(&Token::As) {
             Some(self.expect_ident()?)
-        } else if matches!(self.peek(), Token::Ident(_)) && !self.is_join_keyword()
+        } else if matches!(self.peek(), Token::Ident(s) if !["WHERE","ORDER","GROUP","LIMIT","HAVING","QUALIFY","UNION","INTERSECT","EXCEPT","FETCH","OFFSET","ON","SET","INTO"].contains(&s.to_ascii_uppercase().as_str()))
+               && !self.is_join_keyword()
                && self.peek() != &Token::Where
                && self.peek() != &Token::Order
                && self.peek() != &Token::Group
@@ -277,7 +425,7 @@ impl Parser {
         } else {
             None
         };
-        Ok(TableExpr { name, alias })
+        Ok(TableExpr { name, alias, subquery: None, values: None })
     }
 
     // ─── JOIN clause ───────────────────────────────────────────────────────
@@ -319,10 +467,11 @@ impl Parser {
     }
 
     fn parse_qualified_col(&mut self) -> Result<String, KoreError> {
-        let name = self.expect_ident()?;
+        // Accept both identifiers and SQL keywords used as column names (e.g. avg, count, sum)
+        let name = self.expect_alias()?;
         if self.peek() == &Token::Dot {
             self.pos += 1;
-            let col = self.expect_ident()?;
+            let col = self.expect_alias()?;
             Ok(format!("{}.{}", name, col))
         } else {
             Ok(name)
@@ -353,25 +502,38 @@ impl Parser {
                 lhs = Expr::Like { expr: Box::new(lhs), pattern: Box::new(pat), negated: false };
                 continue;
             }
-            // IN (...)
+            // IN (...) or IN (SELECT ...)
             if self.peek() == &Token::In {
                 self.pos += 1;
                 self.expect(&Token::LParen)?;
-                let values = self.parse_expr_list()?;
-                self.expect(&Token::RParen)?;
-                lhs = Expr::In { expr: Box::new(lhs), values, negated: false };
+                // Distinguish IN (SELECT ...) from IN (literal, ...)
+                if self.peek() == &Token::Select {
+                    let stmt = self.parse_select()?;
+                    self.expect(&Token::RParen)?;
+                    lhs = Expr::InSubquery { expr: Box::new(lhs), subquery: Box::new(stmt), negated: false };
+                } else {
+                    let values = self.parse_expr_list()?;
+                    self.expect(&Token::RParen)?;
+                    lhs = Expr::In { expr: Box::new(lhs), values, negated: false };
+                }
                 continue;
             }
-            // NOT IN / NOT LIKE
+            // NOT IN / NOT LIKE / NOT IN (SELECT ...)
             if self.peek() == &Token::Not {
                 let next = self.tokens.get(self.pos + 1).cloned().unwrap_or(Token::Eof);
                 match next {
                     Token::In => {
                         self.pos += 2;
                         self.expect(&Token::LParen)?;
-                        let values = self.parse_expr_list()?;
-                        self.expect(&Token::RParen)?;
-                        lhs = Expr::In { expr: Box::new(lhs), values, negated: true };
+                        if self.peek() == &Token::Select {
+                            let stmt = self.parse_select()?;
+                            self.expect(&Token::RParen)?;
+                            lhs = Expr::InSubquery { expr: Box::new(lhs), subquery: Box::new(stmt), negated: true };
+                        } else {
+                            let values = self.parse_expr_list()?;
+                            self.expect(&Token::RParen)?;
+                            lhs = Expr::In { expr: Box::new(lhs), values, negated: true };
+                        }
                         continue;
                     }
                     Token::Like => {
@@ -403,17 +565,52 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, KoreError> {
+        // EXISTS (SELECT ...)
+        if let Token::Ident(ref s) = self.peek().clone() {
+            if s.eq_ignore_ascii_case("EXISTS") {
+                self.pos += 1;
+                self.expect(&Token::LParen)?;
+                let stmt = self.parse_select()?;
+                self.expect(&Token::RParen)?;
+                return Ok(Expr::Exists { subquery: Box::new(stmt), negated: false });
+            }
+        }
         if self.consume_if(&Token::Not) {
+            // NOT EXISTS (SELECT ...)
+            if let Token::Ident(ref s) = self.peek().clone() {
+                if s.eq_ignore_ascii_case("EXISTS") {
+                    self.pos += 1;
+                    self.expect(&Token::LParen)?;
+                    let stmt = self.parse_select()?;
+                    self.expect(&Token::RParen)?;
+                    return Ok(Expr::Exists { subquery: Box::new(stmt), negated: true });
+                }
+            }
             // NOT IN / NOT LIKE / NOT BETWEEN
             if self.peek() == &Token::In {
                 self.pos += 1;
                 self.expect(&Token::LParen)?;
+                // Check if it's IN (SELECT ...) or IN (literal, ...)
+                if self.peek() == &Token::Select {
+                    let stmt = self.parse_select()?;
+                    self.expect(&Token::RParen)?;
+                    return Ok(Expr::InSubquery { expr: Box::new(Expr::Null), subquery: Box::new(stmt), negated: true });
+                }
                 let values = self.parse_expr_list()?;
                 self.expect(&Token::RParen)?;
-                // Will be handled below: wrap outer expr
                 return Ok(Expr::In { expr: Box::new(Expr::Null), values, negated: true });
             }
             return Ok(Expr::Not(Box::new(self.parse_unary()?)));
+        }
+        // Unary minus: -expr → (0 - expr)
+        if self.peek() == &Token::Minus {
+            self.pos += 1;
+            let inner = self.parse_primary()?;
+            return Ok(Expr::BinOp {
+                left: Box::new(Expr::Int(0)),
+                op:   BinOpKind::Sub,
+                right: Box::new(inner),
+            });
         }
         self.parse_primary()
     }
@@ -421,6 +618,12 @@ impl Parser {
     fn parse_primary(&mut self) -> Result<Expr, KoreError> {
         match self.advance() {
             Token::LParen => {
+                // If next token is SELECT → scalar subquery: (SELECT ...)
+                if self.peek() == &Token::Select {
+                    let stmt = self.parse_select()?;
+                    self.expect(&Token::RParen)?;
+                    return Ok(Expr::ScalarSubquery(Box::new(stmt)));
+                }
                 let e = self.parse_expr(0)?;
                 self.expect(&Token::RParen)?;
                 Ok(e)
@@ -433,6 +636,9 @@ impl Parser {
             Token::Case => self.parse_case(),
             // Aggregate functions — check for OVER (window)
             Token::Count => {
+                if self.peek() != &Token::LParen {
+                    return Ok(Expr::Col("count".to_string()));
+                }
                 self.expect(&Token::LParen)?;
                 let distinct = self.consume_if(&Token::Distinct);
                 let inner = if self.peek() == &Token::Star {
@@ -443,18 +649,28 @@ impl Parser {
                 self.maybe_window(Expr::Agg { func: func.clone(), expr: Box::new(inner) }, func)
             }
             Token::Sum => {
+                if self.peek() != &Token::LParen {
+                    return Ok(Expr::Col("sum".to_string()));
+                }
                 self.expect(&Token::LParen)?;
                 let inner = self.parse_expr(0)?;
                 self.expect(&Token::RParen)?;
                 self.maybe_window(Expr::Agg { func: AggFunc::Sum, expr: Box::new(inner.clone()) }, AggFunc::Sum)
             }
             Token::Avg => {
+                // If NOT followed by '(', treat as column reference (e.g. CTE alias named "avg")
+                if self.peek() != &Token::LParen {
+                    return Ok(Expr::Col("avg".to_string()));
+                }
                 self.expect(&Token::LParen)?;
                 let inner = self.parse_expr(0)?;
                 self.expect(&Token::RParen)?;
                 self.maybe_window(Expr::Agg { func: AggFunc::Avg, expr: Box::new(inner) }, AggFunc::Avg)
             }
             Token::Min => {
+                if self.peek() != &Token::LParen {
+                    return Ok(Expr::Col("min".to_string()));
+                }
                 self.expect(&Token::LParen)?;
                 let inner = self.parse_expr(0)?;
                 self.expect(&Token::RParen)?;
@@ -466,10 +682,51 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 self.maybe_window(Expr::Agg { func: AggFunc::Max, expr: Box::new(inner) }, AggFunc::Max)
             }
+            // ── Extended aggregate functions ──────────────────────────────────────
+            Token::Ident(ref name) if matches!(name.to_ascii_uppercase().as_str(),
+                "STDDEV" | "STDEV" | "STDDEV_POP" | "STDDEV_SAMP" | "STD" |
+                "VARIANCE" | "VAR_POP" | "VAR_SAMP" |
+                "MEDIAN" | "STRING_AGG" | "GROUP_CONCAT" | "LISTAGG" |
+                "PERCENTILE_CONT" | "PERCENTILE_DISC"
+            ) => {
+                let fname = name.to_ascii_uppercase();
+                // token already consumed by parse_primary's advance()
+                if self.peek() != &Token::LParen {
+                    return Ok(Expr::Col(fname.to_lowercase()));
+                }
+                self.expect(&Token::LParen)?;
+                let inner = self.parse_expr(0)?;
+                let func = match fname.as_str() {
+                    "STDDEV" | "STDEV" | "STDDEV_SAMP" | "STDDEV_POP" | "STD" => AggFunc::Stddev,
+                    "VARIANCE" | "VAR_POP" | "VAR_SAMP" => AggFunc::Variance,
+                    "MEDIAN" => AggFunc::Median,
+                    "STRING_AGG" | "LISTAGG" | "GROUP_CONCAT" => {
+                        let sep = if self.consume_if(&Token::Comma) {
+                            match self.advance() { Token::Str(s) => s, _ => ",".to_string() }
+                        } else { ",".to_string() };
+                        AggFunc::StringAgg { sep }
+                    }
+                    "PERCENTILE_CONT" | "PERCENTILE_DISC" => {
+                        let p_str = match &inner { Expr::Float(f) => format!("{}", f), Expr::Int(i) => format!("{}", i), _ => "0.5".to_string() };
+                        self.expect(&Token::RParen)?;
+                        if self.peek_ident_upper() == "WITHIN" { self.pos += 1; }
+                        if self.peek_ident_upper() == "GROUP"  { self.pos += 1; }
+                        if self.peek() == &Token::LParen { self.pos += 1; }
+                        if self.peek_ident_upper() == "ORDER"  { self.pos += 1; }
+                        if let Token::Ident(s) = self.peek().clone() { if s.eq_ignore_ascii_case("BY") { self.pos += 1; } }
+                        let order_col = self.parse_expr(0)?;
+                        if self.peek() == &Token::RParen { self.pos += 1; }
+                        return Ok(Expr::Agg { func: AggFunc::Percentile { p: p_str }, expr: Box::new(order_col) });
+                    }
+                    _ => AggFunc::Avg,
+                };
+                self.expect(&Token::RParen)?;
+                Ok(Expr::Agg { func, expr: Box::new(inner) })
+            }
             // Identifier: plain column OR window function name
             Token::Ident(name) => {
                 match name.to_ascii_uppercase().as_str() {
-                    "ROW_NUMBER" | "RANK" | "DENSE_RANK" | "NTILE" |
+                    "ROW_NUMBER" | "RANK" | "DENSE_RANK" | "PERCENT_RANK" | "CUME_DIST" | "NTILE" |
                     "LAG" | "LEAD" | "FIRST_VALUE" | "LAST_VALUE" | "CUMSUM" | "CUM_SUM" => {
                         self.expect(&Token::LParen)?;
                         let wfn = self.parse_window_fn_args(&name)?;
@@ -506,6 +763,32 @@ impl Parser {
                         }
                     }
                 }
+            }
+            // SQL keywords that can also be function names: LEFT(str, n), RIGHT(str, n)
+            Token::Left | Token::Right => {
+                let fname = match &self.tokens[self.pos - 1] { Token::Left => "LEFT", _ => "RIGHT" };
+                if self.peek() == &Token::LParen {
+                    self.pos += 1; // consume LParen
+                    let s    = self.parse_expr(0)?;
+                    self.expect(&Token::Comma)?;
+                    let n    = self.parse_expr(0)?;
+                    self.expect(&Token::RParen)?;
+                    Ok(Expr::FuncCall { name: fname.to_string(), args: vec![s, n] })
+                } else {
+                    Ok(Expr::Col(fname.to_lowercase()))
+                }
+            }
+            // EXTRACT(field FROM date) → FuncCall("EXTRACT", [field_str, date])
+            Token::Extract => {
+                self.expect(&Token::LParen)?;
+                // Field name: YEAR, MONTH, DAY, etc. (parsed as Ident or keyword)
+                let field = self.expect_alias()?;
+                // consume FROM keyword
+                if let Token::From = self.peek() { self.pos += 1; }
+                else if let Token::Ident(s) = self.peek() { if s.eq_ignore_ascii_case("FROM") { self.pos += 1; } }
+                let date_expr = self.parse_expr(0)?;
+                self.expect(&Token::RParen)?;
+                Ok(Expr::FuncCall { name: "EXTRACT".to_string(), args: vec![Expr::Str(field), date_expr] })
             }
             other => Err(KoreError::InvalidArgument(format!("unexpected token in expr: {:?}", other))),
         }
@@ -561,7 +844,14 @@ impl Parser {
             let col = self.parse_qualified_col()?;
             let desc = if self.consume_if(&Token::Desc) { true }
                        else { self.consume_if(&Token::Asc); false };
-            list.push(OrderByItem { col, desc });
+            // NULLS FIRST / NULLS LAST
+            let nulls_first = if self.peek_ident_upper() == "NULLS" {
+                self.pos += 1;
+                let first = self.peek_ident_upper() == "FIRST";
+                self.pos += 1; // consume FIRST or LAST
+                Some(first)
+            } else { None };
+            list.push(OrderByItem { col, desc, nulls_first });
             if !self.consume_if(&Token::Comma) { break; }
         }
         Ok(list)

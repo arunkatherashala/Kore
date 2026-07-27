@@ -1,0 +1,32 @@
+{
+  "date": "2026-07-04",
+  "author": "Sai Arun Kumar Katherashala",
+  "kore_bench": {
+    "Q1": 14.3187,
+    "Q3": 349.61039999999997,
+    "Q6": 21.6871,
+    "W1": 370.90869999999995,
+    "S1": 85.5671,
+    "SIMD": 898.8865000000001,
+    "D1": 3610.6313999999998
+  },
+  "duckdb_bench": {
+    "Q1": 1059.9388999980874,
+    "Q6": 775.0771000282839,
+    "Q3": 1077.2677999921143,
+    "Sort": 811.5173999685794
+  },
+  "kore_sql_tests": {
+    "SELECT DISTINCT": "PASS",
+    "GROUP BY + AVG": "PASS",
+    "CTE WITH keyword alias": "PASS",
+    "ROW_NUMBER() OVER": "PASS",
+    "LAG() OVER PARTITION": "PASS",
+    "FULL OUTER JOIN": "PASS",
+    "LEFT JOIN": "PASS",
+    "CTE + UNION ALL": "PASS",
+    "HAVING": "PASS",
+    "LIKE wildcard": "PASS",
+    "CASE WHEN": "PASS"
+  }
+}

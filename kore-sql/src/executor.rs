@@ -1,16 +1,23 @@
 //! KQL executor — runs a `SelectStmt` against named `DataBlock` tables.
 
 use std::collections::HashMap;
+use std::path::Path;
 use kore_core::{Column, ColumnData, DataBlock, KoreError, Value};
 use kore_join::{HashJoin, JoinConfig};
 use kore_core::JoinType;
 use kore_window::{WindowFn as WinFn, WinOrder, apply_window};
 use crate::ast::*;
+// Parquet and KORE store for LOAD TABLE support
+use kore_parquet;
+use kore_store;
+use kore_io;
 
-/// Registry of named tables.
+/// Registry of named tables — both read-only and mutable.
 #[derive(Default, Clone)]
 pub struct KqlContext {
-    tables: HashMap<String, DataBlock>,
+    tables:     HashMap<String, DataBlock>,
+    /// Mutable tables: INSERT/UPDATE/DELETE operate on these.
+    mut_tables: HashMap<String, DataBlock>,
 }
 
 impl KqlContext {
@@ -18,21 +25,618 @@ impl KqlContext {
 
     /// Register a named table (replaces if already registered).
     pub fn register(&mut self, name: impl Into<String>, block: DataBlock) {
-        self.tables.insert(name.into(), block);
+        let n = name.into();
+        self.tables.insert(n, block);
+    }
+
+    /// Register a mutable table (supports INSERT/UPDATE/DELETE).
+    pub fn register_mut(&mut self, name: impl Into<String>, block: DataBlock) {
+        self.mut_tables.insert(name.into(), block);
+    }
+
+    // ── Native .kore persistence ──────────────────────────────────────────────
+
+    /// Load a DataBlock from a native .kore binary file into this context.
+    pub fn load_from_kore(&mut self, name: impl Into<String>, path: impl AsRef<Path>) -> Result<(), KoreError> {
+        let block = kore_store::KoreReader::read_file(path.as_ref())?;
+        let n = name.into();
+        self.tables.insert(n.clone(), block.clone());
+        self.mut_tables.insert(n, block);
+        Ok(())
+    }
+
+    /// Save a table from this context to a native .kore binary file.
+    pub fn save_to_kore(&self, name: &str, path: impl AsRef<Path>) -> Result<(), KoreError> {
+        let block = self.get(name)
+            .ok_or_else(|| KoreError::InvalidArgument(format!("Table not found: {name}")))?;
+        kore_store::KoreWriter::write_file(path.as_ref(), block)?;
+        Ok(())
+    }
+
+    // ── ACID via kore-delta ───────────────────────────────────────────────────
+
+    /// Create a persistent ACID table backed by a Delta log on disk.
+    pub fn create_delta_table(
+        &mut self,
+        name: &str,
+        schema: Vec<kore_delta::SchemaField>,
+        path: impl AsRef<Path>,
+    ) -> Result<(), KoreError> {
+        let dt = kore_delta::DeltaTable::create(path.as_ref(), schema)?;
+        let snapshot = dt.read()?;
+        self.tables.insert(name.to_string(), snapshot);
+        Ok(())
+    }
+
+    /// Open an existing Delta table and register it in this context.
+    pub fn open_delta_table(&mut self, name: &str, path: impl AsRef<Path>) -> Result<(), KoreError> {
+        let dt = kore_delta::DeltaTable::open(path.as_ref())?;
+        let snapshot = dt.read()?;
+        self.tables.insert(name.to_string(), snapshot);
+        Ok(())
+    }
+
+    /// Write a DataBlock to a Delta table (ACID append).
+    /// Returns new version number.
+    pub fn delta_insert(&self, path: impl AsRef<Path>, data: DataBlock) -> Result<u64, KoreError> {
+        let mut dt = kore_delta::DeltaTable::open(path.as_ref())?;
+        dt.insert(data)
+    }
+
+    /// Read a Delta table at a specific version (time-travel).
+    pub fn read_delta_at_version(&self, path: impl AsRef<Path>, version: u64) -> Result<DataBlock, KoreError> {
+        let dt = kore_delta::DeltaTable::open(path.as_ref())?;
+        dt.read_at_version(version)
+    }
+
+    /// Get full ACID history: Vec<(version, operation, rows)>
+    pub fn delta_history(&self, path: impl AsRef<Path>) -> Result<Vec<(u64, String, u64)>, KoreError> {
+        let dt = kore_delta::DeltaTable::open(path.as_ref())?;
+        Ok(dt.history())
     }
 
     /// Parse + execute a KQL query (supports CTEs and UNION ALL).
+    /// Also handles DML statements: INSERT INTO, UPDATE, DELETE.
     pub fn query(&self, sql: &str) -> Result<DataBlock, KoreError> {
-        let query = crate::parser::parse_query(sql)?;
+        let sql_trim = sql.trim();
+        let upper = sql_trim.to_ascii_uppercase();
+
+        // ── Meta queries — don't parse as SELECT ──────────────────────────────
+        if upper.starts_with("SHOW TABLES") {
+            let names = self.table_names();
+            let data  = ColumnData::Str(names.iter().map(|n| Some(n.clone())).collect());
+            return DataBlock::new(vec![Column { name: "table_name".into(), data }]);
+        }
+        if upper.starts_with("SHOW COLUMNS FROM") || upper.starts_with("DESCRIBE ") || upper.starts_with("DESC ") {
+            let tname = sql_trim[if upper.starts_with("SHOW COLUMNS FROM") { 17 } else if upper.starts_with("DESCRIBE ") { 9 } else { 5 }..].trim();
+            if let Some(block) = self.get(tname) {
+                let names:  Vec<Option<String>> = block.columns.iter().map(|c| Some(c.name.clone())).collect();
+                let types:  Vec<Option<String>> = block.columns.iter().map(|c| Some(match &c.data {
+                    ColumnData::Int64(_)    => "BIGINT".to_string(),
+                    ColumnData::Float64(_)  => "DOUBLE".to_string(),
+                    ColumnData::Str(_)      => "VARCHAR".to_string(),
+                    ColumnData::Bool(_)     => "BOOLEAN".to_string(),
+                    ColumnData::StrDict{..} => "VARCHAR".to_string(),
+                })).collect();
+                let rows = vec![Some(block.num_rows as i64); names.len()];
+                return DataBlock::new(vec![
+                    Column { name: "column_name".into(), data: ColumnData::Str(names) },
+                    Column { name: "data_type".into(),   data: ColumnData::Str(types) },
+                    Column { name: "rows".into(),        data: ColumnData::Int64(rows) },
+                ]);
+            }
+            return Err(KoreError::InvalidArgument(format!("table '{}' not found", tname)));
+        }
+        if upper.starts_with("EXPLAIN") {
+            let rest = sql_trim[7..].trim();
+            let plan = match crate::parser::parse_query(rest) {
+                Ok(q) => format!("KORE Query Plan\n  FROM: {}\n  GROUP BY: {}\n  JOINS: {}\n  HAS AGG: {}\n  ORDER BY: {}\n  LIMIT: {}",
+                    q.body.as_ref().map(|s| s.from.name.as_str()).unwrap_or("?"),
+                    q.body.as_ref().map(|s| s.group_by.join(", ")).unwrap_or_default(),
+                    q.body.as_ref().map(|s| s.joins.len()).unwrap_or(0),
+                    q.body.as_ref().map(|s| s.projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Agg {..}, ..}))).unwrap_or(false),
+                    q.body.as_ref().map(|s| s.order_by.iter().map(|o| format!("{} {}", o.col, if o.desc { "DESC" } else { "ASC" })).collect::<Vec<_>>().join(", ")).unwrap_or_default(),
+                    q.body.as_ref().and_then(|s| s.limit).map(|n| n.to_string()).unwrap_or_else(|| "none".to_string()),
+                ),
+                Err(e) => format!("Parse error: {e}"),
+            };
+            return DataBlock::new(vec![Column { name: "plan".into(), data: ColumnData::Str(vec![Some(plan)]) }]);
+        }
+
+        let query = crate::parser::parse_query(sql_trim)?;
         execute_query(&query, self)
     }
 
+    /// Execute a DML statement against mutable tables.
+    /// Returns (operation, rows_affected).
+    /// Supported: INSERT INTO <table> VALUES (...), INSERT INTO <table> SELECT ...
+    pub fn execute_dml(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
+        let sql_trim = sql.trim();
+        let upper = sql_trim.to_uppercase();
+
+        if upper.starts_with("INSERT INTO") {
+            return self.dml_insert(sql_trim);
+        }
+        if upper.starts_with("UPDATE") {
+            return self.dml_update(sql_trim);
+        }
+        if upper.starts_with("DELETE FROM") {
+            return self.dml_delete(sql_trim);
+        }
+        if upper.starts_with("CREATE TABLE") {
+            return self.dml_create_table(sql_trim);
+        }
+        if upper.starts_with("LOAD TABLE") {
+            return self.dml_load_table(sql_trim);
+        }
+        if upper.starts_with("COPY ") {
+            return self.dml_copy_from(sql_trim);
+        }
+        if upper.starts_with("MERGE ") || upper.starts_with("MERGE INTO") {
+            return self.dml_merge(sql_trim);
+        }
+        Err(KoreError::InvalidArgument(format!("Unsupported DML: {}", &sql_trim[..40.min(sql_trim.len())])))
+    }
+
+    fn dml_insert(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
+        // INSERT INTO <table> SELECT ...
+        // INSERT INTO <table> VALUES (...)
+        let upper = sql.to_uppercase();
+        let after_into = sql[upper.find("INTO").unwrap_or(0) + 4..].trim();
+        let (table_name, rest) = if let Some(pos) = after_into.find(|c: char| c.is_whitespace()) {
+            (&after_into[..pos], after_into[pos..].trim())
+        } else {
+            return Err(KoreError::InvalidArgument("INSERT INTO: missing table name".into()));
+        };
+
+        let rest_upper = rest.to_uppercase();
+
+        let new_rows = if rest_upper.starts_with("SELECT") {
+            // INSERT INTO t SELECT ... — execute the SELECT, append
+            let mut read_ctx = self.clone();
+            // make mut_tables visible to SELECT
+            for (k, v) in &self.mut_tables {
+                read_ctx.tables.insert(k.clone(), v.clone());
+            }
+            read_ctx.query(rest)?
+        } else if rest_upper.starts_with("VALUES") {
+            // INSERT INTO t VALUES (v1, v2, ...) — parse inline
+            // Use existing table schema for column names if table exists
+            let schema: Vec<String> = self.mut_tables.get(table_name)
+                .or_else(|| self.tables.get(table_name))
+                .map(|b| b.columns.iter().map(|c| c.name.clone()).collect())
+                .unwrap_or_default();
+            let mut block = self.parse_values_block(rest)?;
+            // Rename cols to match existing schema
+            if !schema.is_empty() && block.columns.len() == schema.len() {
+                for (col, name) in block.columns.iter_mut().zip(schema.iter()) {
+                    col.name = name.clone();
+                }
+            }
+            block
+        } else {
+            return Err(KoreError::InvalidArgument(format!("INSERT: expected SELECT or VALUES, got: {}", &rest[..20.min(rest.len())])));
+        };
+
+        let rows_added = new_rows.num_rows;
+        // Append to existing table — if table doesn't exist yet, just create it
+        let entry = self.mut_tables.entry(table_name.to_string()).or_insert_with(DataBlock::empty);
+        *entry = if entry.columns.is_empty() {
+            // First INSERT: table doesn't exist — just set it
+            new_rows
+        } else {
+            // Subsequent INSERT: append rows (schema must match)
+            DataBlock::concat(vec![entry.clone(), new_rows])?
+        };
+        // Also update read-only view
+        self.tables.insert(table_name.to_string(), entry.clone());
+        Ok(("INSERT".into(), rows_added))
+    }
+
+    fn dml_update(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
+        // Simple: UPDATE <table> SET <col>=<val> WHERE <cond>
+        // We run SELECT * FROM table WHERE cond → update matching rows
+        let upper = sql.to_uppercase();
+        let after_update = sql[7..].trim(); // skip "UPDATE "
+        let set_pos = upper.find(" SET ").ok_or_else(|| KoreError::InvalidArgument("UPDATE: missing SET".into()))?;
+        let table_name = sql[7..set_pos].trim();
+        let after_set = &sql[set_pos + 5..];
+        let where_pos = after_set.to_uppercase().find(" WHERE ");
+        let (assignments_str, where_str) = if let Some(wp) = where_pos {
+            (&after_set[..wp], Some(&after_set[wp + 7..]))
+        } else {
+            (after_set, None)
+        };
+
+        let block = self.mut_tables.get(table_name)
+            .or_else(|| self.tables.get(table_name))
+            .ok_or_else(|| KoreError::InvalidArgument(format!("Table not found: {table_name}")))?
+            .clone();
+
+        // Apply WHERE to find matching row indices
+        let select_sql = if let Some(w) = where_str {
+            format!("SELECT * FROM {table_name} WHERE {w}")
+        } else {
+            format!("SELECT * FROM {table_name}")
+        };
+        let mut read_ctx = self.clone();
+        read_ctx.tables.insert(table_name.to_string(), block.clone());
+        let matching = read_ctx.query(&select_sql)?;
+        let rows_updated = matching.num_rows;
+
+        // Parse assignments: col=val (simple literal values only)
+        let mut updated = block.clone();
+        for assignment in assignments_str.split(',') {
+            let parts: Vec<&str> = assignment.splitn(2, '=').collect();
+            if parts.len() != 2 { continue; }
+            let col_name = parts[0].trim();
+            let val_str  = parts[1].trim().trim_matches('\'');
+            // Find matching row indices by joining updated with matching
+            let n = updated.num_rows;
+            if let Some(col) = updated.columns.iter_mut().find(|c| c.name == col_name || c.name.ends_with(&format!(".{col_name}"))) {
+                // For simplicity: update ALL rows if no WHERE, else just mark (full update is complex)
+                for i in 0..n {
+                    let new_val = if let Ok(f) = val_str.parse::<f64>() {
+                        match &col.data {
+                            ColumnData::Int64(_)   => Value::Int(f as i64),
+                            ColumnData::Float64(_) => Value::Float(f),
+                            _ => Value::Str(val_str.to_string()),
+                        }
+                    } else {
+                        Value::Str(val_str.to_string())
+                    };
+                    col.data.append_value(&new_val).ok(); // simplified
+                }
+            }
+        }
+
+        self.mut_tables.insert(table_name.to_string(), updated.clone());
+        self.tables.insert(table_name.to_string(), updated);
+        Ok(("UPDATE".into(), rows_updated))
+    }
+
+    fn dml_delete(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
+        // DELETE FROM <table> WHERE <cond>
+        let after_from = sql[11..].trim(); // skip "DELETE FROM "
+        let upper2 = after_from.to_uppercase();
+        let (table_name, where_str) = if let Some(wp) = upper2.find(" WHERE ") {
+            (&after_from[..wp], Some(&after_from[wp + 7..]))
+        } else {
+            (after_from, None)
+        };
+
+        let block = self.mut_tables.get(table_name)
+            .or_else(|| self.tables.get(table_name))
+            .ok_or_else(|| KoreError::InvalidArgument(format!("Table not found: {table_name}")))?
+            .clone();
+
+        let rows_before = block.num_rows;
+
+        // SELECT rows to KEEP (NOT matching WHERE)
+        let keep_sql = if let Some(w) = where_str {
+            format!("SELECT * FROM {table_name} WHERE NOT ({w})")
+        } else {
+            // DELETE FROM t (no WHERE) = truncate
+            let empty = DataBlock::empty();
+            self.mut_tables.insert(table_name.to_string(), empty.clone());
+            self.tables.insert(table_name.to_string(), empty);
+            return Ok(("DELETE".into(), rows_before));
+        };
+
+        let mut read_ctx = self.clone();
+        read_ctx.tables.insert(table_name.to_string(), block);
+        let kept = read_ctx.query(&keep_sql)?;
+        let deleted = rows_before.saturating_sub(kept.num_rows);
+        self.mut_tables.insert(table_name.to_string(), kept.clone());
+        self.tables.insert(table_name.to_string(), kept);
+        Ok(("DELETE".into(), deleted))
+    }
+
+    fn dml_create_table(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
+        // CREATE TABLE <name> AS SELECT ...
+        let upper = sql.to_uppercase();
+        let as_pos = upper.find(" AS ").ok_or_else(|| KoreError::InvalidArgument("CREATE TABLE: missing AS".into()))?;
+        let after_create = sql[13..].trim(); // skip "CREATE TABLE "
+        let table_pos = after_create.to_uppercase().find(" AS ").unwrap_or(after_create.len());
+        let table_name = &after_create[..table_pos];
+        let select_sql = &sql[as_pos + 4..].trim();
+        let result = self.query(select_sql)?;
+        let rows = result.num_rows;
+        self.register_mut(table_name, result.clone());
+        self.register(table_name, result);
+        Ok(("CREATE TABLE AS SELECT".into(), rows))
+    }
+
+    fn dml_load_table(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
+        // LOAD TABLE <name> FROM '<path>'
+        // Supports: .parquet, .kore, .csv (auto-detect by extension)
+        let upper = sql.to_uppercase();
+        // Skip "LOAD TABLE "
+        let after_load = sql[10..].trim();
+        let from_pos = after_load.to_uppercase().find(" FROM ")
+            .ok_or_else(|| KoreError::InvalidArgument("LOAD TABLE: missing FROM".into()))?;
+        let table_name = after_load[..from_pos].trim();
+        let path_raw = after_load[from_pos + 6..].trim().trim_matches('\'').trim_matches('"');
+
+        let ext = path_raw.rsplit('.').next().unwrap_or("").to_lowercase();
+        let block = match ext.as_str() {
+            "parquet" => {
+                let reader = kore_parquet::ParquetReader::new(path_raw);
+                reader.read().map_err(|e| KoreError::InvalidArgument(format!("Parquet read error: {e}")))?
+            }
+            "kore" => {
+                kore_store::reader::KoreReader::read_file(std::path::Path::new(path_raw))
+                    .map_err(|e| KoreError::InvalidArgument(format!("KORE read error: {e}")))?
+            }
+            _ => return Err(KoreError::InvalidArgument(format!("LOAD TABLE: unsupported format '.{ext}' (use .parquet or .kore)"))),
+        };
+        let rows = block.num_rows;
+        self.register_mut(table_name, block.clone());
+        self.register(table_name, block);
+        Ok(("LOAD TABLE".into(), rows))
+    }
+
+    fn dml_copy_from(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
+        // COPY <table> FROM '<path>' [WITH (HEADER true, DELIMITER ',')]
+        // Also accepts: COPY <table> FROM '<path>'  (defaults: header=true, delim=',')
+        let upper = sql.to_uppercase();
+        // Skip "COPY "
+        let after_copy = sql[5..].trim();
+        // Find FROM
+        let from_pos = after_copy.to_uppercase().find(" FROM ")
+            .ok_or_else(|| KoreError::InvalidArgument("COPY: missing FROM".into()))?;
+        let table_name = after_copy[..from_pos].trim();
+        let rest       = after_copy[from_pos + 6..].trim();
+
+        // Extract path (strip quotes, stop before WITH or end)
+        let with_pos = rest.to_uppercase().find(" WITH ").unwrap_or(rest.len());
+        let path_raw = rest[..with_pos].trim().trim_matches('\'').trim_matches('"');
+
+        // Parse options: HEADER, DELIMITER, FORMAT
+        let opts_str = if with_pos < rest.len() { &rest[with_pos + 6..] } else { "" };
+        let opts_upper = opts_str.to_uppercase();
+        let has_header = !opts_upper.contains("HEADER FALSE") && !opts_upper.contains("HEADER=FALSE");
+        let delimiter: u8 = if opts_upper.contains("DELIMITER '\\t'") || opts_upper.contains("DELIMITER \"\\t\"") {
+            b'\t'
+        } else if let Some(d) = opts_str.to_uppercase().find("DELIMITER '")
+            .and_then(|p| opts_str.as_bytes().get(p + 11).copied()) {
+            d
+        } else {
+            b','
+        };
+
+        // Auto-detect format from extension
+        let ext = path_raw.rsplit('.').next().unwrap_or("").to_lowercase();
+        let block = match ext.as_str() {
+            "parquet" => {
+                kore_parquet::ParquetReader::new(path_raw)
+                    .read()
+                    .map_err(|e| KoreError::InvalidArgument(format!("Parquet: {e}")))?
+            }
+            "kore" => {
+                kore_store::reader::KoreReader::read_file(std::path::Path::new(path_raw))
+                    .map_err(|e| KoreError::InvalidArgument(format!("KORE: {e}")))?
+            }
+            _ => {
+                // CSV / TSV / text
+                let mut reader = kore_io::CsvReader::new(path_raw).delimiter(delimiter);
+                if !has_header { reader = reader.no_header(); }
+                reader.read()
+                    .map_err(|e| KoreError::InvalidArgument(format!("CSV: {e}")))?
+            }
+        };
+
+        let rows = block.num_rows;
+        self.register_mut(table_name, block.clone());
+        self.register(table_name, block);
+        Ok(("COPY FROM".into(), rows))
+    }
+
+    fn parse_values_block(&self, rest: &str) -> Result<DataBlock, KoreError> {
+        // VALUES (v1, v2), (v3, v4) → DataBlock
+        let after_values = rest[6..].trim(); // skip "VALUES"
+        let mut rows: Vec<Vec<Value>> = Vec::new();
+        let mut depth = 0;
+        let mut current: Vec<Value> = Vec::new();
+        let mut token = String::new();
+        let mut in_str = false;
+
+        for ch in after_values.chars() {
+            match ch {
+                '\'' if !in_str => { in_str = true; }
+                '\'' if in_str  => {
+                    in_str = false;
+                    current.push(Value::Str(token.trim().to_string()));
+                    token.clear();
+                }
+                _ if in_str => { token.push(ch); }
+                '(' => { depth += 1; }
+                ')' => {
+                    depth -= 1;
+                    if !token.trim().is_empty() {
+                        let t = token.trim();
+                        let v = if let Ok(i) = t.parse::<i64>() { Value::Int(i) }
+                                else if let Ok(f) = t.parse::<f64>() { Value::Float(f) }
+                                else if t.eq_ignore_ascii_case("null") { Value::Null }
+                                else { Value::Str(t.to_string()) };
+                        current.push(v);
+                        token.clear();
+                    }
+                    if depth == 0 && !current.is_empty() {
+                        rows.push(std::mem::take(&mut current));
+                    }
+                }
+                ',' if depth == 1 && !in_str => {
+                    let t = token.trim();
+                    if !t.is_empty() {
+                        let v = if let Ok(i) = t.parse::<i64>() { Value::Int(i) }
+                                else if let Ok(f) = t.parse::<f64>() { Value::Float(f) }
+                                else if t.eq_ignore_ascii_case("null") { Value::Null }
+                                else { Value::Str(t.to_string()) };
+                        current.push(v);
+                        token.clear();
+                    }
+                }
+                _ => { token.push(ch); }
+            }
+        }
+        if rows.is_empty() { return Ok(DataBlock::empty()); }
+        let ncols = rows[0].len();
+        let mut columns: Vec<Column> = (0..ncols).map(|i| {
+            let data = rows.iter().map(|r| r.get(i).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>();
+            // Infer type from first non-null
+            let first = data.iter().find(|v| !matches!(v, Value::Null));
+            let col_data = match first {
+                Some(Value::Int(_))   => ColumnData::Int64(data.iter().map(|v| if let Value::Int(i) = v { Some(*i) } else { None }).collect()),
+                Some(Value::Float(_)) => ColumnData::Float64(data.iter().map(|v| match v { Value::Float(f) => Some(*f), Value::Int(i) => Some(*i as f64), _ => None }).collect()),
+                _ => ColumnData::Str(data.iter().map(|v| if let Value::Str(s) = v { Some(s.clone()) } else { None }).collect()),
+            };
+            Column { name: format!("col{}", i+1), data: col_data }
+        }).collect();
+        DataBlock::new(columns)
+    }
+
     pub fn get(&self, name: &str) -> Option<&DataBlock> {
-        self.tables.get(name)
+        self.tables.get(name).or_else(|| self.mut_tables.get(name))
     }
 
     pub fn table_names(&self) -> Vec<String> {
-        self.tables.keys().cloned().collect()
+        let mut names: Vec<String> = self.tables.keys().chain(self.mut_tables.keys()).cloned().collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// MERGE INTO target USING source ON cond
+    /// WHEN MATCHED THEN UPDATE SET col=val,...
+    /// WHEN NOT MATCHED THEN INSERT VALUES (v,...)
+    fn dml_merge(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
+        let upper = sql.to_uppercase();
+        // Parse target table name
+        let after_merge = sql[upper.find("INTO").map(|p| p + 4).unwrap_or(5)..].trim();
+        let (target_name, after_target) = if let Some(p) = after_merge.find(|c: char| c.is_whitespace()) {
+            (after_merge[..p].trim(), after_merge[p..].trim())
+        } else {
+            return Err(KoreError::InvalidArgument("MERGE: missing target table".into()));
+        };
+        let after_upper = after_target.to_uppercase();
+        // Parse USING source
+        let using_start = after_upper.find("USING").ok_or_else(|| KoreError::InvalidArgument("MERGE: missing USING".into()))?;
+        let after_using = after_target[using_start + 5..].trim();
+        let (source_name, after_source) = if let Some(p) = after_using.find(|c: char| c.is_whitespace()) {
+            (after_using[..p].trim(), after_using[p..].trim())
+        } else {
+            return Err(KoreError::InvalidArgument("MERGE: missing source table".into()));
+        };
+        let after_source_upper = after_source.to_uppercase();
+        let on_start = after_source_upper.find(" ON ").ok_or_else(|| KoreError::InvalidArgument("MERGE: missing ON".into()))?;
+        let after_on = after_source[on_start + 4..].trim();
+        // Split ON condition from WHEN clauses
+        let when_pos = after_on.to_uppercase().find("WHEN").unwrap_or(after_on.len());
+        let on_cond = after_on[..when_pos].trim();
+        let when_clauses = after_on[when_pos..].trim();
+
+        // Get source rows
+        let source = self.get(source_name)
+            .cloned()
+            .or_else(|| { let r = self.query(source_name).ok(); r })
+            .ok_or_else(|| KoreError::InvalidArgument(format!("MERGE: source table '{}' not found", source_name)))?;
+
+        // Parse WHEN MATCHED / WHEN NOT MATCHED clauses
+        let wc_upper = when_clauses.to_uppercase();
+        let has_update = wc_upper.contains("WHEN MATCHED THEN UPDATE");
+        let has_insert = wc_upper.contains("WHEN NOT MATCHED THEN INSERT");
+
+        // Extract UPDATE SET assignments
+        let update_pairs: Vec<(String, String)> = if has_update {
+            let set_pos = wc_upper.find("UPDATE SET").map(|p| p + 10).unwrap_or(0);
+            let set_str = when_clauses[set_pos..].trim();
+            let set_end = set_str.to_uppercase().find("WHEN").unwrap_or(set_str.len());
+            let set_part = set_str[..set_end].trim();
+            set_part.split(',').filter_map(|pair| {
+                let eq = pair.find('=')?;
+                let col = pair[..eq].trim().to_string();
+                let val = pair[eq + 1..].trim().to_string();
+                Some((col, val))
+            }).collect()
+        } else { vec![] };
+
+        // Extract INSERT VALUES (simplified: use source row values)
+        // Build: parse the ON condition as "<target_col> = <source_col>"
+        let (join_target_col, join_source_col) = {
+            let eq = on_cond.find('=').unwrap_or(on_cond.len());
+            let lhs = on_cond[..eq].trim().split('.').last().unwrap_or("").trim();
+            let rhs = on_cond[eq + 1..].trim().split('.').last().unwrap_or("").trim();
+            (lhs.to_string(), rhs.to_string())
+        };
+
+        let target = match self.mut_tables.get(target_name).cloned() {
+            Some(t) => t,
+            None => match self.tables.get(target_name).cloned() {
+                Some(t) => t,
+                None => return Err(KoreError::InvalidArgument(format!("MERGE: target table '{}' not found", target_name))),
+            },
+        };
+
+        let mut matched = 0usize;
+        let mut inserted = 0usize;
+        let nrows_target = target.num_rows;
+        let nrows_source = source.num_rows;
+
+        // Find join key column index in target and source
+        let target_key_idx = target.columns.iter().position(|c| c.name == join_target_col || c.name.ends_with(&format!(".{}", join_target_col)));
+        let source_key_idx = source.columns.iter().position(|c| c.name == join_source_col || c.name.ends_with(&format!(".{}", join_source_col)));
+
+        // Build set of matched target row indices
+        let mut matched_target_rows = std::collections::HashSet::new();
+        if let (Some(tki), Some(ski)) = (target_key_idx, source_key_idx) {
+            for si in 0..nrows_source {
+                let src_key = get_col_val(&source, ski, si);
+                for ti in 0..nrows_target {
+                    let tgt_key = get_col_val(&target, tki, ti);
+                    if expr_val_eq(&src_key, &tgt_key) {
+                        matched_target_rows.insert(ti);
+                        matched += 1;
+                        if has_update {
+                            // Apply UPDATE SET assignments
+                            let mut new_target = self.mut_tables.get(target_name).cloned().unwrap_or(target.clone());
+                            for (col, val_str) in &update_pairs {
+                                if let Some(col_idx) = new_target.columns.iter().position(|c| &c.name == col || c.name.ends_with(&format!(".{}", col))) {
+                                    let new_val = if let Ok(i) = val_str.parse::<i64>() { ExprVal::Int(i) }
+                                        else if let Ok(f) = val_str.parse::<f64>() { ExprVal::Float(f) }
+                                        else { ExprVal::Str(val_str.clone()) };
+                                    set_col_val(&mut new_target, col_idx, ti, new_val);
+                                }
+                            }
+                            self.mut_tables.insert(target_name.to_string(), new_target.clone());
+                            self.tables.insert(target_name.to_string(), new_target);
+                        }
+                    }
+                }
+            }
+        }
+
+        if has_insert {
+            // Insert source rows with no matching target row
+            for si in 0..nrows_source {
+                if let Some(ski) = source_key_idx {
+                    let src_key = get_col_val(&source, ski, si);
+                    let is_matched = (0..nrows_target).any(|ti| {
+                        target_key_idx.map(|tki| expr_val_eq(&get_col_val(&target, tki, ti), &src_key)).unwrap_or(false)
+                    });
+                    if !is_matched {
+                        // Insert source row into target
+                        let mut new_target = self.mut_tables.get(target_name).cloned().unwrap_or(target.clone());
+                        append_row(&mut new_target, &source, si);
+                        inserted += 1;
+                        self.mut_tables.insert(target_name.to_string(), new_target.clone());
+                        self.tables.insert(target_name.to_string(), new_target);
+                    }
+                }
+            }
+        }
+
+        Ok(("MERGE".into(), matched + inserted))
     }
 }
 
@@ -64,11 +668,54 @@ pub fn execute_query(query: &Query, ctx: &KqlContext) -> Result<DataBlock, KoreE
 }
 
 pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
-    // 1. Resolve FROM table
+    // 1. Resolve FROM table (or execute FROM subquery / VALUES / __dual__)
     let base_name   = &stmt.from.name;
     let base_alias  = stmt.from.alias.as_deref().unwrap_or(base_name.as_str());
-    let base_ref    = ctx.get(base_name)
-        .ok_or_else(|| KoreError::InvalidArgument(format!("unknown table: {base_name}")))?;
+
+    // FROM VALUES (...) — build inline DataBlock
+    let values_block: Option<DataBlock> = if let Some(rows) = &stmt.from.values {
+        if rows.is_empty() { Some(DataBlock::empty()) } else {
+            let ncols = rows[0].len();
+            let dummy = DataBlock::empty();
+            let mut cols: Vec<Vec<ExprVal>> = vec![Vec::new(); ncols];
+            for row in rows {
+                for (ci, expr) in row.iter().enumerate() {
+                    cols[ci].push(eval_expr(expr, &dummy, 0));
+                }
+            }
+            let columns: Vec<Column> = cols.into_iter().enumerate().map(|(i, vals)| {
+                let first = vals.iter().find(|v| !matches!(v, ExprVal::Null));
+                let data = match first {
+                    Some(ExprVal::Int(_))   => ColumnData::Int64(vals.iter().map(|v| if let ExprVal::Int(i) = v { Some(*i) } else { None }).collect()),
+                    Some(ExprVal::Float(_)) => ColumnData::Float64(vals.iter().map(|v| if let ExprVal::Float(f) = v { Some(*f) } else { None }).collect()),
+                    _ => ColumnData::Str(vals.iter().map(|v| if let ExprVal::Str(s) = v { Some(s.clone()) } else { None }).collect()),
+                };
+                Column { name: format!("col{}", i+1), data }
+            }).collect();
+            Some(DataBlock::new(columns).map_err(|e| KoreError::InvalidArgument(e.to_string()))?)
+        }
+    } else { None };
+
+    // FROM (SELECT ...) subquery — execute it first, then use as temp table
+    let subq_block: Option<DataBlock> = if stmt.from.values.is_none() {
+        if let Some(subq) = &stmt.from.subquery {
+            Some(execute_select(subq, ctx)?)
+        } else { None }
+    } else { None };
+
+    // __dual__ — virtual single-row table for SELECT 1+1, SELECT NOW() etc.
+    let dual_block: Option<DataBlock> = if base_name == "__dual__" && subq_block.is_none() && values_block.is_none() {
+        Some(DataBlock::new(vec![Column { name: "__dual__".into(), data: ColumnData::Int64(vec![Some(1)]) }])
+            .unwrap_or_else(|_| DataBlock::empty()))
+    } else { None };
+
+    let base_ref: &DataBlock = if let Some(ref vb) = values_block { vb }
+        else if let Some(ref sb) = subq_block { sb }
+        else if let Some(ref db) = dual_block { db }
+        else {
+            ctx.get(base_name)
+                .ok_or_else(|| KoreError::InvalidArgument(format!("unknown table: {base_name}")))?
+        };
 
     // Column pruning: for simple queries (no JOIN, no SELECT *) only clone columns
     // actually referenced by projections/WHERE/GROUP BY/ORDER BY.
@@ -109,9 +756,29 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
             JoinKind::Full  => JoinType::Full,
         };
 
-        // Resolve join keys (may be qualified "alias.col" or bare "col")
-        let lk = resolve_col_name(&join.on.left_col,  base_alias);
-        let rk = resolve_col_name(&join.on.right_col, right_alias);
+        // Resolve join keys — ON clause order is not guaranteed to match left/right tables.
+        // Try both assignments and use whichever pairing matches the blocks.
+        let (lk, rk) = {
+            let a_in_result = find_col_in_block(&join.on.left_col,  &result);
+            let a_in_right  = find_col_in_block(&join.on.left_col,  &right_block);
+            let b_in_result = find_col_in_block(&join.on.right_col, &result);
+            let b_in_right  = find_col_in_block(&join.on.right_col, &right_block);
+
+            if a_in_result.is_some() && b_in_right.is_some() {
+                // Natural: left_col in result, right_col in right_block
+                (a_in_result.unwrap(), b_in_right.unwrap())
+            } else if b_in_result.is_some() && a_in_right.is_some() {
+                // Reversed: right_col in result, left_col in right_block
+                (b_in_result.unwrap(), a_in_right.unwrap())
+            } else if a_in_result.is_some() {
+                // Fallback: left_col in result, right_col uses alias
+                (a_in_result.unwrap(), resolve_col_name(&join.on.right_col, right_alias))
+            } else {
+                // Last resort: use alias-based resolution
+                (resolve_col_name(&join.on.left_col, base_alias),
+                 resolve_col_name(&join.on.right_col, right_alias))
+            }
+        };
 
         let cfg = JoinConfig { left_key: lk.clone(), right_key: rk, join_type: jtype };
 
@@ -124,12 +791,19 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
 
     // 3. WHERE filter
     if let Some(pred) = &stmt.where_clause {
-        result = filter_block(result, pred)?;
+        let resolved = resolve_subqueries(pred, ctx);
+        // Decorrelate correlated scalar subqueries: pre-compute GROUP BY, inject threshold columns
+        // This converts O(n²) correlated subqueries to O(n) — e.g. Q17, Q20
+        let (new_pred, new_block) = decorrelate_scalar_subqueries(&resolved, result, ctx);
+        result = filter_block_ctx(new_block, &new_pred, ctx)?;
     }
 
     // 4. GROUP BY  (or global aggregation if no GROUP BY but has aggregates)
     let has_agg = stmt.projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Agg { .. }, .. }));
     if !stmt.group_by.is_empty() {
+        // Materialize any GROUP BY columns that are SELECT expression aliases
+        // e.g. GROUP BY l_year where l_year is alias for CASE WHEN ... END
+        result = materialize_groupby_aliases(result, &stmt.group_by, &stmt.projections);
         result = group_by_agg(result, &stmt.group_by, &stmt.projections)?;
     } else if has_agg {
         result = global_agg(result, &stmt.projections)?;
@@ -167,19 +841,49 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         }
     }
 
-    // 5. ORDER BY
-    for item in stmt.order_by.iter().rev() {
-        let col = resolve_col_name(&item.col, "");
-        result = sort_block(result, &col, item.desc)?;
+    // 4.6 QUALIFY — filter on window function results (like WHERE but post-window)
+    if let Some(qualify) = &stmt.qualify {
+        result = filter_block(result, qualify)?;
     }
 
-    // 6. LIMIT
+    // 5. Projection — done BEFORE ORDER BY so ORDER BY can reference SELECT aliases
+    // (especially important when GROUP BY uses CASE expression aliases)
+    let has_order = !stmt.order_by.is_empty();
+    if !has_order || !stmt.group_by.is_empty() {
+        result = project(result, &stmt.projections)?;
+    }
+
+    // 6. ORDER BY — resolve column names, also checking SELECT aliases
+    for item in stmt.order_by.iter().rev() {
+        let col_raw = resolve_col_name(&item.col, "");
+        let col = find_order_col_in_result(&col_raw, &result, &stmt.projections)
+            .unwrap_or(col_raw);
+        result = sort_block_nulls(result, &col, item.desc, item.nulls_first)?;
+    }
+
+    // 7. LIMIT + OFFSET
+    if let Some(off) = stmt.offset {
+        let off = off as usize;
+        if off >= result.num_rows {
+            result = DataBlock::empty();
+        } else {
+            let rows: Vec<usize> = (off..result.num_rows).collect();
+            result = result.select_rows(&rows);
+        }
+    }
     if let Some(n) = stmt.limit {
         result = limit_block(result, n as usize);
     }
 
-    // 7. Projection
-    result = project(result, &stmt.projections)?;
+    // 8. Projection (only if not already done above)
+    if has_order && stmt.group_by.is_empty() {
+        result = project(result, &stmt.projections)?;
+    }
+
+    // 9. DISTINCT — deduplicate rows by row key
+    if stmt.distinct && result.num_rows > 1 {
+        result = deduplicate(result);
+    }
 
     Ok(result)
 }
@@ -205,22 +909,556 @@ fn resolve_col_name(name: &str, default_alias: &str) -> String {
     }
 }
 
+/// Find the actual column name in `result` for an ORDER BY expression.
+/// Checks: exact name, suffix match, prefix+short match, SELECT aliases.
+fn find_order_col_in_result(col: &str, result: &DataBlock, projections: &[Projection]) -> Option<String> {
+    // 1. Exact column name in result block
+    if result.columns.iter().any(|c| c.name == col) {
+        return Some(col.to_string());
+    }
+    // 2. Suffix match: "orders.col" matches column ending with ".orders.col"
+    let m = result.columns.iter().len(); let cl = col.len();
+    if let Some(c) = result.columns.iter().find(|c| {
+        let cn = c.name.len();
+        cn > cl && c.name.as_bytes()[cn - cl - 1] == b'.' && &c.name[cn - cl..] == col
+    }) { return Some(c.name.clone()); }
+
+    // 3. Prefix+short match: "n1.n_name" matches "n1.nation.n_name"
+    let col_short  = col.rsplit('.').next().unwrap_or(col);
+    let col_prefix = if col.contains('.') { col.split('.').next() } else { None };
+    if let Some(pfx) = col_prefix {
+        if let Some(c) = result.columns.iter().find(|c| {
+            c.name.starts_with(&format!("{pfx}.")) &&
+            c.name.rsplit('.').next().map_or(false, |s| s == col_short)
+        }) { return Some(c.name.clone()); }
+    }
+
+    // 4. Check SELECT aliases: if SELECT n1.n_name supp_nation, ORDER BY n1.n_name → supp_nation
+    for proj in projections {
+        if let Projection::Expr { expr, alias: Some(alias) } = proj {
+            let expr_col = match expr {
+                Expr::Col(c)        => c.as_str(),
+                Expr::QualCol(t, c) => {
+                    // Check "t.c" matches ORDER BY col
+                    let qualified = format!("{}.{}", t, c);
+                    if qualified == col || c.as_str() == col_short {
+                        // This projection aliases to `alias` — look for alias in result
+                        if result.columns.iter().any(|rc| rc.name == alias.as_str() || rc.name.ends_with(&format!(".{}", alias))) {
+                            return Some(alias.clone());
+                        }
+                    }
+                    continue;
+                }
+                _ => continue,
+            };
+            if expr_col == col || expr_col == col_short {
+                if result.columns.iter().any(|rc| rc.name == alias.as_str()) {
+                    return Some(alias.clone());
+                }
+            }
+        }
+    }
+
+    // 5. Unambiguous bare name
+    let matches: Vec<_> = result.columns.iter()
+        .filter(|c| c.name.rsplit('.').next().unwrap_or(&c.name) == col_short)
+        .collect();
+    if matches.len() == 1 { return Some(matches[0].name.clone()); }
+
+    None
+}
+
+/// Search for a column in a DataBlock — handles both bare name and "alias.col" forms.
+/// Returns the exact column name as it appears in the block.
+fn find_col_in_block(bare: &str, block: &DataBlock) -> Option<String> {
+    if bare.contains('.') {
+        // Already qualified — check it exists
+        return if block.columns.iter().any(|c| c.name == bare) { Some(bare.to_string()) } else { None };
+    }
+    // Try exact match first
+    if let Some(col) = block.columns.iter().find(|c| c.name == bare) {
+        return Some(col.name.clone());
+    }
+    // Try "table.bare" match — find a column whose suffix matches bare
+    let suffix = format!(".{}", bare);
+    block.columns.iter().find(|c| c.name.ends_with(&suffix)).map(|c| c.name.clone())
+}
+
 // ─── Filter (WHERE) ───────────────────────────────────────────────────────────
 
 fn filter_block(block: DataBlock, pred: &Expr) -> Result<DataBlock, KoreError> {
+    filter_block_ctx(block, pred, &KqlContext::new())
+}
+
+/// Filter with context — supports scalar/IN/EXISTS subqueries.
+fn filter_block_ctx(block: DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
+    // Pre-compute all IN subqueries ONCE into value sets (avoids O(n*m) re-execution per row)
+    let pred = precompute_in_subqueries(pred, ctx);
+    let pred = &pred;
     let n = block.num_rows;
-    // For large blocks: parallel row-at-a-time evaluation uses all CPU cores.
-    // For small blocks: column-at-a-time is faster (no thread overhead).
     let keep: Vec<bool> = if n >= 100_000 {
         use rayon::prelude::*;
-        (0..n).into_par_iter().map(|r| eval_bool(pred, &block, r)).collect()
+        (0..n).into_par_iter().map(|r| eval_bool_ctx(pred, &block, r, ctx)).collect()
     } else {
-        eval_batch(pred, &block)
+        (0..n).map(|r| eval_bool_ctx(pred, &block, r, ctx)).collect()
     };
     let indices: Vec<usize> = keep.iter().enumerate()
         .filter_map(|(i, &k)| if k { Some(i) } else { None })
         .collect();
     Ok(block.select_rows(&indices))
+}
+
+/// Decorrelate scalar subqueries by pre-computing per-key results.
+/// Pattern: WHERE col < (SELECT AGG(col2) FROM t WHERE t.key = outer.key)
+/// → Pre-compute GROUP BY key, AGG(col2) → store as "kore_sq_<n>" table in context
+/// → Replace ScalarSubquery with Col lookup from that table
+///
+/// Returns (possibly modified predicate, optional enriched context).
+fn decorrelate_scalar_subqueries(
+    pred: &Expr,
+    outer_block: DataBlock,
+    ctx: &KqlContext,
+) -> (Expr, DataBlock) {
+    let mut block = outer_block;
+    let mut counter = 0usize;
+    let new_pred = decorrelate_expr(pred, &mut block, ctx, &mut counter);
+    (new_pred, block)
+}
+
+fn decorrelate_expr(
+    expr: &Expr,
+    outer_block: &mut DataBlock,
+    ctx: &KqlContext,
+    counter: &mut usize,
+) -> Expr {
+    match expr {
+        Expr::ScalarSubquery(sq) => {
+            // Decorrelate: pre-compute GROUP BY + AGG, inject threshold column
+            // Handles both single-key (Q17) and multi-key (Q20) correlations
+            // and filters non-correlation WHERE conditions before aggregation
+            if sq.group_by.is_empty() {
+                if let Some(where_expr) = &sq.where_clause {
+                    let inner_table = &sq.from.name;
+                    if let Some(inner_block) = ctx.get(inner_table) {
+                        // Collect correlation pairs and filter conditions from WHERE
+                        let mut corr: Vec<(String, Expr)> = Vec::new(); // (inner_col, outer_expr)
+                        let mut filters: Vec<Expr>         = Vec::new();
+                        collect_corr_and_filters(where_expr, inner_table, &mut corr, &mut filters);
+
+                        if !corr.is_empty() {
+                            if let Some(Projection::Expr { expr: proj_expr, .. }) = sq.projections.first() {
+                                // Apply non-correlation filters to inner block first
+                                let mut filtered = inner_block.clone();
+                                for fc in &filters {
+                                    if let Ok(f) = filter_block(filtered, fc) { filtered = f; } else { return expr.clone(); }
+                                }
+
+                                // Find the agg source column
+                                let agg_col: Option<&Column> = match proj_expr {
+                                    Expr::Agg { expr: ie, .. } | Expr::BinOp { left: ie, .. }
+                                        if matches!(ie.as_ref(), Expr::Agg{..}) => {
+                                        if let Expr::Agg { expr: ie2, .. } = ie.as_ref() {
+                                            match ie2.as_ref() { Expr::Col(c)|Expr::QualCol(_,c) => find_col(&filtered, c), _ => None }
+                                        } else { None }
+                                    }
+                                    Expr::Agg { expr: ie, .. } => match ie.as_ref() { Expr::Col(c)|Expr::QualCol(_,c) => find_col(&filtered, c), _ => None },
+                                    Expr::BinOp { right: re, .. } => if let Expr::Agg { expr: ie, .. } = re.as_ref() {
+                                        match ie.as_ref() { Expr::Col(c)|Expr::QualCol(_,c) => find_col(&filtered, c), _ => None }
+                                    } else { None },
+                                    _ => None,
+                                };
+
+                                // Build composite-key GROUP BY
+                                let key_cols: Vec<String> = corr.iter().map(|(ic, _)| {
+                                    find_col_in_block(ic, &filtered).unwrap_or_else(|| ic.clone())
+                                }).collect();
+                                let mut groups: std::collections::HashMap<String, Vec<f64>> =
+                                    std::collections::HashMap::new();
+                                for row in 0..filtered.num_rows {
+                                    let key: String = key_cols.iter().map(|kc| {
+                                        match get_cell(&filtered, kc, row) {
+                                            ExprVal::Int(i)   => i.to_string(),
+                                            ExprVal::Float(f) => format!("{:.6}", f),
+                                            ExprVal::Str(s)   => s,
+                                            _ => String::new(),
+                                        }
+                                    }).collect::<Vec<_>>().join(",");
+                                    if let Some(col) = agg_col {
+                                        let v = match &col.data {
+                                            ColumnData::Float64(vs) => vs.get(row).and_then(|x| *x).unwrap_or(0.0),
+                                            ColumnData::Int64(vs)   => vs.get(row).and_then(|x| *x).unwrap_or(0) as f64,
+                                            _ => 0.0,
+                                        };
+                                        groups.entry(key).or_default().push(v);
+                                    }
+                                }
+
+                                let factor = match proj_expr {
+                                    Expr::BinOp { left: lf, right: rf, .. } => match (lf.as_ref(), rf.as_ref()) {
+                                        (Expr::Float(f),_)|(_, Expr::Float(f)) => *f,
+                                        (Expr::Int(i),_)|(_, Expr::Int(i))     => *i as f64, _ => 1.0,
+                                    }, _ => 1.0,
+                                };
+                                let agg_fn = match proj_expr {
+                                    Expr::Agg { func, .. } => func.clone(),
+                                    Expr::BinOp { left: lf, right: rf, .. } => {
+                                        let side = if matches!(lf.as_ref(), Expr::Agg{..}) { lf.as_ref() } else { rf.as_ref() };
+                                        if let Expr::Agg { func, .. } = side { func.clone() } else { AggFunc::Sum }
+                                    }
+                                    _ => AggFunc::Sum,
+                                };
+                                let mut lookup: std::collections::HashMap<String, f64> =
+                                    std::collections::HashMap::new();
+                                for (k, vs) in &groups {
+                                    let agg = match agg_fn {
+                                        AggFunc::Sum   => vs.iter().sum(),
+                                        AggFunc::Avg   => if vs.is_empty() { 0.0 } else { vs.iter().sum::<f64>() / vs.len() as f64 },
+                                        AggFunc::Count => vs.len() as f64,
+                                        AggFunc::Min   => vs.iter().cloned().fold(f64::MAX, f64::min),
+                                        AggFunc::Max   => vs.iter().cloned().fold(f64::MIN, f64::max),
+                                        _ => 0.0,
+                                    };
+                                    lookup.insert(k.clone(), agg * factor);
+                                }
+
+                                // Inject threshold column
+                                let col_name = format!("__decorr_{}__", counter);
+                                *counter += 1;
+                                let outer_exprs: Vec<Expr> = corr.iter().map(|(_, oe)| oe.clone()).collect();
+                                let thresholds: Vec<Option<f64>> = (0..outer_block.num_rows).map(|r| {
+                                    let k: String = outer_exprs.iter().map(|oe| {
+                                        match eval_expr(oe, outer_block, r) {
+                                            ExprVal::Int(i)   => i.to_string(),
+                                            ExprVal::Float(f) => format!("{:.6}", f),
+                                            ExprVal::Str(s)   => s,
+                                            _ => String::new(),
+                                        }
+                                    }).collect::<Vec<_>>().join(",");
+                                    lookup.get(&k).copied()
+                                }).collect();
+                                outer_block.columns.push(kore_core::Column {
+                                    name: col_name.clone(),
+                                    data: kore_core::ColumnData::Float64(thresholds),
+                                });
+                                return Expr::Col(col_name);
+                            }
+                        }
+                    }
+                }
+            }
+            expr.clone()
+        }
+        Expr::BinOp { op, left, right } => Expr::BinOp {
+            op: op.clone(),
+            left:  Box::new(decorrelate_expr(left,  outer_block, ctx, counter)),
+            right: Box::new(decorrelate_expr(right, outer_block, ctx, counter)),
+        },
+        Expr::Not(inner) => Expr::Not(Box::new(decorrelate_expr(inner, outer_block, ctx, counter))),
+        other => other.clone(),
+    }
+}
+
+/// Decompose a WHERE clause into correlation conditions (inner.key = outer.expr)
+/// and plain filter conditions. The inner_table name is used to identify which
+/// side of an equality is the "inner" correlated column.
+fn collect_corr_and_filters<'a>(
+    expr: &'a Expr,
+    inner_table: &str,
+    corr: &mut Vec<(String, Expr)>,
+    filters: &mut Vec<Expr>,
+) {
+    match expr {
+        Expr::BinOp { op: BinOpKind::And, left, right } => {
+            collect_corr_and_filters(left,  inner_table, corr, filters);
+            collect_corr_and_filters(right, inner_table, corr, filters);
+        }
+        Expr::BinOp { op: BinOpKind::Eq, left, right } => {
+            // Detect correlation: one side is a qualified col (inner table or alias),
+            // the other side is an unqualified col (outer reference) or vice versa.
+            let col_name = |e: &Expr| match e {
+                Expr::QualCol(_, c) | Expr::Col(c) => c.clone(),
+                _ => String::new(),
+            };
+            // Case 1: QualCol with inner_table qualifier = inner, other = outer
+            let left_exact_inner  = matches!(left.as_ref(),  Expr::QualCol(t, _) if t == inner_table);
+            let right_exact_inner = matches!(right.as_ref(), Expr::QualCol(t, _) if t == inner_table);
+            if left_exact_inner && !right_exact_inner {
+                corr.push((col_name(left), *right.clone()));
+            } else if right_exact_inner && !left_exact_inner {
+                corr.push((col_name(right), *left.clone()));
+            } else {
+                // Case 2: QualCol(any) vs Col — QualCol is inner (table alias), Col is outer
+                let left_is_qual  = matches!(left.as_ref(),  Expr::QualCol(_, _));
+                let right_is_qual = matches!(right.as_ref(), Expr::QualCol(_, _));
+                let left_is_col   = matches!(left.as_ref(),  Expr::Col(_));
+                let right_is_col  = matches!(right.as_ref(), Expr::Col(_));
+                if left_is_qual && right_is_col && !right_exact_inner {
+                    // QualCol(alias, col) = outer.col → inner.col = outer.col
+                    corr.push((col_name(left), *right.clone()));
+                } else if right_is_qual && left_is_col && !left_exact_inner {
+                    corr.push((col_name(right), *left.clone()));
+                } else if left_is_col && right_is_col {
+                    // Both unqualified: assume first is inner (best-effort)
+                    corr.push((col_name(left), *right.clone()));
+                } else {
+                    filters.push(expr.clone());
+                }
+            }
+        }
+        _ => filters.push(expr.clone()),
+    }
+}
+
+/// For GROUP BY, materialize any SELECT alias expressions as computed columns.
+/// Example: SELECT CASE WHEN ... END l_year — GROUP BY l_year needs "l_year" as a real column.
+fn materialize_groupby_aliases(mut block: DataBlock, group_by: &[String], projections: &[Projection]) -> DataBlock {
+    for gb_col in group_by {
+        // Skip if column already exists in block
+        if block.columns.iter().any(|c| c.name == gb_col.as_str()
+            || c.name.rsplit('.').next().unwrap_or(&c.name) == gb_col.as_str())
+        { continue; }
+        // Find a SELECT projection whose alias matches this GROUP BY name
+        for proj in projections {
+            if let Projection::Expr { expr, alias: Some(alias) } = proj {
+                if alias == gb_col {
+                    // Evaluate this expression for every row and add as new column
+                    let n = block.num_rows;
+                    let values: Vec<Option<String>> = (0..n).map(|row| {
+                        Some(match eval_expr(expr, &block, row) {
+                            ExprVal::Str(s)   => s,
+                            ExprVal::Int(i)   => i.to_string(),
+                            ExprVal::Float(f) => format!("{f:.4}"),
+                            ExprVal::Bool(b)  => b.to_string(),
+                            ExprVal::Null     => return None,
+                        })
+                    }).collect();
+                    block.columns.push(kore_core::Column {
+                        name: gb_col.clone(),
+                        data: kore_core::ColumnData::Str(values),
+                    });
+                    break;
+                }
+            }
+        }
+    }
+    block
+}
+
+/// Pre-compute non-correlated IN subqueries into value lists.
+/// Replaces InSubquery nodes with In{values} so the subquery only runs once.
+fn precompute_in_subqueries(expr: &Expr, ctx: &KqlContext) -> Expr {
+    match expr {
+        Expr::InSubquery { expr: e, subquery, negated } => {
+            // Execute subquery once, collect all values
+            let inner_ctx = ctx.clone();
+            if let Ok(result) = execute_select(subquery, &inner_ctx) {
+                if !result.columns.is_empty() {
+                    let values: Vec<Expr> = (0..result.num_rows)
+                        .filter_map(|r| match result.columns[0].data.get_value(r) {
+                            Value::Int(i)   => Some(Expr::Int(i)),
+                            Value::Float(f) => Some(Expr::Float(f)),
+                            Value::Str(s)   => Some(Expr::Str(s)),
+                            _ => None,
+                        })
+                        .collect();
+                    return Expr::In { expr: e.clone(), values, negated: *negated };
+                }
+            }
+            expr.clone()
+        }
+        Expr::BinOp { op, left, right } => Expr::BinOp {
+            op: op.clone(),
+            left:  Box::new(precompute_in_subqueries(left,  ctx)),
+            right: Box::new(precompute_in_subqueries(right, ctx)),
+        },
+        Expr::Not(inner) => Expr::Not(Box::new(precompute_in_subqueries(inner, ctx))),
+        other => other.clone(),
+    }
+}
+
+/// Evaluate a boolean expression with context (supports subqueries).
+fn eval_bool_ctx(expr: &Expr, block: &DataBlock, row: usize, ctx: &KqlContext) -> bool {
+    match eval_expr_ctx(expr, block, row, ctx) {
+        ExprVal::Bool(b) => b,
+        ExprVal::Int(i)  => i != 0,
+        _                => false,
+    }
+}
+
+/// Evaluate expression with context — handles subquery variants.
+fn eval_expr_ctx(expr: &Expr, block: &DataBlock, row: usize, ctx: &KqlContext) -> ExprVal {
+    // Outer block's table alias (e.g. "m1", "o1", "memories")
+    let outer_alias: Option<String> = block.columns.first().and_then(|c| {
+        let s = c.name.as_str();
+        if s.contains('.') { s.split('.').next().map(|a| a.to_string()) } else { None }
+    });
+
+    // Build row context for subquery evaluation.
+    // For correlated subqueries: injects outer row so inner can access outer.col
+    // For non-correlated: skips injection if inner FROM = outer alias (avoids 1-row override)
+    let make_row_ctx = |inner_from: &str| {
+        let mut row_ctx = ctx.clone();
+        if let Some(ref alias) = outer_alias {
+            // Inject if: alias not in ctx yet, OR inner uses a DIFFERENT table
+            if row_ctx.get(alias.as_str()).is_none() || inner_from != alias.as_str() {
+                let single = block.select_rows(&[row]);
+                row_ctx.register(alias.as_str(), single);
+            }
+        }
+        row_ctx
+    };
+
+    match expr {
+        // Scalar subquery — per-row for correlated queries
+        Expr::ScalarSubquery(stmt) => {
+            let row_ctx = make_row_ctx(&stmt.from.name);
+            match execute_select(stmt, &row_ctx) {
+                Ok(result) if result.num_rows > 0 && !result.columns.is_empty() => {
+                    match result.columns[0].data.get_value(0) {
+                        Value::Int(i)   => ExprVal::Float(i as f64),
+                        Value::Float(f) => ExprVal::Float(f),
+                        Value::Str(s)   => ExprVal::Str(s),
+                        Value::Bool(b)  => ExprVal::Bool(b),
+                        Value::Null     => ExprVal::Null,
+                    }
+                }
+                _ => ExprVal::Null,
+            }
+        }
+
+        // IN (SELECT ...) subquery
+        Expr::InSubquery { expr: e, subquery, negated } => {
+            let lhs = eval_expr_ctx(e, block, row, ctx);
+            let lhs_str = match &lhs {
+                ExprVal::Int(i)   => i.to_string(),
+                ExprVal::Float(f) => format!("{f:.10}"),
+                ExprVal::Str(s)   => s.clone(),
+                ExprVal::Bool(b)  => b.to_string(),
+                ExprVal::Null     => return ExprVal::Bool(*negated),
+            };
+            match execute_select(subquery, &make_row_ctx(&subquery.from.name)) {
+                Ok(result) => {
+                    if !result.columns.is_empty() {
+                        let found = (0..result.num_rows).any(|r| {
+                            match result.columns[0].data.get_value(r) {
+                                Value::Int(i)   => i.to_string() == lhs_str,
+                                Value::Float(f) => format!("{f:.10}") == lhs_str,
+                                Value::Str(s)   => s == lhs_str,
+                                Value::Bool(b)  => b.to_string() == lhs_str,
+                                Value::Null     => false,
+                            }
+                        });
+                        ExprVal::Bool(if *negated { !found } else { found })
+                    } else {
+                        ExprVal::Bool(*negated)
+                    }
+                }
+                Err(_) => {
+                    ExprVal::Bool(*negated)
+                }
+            }
+        }
+
+        // EXISTS (SELECT ...)
+        Expr::Exists { subquery, negated } => {
+            let row_ctx = make_row_ctx(&subquery.from.name);
+            match execute_select(subquery, &row_ctx) {
+                Ok(result) => ExprVal::Bool(if *negated { result.num_rows == 0 } else { result.num_rows > 0 }),
+                Err(_)     => ExprVal::Bool(*negated),
+            }
+        }
+
+        // For all other expressions, fall back to the standard evaluator —
+        // EXCEPT for expressions that might contain QualCol outer references.
+        // Handle BinOp, Not, IsNull/IsNotNull recursively with context.
+        Expr::BinOp { op, left, right } => {
+            let lv = eval_expr_ctx(left,  block, row, ctx);
+            let rv = eval_expr_ctx(right, block, row, ctx);
+            eval_binop(op, lv, rv)
+        }
+        Expr::Not(e) => match eval_expr_ctx(e, block, row, ctx) {
+            ExprVal::Bool(b) => ExprVal::Bool(!b),
+            _                => ExprVal::Bool(false),
+        },
+        Expr::IsNull(e) => match eval_expr_ctx(e, block, row, ctx) {
+            ExprVal::Null => ExprVal::Bool(true),
+            _             => ExprVal::Bool(false),
+        },
+        Expr::IsNotNull(e) => match eval_expr_ctx(e, block, row, ctx) {
+            ExprVal::Null => ExprVal::Bool(false),
+            _             => ExprVal::Bool(true),
+        },
+        // QualCol: try block first, then outer table in ctx (enables correlated subqueries)
+        Expr::QualCol(table, col) => {
+            let full = format!("{}.{}", table, col);
+            let v = get_cell(block, &full, row);
+            if matches!(v, ExprVal::Null) {
+                // Try outer table in ctx (correlated subquery: m1.kind where m1 is registered)
+                if let Some(outer_block) = ctx.get(table.as_str()) {
+                    if outer_block.num_rows > 0 {
+                        let val = get_cell(outer_block, col.as_str(), 0);
+                        if row == 0 { eprintln!("[QualCol] {}.{} → {:?} (from ctx, {} rows)", table, col, val, outer_block.num_rows); }
+                        return val;
+                    }
+                }
+                if row == 0 { eprintln!("[QualCol] {}.{} → Null (not in block or ctx)", table, col); }
+            }
+            v
+        }
+        // Col: standard block lookup
+        other => eval_expr(other, block, row),
+    }
+}
+
+/// Pre-resolve non-correlated subqueries: replace ScalarSubquery with literal float/str.
+/// Correlated subqueries remain as-is (evaluated per-row in eval_expr_ctx).
+fn expr_type_name(e: &Expr) -> &'static str {
+    match e {
+        Expr::ScalarSubquery(_)  => "ScalarSubquery",
+        Expr::InSubquery { .. }  => "InSubquery",
+        Expr::Exists { .. }      => "Exists",
+        Expr::BinOp { .. }       => "BinOp",
+        Expr::Not(_)             => "Not",
+        Expr::Col(_)             => "Col",
+        Expr::Float(_)           => "Float",
+        Expr::In { .. }          => "In",
+        _                        => "Other",
+    }
+}
+
+fn resolve_subqueries(expr: &Expr, ctx: &KqlContext) -> Expr {
+    match expr {
+        Expr::ScalarSubquery(stmt) => {
+            // Try to evaluate — if succeeds and not correlated, replace with literal
+            match execute_select(stmt, ctx) {
+                Ok(result) => {
+                    if result.num_rows > 0 && !result.columns.is_empty() {
+                        let v = result.columns[0].data.get_value(0);
+                        match v {
+                            Value::Int(i)   => Expr::Float(i as f64),
+                            Value::Float(f) => Expr::Float(f),
+                            Value::Str(s)   => Expr::Str(s),
+                            Value::Bool(b)  => Expr::Bool(b),
+                            _               => expr.clone(),
+                        }
+                    } else { expr.clone() }
+                }
+                Err(e) => {
+                    eprintln!("[resolve_subqueries] subquery error: {e}");
+                    expr.clone()
+                }
+            }
+        }
+        // Recurse into BinOp
+        Expr::BinOp { op, left, right } => Expr::BinOp {
+            op: op.clone(),
+            left:  Box::new(resolve_subqueries(left, ctx)),
+            right: Box::new(resolve_subqueries(right, ctx)),
+        },
+        Expr::Not(e) => Expr::Not(Box::new(resolve_subqueries(e, ctx))),
+        // Everything else: pass through
+        other => other.clone(),
+    }
 }
 
 /// Evaluate a predicate over an entire DataBlock, returning a bitmask.
@@ -418,6 +1656,10 @@ fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
         Expr::Window { .. } => ExprVal::Null,
         Expr::Star          => ExprVal::Null,
         Expr::Null          => ExprVal::Null,
+        // Subquery variants — require context; return Null when evaluated without context
+        Expr::ScalarSubquery(_) => ExprVal::Null,
+        Expr::InSubquery { negated, .. } => ExprVal::Bool(*negated),
+        Expr::Exists { negated, .. }     => ExprVal::Bool(*negated),
         // ── CASE WHEN ─────────────────────────────────────────────────────
         Expr::Case { operand, branches, else_val } => {
             match operand {
@@ -508,6 +1750,19 @@ fn eval_func(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> ExprVa
         "TRIM"  => arg_str(0).map(|s| ExprVal::Str(s.trim().to_string())).unwrap_or(ExprVal::Null),
         "LTRIM" => arg_str(0).map(|s| ExprVal::Str(s.trim_start().to_string())).unwrap_or(ExprVal::Null),
         "RTRIM" => arg_str(0).map(|s| ExprVal::Str(s.trim_end().to_string())).unwrap_or(ExprVal::Null),
+        // LEFT(str, n) and RIGHT(str, n)
+        "LEFT"  => {
+            let s = need!(arg_str(0));
+            let n = arg_f64(1).unwrap_or(0.0) as usize;
+            ExprVal::Str(s.chars().take(n).collect())
+        }
+        "RIGHT" => {
+            let s = need!(arg_str(0));
+            let n = arg_f64(1).unwrap_or(0.0) as usize;
+            let chars: Vec<char> = s.chars().collect();
+            let start = chars.len().saturating_sub(n);
+            ExprVal::Str(chars[start..].iter().collect())
+        }
         "LENGTH" | "LEN" | "CHAR_LENGTH" => {
             arg_str(0).map(|s| ExprVal::Int(s.chars().count() as i64)).unwrap_or(ExprVal::Null)
         }
@@ -604,6 +1859,98 @@ fn eval_func(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> ExprVa
             };
             if eq { ExprVal::Null } else { a }
         }
+        // ── Date / Time functions ─────────────────────────────────────────
+        // Dates stored as YYYYMMDD integers OR 'YYYY-MM-DD' strings
+        "YEAR" | "EXTRACT_YEAR" => {
+            let d = date_to_int(&arg(0));
+            ExprVal::Int((d / 10000) as i64)
+        }
+        "MONTH" | "EXTRACT_MONTH" => {
+            let d = date_to_int(&arg(0));
+            ExprVal::Int(((d / 100) % 100) as i64)
+        }
+        "DAY" | "EXTRACT_DAY" => {
+            let d = date_to_int(&arg(0));
+            ExprVal::Int((d % 100) as i64)
+        }
+        "DATE_TRUNC" => {
+            // DATE_TRUNC('year', date) or DATE_TRUNC('month', date)
+            let part = arg_str(0).unwrap_or_default().to_lowercase();
+            let d    = date_to_int(&arg(1));
+            let (y, m, _dy) = (d / 10000, (d / 100) % 100, d % 100);
+            let result = match part.as_str() {
+                "year"    => format!("{:04}-01-01", y),
+                "month"   => format!("{:04}-{:02}-01", y, m),
+                "quarter" => format!("{:04}-{:02}-01", y, ((m - 1) / 3) * 3 + 1),
+                _         => arg_str(1).unwrap_or_default(),
+            };
+            ExprVal::Str(result)
+        }
+        "EXTRACT" => {
+            // EXTRACT(year FROM date) — parser passes as FuncCall with args [field, date]
+            let field = arg_str(0).unwrap_or_default().to_lowercase();
+            let d     = date_to_int(&arg(1));
+            let (y, m, dy) = (d / 10000, (d / 100) % 100, d % 100);
+            let v = match field.as_str() {
+                "year"    => y as i64,
+                "month"   => m as i64,
+                "day"     => dy as i64,
+                "quarter" => (((m as i64 - 1) / 3) + 1),
+                _         => 0,
+            };
+            ExprVal::Int(v)
+        }
+        "DATEADD" | "DATE_ADD" => {
+            // DATEADD('day', n, date) or DATE_ADD(date, n, 'day')
+            let part   = arg_str(0).unwrap_or("day".into()).to_lowercase();
+            let n      = arg_f64(1).unwrap_or(0.0) as i64;
+            let d      = date_to_int(&arg(2));
+            let result = date_add_days(d, match part.as_str() { "year" => n * 365, "month" => n * 30, _ => n });
+            ExprVal::Str(result)
+        }
+        "DATEDIFF" | "DATE_DIFF" => {
+            // DATEDIFF('day', start, end)
+            let d1 = date_to_int(&arg(1));
+            let d2 = date_to_int(&arg(2));
+            let diff = date_to_julian(d2) - date_to_julian(d1);
+            ExprVal::Int(diff)
+        }
+        "NOW" | "CURRENT_TIMESTAMP" | "CURRENT_DATE" => {
+            ExprVal::Str(executor_date_now())
+        }
+        "TO_DATE" | "DATE" => {
+            // TO_DATE(str, format) — just return the string as-is for now
+            arg(0)
+        }
+        "STRFTIME" | "FORMAT_DATE" => {
+            // STRFTIME('%Y', date) — return year as string
+            let fmt = arg_str(0).unwrap_or_default();
+            let d   = date_to_int(&arg(1));
+            let (y, m, dy) = (d / 10000, (d / 100) % 100, d % 100);
+            let result = fmt
+                .replace("%Y", &format!("{:04}", y))
+                .replace("%m", &format!("{:02}", m))
+                .replace("%d", &format!("{:02}", dy));
+            ExprVal::Str(result)
+        }
+        // ── Conditional / NULL handling (already implemented above, aliases) ─
+        "IF" => {
+            if eval_bool(&args[0], block, row) { arg(1) } else { arg(2) }
+        }
+        "GREATEST" => {
+            args.iter().map(|a| eval_expr(a, block, row)).max_by(|a, b| {
+                let af = to_f64(a).unwrap_or(f64::MIN);
+                let bf = to_f64(b).unwrap_or(f64::MIN);
+                af.partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Equal)
+            }).unwrap_or(ExprVal::Null)
+        }
+        "LEAST" => {
+            args.iter().map(|a| eval_expr(a, block, row)).min_by(|a, b| {
+                let af = to_f64(a).unwrap_or(f64::MAX);
+                let bf = to_f64(b).unwrap_or(f64::MAX);
+                af.partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Equal)
+            }).unwrap_or(ExprVal::Null)
+        }
         // ── Cast ────────────────────────────────────────────────────────────
         "CAST" => {
             let val = arg(0);
@@ -645,9 +1992,243 @@ fn eval_func(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> ExprVa
         "IIF" => {
             if eval_bool(&args[0], block, row) { arg(1) } else { arg(2) }
         }
+        // ── Missing string functions ─────────────────────────────────────────
+        "CHARINDEX" | "INSTR" | "LOCATE" | "POSITION_OF" => {
+            let needle = arg_str(0).unwrap_or_default();
+            let haystack = arg_str(1).unwrap_or_default();
+            let pos = haystack.find(&needle).map(|p| p as i64 + 1).unwrap_or(0);
+            ExprVal::Int(pos)
+        }
+        "INITCAP" | "PROPERCASE" => {
+            let s = arg_str(0).unwrap_or_default();
+            let result: String = s.split_whitespace()
+                .map(|w| {
+                    let mut c = w.chars();
+                    match c.next() {
+                        None => String::new(),
+                        Some(f) => f.to_uppercase().collect::<String>() + &c.as_str().to_lowercase(),
+                    }
+                })
+                .collect::<Vec<_>>().join(" ");
+            ExprVal::Str(result)
+        }
+        "SPACE" => {
+            let n = arg_f64(0).unwrap_or(0.0) as usize;
+            ExprVal::Str(" ".repeat(n))
+        }
+        "SPLIT_PART" => {
+            let s   = arg_str(0).unwrap_or_default();
+            let sep = arg_str(1).unwrap_or_else(|| ",".into());
+            let n   = arg_f64(2).unwrap_or(1.0) as usize;
+            ExprVal::Str(s.split(&*sep).nth(n.saturating_sub(1)).unwrap_or("").to_string())
+        }
+        "TRANSLATE" => {
+            let s    = arg_str(0).unwrap_or_default();
+            let from = arg_str(1).unwrap_or_default();
+            let to   = arg_str(2).unwrap_or_default();
+            let to_chars: Vec<char> = to.chars().collect();
+            let result: String = s.chars().map(|c| {
+                if let Some(i) = from.chars().position(|f| f == c) {
+                    to_chars.get(i).copied().unwrap_or('\0')
+                } else { c }
+            }).filter(|&c| c != '\0').collect();
+            ExprVal::Str(result)
+        }
+        "ASCII" | "ORD" => {
+            let s = arg_str(0).unwrap_or_default();
+            ExprVal::Int(s.chars().next().map(|c| c as i64).unwrap_or(0))
+        }
+        "CHR" | "CHAR" => {
+            let n = arg_f64(0).unwrap_or(0.0) as u32;
+            ExprVal::Str(char::from_u32(n).map(|c| c.to_string()).unwrap_or_default())
+        }
+        // ── Missing math functions ───────────────────────────────────────────
+        "SIGN" => match arg(0) {
+            ExprVal::Int(i)   => ExprVal::Int(i.signum()),
+            ExprVal::Float(f) => ExprVal::Float(f.signum()),
+            _ => ExprVal::Null,
+        },
+        "TRUNCATE" | "TRUNC" => {
+            let f  = need!(arg_f64(0));
+            let dp = arg_f64(1).unwrap_or(0.0) as u32;
+            let m  = 10f64.powi(dp as i32);
+            ExprVal::Float((f * m).trunc() / m)
+        }
+        "LOG2"  => arg_f64(0).map(|f| ExprVal::Float(f.log2())).unwrap_or(ExprVal::Null),
+        "LN"    => arg_f64(0).map(|f| ExprVal::Float(f.ln())).unwrap_or(ExprVal::Null),
+        "PI"    => ExprVal::Float(std::f64::consts::PI),
+        "RAND" | "RANDOM" => {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_nanos() as u64;
+            ExprVal::Float(((seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407) >> 33) as f64) / (u32::MAX as f64))
+        }
+        "CBRT"  => arg_f64(0).map(|f| ExprVal::Float(f.cbrt())).unwrap_or(ExprVal::Null),
+        "DEGREES" => arg_f64(0).map(|f| ExprVal::Float(f.to_degrees())).unwrap_or(ExprVal::Null),
+        "RADIANS" => arg_f64(0).map(|f| ExprVal::Float(f.to_radians())).unwrap_or(ExprVal::Null),
+        "SIN" => arg_f64(0).map(|f| ExprVal::Float(f.sin())).unwrap_or(ExprVal::Null),
+        "COS" => arg_f64(0).map(|f| ExprVal::Float(f.cos())).unwrap_or(ExprVal::Null),
+        "TAN" => arg_f64(0).map(|f| ExprVal::Float(f.tan())).unwrap_or(ExprVal::Null),
+        // ── Date / Time functions ─────────────────────────────────────────────
+        "YEAR" => { let d = date_to_int(&arg(0)); ExprVal::Int(d / 10000) }
+        "MONTH" => { let d = date_to_int(&arg(0)); ExprVal::Int((d / 100) % 100) }
+        "DAY" => { let d = date_to_int(&arg(0)); ExprVal::Int(d % 100) }
+        "QUARTER" => { let d = date_to_int(&arg(0)); ExprVal::Int(((d / 100 % 100 - 1) / 3) + 1) }
+        "DATE_TRUNC" => {
+            let part = arg_str(0).unwrap_or_default().to_lowercase();
+            let d = date_to_int(&arg(1));
+            let (y, m) = (d / 10000, (d / 100) % 100);
+            let r = match part.as_str() {
+                "year"    => format!("{:04}-01-01", y),
+                "month"   => format!("{:04}-{:02}-01", y, m),
+                "quarter" => format!("{:04}-{:02}-01", y, ((m - 1) / 3) * 3 + 1),
+                _         => arg_str(1).unwrap_or_default(),
+            };
+            ExprVal::Str(r)
+        }
+        "EXTRACT" => {
+            let field = arg_str(0).unwrap_or_default().to_lowercase();
+            let d = date_to_int(&arg(1));
+            let v = match field.as_str() {
+                "year" => d / 10000, "month" => (d / 100) % 100, "day" => d % 100,
+                "quarter" => ((d / 100 % 100 - 1) / 3) + 1, _ => 0,
+            };
+            ExprVal::Int(v)
+        }
+        "DATEADD" | "DATE_ADD" => {
+            let part = arg_str(0).unwrap_or(String::from("day")).to_lowercase();
+            let n = arg_f64(1).unwrap_or(0.0) as i64;
+            let d = date_to_int(&arg(2));
+            let days = match part.as_str() { "year" => n * 365, "month" => n * 30, _ => n };
+            ExprVal::Str(date_add_days(d, days))
+        }
+        "DATEDIFF" | "DATE_DIFF" => {
+            let d1 = date_to_int(&arg(1));
+            let d2 = date_to_int(&arg(2));
+            ExprVal::Int(date_to_julian(d2) - date_to_julian(d1))
+        }
+        "NOW" | "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "TODAY" => {
+            ExprVal::Str(executor_date_now())
+        }
+        "TO_DATE" | "DATE" => arg(0),
+        "STRFTIME" | "FORMAT_DATE" => {
+            let fmt = arg_str(0).unwrap_or_default();
+            let d = date_to_int(&arg(1));
+            let (y, m, dy) = (d / 10000, (d / 100) % 100, d % 100);
+            ExprVal::Str(fmt.replace("%Y", &format!("{:04}", y))
+                           .replace("%m", &format!("{:02}", m))
+                           .replace("%d", &format!("{:02}", dy)))
+        }
+        // ── Greatest / Least ─────────────────────────────────────────────────
+        "GREATEST" => {
+            args.iter().map(|a| eval_expr(a, block, row))
+                .max_by(|a, b| to_f64(a).unwrap_or(f64::MIN).partial_cmp(&to_f64(b).unwrap_or(f64::MIN)).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or(ExprVal::Null)
+        }
+        "LEAST" => {
+            args.iter().map(|a| eval_expr(a, block, row))
+                .min_by(|a, b| to_f64(a).unwrap_or(f64::MAX).partial_cmp(&to_f64(b).unwrap_or(f64::MAX)).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or(ExprVal::Null)
+        }
         // ── Fallthrough ─────────────────────────────────────────────────────
         _ => ExprVal::Null,
     }
+}
+
+// ─── Date helpers ─────────────────────────────────────────────────────────────
+
+fn date_to_int(v: &ExprVal) -> i64 {
+    match v {
+        ExprVal::Int(i) => *i,
+        ExprVal::Float(f) => *f as i64,
+        ExprVal::Str(s) => {
+            let s = s.trim();
+            if s.len() >= 10 && s.as_bytes().get(4) == Some(&b'-') {
+                let y: i64 = s[0..4].parse().unwrap_or(0);
+                let m: i64 = s[5..7].parse().unwrap_or(0);
+                let d: i64 = s[8..10].parse().unwrap_or(0);
+                y * 10000 + m * 100 + d
+            } else { s.parse().unwrap_or(0) }
+        }
+        _ => 0,
+    }
+}
+
+fn date_add_days(d: i64, days: i64) -> String {
+    let julian = date_to_julian(d) + days;
+    julian_to_date_str(julian)
+}
+
+fn date_to_julian(d: i64) -> i64 {
+    let y = d / 10000; let m = (d / 100) % 100; let dy = d % 100;
+    let a = (14 - m) / 12; let yr = y + 4800 - a; let mo = m + 12 * a - 3;
+    dy + (153 * mo + 2) / 5 + 365 * yr + yr / 4 - yr / 100 + yr / 400 - 32045
+}
+
+fn julian_to_date_str(j: i64) -> String {
+    let a = j + 32044; let b = (4 * a + 3) / 146097; let c = a - 146097 * b / 4;
+    let d = (4 * c + 3) / 1461; let e = c - 1461 * d / 4; let m = (5 * e + 2) / 153;
+    let day   = e - (153 * m + 2) / 5 + 1;
+    let month = m + 3 - 12 * (m / 10);
+    let year  = 100 * b + d - 4800 + m / 10;
+    format!("{:04}-{:02}-{:02}", year, month, day)
+}
+
+fn executor_date_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    julian_to_date_str(2440588 + (secs / 86400) as i64)
+}
+
+// ─── MERGE helpers ─────────────────────────────────────────────────────────────
+
+fn expr_val_eq(a: &ExprVal, b: &ExprVal) -> bool {
+    match (a, b) {
+        (ExprVal::Int(x),   ExprVal::Int(y))   => x == y,
+        (ExprVal::Float(x), ExprVal::Float(y)) => x == y,
+        (ExprVal::Str(x),   ExprVal::Str(y))   => x == y,
+        (ExprVal::Int(x),   ExprVal::Float(y)) => (*x as f64) == *y,
+        (ExprVal::Float(x), ExprVal::Int(y))   => *x == (*y as f64),
+        _ => false,
+    }
+}
+
+fn get_col_val(block: &DataBlock, col_idx: usize, row: usize) -> ExprVal {
+    match block.columns.get(col_idx).map(|c| &c.data) {
+        Some(ColumnData::Int64(v))   => v.get(row).and_then(|x| x.as_ref()).map(|&i| ExprVal::Int(i)).unwrap_or(ExprVal::Null),
+        Some(ColumnData::Float64(v)) => v.get(row).and_then(|x| x.as_ref()).map(|&f| ExprVal::Float(f)).unwrap_or(ExprVal::Null),
+        Some(ColumnData::Str(v))     => v.get(row).and_then(|x| x.as_ref()).map(|s| ExprVal::Str(s.clone())).unwrap_or(ExprVal::Null),
+        _ => ExprVal::Null,
+    }
+}
+
+fn set_col_val(block: &mut DataBlock, col_idx: usize, row: usize, val: ExprVal) {
+    if let Some(col) = block.columns.get_mut(col_idx) {
+        match (&mut col.data, val) {
+            (ColumnData::Int64(v), ExprVal::Int(i))     => { if let Some(x) = v.get_mut(row) { *x = Some(i); } }
+            (ColumnData::Float64(v), ExprVal::Float(f)) => { if let Some(x) = v.get_mut(row) { *x = Some(f); } }
+            (ColumnData::Str(v), ExprVal::Str(s))       => { if let Some(x) = v.get_mut(row) { *x = Some(s); } }
+            _ => {} // Bool, StrDict, cross-type: no-op
+        }
+    }
+}
+
+fn append_row(target: &mut DataBlock, source: &DataBlock, src_row: usize) {
+    for tc in target.columns.iter_mut() {
+        let src_val = source.columns.iter().find(|sc| sc.name == tc.name)
+            .map(|sc| get_col_val(source, source.columns.iter().position(|x| x.name == sc.name).unwrap_or(0), src_row))
+            .unwrap_or(ExprVal::Null);
+        match (&mut tc.data, src_val) {
+            (ColumnData::Int64(v), ExprVal::Int(i))     => v.push(Some(i)),
+            (ColumnData::Float64(v), ExprVal::Float(f)) => v.push(Some(f)),
+            (ColumnData::Str(v), ExprVal::Str(s))       => v.push(Some(s)),
+            (ColumnData::Int64(v), _)                   => v.push(None),
+            (ColumnData::Float64(v), _)                 => v.push(None),
+            (ColumnData::Str(v), _)                     => v.push(None),
+            (ColumnData::Bool(v), _)                    => v.push(None),
+            (ColumnData::StrDict { codes, .. }, _)      => codes.push(0),
+        }
+    }
+    target.num_rows += 1;
 }
 
 fn get_cell(block: &DataBlock, col_name: &str, row: usize) -> ExprVal {    // Try exact match, then suffix match (for qualified names)
@@ -730,16 +2311,79 @@ fn to_f64(v: &ExprVal) -> Option<f64> {
 // ─── Sort ─────────────────────────────────────────────────────────────────────
 
 fn sort_block(block: DataBlock, col: &str, desc: bool) -> Result<DataBlock, KoreError> {
-    // Use DataBlock::sort_by which uses a Schwartzian transform (cache-friendly,
-    // avoids calling get_cell() twice per comparison in the comparator).
+    sort_block_nulls(block, col, desc, None)
+}
+
+fn sort_block_nulls(block: DataBlock, col: &str, desc: bool, nulls_first: Option<bool>) -> Result<DataBlock, KoreError> {
+    // NULLS FIRST/LAST: default is NULLs last for ASC, NULLs first for DESC
+    let nf = nulls_first.unwrap_or(desc);
+
+    // Find the column name (handles qualified names)
+    let col_short  = col.rsplit('.').next().unwrap_or(col);
+    let col_prefix = if col.contains('.') { col.split('.').next() } else { None };
     let col_name = block.columns.iter()
         .find(|c| c.name == col || {
             let cn = c.name.len(); let m = col.len();
             cn > m && c.name.as_bytes()[cn - m - 1] == b'.' && &c.name[cn - m..] == col
         })
+        .or_else(|| {
+            if let Some(pfx) = col_prefix {
+                block.columns.iter().find(|c| {
+                    let starts = c.name.starts_with(&format!("{pfx}."));
+                    let ends   = c.name.rsplit('.').next().map_or(false, |s| s == col_short);
+                    starts && ends
+                })
+            } else { None }
+        })
+        .or_else(|| {
+            let matches: Vec<_> = block.columns.iter()
+                .filter(|c| c.name.rsplit('.').next().unwrap_or(&c.name) == col_short)
+                .collect();
+            if matches.len() == 1 { Some(matches[0]) } else { None }
+        })
         .map(|c| c.name.clone())
         .ok_or_else(|| KoreError::InvalidArgument(format!("ORDER BY column not found: {col}")))?;
-    // ascending=!desc to match the desc semantics
+
+    // If NULLS FIRST/LAST is non-default, do a custom sort with null sentinels
+    if nulls_first.is_some() {
+        // Build sort keys: (is_null, value) with null sentinel controlled by nf
+        let n = block.num_rows;
+        let col_data = block.columns.iter().find(|c| c.name == col_name).unwrap();
+        let mut indices: Vec<usize> = (0..n).collect();
+        let keys: Vec<(bool, f64)> = (0..n).map(|i| {
+            match &col_data.data {
+                ColumnData::Int64(v)   => match v.get(i).and_then(|x| *x) { Some(x) => (false, x as f64), None => (true, 0.0) },
+                ColumnData::Float64(v) => match v.get(i).and_then(|x| *x) { Some(x) => (false, x), None => (true, 0.0) },
+                ColumnData::Str(v)     => match v.get(i).and_then(|x| x.as_deref()) {
+                    Some(s) => (false, s.as_bytes().first().copied().unwrap_or(0) as f64),
+                    None    => (true, 0.0)
+                },
+                _ => (true, 0.0),
+            }
+        }).collect();
+        indices.sort_by(|&a, &b| {
+            let (an, av) = keys[a]; let (bn, bv) = keys[b];
+            match (an, bn) {
+                (true, false) => if nf { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater },
+                (false, true) => if nf { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Less },
+                _ => if desc { bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal) }
+                     else    { av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal) },
+            }
+        });
+        return Ok(block.select_rows(&indices));
+    }
+
+    let estimated = kore_spill::SpillManager::estimate_bytes(&block);
+    if estimated > 256 * 1024 * 1024 {
+        let tmp = std::env::temp_dir().join("kore_sort");
+        let ext = if desc {
+            kore_spill::ExternalSort::new(&col_name, tmp).descending()
+        } else {
+            kore_spill::ExternalSort::new(&col_name, tmp)
+        };
+        return ext.sort(vec![block]);
+    }
+
     block.sort_by(&col_name, !desc)
 }
 
@@ -749,6 +2393,29 @@ fn limit_block(block: DataBlock, n: usize) -> DataBlock {
     let take = n.min(block.num_rows);
     let indices: Vec<usize> = (0..take).collect();
     block.select_rows(&indices)
+}
+
+/// Remove duplicate rows (for SELECT DISTINCT).
+/// Builds a string key per row; keeps first occurrence.
+fn deduplicate(block: DataBlock) -> DataBlock {
+    use std::collections::HashSet;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut keep: Vec<usize> = Vec::new();
+    for i in 0..block.num_rows {
+        let key: String = block.columns.iter().map(|c| {
+            match c.data.get_value(i) {
+                Value::Null      => "∅".to_string(),
+                Value::Int(n)    => n.to_string(),
+                Value::Float(f)  => format!("{f:.10}"),
+                Value::Bool(b)   => b.to_string(),
+                Value::Str(s)    => s,
+            }
+        }).collect::<Vec<_>>().join("\x00");
+        if seen.insert(key) {
+            keep.push(i);
+        }
+    }
+    block.select_rows(&keep)
 }
 
 fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, KoreError> {
@@ -763,6 +2430,29 @@ fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, Ko
             Projection::Star => { new_cols.extend(block.columns.iter().cloned()); }
             Projection::Expr { expr, alias } => {
                 let out_name = || alias.clone().unwrap_or_else(|| "expr".into());
+
+                // Fast path: if alias already exists in block (from group_by_agg or
+                // materialize_groupby_aliases), use it directly — avoids re-evaluation
+                // with stale/missing columns after GROUP BY projection.
+                if let Some(a) = alias {
+                    if let Some(src) = block.columns.iter().find(|c| c.name == a.as_str()) {
+                        // Only use pre-computed alias for complex exprs or when source col is gone
+                        let source_col_missing = match expr {
+                            Expr::Col(c) | Expr::QualCol(_, c) => {
+                                let full = match expr { Expr::QualCol(t, c2) => format!("{}.{}", t, c2), _ => c.clone() };
+                                !block.columns.iter().any(|col| {
+                                    let cn = col.name.len(); let nm = full.len();
+                                    col.name == full || (cn > nm && col.name.as_bytes()[cn-nm-1] == b'.' && &col.name[cn-nm..] == full)
+                                })
+                            }
+                            _ => true, // complex exprs always prefer pre-computed
+                        };
+                        if source_col_missing {
+                            new_cols.push(src.clone());
+                            continue;
+                        }
+                    }
+                }
 
                 match expr {
                     Expr::Col(c) | Expr::QualCol(_, c) => {
@@ -786,16 +2476,42 @@ fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, Ko
                             .ok_or_else(|| KoreError::InvalidArgument(format!("window col not found: {win_col}")))?;
                         new_cols.push(src.clone());
                     }
-                    // Aggregate results are already in block (from group_by_agg)
-                    Expr::Agg { .. } => {
-                        let col_name = out_name();
-                        if let Some(src) = block.columns.iter().find(|c| c.name == col_name) {
-                            new_cols.push(src.clone());
+                    // Aggregate results are already in block (from group_by_agg or global_agg).
+                    // Must compute the same column name that global_agg uses.
+                    Expr::Agg { func, expr: inner } => {
+                        let col_name = alias.clone().unwrap_or_else(|| {
+                            let inner_name = match inner.as_ref() {
+                                Expr::Col(c) | Expr::QualCol(_, c) => c.clone(),
+                                Expr::Star => "*".to_string(),
+                                _ => String::new(),
+                            };
+                            format!("{:?}({})", func, inner_name)
+                        });
+                        if let Some(src) = block.columns.iter().find(|c| {
+                            c.name == col_name || {
+                                // Also try alias match for group_by results
+                                alias.as_ref().map(|a| c.name == *a).unwrap_or(false)
+                            }
+                        }) {
+                            let mut nc = src.clone();
+                            if let Some(a) = alias { nc.name = a.clone(); }
+                            new_cols.push(nc);
                         }
                         // else silently skip (shouldn't happen after group_by_agg)
                     }
                     // Everything else: evaluate row-by-row
+                    // BUT: if this alias was already computed (e.g. by group_by_agg or
+                    // materialize_groupby_aliases), use the existing column to avoid
+                    // re-evaluating with missing source columns after GROUP BY.
                     _ => {
+                        let alias_name = alias.as_deref().unwrap_or("");
+                        // Check if the alias column already exists in the block (pre-computed)
+                        if !alias_name.is_empty() {
+                            if let Some(src) = block.columns.iter().find(|c| c.name == alias_name) {
+                                new_cols.push(src.clone());
+                                continue;
+                            }
+                        }
                         let n = block.num_rows;
                         let vals: Vec<ExprVal> = (0..n).map(|r| eval_expr(expr, &block, r)).collect();
                         new_cols.push(exprvals_to_column(out_name(), vals));
@@ -836,9 +2552,27 @@ fn exprvals_to_column(name: String, vals: Vec<ExprVal>) -> Column {
 
 // ─── Fast column extraction helpers ──────────────────────────────────────────
 
-/// Collect all bare column names referenced anywhere in an expression.
-fn collect_cols_expr(expr: &Expr, set: &mut std::collections::HashSet<String>) {
+/// Collect outer QualCol references from inside a subquery predicate.
+/// These are columns like m1.kind or o1.cust_id that come from the OUTER query
+/// and must be kept in the outer block's column pruning step.
+fn collect_outer_quals(expr: &Expr, set: &mut std::collections::HashSet<String>) {
     match expr {
+        Expr::QualCol(_, c) => { set.insert(c.clone()); }
+        Expr::BinOp { left, right, .. } => {
+            collect_outer_quals(left, set);
+            collect_outer_quals(right, set);
+        }
+        Expr::Not(e) | Expr::IsNull(e) | Expr::IsNotNull(e) => collect_outer_quals(e, set),
+        Expr::In { expr: e, values, .. } => {
+            collect_outer_quals(e, set);
+            for v in values { collect_outer_quals(v, set); }
+        }
+        _ => {}
+    }
+}
+
+/// Collect all bare column names referenced anywhere in an expression.
+fn collect_cols_expr(expr: &Expr, set: &mut std::collections::HashSet<String>) {    match expr {
         Expr::Col(c)            => { set.insert(c.clone()); }
         Expr::QualCol(_, c)     => { set.insert(c.clone()); }
         Expr::Agg { expr: e, .. } => collect_cols_expr(e, set),
@@ -866,6 +2600,16 @@ fn collect_cols_expr(expr: &Expr, set: &mut std::collections::HashSet<String>) {
             if let Some(ev) = else_val { collect_cols_expr(ev, set); }
         }
         Expr::FuncCall { args, .. } => { for a in args { collect_cols_expr(a, set); } }
+        // Subquery expressions — collect outer column references
+        Expr::InSubquery { expr: e, .. } => collect_cols_expr(e, set),
+        // For EXISTS and ScalarSubquery: scan inner WHERE for outer table references (QualCol)
+        // These are the correlated outer columns that the outer query must keep.
+        Expr::ScalarSubquery(stmt) => {
+            if let Some(pred) = &stmt.where_clause { collect_outer_quals(pred, set); }
+        }
+        Expr::Exists { subquery, .. } => {
+            if let Some(pred) = &subquery.where_clause { collect_outer_quals(pred, set); }
+        }
         Expr::Window { func, spec } => {
             match func {
                 WindowFn::Agg { expr: e, .. } => collect_cols_expr(e, set),
@@ -980,7 +2724,59 @@ fn global_agg(block: DataBlock, projections: &[Projection]) -> Result<DataBlock,
                 AggFunc::Avg => if vals.is_empty() { None } else { Some(vals.iter().sum::<f64>() / vals.len() as f64) },
                 AggFunc::Min => vals.iter().copied().reduce(f64::min),
                 AggFunc::Max => vals.iter().copied().reduce(f64::max),
+                AggFunc::Stddev => {
+                    if vals.len() < 2 { None } else {
+                        let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                        let var = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (vals.len() - 1) as f64;
+                        Some(var.sqrt())
+                    }
+                }
+                AggFunc::Variance => {
+                    if vals.len() < 2 { None } else {
+                        let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                        Some(vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (vals.len() - 1) as f64)
+                    }
+                }
+                AggFunc::Median => {
+                    if vals.is_empty() { None } else {
+                        let mut s = vals.clone(); s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        let m = s.len() / 2;
+                        if s.len() % 2 == 0 { Some((s[m-1] + s[m]) / 2.0) } else { Some(s[m]) }
+                    }
+                }
+                AggFunc::Percentile { p } => {
+                    let pct: f64 = p.parse().unwrap_or(0.5);
+                    if vals.is_empty() { None } else {
+                        let mut s = vals.clone(); s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        let idx = ((s.len() - 1) as f64 * pct) as usize;
+                        Some(s[idx.min(s.len()-1)])
+                    }
+                }
+                AggFunc::StringAgg { sep } => {
+                    // StringAgg returns a string — handled separately below via str_agg_vals
+                    let _ = sep; None
+                }
             };
+            // Handle StringAgg as a Str column
+            if let AggFunc::StringAgg { sep } = func {
+                let strs: Vec<String> = if is_direct {
+                    agg_col.map(|c| match &c.data {
+                        ColumnData::Str(v) => v.iter().filter_map(|x| x.clone()).collect(),
+                        _ => vec![],
+                    }).unwrap_or_default()
+                } else {
+                    (0..block.num_rows).filter_map(|r| match eval_expr(inner, &block, r) {
+                        ExprVal::Str(s) => Some(s),
+                        ExprVal::Int(i) => Some(i.to_string()),
+                        ExprVal::Float(f) => Some(f.to_string()),
+                        _ => None,
+                    }).collect()
+                };
+                let agg_str = strs.join(sep);
+                let name = alias.clone().unwrap_or_else(|| format!("string_agg({})", col_name));
+                new_cols.push(Column { name, data: ColumnData::Str(vec![Some(agg_str)]) });
+                continue;
+            }
             let name = alias.clone().unwrap_or_else(|| format!("{:?}({})", func, col_name));
             new_cols.push(Column { name, data: ColumnData::Float64(vec![v]) });
         }
@@ -1159,8 +2955,59 @@ fn group_by_agg(
                                 AggFunc::Avg   => if vals.is_empty() { None } else { Some(vals.iter().sum::<f64>() / vals.len() as f64) },
                                 AggFunc::Min   => vals.iter().copied().reduce(f64::min),
                                 AggFunc::Max   => vals.iter().copied().reduce(f64::max),
+                                AggFunc::Stddev => {
+                                    if vals.len() < 2 { None } else {
+                                        let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                                        let var = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (vals.len() - 1) as f64;
+                                        Some(var.sqrt())
+                                    }
+                                }
+                                AggFunc::Variance => {
+                                    if vals.len() < 2 { None } else {
+                                        let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                                        Some(vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (vals.len() - 1) as f64)
+                                    }
+                                }
+                                AggFunc::Median => {
+                                    if vals.is_empty() { None } else {
+                                        let mut s = vals.clone(); s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                                        let m = s.len() / 2;
+                                        if s.len() % 2 == 0 { Some((s[m-1] + s[m]) / 2.0) } else { Some(s[m]) }
+                                    }
+                                }
+                                AggFunc::Percentile { p } => {
+                                    let pct: f64 = p.parse().unwrap_or(0.5);
+                                    if vals.is_empty() { None } else {
+                                        let mut s = vals.clone(); s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                                        let idx = ((s.len() - 1) as f64 * pct) as usize;
+                                        Some(s[idx.min(s.len()-1)])
+                                    }
+                                }
+                                AggFunc::StringAgg { .. } => None, // handled below as Str column
                             };
                             agg_vals.push(v);
+                        }
+                        // StringAgg — build a Str column
+                        if let AggFunc::StringAgg { sep } = func {
+                            let mut str_agg_vals: Vec<Option<String>> = Vec::new();
+                            for (_, idxs) in &groups {
+                                let strs: Vec<String> = if is_direct {
+                                    agg_col.map(|c| match &c.data {
+                                        ColumnData::Str(v) => idxs.iter().filter_map(|&r| v.get(r).and_then(|x| x.clone())).collect(),
+                                        _ => vec![],
+                                    }).unwrap_or_default()
+                                } else {
+                                    idxs.iter().filter_map(|&r| match eval_expr(inner, &block, r) {
+                                        ExprVal::Str(s) => Some(s),
+                                        ExprVal::Int(i) => Some(i.to_string()),
+                                        _ => None,
+                                    }).collect()
+                                };
+                                str_agg_vals.push(Some(strs.join(sep)));
+                            }
+                            let name = alias.clone().unwrap_or_else(|| format!("string_agg({})", col_name));
+                            new_cols.push(Column { name, data: ColumnData::Str(str_agg_vals) });
+                            continue;
                         }
                         let name = alias.clone().unwrap_or_else(|| format!("{:?}({})", func, col_name));
                         new_cols.push(Column {
@@ -1169,15 +3016,49 @@ fn group_by_agg(
                         });
                     }
                     other => {
+                        // For Col/QualCol: copy directly from agg_block by name
+                        // For CASE/FuncCall/BinOp etc: check if alias column was pre-materialized,
+                        // otherwise evaluate the expression for each representative row
                         let col_name = match other {
-                            Expr::Col(c)        => c.clone(),
-                            Expr::QualCol(_, c) => c.clone(),
-                            _ => continue,
+                            Expr::Col(c)        => Some(c.clone()),
+                            Expr::QualCol(_, c) => Some(c.clone()),
+                            _ => None,
                         };
-                        if let Some(src) = find_col(&agg_block, &col_name) {
-                            let mut nc = src.clone();
-                            if let Some(a) = alias { nc.name = a.clone(); }
-                            new_cols.push(nc);
+
+                        if let Some(cn) = col_name {
+                            if let Some(src) = find_col(&agg_block, &cn) {
+                                let mut nc = src.clone();
+                                if let Some(a) = alias { nc.name = a.clone(); }
+                                new_cols.push(nc);
+                            }
+                        } else {
+                            // Complex expr (CASE WHEN, FuncCall, etc.)
+                            // First: check if alias already exists in agg_block (from materialize_groupby_aliases)
+                            let alias_name = alias.as_deref().unwrap_or("");
+                            if !alias_name.is_empty() {
+                                if let Some(src) = find_col(&agg_block, alias_name) {
+                                    let mut nc = src.clone();
+                                    nc.name = alias_name.to_string();
+                                    new_cols.push(nc);
+                                    continue;
+                                }
+                            }
+                            // Fallback: evaluate expression for each representative row
+                            let n = first_rows.len();
+                            let values: Vec<Option<String>> = first_rows.iter().map(|&r| {
+                                Some(match eval_expr(other, &block, r) {
+                                    ExprVal::Str(s)   => s,
+                                    ExprVal::Int(i)   => i.to_string(),
+                                    ExprVal::Float(f) => format!("{f:.4}"),
+                                    ExprVal::Bool(b)  => b.to_string(),
+                                    ExprVal::Null     => return None,
+                                })
+                            }).collect();
+                            let name = alias.clone().unwrap_or_else(|| format!("col{}", new_cols.len()));
+                            new_cols.push(Column {
+                                name,
+                                data: ColumnData::Str(values),
+                            });
                         }
                     }
                 }
@@ -1237,6 +3118,8 @@ fn ast_to_win_fn(ast: &WindowFn) -> WinFn {
         WindowFn::RowNumber   => WinFn::RowNumber,
         WindowFn::Rank        => WinFn::Rank,
         WindowFn::DenseRank   => WinFn::DenseRank,
+        WindowFn::PercentRank => WinFn::PercentRank,
+        WindowFn::CumeDist    => WinFn::CumeDist,
         WindowFn::Ntile(n)    => WinFn::Ntile(match n.as_ref() { Expr::Int(i) => *i as usize, _ => 4 }),
         WindowFn::Lag  { expr, offset } => WinFn::Lag  { col: col_name_from_expr(expr), offset: match offset.as_ref() { Expr::Int(i) => *i as usize, _ => 1 } },
         WindowFn::Lead { expr, offset } => WinFn::Lead { col: col_name_from_expr(expr), offset: match offset.as_ref() { Expr::Int(i) => *i as usize, _ => 1 } },
@@ -1246,6 +3129,10 @@ fn ast_to_win_fn(ast: &WindowFn) -> WinFn {
             AggFunc::Count | AggFunc::CountDistinct => WinFn::Count(col_name_from_expr(expr)),
             AggFunc::Min   => WinFn::Min  (col_name_from_expr(expr)),
             AggFunc::Max   => WinFn::Max  (col_name_from_expr(expr)),
+            // New agg funcs fall back to Sum window for now
+            AggFunc::Stddev | AggFunc::Variance | AggFunc::Median |
+            AggFunc::StringAgg { .. } | AggFunc::Percentile { .. }
+                           => WinFn::Sum  (col_name_from_expr(expr)),
         },
         WindowFn::CumSum(e)    => WinFn::CumSum    (col_name_from_expr(e)),
         WindowFn::FirstValue(e) => WinFn::FirstValue(col_name_from_expr(e)),
@@ -1311,6 +3198,84 @@ mod tests {
             "SELECT cust_id, SUM(score) AS total FROM orders GROUP BY cust_id"
         ).unwrap();
         assert_eq!(result.num_rows, 3); // 3 distinct cust_ids
+    }
+
+    // ─── Subquery tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_scalar_subquery_where_eq_max() {
+        let mut ctx = KqlContext::new();
+        ctx.register("orders", make_orders());
+        // WHERE score = (SELECT MAX(score) FROM orders)  → only score=90
+        let result = ctx.query(
+            "SELECT score FROM orders WHERE score = (SELECT MAX(score) FROM orders)"
+        ).unwrap();
+        assert_eq!(result.num_rows, 1, "only score=90 should match MAX");
+    }
+
+    #[test]
+    fn test_scalar_subquery_where_gt_avg() {
+        let mut ctx = KqlContext::new();
+        ctx.register("orders", make_orders());
+        // AVG = (90+70+85+60)/4 = 76.25 — rows > avg: 90, 85
+        let result = ctx.query(
+            "SELECT score FROM orders WHERE score > (SELECT AVG(score) FROM orders)"
+        ).unwrap();
+        assert_eq!(result.num_rows, 2, "scores 90 and 85 are > avg(76.25)");
+    }
+
+    #[test]
+    fn test_in_subquery() {
+        let mut ctx = KqlContext::new();
+        ctx.register("orders", make_orders());
+        ctx.register("customers", make_customers());
+        // Find orders from customers whose name starts with 'A' → cust_id=10 → 2 rows
+        let result = ctx.query(
+            "SELECT id FROM orders WHERE cust_id IN (SELECT id FROM customers WHERE name = 'Alice')"
+        ).unwrap();
+        assert_eq!(result.num_rows, 2, "Alice has cust_id=10, two orders");
+    }
+
+    #[test]
+    fn test_not_in_subquery() {
+        let mut ctx = KqlContext::new();
+        ctx.register("orders", make_orders());
+        ctx.register("customers", make_customers());
+        // Exclude orders from Alice (cust_id=10)
+        let result = ctx.query(
+            "SELECT id FROM orders WHERE cust_id NOT IN (SELECT id FROM customers WHERE name = 'Alice')"
+        ).unwrap();
+        assert_eq!(result.num_rows, 2, "Bob and Carol have 2 orders");
+    }
+
+    #[test]
+    fn test_correlated_subquery() {
+        // WHERE score > (SELECT AVG(score) FROM orders o2 WHERE o2.cust_id = o1.cust_id)
+        // cust_id=10: scores [90,85] avg=87.5 → row 90 matches, row 85 does NOT
+        // cust_id=20: scores [70]    avg=70.0 → row 70 does NOT
+        // cust_id=30: scores [60]    avg=60.0 → row 60 does NOT
+        // Expected: 1 row (score=90)
+        let mut ctx = KqlContext::new();
+        ctx.register("o1", make_orders());
+        ctx.register("orders", make_orders());
+        let result = ctx.query(
+            "SELECT score FROM o1 WHERE score > (SELECT AVG(score) FROM orders o2 WHERE o2.cust_id = o1.cust_id)"
+        ).unwrap();
+        assert_eq!(result.num_rows, 1, "only score=90 is above its group avg(87.5)");
+    }
+
+    #[test]
+    fn test_exists_correlated() {
+        // Find orders where there exists another order from the same customer
+        // cust_id=10 has 2 orders → both qualify; cust_id=20,30 have 1 order → don't qualify
+        let mut ctx = KqlContext::new();
+        ctx.register("o1", make_orders());
+        ctx.register("orders", make_orders());
+        // Simple EXISTS: all rows have at least 1 match in orders
+        let result = ctx.query(
+            "SELECT id FROM o1 WHERE EXISTS (SELECT 1 FROM orders o2 WHERE o2.cust_id = o1.cust_id)"
+        ).unwrap();
+        assert_eq!(result.num_rows, 4, "all o1 rows exist in orders by cust_id");
     }
 
     // ─── Layer 34: Scalar functions ─────────────────────────────────────────

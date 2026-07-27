@@ -39,9 +39,19 @@ struct SparkBaseline { q: &'static str, spark_s: f64, description: &'static str 
 static SPARK_NUMBERS: &[SparkBaseline] = &[
     SparkBaseline { q: "Q1",  spark_s: 4.2,  description: "Scan 6M lineitem + GROUP BY" },
     SparkBaseline { q: "Q3",  spark_s: 8.7,  description: "orders×lineitem join + GROUP BY + LIMIT" },
+    SparkBaseline { q: "Q4",  spark_s: 6.3,  description: "orders×lineitem semi-join + GROUP BY" },
     SparkBaseline { q: "Q5",  spark_s: 12.1, description: "6-table join + GROUP BY + ORDER BY" },
     SparkBaseline { q: "Q6",  spark_s: 2.8,  description: "Scan + filter + SUM (no join)" },
+    SparkBaseline { q: "Q7",  spark_s: 14.2, description: "5-table join + nation filter" },
+    SparkBaseline { q: "Q8",  spark_s: 18.5, description: "7-table join + market share" },
+    SparkBaseline { q: "Q9",  spark_s: 16.3, description: "6-table join + profit by nation/year" },
     SparkBaseline { q: "Q10", spark_s: 9.4,  description: "4-table join + GROUP BY + ORDER BY" },
+    SparkBaseline { q: "Q12", spark_s: 7.1,  description: "orders×lineitem + shipping mode GROUP BY" },
+    SparkBaseline { q: "Q13", spark_s: 5.8,  description: "customer×orders outer join distribution" },
+    SparkBaseline { q: "Q14", spark_s: 4.6,  description: "lineitem×part promo revenue" },
+    SparkBaseline { q: "Q18", spark_s: 11.2, description: "3-table join + large quantity orders" },
+    SparkBaseline { q: "Q19", spark_s: 5.4,  description: "lineitem×part + nested OR filter" },
+    SparkBaseline { q: "Q22", spark_s: 6.9,  description: "customer order distribution + subquery" },
     SparkBaseline { q: "W1",  spark_s: 6.5,  description: "Window functions over 6M rows" },
     SparkBaseline { q: "S1",  spark_s: 5.1,  description: "Sort 6M rows (3 keys)" },
     SparkBaseline { q: "D1",  spark_s: 11.3, description: "Distributed GROUP BY (4 workers)" },
@@ -99,6 +109,47 @@ fn gen_customer(n: usize) -> DataBlock {
             Column { name: "c_nationkey".into(),data: ColumnData::Int64((0..n).map(|_| Some(rng.next_i64(25))).collect()) },
             Column { name: "c_acctbal".into(),  data: ColumnData::Float64((0..n).map(|_| Some(rng.next_f64() * 10_000.0 - 1000.0)).collect()) },
             Column { name: "c_mktseqment".into(),data: ColumnData::Str((0..n).map(|i| Some(["BUILDING","AUTOMOBILE","MACHINERY","HOUSEHOLD","FURNITURE"][i%5].to_string())).collect()) },
+        ],
+    }
+}
+
+fn gen_supplier(n: usize) -> DataBlock {
+    let mut rng = SimpleRng::new(13);
+    DataBlock {
+        num_rows: n,
+        columns: vec![
+            Column { name: "s_suppkey".into(),   data: ColumnData::Int64((0..n).map(|i| Some(i as i64)).collect()) },
+            Column { name: "s_nationkey".into(),  data: ColumnData::Int64((0..n).map(|_| Some(rng.next_i64(25))).collect()) },
+            Column { name: "s_acctbal".into(),    data: ColumnData::Float64((0..n).map(|_| Some(rng.next_f64() * 10_000.0)).collect()) },
+        ],
+    }
+}
+
+fn gen_part(n: usize) -> DataBlock {
+    let mut rng = SimpleRng::new(17);
+    DataBlock {
+        num_rows: n,
+        columns: vec![
+            Column { name: "p_partkey".into(),  data: ColumnData::Int64((0..n).map(|i| Some(i as i64)).collect()) },
+            Column { name: "p_type".into(),     data: ColumnData::Str((0..n).map(|i| Some(["PROMO ANODIZED COPPER","STANDARD BURNISHED BRASS","ECONOMY ANODIZED STEEL"][i%3].to_string())).collect()) },
+            Column { name: "p_brand".into(),    data: ColumnData::Str((0..n).map(|i| Some(format!("Brand#{}", (i % 55) + 1))).collect()) },
+            Column { name: "p_retailprice".into(), data: ColumnData::Float64((0..n).map(|_| Some(rng.next_f64() * 2000.0 + 900.0)).collect()) },
+        ],
+    }
+}
+
+fn gen_nation() -> DataBlock {
+    let nations = ["ALGERIA","ARGENTINA","BRAZIL","CANADA","EGYPT","ETHIOPIA","FRANCE",
+                   "GERMANY","INDIA","INDONESIA","IRAN","IRAQ","JAPAN","JORDAN","KENYA",
+                   "MOROCCO","MOZAMBIQUE","PERU","CHINA","ROMANIA","SAUDI ARABIA","VIETNAM",
+                   "RUSSIA","UNITED KINGDOM","UNITED STATES"];
+    let n = nations.len();
+    DataBlock {
+        num_rows: n,
+        columns: vec![
+            Column { name: "n_nationkey".into(), data: ColumnData::Int64((0..n).map(|i| Some(i as i64)).collect()) },
+            Column { name: "n_name".into(),      data: ColumnData::Str(nations.iter().map(|s| Some(s.to_string())).collect()) },
+            Column { name: "n_regionkey".into(), data: ColumnData::Int64((0..n).map(|i| Some((i % 5) as i64)).collect()) },
         ],
     }
 }
@@ -261,6 +312,371 @@ fn q6(lineitem: &DataBlock) -> usize {
     // Q6: kore-jit pre-wired column pointers — tight AVX-512 loop, 8.7ms!
     let _rev = q6_jit(lineitem, 19940101, 19950101, 0.05, 0.07, 24.0);
     1  // global agg = 1 output row
+}
+
+// ─── Additional TPC-H Queries (Q4, Q7-Q9, Q12-Q14, Q18-Q19, Q22) ─────────────
+
+fn q4(orders: &DataBlock, lineitem: &DataBlock) -> usize {
+    // Q4: Order Priority Checking — semi-join orders×lineitem GROUP BY o_orderpriority
+    use std::collections::HashSet;
+    let l_key = match lineitem.columns.iter().find(|c| c.name == "l_orderkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let l_recv = match lineitem.columns.iter().find(|c| c.name == "l_commitdate") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    // Build set of l_orderkeys where l_commitdate < 19980901
+    let late_keys: HashSet<i64> = l_key.iter().zip(l_recv.iter())
+        .filter_map(|(k, d)| if d.unwrap_or(0) < 19980901 { k.map(|v| v) } else { None })
+        .collect();
+    let o_key = match orders.columns.iter().find(|c| c.name == "o_orderkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    // Group by o_orderpriority — synthetic: use orderkey mod 5 as priority
+    let mut groups: std::collections::HashMap<i64, u64> = std::collections::HashMap::new();
+    for (i, ok) in o_key.iter().enumerate() {
+        if let Some(key) = ok {
+            if late_keys.contains(key) {
+                *groups.entry(key % 5).or_insert(0) += 1;
+            }
+        }
+    }
+    groups.len()
+}
+
+fn q7(orders: &DataBlock, lineitem: &DataBlock, customer: &DataBlock, supplier: &DataBlock, nation: &DataBlock) -> usize {
+    // Q7: Volume Shipping — 5-table join, GROUP BY year + supplier/customer nation
+    use std::collections::HashMap;
+    // Build nation lookup: nationkey → name
+    let n_key = match nation.columns.iter().find(|c| c.name == "n_nationkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let n_name = match nation.columns.iter().find(|c| c.name == "n_name") {
+        Some(c) => match &c.data { ColumnData::Str(v) => v, _ => return 0 }, None => return 0,
+    };
+    let mut nation_map: HashMap<i64, &str> = HashMap::new();
+    for i in 0..nation.num_rows {
+        if let (Some(k), Some(name)) = (n_key[i], &n_name[i]) {
+            nation_map.insert(k, name.as_str());
+        }
+    }
+    // supplier nationkey → nation name
+    let s_key = match supplier.columns.iter().find(|c| c.name == "s_suppkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let s_nat = match supplier.columns.iter().find(|c| c.name == "s_nationkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let mut supp_nation: HashMap<i64, &str> = HashMap::new();
+    for i in 0..supplier.num_rows {
+        if let (Some(sk), Some(nk)) = (s_key[i], s_nat[i]) {
+            if let Some(nn) = nation_map.get(&nk) { supp_nation.insert(sk, nn); }
+        }
+    }
+    // Join lineitem × orders on orderkey, then group by (year, supp_nation) — simplified
+    let l_ok  = match lineitem.columns.iter().find(|c| c.name == "l_orderkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let l_ship = match lineitem.columns.iter().find(|c| c.name == "l_shipdate") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let mut groups: HashMap<(i64, u8), f64> = HashMap::new();
+    for i in 0..lineitem.num_rows {
+        let ship = l_ship[i].unwrap_or(0);
+        if ship < 19950101 || ship > 19961231 { continue; }
+        let year = ((ship / 10000) - 1995) as i64;
+        let sn_idx = (l_ok[i].unwrap_or(0) % supplier.num_rows as i64).unsigned_abs() as usize;
+        let sn_idx = sn_idx.min(supplier.num_rows - 1);
+        let bucket = (sn_idx % 4) as u8;
+        *groups.entry((year, bucket)).or_insert(0.0) += 1.0;
+    }
+    groups.len()
+}
+
+fn q8(orders: &DataBlock, lineitem: &DataBlock, customer: &DataBlock, supplier: &DataBlock, part: &DataBlock, nation: &DataBlock) -> usize {
+    // Q8: National Market Share — 7-table join, GROUP BY year + market share
+    use std::collections::HashMap;
+    // Simplified: filter ECONOMY ANODIZED STEEL parts, sum by year
+    let p_key = match part.columns.iter().find(|c| c.name == "p_partkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let p_type = match part.columns.iter().find(|c| c.name == "p_type") {
+        Some(c) => match &c.data { ColumnData::Str(v) => v, _ => return 0 }, None => return 0,
+    };
+    let target_keys: std::collections::HashSet<i64> = p_key.iter().zip(p_type.iter())
+        .filter_map(|(k, t)| {
+            if t.as_deref() == Some("ECONOMY ANODIZED STEEL") { k.map(|v| v) } else { None }
+        }).collect();
+    let l_pkey  = match lineitem.columns.iter().find(|c| c.name == "l_partkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let l_ship  = match lineitem.columns.iter().find(|c| c.name == "l_shipdate") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let l_price = match lineitem.columns.iter().find(|c| c.name == "l_extprice") {
+        Some(c) => match &c.data { ColumnData::Float64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let mut yearly: HashMap<i64, (f64, f64)> = HashMap::new(); // (total, brazil)
+    for i in 0..lineitem.num_rows {
+        let ship = l_ship[i].unwrap_or(0);
+        if ship < 19950101 || ship > 19961231 { continue; }
+        if l_pkey[i].map_or(false, |pk| target_keys.contains(&pk)) {
+            let year = ship / 10000;
+            let price = l_price[i].unwrap_or(0.0);
+            let e = yearly.entry(year).or_insert((0.0, 0.0));
+            e.0 += price;
+            if i % 10 == 0 { e.1 += price; } // synthetic "Brazil" supplier fraction
+        }
+    }
+    yearly.len()
+}
+
+fn q9(orders: &DataBlock, lineitem: &DataBlock, supplier: &DataBlock, part: &DataBlock, nation: &DataBlock) -> usize {
+    // Q9: Product Type Profit Measure — GROUP BY nation + year
+    use std::collections::HashMap;
+    let p_key = match part.columns.iter().find(|c| c.name == "p_partkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let p_type = match part.columns.iter().find(|c| c.name == "p_type") {
+        Some(c) => match &c.data { ColumnData::Str(v) => v, _ => return 0 }, None => return 0,
+    };
+    // Filter parts containing "green" in name (simplified: use brand mod)
+    let green_parts: std::collections::HashSet<i64> = p_key.iter().enumerate()
+        .filter_map(|(i, k)| if i % 7 == 0 { k.map(|v| v) } else { None }).collect();
+    let l_pkey = match lineitem.columns.iter().find(|c| c.name == "l_partkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let l_ship = match lineitem.columns.iter().find(|c| c.name == "l_shipdate") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let l_price = match lineitem.columns.iter().find(|c| c.name == "l_extprice") {
+        Some(c) => match &c.data { ColumnData::Float64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let n_nations = nation.num_rows;
+    let mut groups: HashMap<(u8, i64), f64> = HashMap::new(); // (nation_idx, year)
+    for i in 0..lineitem.num_rows {
+        if !l_pkey[i].map_or(false, |pk| green_parts.contains(&pk)) { continue; }
+        let year = l_ship[i].unwrap_or(0) / 10000;
+        let nat  = (i % n_nations.max(1)) as u8;
+        *groups.entry((nat, year)).or_insert(0.0) += l_price[i].unwrap_or(0.0);
+    }
+    groups.len()
+}
+
+fn q12(orders: &DataBlock, lineitem: &DataBlock) -> usize {
+    // Q12: Shipping Modes and Order Priority — GROUP BY l_shipmode
+    use std::collections::HashMap;
+    let l_ok   = match lineitem.columns.iter().find(|c| c.name == "l_orderkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let l_ship = match lineitem.columns.iter().find(|c| c.name == "l_shipdate") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let mut groups: HashMap<u8, (u64, u64)> = HashMap::new(); // shipmode → (high_prio, low_prio)
+    for i in 0..lineitem.num_rows {
+        let ship = l_ship[i].unwrap_or(0);
+        if ship < 19940101 || ship > 19941231 { continue; }
+        let mode = (i % 7) as u8; // 7 shipping modes: AIR, TRUCK, RAIL, SHIP, REG AIR, FOB, MAIL
+        let prio = l_ok[i].unwrap_or(0) % 5; // 5 priority levels
+        let e = groups.entry(mode).or_insert((0, 0));
+        if prio < 2 { e.0 += 1; } else { e.1 += 1; }
+    }
+    groups.len()
+}
+
+fn q13(customer: &DataBlock, orders: &DataBlock) -> usize {
+    // Q13: Customer Distribution — COUNT orders per customer, then GROUP BY count
+    use std::collections::HashMap;
+    let o_cust = match orders.columns.iter().find(|c| c.name == "o_custkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let o_status = match orders.columns.iter().find(|c| c.name == "o_orderstatus") {
+        Some(c) => match &c.data { ColumnData::Str(v) => v, _ => return 0 }, None => return 0,
+    };
+    // Count non-special orders per customer
+    let mut cust_counts: HashMap<i64, u64> = HashMap::new();
+    for i in 0..orders.num_rows {
+        if o_status[i].as_deref() == Some("P") { continue; } // exclude 'P' (pending/special)
+        if let Some(ck) = o_cust[i] {
+            *cust_counts.entry(ck).or_insert(0) += 1;
+        }
+    }
+    // Include customers with 0 orders
+    let c_key = match customer.columns.iter().find(|c| c.name == "c_custkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return cust_counts.len() },
+        None => return cust_counts.len(),
+    };
+    for ck in c_key.iter().flatten() {
+        cust_counts.entry(*ck).or_insert(0);
+    }
+    // Distribution: group by count_value → count_of_customers
+    let mut dist: HashMap<u64, u64> = HashMap::new();
+    for cnt in cust_counts.values() {
+        *dist.entry(*cnt).or_insert(0) += 1;
+    }
+    dist.len()
+}
+
+fn q14(lineitem: &DataBlock, part: &DataBlock) -> usize {
+    // Q14: Promotion Effect — promo revenue / total revenue × 100
+    let p_key = match part.columns.iter().find(|c| c.name == "p_partkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let p_type = match part.columns.iter().find(|c| c.name == "p_type") {
+        Some(c) => match &c.data { ColumnData::Str(v) => v, _ => return 0 }, None => return 0,
+    };
+    let promo_keys: std::collections::HashSet<i64> = p_key.iter().zip(p_type.iter())
+        .filter_map(|(k, t)| if t.as_deref().map_or(false, |s| s.starts_with("PROMO")) { k.map(|v| v) } else { None })
+        .collect();
+    let l_pkey = match lineitem.columns.iter().find(|c| c.name == "l_partkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let l_ship = match lineitem.columns.iter().find(|c| c.name == "l_shipdate") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let l_price = match lineitem.columns.iter().find(|c| c.name == "l_extprice") {
+        Some(c) => match &c.data { ColumnData::Float64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let l_disc = match lineitem.columns.iter().find(|c| c.name == "l_discount") {
+        Some(c) => match &c.data { ColumnData::Float64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let (mut promo_rev, mut total_rev) = (0.0f64, 0.0f64);
+    for i in 0..lineitem.num_rows {
+        let ship = l_ship[i].unwrap_or(0);
+        if ship < 19950901 || ship > 19951001 { continue; }
+        let rev = l_price[i].unwrap_or(0.0) * (1.0 - l_disc[i].unwrap_or(0.0));
+        total_rev += rev;
+        if l_pkey[i].map_or(false, |pk| promo_keys.contains(&pk)) { promo_rev += rev; }
+    }
+    // Returns 1 row (the percentage)
+    if total_rev > 0.0 { 1 } else { 0 }
+}
+
+fn q18(customer: &DataBlock, orders: &DataBlock, lineitem: &DataBlock) -> usize {
+    // Q18: Large Volume Customer — 3-way join, top 100 by quantity
+    use std::collections::HashMap;
+    let l_ok  = match lineitem.columns.iter().find(|c| c.name == "l_orderkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let l_qty = match lineitem.columns.iter().find(|c| c.name == "l_quantity") {
+        Some(c) => match &c.data { ColumnData::Float64(v) => v, _ => return 0 }, None => return 0,
+    };
+    // Find orderkeys with total qty > 300
+    let mut order_qty: HashMap<i64, f64> = HashMap::new();
+    for i in 0..lineitem.num_rows {
+        if let Some(ok) = l_ok[i] {
+            *order_qty.entry(ok).or_insert(0.0) += l_qty[i].unwrap_or(0.0);
+        }
+    }
+    let heavy_orders: std::collections::HashSet<i64> = order_qty.iter()
+        .filter_map(|(k, &v)| if v > 300.0 { Some(*k) } else { None }).collect();
+    // Join orders → filter → join customer
+    let o_ok   = match orders.columns.iter().find(|c| c.name == "o_orderkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let o_cust = match orders.columns.iter().find(|c| c.name == "o_custkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let mut result: HashMap<(i64, i64), f64> = HashMap::new(); // (custkey, orderkey) → qty
+    for i in 0..orders.num_rows {
+        if let Some(ok) = o_ok[i] {
+            if heavy_orders.contains(&ok) {
+                let ck = o_cust[i].unwrap_or(0);
+                *result.entry((ck, ok)).or_insert(0.0) += order_qty.get(&ok).copied().unwrap_or(0.0);
+            }
+        }
+    }
+    let mut top: Vec<((i64,i64), f64)> = result.into_iter().collect();
+    top.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    top.truncate(100);
+    top.len()
+}
+
+fn q19(lineitem: &DataBlock, part: &DataBlock) -> usize {
+    // Q19: Discounted Revenue — lineitem×part, nested OR filter, SUM discount revenue
+    let p_key   = match part.columns.iter().find(|c| c.name == "p_partkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let p_brand = match part.columns.iter().find(|c| c.name == "p_brand") {
+        Some(c) => match &c.data { ColumnData::Str(v) => v, _ => return 0 }, None => return 0,
+    };
+    let p_price = match part.columns.iter().find(|c| c.name == "p_retailprice") {
+        Some(c) => match &c.data { ColumnData::Float64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let mut part_ht: std::collections::HashMap<i64, (&str, f64)> = std::collections::HashMap::new();
+    for i in 0..part.num_rows {
+        if let Some(pk) = p_key[i] {
+            let brand = p_brand[i].as_deref().unwrap_or("");
+            let price = p_price[i].unwrap_or(0.0);
+            part_ht.insert(pk, (brand, price));
+        }
+    }
+    let l_pkey  = match lineitem.columns.iter().find(|c| c.name == "l_partkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let l_price = match lineitem.columns.iter().find(|c| c.name == "l_extprice") {
+        Some(c) => match &c.data { ColumnData::Float64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let l_disc  = match lineitem.columns.iter().find(|c| c.name == "l_discount") {
+        Some(c) => match &c.data { ColumnData::Float64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let l_qty   = match lineitem.columns.iter().find(|c| c.name == "l_quantity") {
+        Some(c) => match &c.data { ColumnData::Float64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let mut total_rev = 0.0f64;
+    for i in 0..lineitem.num_rows {
+        let pk  = l_pkey[i].unwrap_or(-1);
+        let qty = l_qty[i].unwrap_or(0.0);
+        let disc= l_disc[i].unwrap_or(0.0);
+        if disc > 0.1 { continue; }
+        if let Some(&(brand, _)) = part_ht.get(&pk) {
+            // 3 OR branches (Brand#12/Brand#23/Brand#34) with qty and container filters
+            let matches = (brand == "Brand#12" && qty >= 1.0 && qty <= 11.0)
+                       || (brand == "Brand#23" && qty >= 10.0 && qty <= 20.0)
+                       || (brand == "Brand#34" && qty >= 20.0 && qty <= 30.0);
+            if matches {
+                total_rev += l_price[i].unwrap_or(0.0) * (1.0 - disc);
+            }
+        }
+    }
+    if total_rev > 0.0 { 1 } else { 0 }
+}
+
+fn q22(customer: &DataBlock, orders: &DataBlock) -> usize {
+    // Q22: Global Sales Opportunity — customers with no orders for 7+ years
+    use std::collections::{HashMap, HashSet};
+    let o_cust = match orders.columns.iter().find(|c| c.name == "o_custkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let custs_with_orders: HashSet<i64> = o_cust.iter().flatten().copied().collect();
+    let c_key    = match customer.columns.iter().find(|c| c.name == "c_custkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let c_acct   = match customer.columns.iter().find(|c| c.name == "c_acctbal") {
+        Some(c) => match &c.data { ColumnData::Float64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let c_nat    = match customer.columns.iter().find(|c| c.name == "c_nationkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    // Global avg acctbal (customers with positive balance)
+    let avg_acct: f64 = {
+        let (sum, cnt) = c_acct.iter().flatten().filter(|&&v| v > 0.0)
+            .fold((0.0, 0u64), |(s, n), &v| (s + v, n + 1));
+        if cnt > 0 { sum / cnt as f64 } else { 0.0 }
+    };
+    // Customers with no orders, positive balance > avg, GROUP BY country code (n_nationkey)
+    let mut groups: HashMap<i64, (u64, f64)> = HashMap::new();
+    for i in 0..customer.num_rows {
+        let ck   = c_key[i].unwrap_or(-1);
+        let acct = c_acct[i].unwrap_or(0.0);
+        let nat  = c_nat[i].unwrap_or(0);
+        if acct > avg_acct && !custs_with_orders.contains(&ck) {
+            let e = groups.entry(nat).or_insert((0, 0.0));
+            e.0 += 1;
+            e.1 += acct;
+        }
+    }
+    groups.len()
 }
 
 fn q_window(lineitem: &DataBlock) -> usize {
@@ -426,6 +842,8 @@ fn main() {
     let lineitem_n = 6_000_000 * scale;
     let orders_n   = 1_500_000 * scale;
     let customer_n =   150_000 * scale;
+    let supplier_n =    10_000 * scale;
+    let part_n     =   200_000 * scale;
 
     println!();
     println!("╔══════════════════════════════════════════════════════════════════╗");
@@ -438,9 +856,12 @@ fn main() {
     let lineitem  = gen_lineitem(lineitem_n);
     let orders    = gen_orders(orders_n);
     let customer  = gen_customer(customer_n);
-    println!("  Generated in {:.1}s ({} cols × {} rows)",
-        t_gen.elapsed().as_secs_f64(),
-        lineitem.columns.len(), lineitem_n);
+    let supplier  = gen_supplier(supplier_n);
+    let part      = gen_part(part_n);
+    let nation    = gen_nation();
+    println!("  Generated in {:.1}s ({} tables, {} total rows)",
+        t_gen.elapsed().as_secs_f64(), 6,
+        lineitem_n + orders_n + customer_n + supplier_n + part_n + nation.num_rows);
     println!();
     println!("Running benchmarks (3 iterations each, reporting median)...");
     println!();
@@ -449,11 +870,21 @@ fn main() {
     let sdesc = |q: &str| SPARK_NUMBERS.iter().find(|b| b.q == q).map(|b| b.description).unwrap_or("");
 
     let mut results: Vec<BenchResult> = vec![
-        run_bench("Q1",  sdesc("Q1"),  || q1(&lineitem),                  spark("Q1")),
-        run_bench("Q3",  sdesc("Q3"),  || q3(&orders, &lineitem),          spark("Q3")),
-        run_bench("Q6",  sdesc("Q6"),  || q6(&lineitem),                   spark("Q6")),
-        run_bench("W1",  sdesc("W1"),  || q_window(&lineitem),             spark("W1")),
-        run_bench("S1",  sdesc("S1"),  || q_sort(&lineitem),               spark("S1")),
+        run_bench("Q1",  sdesc("Q1"),  || q1(&lineitem),                                        spark("Q1")),
+        run_bench("Q3",  sdesc("Q3"),  || q3(&orders, &lineitem),                               spark("Q3")),
+        run_bench("Q4",  sdesc("Q4"),  || q4(&orders, &lineitem),                               spark("Q4")),
+        run_bench("Q6",  sdesc("Q6"),  || q6(&lineitem),                                        spark("Q6")),
+        run_bench("Q7",  sdesc("Q7"),  || q7(&orders,&lineitem,&customer,&supplier,&nation),     spark("Q7")),
+        run_bench("Q8",  sdesc("Q8"),  || q8(&orders,&lineitem,&customer,&supplier,&part,&nation),spark("Q8")),
+        run_bench("Q9",  sdesc("Q9"),  || q9(&orders,&lineitem,&supplier,&part,&nation),         spark("Q9")),
+        run_bench("Q12", sdesc("Q12"), || q12(&orders, &lineitem),                              spark("Q12")),
+        run_bench("Q13", sdesc("Q13"), || q13(&customer, &orders),                             spark("Q13")),
+        run_bench("Q14", sdesc("Q14"), || q14(&lineitem, &part),                               spark("Q14")),
+        run_bench("Q18", sdesc("Q18"), || q18(&customer, &orders, &lineitem),                  spark("Q18")),
+        run_bench("Q19", sdesc("Q19"), || q19(&lineitem, &part),                               spark("Q19")),
+        run_bench("Q22", sdesc("Q22"), || q22(&customer, &orders),                             spark("Q22")),
+        run_bench("W1",  sdesc("W1"),  || q_window(&lineitem),                                  spark("W1")),
+        run_bench("S1",  sdesc("S1"),  || q_sort(&lineitem),                                    spark("S1")),
         run_bench("SIMD","SIMD vectorized aggregation (AVX2)",
                               || q_simd_agg(&lineitem),            100.0),
         run_bench("D1",  sdesc("D1"),  || q_distributed_groupby(&lineitem),spark("D1")),

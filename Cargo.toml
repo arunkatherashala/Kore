@@ -50,6 +50,8 @@ members = [
     "kore-vectorized",   # Layer 63 — Vectorized batch SQL (1024-row SIMD chunks)
     "kore-gpu",          # Layer 64 — GPU compute (wgpu/CUDA GROUP BY, sort, filter)
     "kore-self",         # Layer 65 — Personal AI twin (memory, recall, respond, learn)
+    "kore-body",         # Layer 65b — Generic body interface for KORE (engine, robot, cloud, sim)
+    "kore-federation",   # Layer 65c — Voluntary ethical network between KORE instances
     "kore-distributed",  # Layer 66 — Distributed SQL engine (SQL→cluster wire-up)
     "kore-dist-net",     # Layer 67 — TRUE network distribution (TCP workers, real multi-node)
     "kore-jit",          # Layer 68 — JIT/compiled execution (low-cardinality GROUP BY, compiled filters)
@@ -92,7 +94,9 @@ kore-parquet = { path = "kore-parquet" }
 kore-optimize = { path = "kore-optimize" }
 
 kore-mcp    = { path = "kore-mcp" }
-kore-python    = { path = "kore-python" }
+kore-body        = { path = "kore-body" }
+kore-federation  = { path = "kore-federation" }
+kore-python      = { path = "kore-python" }
 kore-sortmerge = { path = "kore-sortmerge" }
 kore-kafka     = { path = "kore-kafka" }
 kore-mlx       = { path = "kore-mlx" }
