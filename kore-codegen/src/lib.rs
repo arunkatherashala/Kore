@@ -164,6 +164,7 @@ fn batch_null(block: &DataBlock, idx: usize, want_null: bool) -> Vec<bool> {
             (ColumnData::Float64(v), r) => v.get(r).copied().flatten().is_none(),
             (ColumnData::Bool(v),    r) => v.get(r).copied().flatten().is_none(),
             (ColumnData::Str(v),     r) => v.get(r).and_then(|x| x.as_ref()).is_none(),
+            (ColumnData::StrDict { codes, .. }, r) => codes.get(r).map(|&c| c == u8::MAX).unwrap_or(true),
         }).unwrap_or(true);
         is_null == want_null
     }).collect()

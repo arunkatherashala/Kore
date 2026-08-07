@@ -79,6 +79,19 @@ impl ColZone {
                     match x { None => z.null_count += 1, Some(true) => z.has_true = true, Some(false) => z.has_false = true }
                 }
             }
+            ColumnData::StrDict { codes, dict } => {
+                let mut mn: Option<&String> = None;
+                let mut mx: Option<&String> = None;
+                for &c in codes {
+                    if c == u8::MAX { z.null_count += 1; continue; }
+                    if let Some(s) = dict.get(c as usize) {
+                        if mn.map(|m| s < m).unwrap_or(true) { mn = Some(s); }
+                        if mx.map(|m| s > m).unwrap_or(true) { mx = Some(s); }
+                    }
+                }
+                z.min_str = mn.cloned();
+                z.max_str = mx.cloned();
+            }
         }
         z
     }

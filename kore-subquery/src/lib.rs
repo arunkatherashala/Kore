@@ -58,6 +58,11 @@ pub fn eval_subquery(
                     kore_core::ColumnData::Float64(v) => v.get(r).and_then(|x| *x).map(|f| format!("{f:.10}"))?,
                     kore_core::ColumnData::Str(v)     => v.get(r).and_then(|x| x.clone())?,
                     kore_core::ColumnData::Bool(v)    => v.get(r).and_then(|x| *x)?.to_string(),
+                    kore_core::ColumnData::StrDict { codes, dict } => {
+                        let code = *codes.get(r)?;
+                        if code == u8::MAX { return None; }
+                        dict.get(code as usize).cloned()?
+                    }
                 })
             }).collect();
             Ok(SubqueryResult::Set(vals))

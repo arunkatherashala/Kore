@@ -208,6 +208,7 @@ fn row_key(block: &DataBlock, row: usize) -> String {
         ColumnData::Float64(v) => v.get(row).and_then(|x| *x).map(|f| format!("{f:.10}")).unwrap_or_default(),
         ColumnData::Str(v)     => v.get(row).and_then(|x| x.clone()).unwrap_or_default(),
         ColumnData::Bool(v)    => v.get(row).and_then(|x| *x).map(|b| b.to_string()).unwrap_or_default(),
+        ColumnData::StrDict { codes, dict } => codes.get(row).and_then(|&c| if c == u8::MAX { None } else { dict.get(c as usize) }).cloned().unwrap_or_default(),
     }).collect::<Vec<_>>().join("\x01")
 }
 
