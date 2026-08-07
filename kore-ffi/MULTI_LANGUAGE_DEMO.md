@@ -33,7 +33,7 @@ The compiled library is at:
 
 ## 1. Python
 
-**Requirements**: Python 3.9+, no third-party packages.
+**Requirements**: Python 3.9, 3.10, 3.11, 3.12, 3.13 (all active releases).
 
 ```bash
 # Optional: override library path
@@ -73,7 +73,7 @@ with KoreSession() as sess:
 
 ## 2. Java (REST API client)
 
-**Requirements**: Java 21+ (LTS), running `kore-api` server.
+**Requirements**: Java 11 LTS, 17 LTS, 21 LTS, 25 LTS — all LTS releases supported.
 
 ```bash
 # Terminal 1: start the API server
@@ -112,7 +112,7 @@ try (var kore = new KoreClient()) {           // connects to localhost:3000
 
 ## 3. Node.js
 
-**Requirements**: Node.js 22+ (LTS).  
+**Requirements**: Node.js 18 LTS, 20 LTS, 22 LTS, 24 (current) — all active releases.  
 Native mode (faster): `npm install ffi-napi ref-napi`  
 REST mode (no install): start `cargo run --release -p kore-api`
 
@@ -146,7 +146,7 @@ await sess.close();
 
 ## 4. Go
 
-**Requirements**: Go 1.24+, CGo, GCC/Clang.
+**Requirements**: Go 1.21, 1.22, 1.23, 1.24 (all supported releases), CGo, GCC/Clang.
 
 ```bash
 export CGO_LDFLAGS="-L$(pwd)/target/release -lkore_ffi -Wl,-rpath,$(pwd)/target/release"
@@ -197,7 +197,7 @@ func main() {
 
 ## 5. C#
 
-**Requirements**: .NET 7+, `[LibraryImport]` source generator.
+**Requirements**: .NET 8 LTS, .NET 9, .NET 10 LTS — all active releases.
 
 ```bash
 # Add kore_ffi.dll / libkore_ffi.so to your project output directory, then:
@@ -239,7 +239,7 @@ Console.WriteLine(agg[0]["total"]);   // 6
 
 ## 6. Ruby
 
-**Requirements**: Ruby 3.4+, Fiddle (stdlib -- no gems needed).
+**Requirements**: Ruby 3.1, 3.2, 3.3, 3.4 — all active releases, Fiddle (stdlib, no gems).
 
 ```bash
 ruby bindings/ruby/kore.rb   # smoke test
@@ -279,7 +279,7 @@ sess.close
 
 ## 7. PHP
 
-**Requirements**: PHP 7.4+ with `ext-ffi` enabled.
+**Requirements**: PHP 8.0, 8.1, 8.2, 8.3, 8.4 — all active releases, `ext-ffi` enabled.
 
 ```ini
 ; php.ini
