@@ -1,0 +1,133 @@
+name: Publish to Maven Central
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up JDK 11
+      uses: actions/setup-java@v4
+      with:
+        java-version: '11'
+        distribution: 'temurin'
+    
+    - name: Extract version
+      id: version
+      run: |
+        # For tag-triggered workflows, use the tag (remove v prefix)
+        if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          VERSION="${GITHUB_REF#refs/tags/v}"
+        else
+          # Extract version from pom.xml
+          VERSION=$(grep -m1 '<version>' maven/pom.xml | sed 's/.*<version>\(.*\)<\/version>.*/\1/')
+        fi
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Version detected: ${VERSION}"
+    
+    - name: Build Maven package
+      working-directory: maven
+      run: |
+        mvn clean package -DskipTests -Dgpg.skip=true
+        echo "Build completed successfully"
+        ls -lh target/*.jar
+    
+    - name: Extract pom.xml and jar files
+      working-directory: maven
+      run: |
+        cp pom.xml target/
+        echo "Artifacts prepared:"
+        ls -lh target/*.jar target/pom.xml
+    
+    - name: Deploy to Maven Central Portal
+      if: startsWith(github.ref, 'refs/tags/')
+      env:
+        CENTRAL_USERNAME: ${{ secrets.CENTRAL_PORTAL_TOKEN_USERNAME }}
+        CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PORTAL_TOKEN_PASSWORD }}
+        VERSION: ${{ steps.version.outputs.version }}
+      run: |
+        cd maven/target
+        
+        # Verify all artifacts exist
+        if [[ ! -f "kore-fileformat-${VERSION}.jar" ]]; then
+          echo "ERROR: Main JAR not found"
+          exit 1
+        fi
+        
+        if [[ ! -f "kore-fileformat-${VERSION}-sources.jar" ]]; then
+          echo "ERROR: Sources JAR not found"
+          exit 1
+        fi
+        
+        if [[ ! -f "kore-fileformat-${VERSION}-javadoc.jar" ]]; then
+          echo "ERROR: Javadoc JAR not found"
+          exit 1
+        fi
+        
+        # Deploy using Central Portal API
+        echo "Deploying to Maven Central Portal..."
+        
+        RESPONSE=$(curl -v \
+          -F "bundle=@kore-fileformat-${VERSION}.jar" \
+          -F "bundle=@kore-fileformat-${VERSION}-sources.jar" \
+          -F "bundle=@kore-fileformat-${VERSION}-javadoc.jar" \
+          -F "bundle=@pom.xml" \
+          --basic -u "${CENTRAL_USERNAME}:${CENTRAL_PASSWORD}" \
+          "https://central.sonatype.com/api/v1/publisher/upload" 2>&1)
+        
+        echo "Response:"
+        echo "${RESPONSE}"
+        
+        # Check for success (201 Created)
+        if echo "${RESPONSE}" | grep -q "201"; then
+          echo "✅ Deployment successful! (HTTP 201 Created)"
+          echo "Package will be indexed in 10-15 minutes"
+          echo "Search: https://central.sonatype.com/search?q=kore-fileformat"
+        elif echo "${RESPONSE}" | grep -q "200"; then
+          echo "✅ Deployment accepted! (HTTP 200)"
+          echo "Package will be indexed shortly"
+        else
+          echo "❌ Deployment may have failed"
+          exit 1
+        fi
+    
+    - name: Publish Summary
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        VERSION=${{ steps.version.outputs.version }}
+        echo "## 📦 Maven Central Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Package**: com.github.arunkatherashala:kore-fileformat" >> $GITHUB_STEP_SUMMARY
+        echo "**Version**: ${VERSION}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Artifacts Deployed" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ kore-fileformat-${VERSION}.jar" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ kore-fileformat-${VERSION}-sources.jar" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ kore-fileformat-${VERSION}-javadoc.jar" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ pom.xml" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+        echo "1. Wait 10-15 minutes for indexing" >> $GITHUB_STEP_SUMMARY
+        echo "2. Search: [Maven Central Portal](https://central.sonatype.com/search?q=kore-fileformat)" >> $GITHUB_STEP_SUMMARY
+        echo "3. Use in Maven:" >> $GITHUB_STEP_SUMMARY
+        echo "   \`\`\`xml" >> $GITHUB_STEP_SUMMARY
+        echo "   <dependency>" >> $GITHUB_STEP_SUMMARY
+        echo "     <groupId>com.github.arunkatherashala</groupId>" >> $GITHUB_STEP_SUMMARY
+        echo "     <artifactId>kore-fileformat</artifactId>" >> $GITHUB_STEP_SUMMARY
+        echo "     <version>${VERSION}</version>" >> $GITHUB_STEP_SUMMARY
+        echo "   </dependency>" >> $GITHUB_STEP_SUMMARY
+        echo "   \`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "4. Or in Gradle:" >> $GITHUB_STEP_SUMMARY
+        echo "   \`\`\`gradle" >> $GITHUB_STEP_SUMMARY
+        echo "   implementation 'com.github.arunkatherashala:kore-fileformat:${VERSION}'" >> $GITHUB_STEP_SUMMARY
+        echo "   \`\`\`" >> $GITHUB_STEP_SUMMARY
