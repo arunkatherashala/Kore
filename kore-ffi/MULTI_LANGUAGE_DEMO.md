@@ -33,7 +33,7 @@ The compiled library is at:
 
 ## 1. Python
 
-**Requirements**: Python 3.8+, no third-party packages.
+**Requirements**: Python 3.9+, no third-party packages.
 
 ```bash
 # Optional: override library path
@@ -73,7 +73,7 @@ with KoreSession() as sess:
 
 ## 2. Java (REST API client)
 
-**Requirements**: Java 11+, running `kore-api` server.
+**Requirements**: Java 21+ (LTS), running `kore-api` server.
 
 ```bash
 # Terminal 1: start the API server
@@ -112,7 +112,7 @@ try (var kore = new KoreClient()) {           // connects to localhost:3000
 
 ## 3. Node.js
 
-**Requirements**: Node.js 14+.  
+**Requirements**: Node.js 22+ (LTS).  
 Native mode (faster): `npm install ffi-napi ref-napi`  
 REST mode (no install): start `cargo run --release -p kore-api`
 
@@ -146,7 +146,7 @@ await sess.close();
 
 ## 4. Go
 
-**Requirements**: Go 1.18+, CGo, GCC/Clang.
+**Requirements**: Go 1.24+, CGo, GCC/Clang.
 
 ```bash
 export CGO_LDFLAGS="-L$(pwd)/target/release -lkore_ffi -Wl,-rpath,$(pwd)/target/release"
@@ -239,7 +239,7 @@ Console.WriteLine(agg[0]["total"]);   // 6
 
 ## 6. Ruby
 
-**Requirements**: Ruby 2.7+, Fiddle (stdlib -- no gems needed).
+**Requirements**: Ruby 3.4+, Fiddle (stdlib -- no gems needed).
 
 ```bash
 ruby bindings/ruby/kore.rb   # smoke test
