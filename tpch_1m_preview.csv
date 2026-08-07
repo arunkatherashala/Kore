@@ -1,0 +1,6 @@
+l_comment,l_discount,l_extendedprice,l_orderkey,l_partkey,l_quantity,l_tax
+comment_0,0.04,56008.81,1,1,32.33,0.0
+comment_1,0.0,5930.99,2,2,2.23,0.06
+comment_2,0.01,52407.0,3,3,14.48,0.04
+comment_3,0.02,2757.86,4,4,11.94,0.02
+comment_4,0.0,29809.51,5,5,37.09,0.0

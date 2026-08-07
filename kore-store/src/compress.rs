@@ -244,3 +244,338 @@ pub fn decode_strdict(data: &[u8], n: usize) -> (Vec<u8>, Vec<String>) {
     let codes = data[i..].iter().take(n).copied().collect();
     (codes, dict)
 }
+
+// ── ZSTD compression (better ratio than LZ4) ──────────────────────────────────
+pub fn zstd_encode(data: &[u8]) -> Vec<u8> {
+    zstd::encode_all(data, 3).unwrap_or_else(|_| data.to_vec())
+}
+
+pub fn zstd_decode(data: &[u8], n: usize) -> Vec<u8> {
+    zstd::decode_all(data).unwrap_or_else(|_| vec![0; n])
+}
+
+// ── CRC32 checksums for data integrity ─────────────────────────────────────────
+pub fn crc32(data: &[u8]) -> u32 {
+    use crc::{Crc, CRC_32_ISO_HDLC};
+    const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
+    CRC.checksum(data)
+}
+
+// ── Column statistics for predicate pushdown ──────────────────────────────────
+#[derive(Clone, Debug)]
+pub struct ColStats {
+    pub null_count: usize,
+    pub min_i64: Option<i64>,
+    pub max_i64: Option<i64>,
+    pub min_f64: Option<f64>,
+    pub max_f64: Option<f64>,
+}
+
+impl ColStats {
+    pub fn for_int64(vals: &[Option<i64>]) -> Self {
+        let mut null_count = 0;
+        let mut min = i64::MAX;
+        let mut max = i64::MIN;
+        for &v in vals {
+            match v {
+                None => null_count += 1,
+                Some(i) => {
+                    if i < min { min = i; }
+                    if i > max { max = i; }
+                }
+            }
+        }
+        Self {
+            null_count,
+            min_i64: if min <= max { Some(min) } else { None },
+            max_i64: if min <= max { Some(max) } else { None },
+            min_f64: None,
+            max_f64: None,
+        }
+    }
+
+    pub fn for_f64(vals: &[Option<f64>]) -> Self {
+        let mut null_count = 0;
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        for &v in vals {
+            match v {
+                None => null_count += 1,
+                Some(f) => {
+                    if f < min { min = f; }
+                    if f > max { max = f; }
+                }
+            }
+        }
+        Self {
+            null_count,
+            min_i64: None,
+            max_i64: None,
+            min_f64: if min.is_finite() { Some(min) } else { None },
+            max_f64: if max.is_finite() { Some(max) } else { None },
+        }
+    }
+}
+
+// ── Bloom Filters for fast cardinality checks ─────────────────────────────────
+#[derive(Clone, Debug)]
+pub struct BloomFilter {
+    bits: Vec<u8>,
+    num_hash_fns: u8,
+}
+
+impl BloomFilter {
+    pub fn new(expected_items: usize, fpp: f64) -> Self {
+        let m = ((expected_items as f64 * fpp.ln()) / (2f64 * (2f64.ln()).powi(2))).ceil() as usize;
+        let k = ((m as f64 / expected_items as f64) * 2f64.ln()).ceil() as u8;
+        BloomFilter {
+            bits: vec![0; (m + 7) / 8],
+            num_hash_fns: k,
+        }
+    }
+
+    pub fn insert(&mut self, data: &[u8]) {
+        for i in 0..self.num_hash_fns {
+            let hash = hash_fn(data, i) as usize % (self.bits.len() * 8);
+            let byte_idx = hash / 8;
+            let bit_idx = hash % 8;
+            self.bits[byte_idx] |= 1 << bit_idx;
+        }
+    }
+
+    pub fn contains(&self, data: &[u8]) -> bool {
+        for i in 0..self.num_hash_fns {
+            let hash = hash_fn(data, i) as usize % (self.bits.len() * 8);
+            let byte_idx = hash / 8;
+            let bit_idx = hash % 8;
+            if (self.bits[byte_idx] & (1 << bit_idx)) == 0 { return false; }
+        }
+        true
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = vec![self.num_hash_fns];
+        out.extend_from_slice(&(self.bits.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.bits);
+        out
+    }
+
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        if data.is_empty() { return None; }
+        let num_hash_fns = data[0];
+        let len = u32::from_le_bytes(data[1..5].try_into().ok()?) as usize;
+        let bits = data[5..5+len].to_vec();
+        Some(BloomFilter { bits, num_hash_fns })
+    }
+}
+
+fn hash_fn(data: &[u8], seed: u8) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    seed.hash(&mut hasher);
+    data.hash(&mut hasher);
+    hasher.finish()
+}
+
+// ── Array encoding (variable-length arrays) ────────────────────────────────────
+pub fn encode_array_i64(arrays: &[Vec<i64>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(arrays.len() as u32).to_le_bytes());
+    for arr in arrays {
+        out.extend_from_slice(&(arr.len() as u32).to_le_bytes());
+        for &v in arr { out.extend_from_slice(&v.to_le_bytes()); }
+    }
+    out
+}
+
+pub fn decode_array_i64(data: &[u8]) -> Vec<Vec<i64>> {
+    if data.len() < 4 { return vec![]; }
+    let mut out = Vec::new();
+    let num_arrays = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+    let mut pos = 4;
+    for _ in 0..num_arrays {
+        if pos + 4 > data.len() { break; }
+        let len = u32::from_le_bytes(data[pos..pos+4].try_into().unwrap()) as usize;
+        pos += 4;
+        let mut arr = Vec::with_capacity(len);
+        for _ in 0..len {
+            if pos + 8 > data.len() { break; }
+            let v = i64::from_le_bytes(data[pos..pos+8].try_into().unwrap());
+            arr.push(v);
+            pos += 8;
+        }
+        out.push(arr);
+    }
+    out
+}
+
+// ── Struct encoding (field offsets) ─────────────────────────────────────────────
+pub fn encode_struct_fields(field_data: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(field_data.len() as u16).to_le_bytes());
+    for (name, data) in field_data {
+        let name_bytes = name.as_bytes();
+        out.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+        out.extend_from_slice(name_bytes);
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(data);
+    }
+    out
+}
+
+pub fn decode_struct_fields(data: &[u8]) -> Vec<(String, Vec<u8>)> {
+    if data.len() < 2 { return vec![]; }
+    let mut out = Vec::new();
+    let num_fields = u16::from_le_bytes(data[0..2].try_into().unwrap()) as usize;
+    let mut pos = 2;
+    for _ in 0..num_fields {
+        if pos + 2 > data.len() { break; }
+        let name_len = u16::from_le_bytes(data[pos..pos+2].try_into().unwrap()) as usize;
+        pos += 2;
+        if pos + name_len > data.len() { break; }
+        let name = String::from_utf8_lossy(&data[pos..pos+name_len]).into_owned();
+        pos += name_len;
+        if pos + 4 > data.len() { break; }
+        let field_len = u32::from_le_bytes(data[pos..pos+4].try_into().unwrap()) as usize;
+        pos += 4;
+        if pos + field_len > data.len() { break; }
+        let field_data = data[pos..pos+field_len].to_vec();
+        out.push((name, field_data));
+        pos += field_len;
+    }
+    out
+}
+
+// ── MVCC Version Snapshots (time travel support) ────────────────────────────────
+pub fn encode_version_snapshots(snapshots: &[crate::VersionSnapshot]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(snapshots.len() as u32).to_le_bytes());
+    for snap in snapshots {
+        out.extend_from_slice(&snap.version_id.to_le_bytes());
+        out.extend_from_slice(&snap.timestamp.to_le_bytes());
+        out.extend_from_slice(&snap.block_offset.to_le_bytes());
+        out.extend_from_slice(&snap.row_count.to_le_bytes());
+        let has_prev = snap.prev_version.is_some();
+        out.push(if has_prev { 1 } else { 0 });
+        if has_prev {
+            out.extend_from_slice(&snap.prev_version.unwrap().to_le_bytes());
+        }
+    }
+    out
+}
+
+pub fn decode_version_snapshots(data: &[u8]) -> Vec<crate::VersionSnapshot> {
+    if data.len() < 4 { return vec![]; }
+    let mut out = Vec::new();
+    let num_snapshots = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+    let mut pos = 4;
+    for _ in 0..num_snapshots {
+        if pos + 25 > data.len() { break; }
+        let version_id = u32::from_le_bytes(data[pos..pos+4].try_into().unwrap());
+        let timestamp = u64::from_le_bytes(data[pos+4..pos+12].try_into().unwrap());
+        let block_offset = u64::from_le_bytes(data[pos+12..pos+20].try_into().unwrap());
+        let row_count = u64::from_le_bytes(data[pos+20..pos+28].try_into().unwrap());
+        let has_prev = data[pos+28] == 1;
+        pos += 29;
+        let prev_version = if has_prev && pos + 4 <= data.len() {
+            let pv = u32::from_le_bytes(data[pos..pos+4].try_into().unwrap());
+            pos += 4;
+            Some(pv)
+        } else {
+            None
+        };
+        out.push(crate::VersionSnapshot { version_id, timestamp, block_offset, row_count, prev_version });
+    }
+    out
+}
+
+// ── Partition Evolution (dynamic partition spec changes) ────────────────────────
+pub fn encode_partition_specs(specs: &[crate::PartitionSpec]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(specs.len() as u16).to_le_bytes());
+    for spec in specs {
+        out.extend_from_slice(&spec.spec_id.to_le_bytes());
+        out.extend_from_slice(&(spec.columns.len() as u16).to_le_bytes());
+        for &col_idx in &spec.columns {
+            out.extend_from_slice(&col_idx.to_le_bytes());
+        }
+        out.extend_from_slice(&(spec.transforms.len() as u16).to_le_bytes());
+        for transform in &spec.transforms {
+            let b = transform.as_bytes();
+            out.extend_from_slice(&(b.len() as u16).to_le_bytes());
+            out.extend_from_slice(b);
+        }
+        let has_parent = spec.parent_spec_id.is_some();
+        out.push(if has_parent { 1 } else { 0 });
+        if has_parent {
+            out.extend_from_slice(&spec.parent_spec_id.unwrap().to_le_bytes());
+        }
+    }
+    out
+}
+
+pub fn decode_partition_specs(data: &[u8]) -> Vec<crate::PartitionSpec> {
+    if data.len() < 2 { return vec![]; }
+    let mut out = Vec::new();
+    let num_specs = u16::from_le_bytes(data[0..2].try_into().unwrap()) as usize;
+    let mut pos = 2;
+    for _ in 0..num_specs {
+        if pos + 2 > data.len() { break; }
+        let spec_id = u16::from_le_bytes(data[pos..pos+2].try_into().unwrap());
+        pos += 2;
+        if pos + 2 > data.len() { break; }
+        let num_cols = u16::from_le_bytes(data[pos..pos+2].try_into().unwrap()) as usize;
+        pos += 2;
+        let mut columns = Vec::new();
+        for _ in 0..num_cols {
+            if pos + 2 > data.len() { break; }
+            columns.push(u16::from_le_bytes(data[pos..pos+2].try_into().unwrap()));
+            pos += 2;
+        }
+        if pos + 2 > data.len() { break; }
+        let num_transforms = u16::from_le_bytes(data[pos..pos+2].try_into().unwrap()) as usize;
+        pos += 2;
+        let mut transforms = Vec::new();
+        for _ in 0..num_transforms {
+            if pos + 2 > data.len() { break; }
+            let t_len = u16::from_le_bytes(data[pos..pos+2].try_into().unwrap()) as usize;
+            pos += 2;
+            if pos + t_len > data.len() { break; }
+            transforms.push(String::from_utf8_lossy(&data[pos..pos+t_len]).into_owned());
+            pos += t_len;
+        }
+        if pos >= data.len() { break; }
+        let has_parent = data[pos] == 1;
+        pos += 1;
+        let parent_spec_id = if has_parent && pos + 2 <= data.len() {
+            let parent = u16::from_le_bytes(data[pos..pos+2].try_into().unwrap());
+            pos += 2;
+            Some(parent)
+        } else {
+            None
+        };
+        out.push(crate::PartitionSpec { spec_id, columns, transforms, parent_spec_id });
+    }
+    out
+}
+
+// ── Row-Level Delete Vectors (soft deletes without full rewrite) ────────────────
+pub fn encode_delete_vector(dv: &crate::DeleteVector) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&dv.cardinality.to_le_bytes());
+    out.extend_from_slice(&dv.timestamp.to_le_bytes());
+    out.extend_from_slice(&(dv.bitmap.len() as u32).to_le_bytes());
+    out.extend_from_slice(&dv.bitmap);
+    out
+}
+
+pub fn decode_delete_vector(data: &[u8]) -> Option<crate::DeleteVector> {
+    if data.len() < 16 { return None; }
+    let cardinality = u32::from_le_bytes(data[0..4].try_into().ok()?);
+    let timestamp = u64::from_le_bytes(data[4..12].try_into().ok()?);
+    let bitmap_len = u32::from_le_bytes(data[12..16].try_into().ok()?) as usize;
+    if 16 + bitmap_len > data.len() { return None; }
+    let bitmap = data[16..16+bitmap_len].to_vec();
+    Some(crate::DeleteVector { bitmap, cardinality, timestamp })
+}

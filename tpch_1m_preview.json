@@ -1,0 +1,47 @@
+[
+  {
+    "l_comment": "comment_0",
+    "l_discount": 0.04,
+    "l_extendedprice": 56008.81,
+    "l_orderkey": 1,
+    "l_partkey": 1,
+    "l_quantity": 32.33,
+    "l_tax": 0.0
+  },
+  {
+    "l_comment": "comment_1",
+    "l_discount": 0.0,
+    "l_extendedprice": 5930.99,
+    "l_orderkey": 2,
+    "l_partkey": 2,
+    "l_quantity": 2.23,
+    "l_tax": 0.06
+  },
+  {
+    "l_comment": "comment_2",
+    "l_discount": 0.01,
+    "l_extendedprice": 52407.0,
+    "l_orderkey": 3,
+    "l_partkey": 3,
+    "l_quantity": 14.48,
+    "l_tax": 0.04
+  },
+  {
+    "l_comment": "comment_3",
+    "l_discount": 0.02,
+    "l_extendedprice": 2757.86,
+    "l_orderkey": 4,
+    "l_partkey": 4,
+    "l_quantity": 11.94,
+    "l_tax": 0.02
+  },
+  {
+    "l_comment": "comment_4",
+    "l_discount": 0.0,
+    "l_extendedprice": 29809.51,
+    "l_orderkey": 5,
+    "l_partkey": 5,
+    "l_quantity": 37.09,
+    "l_tax": 0.0
+  }
+]

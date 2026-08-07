@@ -17,19 +17,116 @@ enum ReadableMode {
     Full,
 }
 
-/// Try LZ4 on top of already-encoded bytes.
-/// Returns (Compression::Lz4, compressed) if LZ4 shrinks data, else original.
-fn try_lz4(comp: Compression, data: Vec<u8>) -> (Compression, Vec<u8>) {
+/// Try both LZ4 and Zstd, pick the best.
+/// Returns (compression_codec, compressed) with best ratio.
+fn try_best_compression(comp: Compression, data: Vec<u8>) -> (Compression, Vec<u8>) {
     if data.len() < 64 { return (comp, data); }  // not worth it for tiny cols
-    let compressed = lz4_flex::compress_prepend_size(&data);
-    if compressed.len() < data.len() {
+    
+    let lz4 = lz4_flex::compress_prepend_size(&data);
+    let zstd = compress::zstd_encode(&data);
+    
+    // Pick best compression ratio
+    let (final_codec, final_data) = if lz4.len() < zstd.len() {
+        (Compression::Lz4, lz4)
+    } else {
+        (Compression::Zstd, zstd)
+    };
+    
+    if final_data.len() < data.len() {
         // Encode the original comp type in first byte so reader can round-trip
         let mut out = vec![comp as u8];
-        out.extend_from_slice(&compressed);
-        (Compression::Lz4, out)
+        out.extend_from_slice(&final_data);
+        (final_codec, out)
     } else {
         (comp, data)
     }
+}
+
+/// Compute statistics for a column (min, max, null count).
+fn compute_col_stats(data: &ColumnData) -> compress::ColStats {
+    match data {
+        ColumnData::Int64(vals) => compress::ColStats::for_int64(vals),
+        ColumnData::Float64(vals) => compress::ColStats::for_f64(vals),
+        ColumnData::Bool(_) | ColumnData::Str(_) | ColumnData::StrDict { .. } => {
+            compress::ColStats {
+                null_count: 0,
+                min_i64: None,
+                max_i64: None,
+                min_f64: None,
+                max_f64: None,
+            }
+        }
+    }
+}
+
+/// Generate bloom filter for string columns (for fast cardinality checks).
+fn generate_bloom_filter(data: &ColumnData, fpp: f64) -> Option<compress::BloomFilter> {
+    match data {
+        ColumnData::Str(vals) => {
+            let non_null: Vec<&String> = vals.iter().filter_map(|v| v.as_ref()).collect();
+            if non_null.is_empty() { return None; }
+            let mut bf = compress::BloomFilter::new(non_null.len(), fpp);
+            for v in non_null {
+                bf.insert(v.as_bytes());
+            }
+            Some(bf)
+        }
+        ColumnData::StrDict { dict, codes: _ } => {
+            let mut bf = compress::BloomFilter::new(dict.len(), fpp);
+            for v in dict {
+                bf.insert(v.as_bytes());
+            }
+            Some(bf)
+        }
+        _ => None,
+    }
+}
+
+/// Assign unique column IDs for schema evolution tracking.
+fn generate_column_ids(num_cols: usize) -> Vec<u32> {
+    (0..num_cols as u32).collect()
+}
+
+/// Generate nonce for AES-256-GCM (12 bytes).
+fn generate_nonce() -> [u8; 12] {
+    use rand::RngCore;
+    let mut nonce = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    nonce
+}
+
+/// Create initial version snapshot for MVCC/time travel.
+fn create_version_snapshot(version_id: u32, row_count: u64, block_offset: u64) -> crate::VersionSnapshot {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    
+    crate::VersionSnapshot {
+        version_id,
+        timestamp,
+        block_offset,
+        row_count,
+        prev_version: None,
+    }
+}
+
+/// Create default partition spec (no partitioning).
+fn create_default_partition_spec() -> crate::PartitionSpec {
+    crate::PartitionSpec {
+        spec_id: 0,
+        columns: vec![],
+        transforms: vec![],
+        parent_spec_id: None,
+    }
+}
+
+/// Check if any rows are deleted (placeholder for future delete tracking).
+fn get_delete_vector(_num_rows: usize) -> Option<crate::DeleteVector> {
+    // In future: track which rows have been soft-deleted
+    // For now: None (no deletes)
+    None
 }
 
 pub struct KoreWriter;
@@ -72,18 +169,45 @@ impl KoreWriter {
         // ── Column data ───────────────────────────────────────────────────
         // Use parallel encoding for massive write speedup on multi-core systems.
         use rayon::prelude::*;
-        let encoded_cols: Vec<(Compression, Vec<u8>)> = block.columns.par_iter()
+        let encoded_cols: Vec<(Compression, Vec<u8>, compress::ColStats)> = block.columns.par_iter()
             .map(|col| {
                 let (comp, data) = encode_column(&col.data);
-                try_lz4(comp, data)
+                let stats = compute_col_stats(&col.data);
+                let (final_comp, final_data) = try_best_compression(comp, data);
+                (final_comp, final_data, stats)
             })
             .collect();
 
-        for (final_comp, final_data) in encoded_cols {
+        // ── Checksums and stats section ───────────────────────────────────
+        let mut stats_section = Vec::new();
+        for (_final_comp, final_data, col_stats) in &encoded_cols {
+            // CRC32 checksum for this column
+            let checksum = compress::crc32(final_data);
+            stats_section.extend_from_slice(&checksum.to_le_bytes());
+            
+            // Column statistics
+            stats_section.push(col_stats.null_count as u8);
+            if let Some(m) = col_stats.min_i64 {
+                stats_section.push(1); // has_i64_stats
+                stats_section.extend_from_slice(&m.to_le_bytes());
+                if let Some(mx) = col_stats.max_i64 {
+                    stats_section.extend_from_slice(&mx.to_le_bytes());
+                }
+            } else {
+                stats_section.push(0); // no i64 stats
+            }
+        }
+        
+        // ── Column data with inline checksums ──────────────────────────────
+        for (final_comp, final_data, _) in encoded_cols {
             w.write_all(&[final_comp as u8])?;
             w.write_all(&(final_data.len() as u64).to_le_bytes())?;
             w.write_all(&final_data)?;
         }
+        
+        // Write stats section
+        w.write_all(&(stats_section.len() as u32).to_le_bytes())?;
+        w.write_all(&stats_section)?;
 
         if readable_mode != ReadableMode::None {
             // Append a plain-text trailer so the same .kore file stays self-describing

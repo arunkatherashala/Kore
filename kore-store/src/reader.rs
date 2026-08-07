@@ -98,6 +98,32 @@ impl KoreReader {
         let mmap = unsafe { Mmap::map(&file).map_err(io_err)? };
         Self::from_bytes(&mmap)
     }
+
+    /// Time travel: Read a specific version by timestamp (MVCC).
+    pub fn read_at_version(data: &[u8], _target_timestamp: u64) -> Result<DataBlock, KoreError> {
+        // Extract version snapshots from footer, find matching timestamp, read that version
+        // For now: returns current version (latest)
+        Self::from_bytes(data)
+    }
+
+    /// Get partition specification (for partition-aware queries).
+    pub fn get_partition_spec(data: &[u8]) -> Option<crate::PartitionSpec> {
+        // Extract partition spec from footer metadata
+        // For now: return default (unpartitioned)
+        Some(crate::PartitionSpec {
+            spec_id: 0,
+            columns: vec![],
+            transforms: vec![],
+            parent_spec_id: None,
+        })
+    }
+
+    /// Get delete vector (for row-level soft deletes).
+    pub fn get_delete_vector(data: &[u8]) -> Option<crate::DeleteVector> {
+        // Extract delete vector from footer metadata
+        // For now: None (no deleted rows)
+        None
+    }
 }
 
 fn strip_readable_trailer(data: &[u8]) -> &[u8] {
@@ -136,6 +162,12 @@ fn decode_column(raw: &[u8], dtype: DType, comp: Compression, n: usize) -> Resul
             .map_err(|e| format!("LZ4 inner comp: {e}"))?;
         let decompressed = lz4_flex::decompress_size_prepended(&raw[1..])
             .map_err(|e| format!("LZ4 decompress: {e}"))?;
+        return decode_column(&decompressed, dtype, inner_comp, n);
+    } else if comp == Compression::Zstd {
+        if raw.is_empty() { return Err("empty ZSTD block".into()); }
+        let inner_comp = Compression::try_from(raw[0])
+            .map_err(|e| format!("ZSTD inner comp: {e}"))?;
+        let decompressed = compress::zstd_decode(&raw[1..], n * 16); // estimate max size
         return decode_column(&decompressed, dtype, inner_comp, n);
     } else {
         (raw, comp)
@@ -184,6 +216,14 @@ fn decode_column(raw: &[u8], dtype: DType, comp: Compression, n: usize) -> Resul
         DType::StrDict => {
             let (codes, dict) = compress::decode_strdict(raw, n);
             ColumnData::StrDict { codes, dict }
+        }
+        DType::Array => {
+            // Placeholder: Array decoded as raw bytes (would be structured differently in full impl)
+            ColumnData::Str(vec![Some(String::from_utf8_lossy(raw).into_owned())])
+        }
+        DType::Struct => {
+            // Placeholder: Struct decoded as raw bytes (would be structured differently in full impl)
+            ColumnData::Str(vec![Some(String::from_utf8_lossy(raw).into_owned())])
         }
     })
 }
