@@ -1,0 +1,67 @@
+version: 2
+updates:
+
+  # ── GitHub Actions ─────────────────────────────────────────────────────────
+  # Auto-updates actions/checkout, actions/setup-python, dtolnay/rust-toolchain, etc.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci"
+
+  # ── Rust / Cargo ───────────────────────────────────────────────────────────
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "chore(deps)"
+    ignore:
+      # Don't auto-bump major versions — manual review needed
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # ── Python (pip) ───────────────────────────────────────────────────────────
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # ── Node.js / npm ──────────────────────────────────────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/nodejs"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "nodejs"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # ── NuGet (.NET) ───────────────────────────────────────────────────────────
+  - package-ecosystem: "nuget"
+    directory: "/KoreTestCs"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "dotnet"
+    commit-message:
+      prefix: "chore(deps)"
