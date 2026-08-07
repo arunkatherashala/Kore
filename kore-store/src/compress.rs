@@ -25,7 +25,8 @@ pub fn rle_decode_i64(data: &[u8], n: usize) -> Vec<Option<i64>> {
         let val = i64::from_le_bytes(data[i..i+8].try_into().unwrap()); i += 8;
         let run = u32::from_le_bytes(data[i..i+4].try_into().unwrap()) as usize; i += 4;
         let v = if is_null == 1 { None } else { Some(val) };
-        for _ in 0..run.min(n - out.len()) { out.push(v); }
+        let count = run.min(n - out.len());
+        out.extend(std::iter::repeat(v).take(count));
     }
     out
 }
@@ -162,9 +163,8 @@ pub fn nan_encode_f64(vals: &[Option<f64>]) -> Vec<u8> {
 
 pub fn nan_decode_f64(data: &[u8], n: usize) -> Vec<Option<f64>> {
     let mut out = Vec::with_capacity(n);
-    let mut i = 0;
-    while i + 8 <= data.len() && out.len() < n {
-        let f = f64::from_le_bytes(data[i..i+8].try_into().unwrap()); i += 8;
+    for chunk in data.chunks_exact(8).take(n) {
+        let f = f64::from_le_bytes(chunk.try_into().unwrap());
         out.push(if f.is_nan() { None } else { Some(f) });
     }
     out

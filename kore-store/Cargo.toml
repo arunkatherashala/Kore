@@ -7,3 +7,5 @@ edition = "2021"
 kore-core = { workspace = true }
 thiserror = { workspace = true }
 lz4_flex  = { workspace = true }
+rayon     = { workspace = true }
+memmap2 = "0.9.11"

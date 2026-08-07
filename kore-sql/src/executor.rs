@@ -786,11 +786,20 @@ fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, Ko
                             .ok_or_else(|| KoreError::InvalidArgument(format!("window col not found: {win_col}")))?;
                         new_cols.push(src.clone());
                     }
-                    // Aggregate results are already in block (from group_by_agg)
-                    Expr::Agg { .. } => {
-                        let col_name = out_name();
-                        if let Some(src) = block.columns.iter().find(|c| c.name == col_name) {
-                            new_cols.push(src.clone());
+                    // Aggregate results are already in block (from group_by_agg / global_agg).
+                    // The column was named alias ?? "{:?}(col)" by global_agg — match that.
+                    Expr::Agg { func, expr: inner } => {
+                        let inner_col = match inner.as_ref() {
+                            Expr::Col(c)        => c.clone(),
+                            Expr::QualCol(_, c) => c.clone(),
+                            _                   => String::new(),
+                        };
+                        let expected = alias.clone()
+                            .unwrap_or_else(|| format!("{:?}({})", func, inner_col));
+                        if let Some(src) = block.columns.iter().find(|c| c.name == expected) {
+                            let mut nc = src.clone();
+                            if let Some(a) = alias { nc.name = a.clone(); }
+                            new_cols.push(nc);
                         }
                         // else silently skip (shouldn't happen after group_by_agg)
                     }
