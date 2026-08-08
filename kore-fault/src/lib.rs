@@ -154,6 +154,12 @@ pub struct RetryScheduler {
     pub config: RetryConfig,
 }
 
+impl Clone for RetryScheduler {
+    fn clone(&self) -> Self {
+        Self { config: self.config.clone() }
+    }
+}
+
 impl RetryScheduler {
     pub fn new(config: RetryConfig) -> Self { Self { config } }
 
@@ -228,6 +234,157 @@ impl Checkpoint {
     }
 }
 
+// ─── Partition-level lineage (Phase 18) ──────────────────────────────────────
+
+use std::sync::{Arc, Mutex};
+
+/// One in-flight partition tracked by the coordinator.
+///
+/// The existing coarse-grained `LineageDAG` records whole-stage lineage — it
+/// answers "how would I rebuild stage S from its parents?".  This finer-grained
+/// tracker answers a different question that comes up on real clusters:
+/// **when worker W dies mid-query, which partitions were in flight on W, and
+/// how do I re-dispatch them to a survivor?**
+///
+/// A `PartitionRecord` carries just enough state to replay one task on a
+/// different worker:
+///
+///  * `partition_idx` — the coordinator's partition ordering (0..n).
+///  * `task_id` — unique task ID (used by the retry scheduler + metrics).
+///  * `worker_id` — the worker this partition was originally assigned to.
+///  * `stage_id` — logical stage this partition belongs to (map / reduce /
+///    broadcast-join / etc.).  A single query may have several.
+///  * `sql` — the SQL fragment the worker executed for this partition.
+///  * `table_name` — the coordinator-side table name the partition was
+///    registered under (workers key their local tables by this).
+///  * `state` — `Pending` before dispatch, `Completed` after ack.
+///
+/// The tracker itself is a `Send + Sync` map — the coordinator's shared state
+/// wraps it in `Arc<Mutex<TaskLineage>>` so tokio tasks can update it.
+#[derive(Debug, Clone)]
+pub struct PartitionRecord {
+    pub partition_idx: usize,
+    pub task_id:       String,
+    pub worker_id:     String,
+    pub stage_id:      String,
+    pub sql:           String,
+    pub table_name:    String,
+    pub state:         PartitionState,
+    pub started_at_ms: u64,
+    pub finished_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartitionState {
+    Pending,
+    Completed,
+    /// Set by `mark_worker_lost` when the assigned worker died before ack.
+    /// The coordinator's recovery loop picks these up and re-dispatches them
+    /// to a surviving worker.
+    LostReadyToRetry,
+}
+
+/// Coordinator-side per-partition lineage tracker.
+///
+/// Cheap to clone (`Arc` internal); safe to share across spawned tokio tasks.
+#[derive(Debug, Clone, Default)]
+pub struct TaskLineage {
+    inner: Arc<Mutex<TaskLineageInner>>,
+}
+
+#[derive(Debug, Default)]
+struct TaskLineageInner {
+    /// Keyed by `task_id` for O(1) lookup on ack.
+    records: HashMap<String, PartitionRecord>,
+}
+
+impl TaskLineage {
+    pub fn new() -> Self { Self::default() }
+
+    /// Record a new partition dispatch. Panics if `task_id` already exists —
+    /// task IDs must be unique across a query.
+    pub fn record(&self, rec: PartitionRecord) {
+        let mut inner = self.inner.lock().unwrap();
+        assert!(
+            !inner.records.contains_key(&rec.task_id),
+            "duplicate task_id in lineage: {}", rec.task_id,
+        );
+        inner.records.insert(rec.task_id.clone(), rec);
+    }
+
+    /// Mark a task as completed (worker ack'd).  Silently no-op if unknown.
+    pub fn mark_completed(&self, task_id: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(r) = inner.records.get_mut(task_id) {
+            r.state = PartitionState::Completed;
+            r.finished_at_ms = Some(now_ms_local());
+        }
+    }
+
+    /// Mark every pending partition on `worker_id` as ready for retry.
+    /// Returns the records that need re-dispatch — the coordinator's recovery
+    /// path re-runs them on a surviving worker.
+    pub fn mark_worker_lost(&self, worker_id: &str) -> Vec<PartitionRecord> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut lost = Vec::new();
+        for rec in inner.records.values_mut() {
+            if rec.worker_id == worker_id && rec.state == PartitionState::Pending {
+                rec.state = PartitionState::LostReadyToRetry;
+                lost.push(rec.clone());
+            }
+        }
+        lost
+    }
+
+    /// Reassign a lost partition to a new worker; the coordinator has already
+    /// dispatched to the new worker and just needs to update the tracker.
+    pub fn reassign(&self, task_id: &str, new_worker_id: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(r) = inner.records.get_mut(task_id) {
+            r.worker_id     = new_worker_id.to_string();
+            r.state         = PartitionState::Pending;
+            r.started_at_ms = now_ms_local();
+            r.finished_at_ms = None;
+        }
+    }
+
+    /// Snapshot every record — for tests, EXPLAIN ANALYZE, and debugging.
+    pub fn snapshot(&self) -> Vec<PartitionRecord> {
+        let inner = self.inner.lock().unwrap();
+        inner.records.values().cloned().collect()
+    }
+
+    /// Snapshot only the pending partitions.
+    pub fn pending(&self) -> Vec<PartitionRecord> {
+        self.snapshot().into_iter()
+            .filter(|r| r.state == PartitionState::Pending)
+            .collect()
+    }
+
+    /// Snapshot only the completed partitions.
+    pub fn completed(&self) -> Vec<PartitionRecord> {
+        self.snapshot().into_iter()
+            .filter(|r| r.state == PartitionState::Completed)
+            .collect()
+    }
+
+    /// How many partitions are currently pending?  Useful for the coord's
+    /// "wait for stage barrier" logic.
+    pub fn pending_count(&self) -> usize {
+        self.inner.lock().unwrap().records.values()
+            .filter(|r| r.state == PartitionState::Pending).count()
+    }
+}
+
+/// Best-effort millisecond clock — shared between coord dispatch and lineage
+/// tracking so timings correlate.
+fn now_ms_local() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 // ─── Speculative execution ────────────────────────────────────────────────────
 
 /// Tracks task durations and identifies stragglers.
@@ -254,6 +411,91 @@ impl SpeculativeTracker {
         self.median_ms()
             .map(|m| elapsed_ms as f64 > m as f64 * self.threshold)
             .unwrap_or(false)
+    }
+}
+
+/// Race a primary task against a delayed backup: return the first successful
+/// result; abort the loser. This is the Spark speculative-execution primitive.
+///
+/// Semantics:
+///  * Launches the primary task immediately.
+///  * After `backup_after_ms`, if the primary is still running, launches the
+///    backup task (must be idempotent — same output either way).
+///  * Returns whichever completes first with `Ok(_)`; the other is aborted.
+///  * If one fails and the other succeeds, returns the successful one.
+///  * If both fail, returns the primary's error.
+///
+/// The primary and backup should target different workers so a stalled worker
+/// doesn't block both attempts.
+pub async fn run_with_speculation<T, E, F1, F2, Fut1, Fut2>(
+    primary: F1,
+    backup:  F2,
+    backup_after_ms: u64,
+) -> Result<T, E>
+where
+    T: Send + 'static,
+    E: Send + 'static + std::fmt::Debug,
+    F1: FnOnce() -> Fut1 + Send + 'static,
+    F2: FnOnce() -> Fut2 + Send + 'static,
+    Fut1: std::future::Future<Output = Result<T, E>> + Send + 'static,
+    Fut2: std::future::Future<Output = Result<T, E>> + Send + 'static,
+{
+    let mut primary_h = tokio::spawn(async move { primary().await });
+    let sleep_dur = std::time::Duration::from_millis(backup_after_ms);
+
+    // Wait either for primary to finish, or the speculation timer.
+    tokio::select! {
+        biased;
+        r = &mut primary_h => {
+            return match r {
+                Ok(v) => v,
+                Err(join_err) => panic!("primary panic: {join_err}"),
+            };
+        }
+        _ = tokio::time::sleep(sleep_dur) => {
+            // Primary is a straggler → launch backup and race.
+        }
+    }
+
+    let mut backup_h = tokio::spawn(async move { backup().await });
+    // Now race primary vs backup. First Ok wins; both Err → primary's Err.
+    let mut primary_err: Option<E> = None;
+    loop {
+        tokio::select! {
+            r = &mut primary_h, if !primary_h.is_finished() => {
+                match r {
+                    Ok(Ok(v)) => { backup_h.abort(); return Ok(v); }
+                    Ok(Err(e)) => primary_err = Some(e),
+                    Err(_) => primary_err = None,
+                }
+            }
+            r = &mut backup_h, if !backup_h.is_finished() => {
+                match r {
+                    Ok(Ok(v)) => { primary_h.abort(); return Ok(v); }
+                    Ok(Err(e)) => {
+                        if let Some(pe) = primary_err {
+                            return Err(pe);
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                    Err(_) => {
+                        if let Some(pe) = primary_err {
+                            return Err(pe);
+                        }
+                        // Both futures gone with no usable error — fabricate an
+                        // error propagation path by continuing (extremely rare).
+                    }
+                }
+            }
+            else => {
+                // Both finished with no Ok — should be caught above.
+                if let Some(pe) = primary_err {
+                    return Err(pe);
+                }
+                unreachable!("both tasks finished but no primary_err captured");
+            }
+        }
     }
 }
 
@@ -369,6 +611,140 @@ mod tests {
         assert!(tracker.is_straggler(250));
         // A task taking 150ms is fine
         assert!(!tracker.is_straggler(150));
+    }
+
+    #[tokio::test]
+    async fn speculation_primary_wins_when_fast() {
+        // Primary finishes in 10ms, backup would take 500ms.
+        let r: Result<i32, String> = run_with_speculation(
+            || async {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                Ok::<i32, String>(1)
+            },
+            || async {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                Ok::<i32, String>(2)
+            },
+            100, // start backup after 100ms; primary should beat it
+        ).await;
+        assert_eq!(r.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn speculation_backup_wins_when_primary_stalls() {
+        // Primary would take 500ms, backup 20ms after 50ms delay.
+        // Total race window: backup finishes at 50+20=70ms, primary at 500ms.
+        let r: Result<i32, String> = run_with_speculation(
+            || async {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                Ok::<i32, String>(1)
+            },
+            || async {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                Ok::<i32, String>(2)
+            },
+            50,
+        ).await;
+        assert_eq!(r.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn speculation_returns_error_when_both_fail() {
+        let r: Result<i32, String> = run_with_speculation(
+            || async {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                Err::<i32, String>("primary bad".into())
+            },
+            || async {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                Err::<i32, String>("backup bad".into())
+            },
+            50,
+        ).await;
+        assert!(r.is_err());
+    }
+
+    // ── Phase 18: TaskLineage tests ───────────────────────────────────────
+
+    fn make_partition_rec(idx: usize, worker: &str) -> PartitionRecord {
+        PartitionRecord {
+            partition_idx:  idx,
+            task_id:        format!("task-{worker}-{idx}"),
+            worker_id:      worker.to_string(),
+            stage_id:       "stage-0".into(),
+            sql:            "SELECT * FROM t".into(),
+            table_name:     "t".into(),
+            state:          PartitionState::Pending,
+            started_at_ms:  0,
+            finished_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn task_lineage_records_and_completes_partitions() {
+        let lineage = TaskLineage::new();
+        for i in 0..3 {
+            lineage.record(make_partition_rec(i, "w1"));
+        }
+        assert_eq!(lineage.pending_count(), 3);
+        lineage.mark_completed("task-w1-1");
+        assert_eq!(lineage.pending_count(), 2);
+        assert_eq!(lineage.completed().len(), 1);
+    }
+
+    #[test]
+    fn task_lineage_reports_lost_partitions_on_worker_death() {
+        let lineage = TaskLineage::new();
+        // Two workers, 4 partitions total: 0,1 on w1; 2,3 on w2.
+        lineage.record(make_partition_rec(0, "w1"));
+        lineage.record(make_partition_rec(1, "w1"));
+        lineage.record(make_partition_rec(2, "w2"));
+        lineage.record(make_partition_rec(3, "w2"));
+
+        // Complete one on each worker.
+        lineage.mark_completed("task-w1-0");
+        lineage.mark_completed("task-w2-2");
+
+        // w2 dies — the only pending partition on w2 is idx 3.
+        let lost = lineage.mark_worker_lost("w2");
+        assert_eq!(lost.len(), 1);
+        assert_eq!(lost[0].partition_idx, 3);
+        assert_eq!(lost[0].state, PartitionState::LostReadyToRetry);
+
+        // w1's partition 0 is completed (untouched); partition 1 still pending.
+        assert_eq!(lineage.pending_count(), 1);
+    }
+
+    #[test]
+    fn task_lineage_reassigns_lost_partition_to_new_worker() {
+        let lineage = TaskLineage::new();
+        lineage.record(make_partition_rec(0, "w1"));
+        lineage.record(make_partition_rec(1, "w1"));
+
+        let lost = lineage.mark_worker_lost("w1");
+        assert_eq!(lost.len(), 2);
+
+        // Recovery reassigns partition 0 to w3.
+        lineage.reassign("task-w1-0", "w3");
+        let snap = lineage.snapshot();
+        let rec0 = snap.iter().find(|r| r.partition_idx == 0).unwrap();
+        assert_eq!(rec0.worker_id, "w3");
+        assert_eq!(rec0.state, PartitionState::Pending);
+    }
+
+    #[test]
+    fn task_lineage_completed_worker_survives_death_of_other_worker() {
+        // Regression: if worker A completes its work then worker B dies,
+        // we must not roll back A's completion.
+        let lineage = TaskLineage::new();
+        lineage.record(make_partition_rec(0, "wA"));
+        lineage.record(make_partition_rec(1, "wB"));
+
+        lineage.mark_completed("task-wA-0");
+        let lost = lineage.mark_worker_lost("wB");
+        assert_eq!(lost.len(), 1);
+        assert_eq!(lineage.completed().len(), 1);
+        assert_eq!(lineage.completed()[0].partition_idx, 0);
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub mod ast;
 pub mod lexer;
 pub mod parser;
 pub mod executor;
+pub mod vec_path;
 
 pub use ast::*;
 pub use executor::{KqlContext, execute, execute_query};

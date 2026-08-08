@@ -226,3 +226,16 @@ pub fn disk_stats(owner: &str) -> serde_json::Value {
         "exists":     path.exists(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_path_includes_owner() {
+        let p = data_path("test_owner");
+        let s = p.to_string_lossy();
+        assert!(s.contains("test_owner"));
+        assert!(s.ends_with("memories.kore.json"));
+    }
+}

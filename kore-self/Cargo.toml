@@ -19,7 +19,11 @@ kore-io          = { path = "../kore-io" }
 kore-parquet     = { path = "../kore-parquet" }
 kore-body        = { workspace = true }
 kore-federation  = { workspace = true }
+kore-mesh        = { workspace = true }
+kore-survival    = { workspace = true }
 tokio            = { workspace = true }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
 rayon            = { workspace = true }
+reqwest          = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+url              = "2"

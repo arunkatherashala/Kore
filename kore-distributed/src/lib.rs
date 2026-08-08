@@ -19,6 +19,14 @@
 //!   To use on a REAL cluster: run workers on remote machines pointing at
 //!   the coordinator's IP. Everything else is identical.
 
+mod cluster;
+mod planner;
+pub use cluster::{
+    query_persistent_cluster, query_persistent_cluster_blocking,
+    query_persistent_cluster_planned, query_persistent_cluster_blocking_planned,
+};
+pub use planner::{plan, DistributedPlan, DistributedStrategy};
+
 use std::collections::HashMap;
 use rayon::prelude::*;
 
@@ -55,7 +63,10 @@ impl DistributedExecutor {
         let n_workers = self.num_workers;
         let sql_owned = sql.to_string();
         let table_owned = table_name.to_string();
-        let merge_sql = build_merge_sql(sql);
+        let reduce_sql = build_merge_sql(sql).replace("FROM data", "FROM merged");
+        let has_agg = sql.to_lowercase().contains("group by")
+            || sql.to_lowercase().contains("sum(")
+            || sql.to_lowercase().contains("count(");
 
         // Build tokio runtime for async TCP operations
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -107,8 +118,7 @@ impl DistributedExecutor {
                 &sql_owned,
                 &table_owned,
                 data,
-                // Reduce SQL uses "merged" — the table name coordinator registers partial results under
-                Some(&build_merge_sql(&sql_owned).replace("FROM data", "FROM merged")),
+                if has_agg { Some(reduce_sql.as_str()) } else { None },
             ).await.map_err(|e| format!("distributed exec: {e}"))?;
 
             // 5. Abort worker tasks
@@ -259,6 +269,33 @@ pub fn distributed_query_n(sql: &str, data: DataBlock, workers: usize) -> Result
     DistributedExecutor::new(workers).query(sql, data)
 }
 
+/// Execute on persistent coordinator using planner (Phase 6).
+pub fn cluster_query_planned(
+    coord_addr: &str,
+    sql: &str,
+    table_name: &str,
+    data: DataBlock,
+) -> Result<DataBlock, String> {
+    let p = plan(sql, table_name);
+    query_persistent_cluster_blocking_planned(
+        coord_addr,
+        &p.map_sql,
+        table_name,
+        data,
+        p.reduce_sql.as_deref(),
+    )
+}
+
+/// Execute on a **persistent** coordinator already running (no spawn/kill per query).
+pub fn cluster_query_persistent(
+    coord_addr: &str,
+    sql: &str,
+    table_name: &str,
+    data: DataBlock,
+) -> Result<DataBlock, String> {
+    query_persistent_cluster_blocking(coord_addr, sql, table_name, data)
+}
+
 /// Execute using TRUE TCP cluster: real coordinator + worker network.
 /// Same SQL, same DataBlock — but communication goes through TCP sockets.
 /// On a multi-machine cluster, workers run on remote hosts pointing to coordinator IP.
@@ -329,7 +366,7 @@ impl Default for DistributedContext { fn default() -> Self { Self::new() } }
 ///
 /// Algorithm: parse projection list, detect aggregate functions,
 /// rewrite them to aggregate their alias columns.
-fn build_merge_sql(original_sql: &str) -> String {
+pub(crate) fn build_merge_sql(original_sql: &str) -> String {
     let lower = original_sql.to_lowercase();
 
     // Only transform if it has aggregation

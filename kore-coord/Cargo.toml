@@ -11,9 +11,14 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
-kore-core   = { workspace = true }
-kore-net    = { path = "../kore-net" }
-kore-sql    = { path = "../kore-sql" }
-kore-worker = { path = "../kore-worker" }
-serde_json  = { workspace = true }
-tokio       = { workspace = true }
+kore-core     = { workspace = true }
+kore-net      = { path = "../kore-net" }
+kore-sql      = { path = "../kore-sql" }
+kore-worker   = { path = "../kore-worker" }
+kore-fault    = { path = "../kore-fault" }
+kore-shuffle  = { path = "../kore-shuffle" }
+kore-catalog  = { path = "../kore-catalog" }
+kore-catalyst = { path = "../kore-catalyst" }
+kore-metrics  = { path = "../kore-metrics" }
+serde_json    = { workspace = true }
+tokio         = { workspace = true }

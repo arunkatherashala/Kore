@@ -87,6 +87,20 @@ pub struct EvolutionEngine {
     pub next_id:          u64,
     #[serde(default)]
     pub last_evolved_at:  u64,
+    /// Minimum gap score before auto-writing code (0.0 = always try in continuous mode).
+    #[serde(default = "default_auto_evolve_min_gap")]
+    pub auto_evolve_min_gap: f64,
+    /// Seconds between successful auto-evolutions.
+    #[serde(default = "default_auto_evolve_cooldown_secs")]
+    pub auto_evolve_cooldown_secs: u64,
+}
+
+fn default_auto_evolve_min_gap() -> f64 {
+    0.30
+}
+
+fn default_auto_evolve_cooldown_secs() -> u64 {
+    300
 }
 
 impl EvolutionEngine {
@@ -98,7 +112,19 @@ impl EvolutionEngine {
             total_evolutions: 0,
             next_id:          1,
             last_evolved_at:  0,
+            auto_evolve_min_gap: default_auto_evolve_min_gap(),
+            auto_evolve_cooldown_secs: default_auto_evolve_cooldown_secs(),
         }
+    }
+
+    pub fn apply_continuous_policy(&mut self) {
+        self.auto_evolve_min_gap = 0.0;
+        self.auto_evolve_cooldown_secs = 1;
+    }
+
+    pub fn apply_default_policy(&mut self) {
+        self.auto_evolve_min_gap = default_auto_evolve_min_gap();
+        self.auto_evolve_cooldown_secs = default_auto_evolve_cooldown_secs();
     }
 
     // ── Step 1: Read own source ────────────────────────────────────────────────
@@ -248,10 +274,16 @@ impl EvolutionEngine {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        if !should_auto_trigger(proposal.gap_score, self.last_evolved_at, now, 0.30, 300) {
+        if !should_auto_trigger(
+            proposal.gap_score,
+            self.last_evolved_at,
+            now,
+            self.auto_evolve_min_gap,
+            self.auto_evolve_cooldown_secs,
+        ) {
             eprintln!(
-                "[kore-self:evolution] Auto-trigger blocked: gap_score={:.2}, cooldown active.",
-                proposal.gap_score
+                "[kore-self:evolution] Auto-trigger blocked: gap_score={:.2}, cooldown={}s min_gap={:.2}.",
+                proposal.gap_score, self.auto_evolve_cooldown_secs, self.auto_evolve_min_gap
             );
             proposal.status = "blocked".to_string();
             return GeneratedFile {
@@ -1127,4 +1159,34 @@ fn extract_phrase_around(content: &str, keyword: &str, radius: usize) -> String 
         }
     }
     kw
+}
+
+/// Gate self-modifying source writes. Continuous mode requires explicit `KORE_EVOLVE=1`.
+pub fn evolution_write_enabled(continuous: bool) -> bool {
+    match std::env::var("KORE_EVOLVE").ok().as_deref() {
+        Some("0") | Some("false") | Some("FALSE") => false,
+        Some("1") | Some("true") | Some("TRUE") => true,
+        _ if continuous => false,
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod evolution_gate_tests {
+    use super::*;
+
+    #[test]
+    fn continuous_requires_opt_in() {
+        std::env::remove_var("KORE_EVOLVE");
+        assert!(!evolution_write_enabled(true));
+        std::env::set_var("KORE_EVOLVE", "1");
+        assert!(evolution_write_enabled(true));
+        std::env::remove_var("KORE_EVOLVE");
+    }
+
+    #[test]
+    fn interactive_default_allows() {
+        std::env::remove_var("KORE_EVOLVE");
+        assert!(evolution_write_enabled(false));
+    }
 }

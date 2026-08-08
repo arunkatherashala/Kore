@@ -144,6 +144,15 @@ impl KqlContext {
         }
 
         let query = crate::parser::parse_query(sql_trim)?;
+
+        // Phase 17: try vectorized fast-path before falling into the row-loop
+        // interpreter.  Returns None if the query shape isn't supported, in
+        // which case we fall through to execute_query unchanged.  Gated by
+        // KORE_VECTORIZED=0 for regression debugging.
+        if let Some(res) = crate::vec_path::try_vectorized(&query, self) {
+            return res;
+        }
+
         execute_query(&query, self)
     }
 
@@ -742,6 +751,28 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
 
     // 2. Process JOINs
     for join in &stmt.joins {
+        // Pre-cap the probe side when LIMIT is set with no ORDER BY/WHERE.
+        // Prevents O(n×m) join materialisation for queries like:
+        //   SELECT ... FROM t1 JOIN t2 ON t1.k=t2.k LIMIT 5
+        // One left row can match many right rows; capping left to limit rows
+        // keeps the output bounded while returning correct (any) n results.
+        let probe = if let Some(lim) = stmt.limit {
+            let has_win = stmt.projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Window { .. }, .. }));
+            if stmt.where_clause.is_none()
+                && stmt.order_by.is_empty()
+                && stmt.group_by.is_empty()
+                && stmt.having.is_none()
+                && !has_win
+            {
+                let cap = (lim as usize).saturating_add(stmt.offset.unwrap_or(0) as usize);
+                // Use a small multiple to ensure we can satisfy LIMIT after join predicate
+                limit_block(result.clone(), cap.max(1))
+            } else {
+                result.clone()
+            }
+        } else {
+            result.clone()
+        };
         let right_name  = &join.table.name;
         let right_alias = join.table.alias.as_deref().unwrap_or(right_name.as_str());
         let right_block = ctx.get(right_name)
@@ -759,22 +790,18 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         // Resolve join keys — ON clause order is not guaranteed to match left/right tables.
         // Try both assignments and use whichever pairing matches the blocks.
         let (lk, rk) = {
-            let a_in_result = find_col_in_block(&join.on.left_col,  &result);
+            let a_in_result = find_col_in_block(&join.on.left_col,  &probe);
             let a_in_right  = find_col_in_block(&join.on.left_col,  &right_block);
-            let b_in_result = find_col_in_block(&join.on.right_col, &result);
+            let b_in_result = find_col_in_block(&join.on.right_col, &probe);
             let b_in_right  = find_col_in_block(&join.on.right_col, &right_block);
 
             if a_in_result.is_some() && b_in_right.is_some() {
-                // Natural: left_col in result, right_col in right_block
                 (a_in_result.unwrap(), b_in_right.unwrap())
             } else if b_in_result.is_some() && a_in_right.is_some() {
-                // Reversed: right_col in result, left_col in right_block
                 (b_in_result.unwrap(), a_in_right.unwrap())
             } else if a_in_result.is_some() {
-                // Fallback: left_col in result, right_col uses alias
                 (a_in_result.unwrap(), resolve_col_name(&join.on.right_col, right_alias))
             } else {
-                // Last resort: use alias-based resolution
                 (resolve_col_name(&join.on.left_col, base_alias),
                  resolve_col_name(&join.on.right_col, right_alias))
             }
@@ -783,19 +810,37 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         let cfg = JoinConfig { left_key: lk.clone(), right_key: rk, join_type: jtype };
 
         if join.join_type == JoinKind::Right {
-            result = HashJoin::join(&right_block, &result, &cfg)?;
+            result = HashJoin::join(&right_block, &probe, &cfg)?;
         } else {
-            result = HashJoin::join(&result, &right_block, &cfg)?;
+            result = HashJoin::join(&probe, &right_block, &cfg)?;
+        }
+    }
+
+    // 2.5 Early LIMIT: when no WHERE/ORDER BY/GROUP BY, truncate the join output now.
+    // Avoids materialising huge cross-products (e.g. 9K×9K self-join) before LIMIT 5.
+    if !stmt.joins.is_empty() {
+        if let Some(lim) = stmt.limit {
+            let has_win = stmt.projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Window { .. }, .. }));
+            if stmt.where_clause.is_none()
+                && stmt.order_by.is_empty()
+                && stmt.group_by.is_empty()
+                && stmt.having.is_none()
+                && !has_win
+            {
+                let cap = (lim as usize).saturating_add(stmt.offset.unwrap_or(0) as usize);
+                result = limit_block(result, cap);
+            }
         }
     }
 
     // 3. WHERE filter
     if let Some(pred) = &stmt.where_clause {
         let resolved = resolve_subqueries(pred, ctx);
-        // Decorrelate correlated scalar subqueries: pre-compute GROUP BY, inject threshold columns
-        // This converts O(n²) correlated subqueries to O(n) — e.g. Q17, Q20
+        // Decorrelate correlated scalar subqueries → O(n²) to O(n)
         let (new_pred, new_block) = decorrelate_scalar_subqueries(&resolved, result, ctx);
-        result = filter_block_ctx(new_block, &new_pred, ctx)?;
+        // Decorrelate correlated EXISTS → hash semi-join (O(1) per outer row)
+        let (new_pred2, new_block2) = decorrelate_exists(&new_pred, new_block, ctx);
+        result = filter_block_ctx(new_block2, &new_pred2, ctx)?;
     }
 
     // 4. GROUP BY  (or global aggregation if no GROUP BY but has aggregates)
@@ -1423,6 +1468,150 @@ fn expr_type_name(e: &Expr) -> &'static str {
         Expr::Float(_)           => "Float",
         Expr::In { .. }          => "In",
         _                        => "Other",
+    }
+}
+
+/// Decorrelate correlated EXISTS subqueries into hash semi-join lookups.
+///
+/// Pattern: `WHERE EXISTS (SELECT 1 FROM t2 WHERE t2.key = outer.key AND t2.cond)`
+/// Optimization:
+///   1. Execute non-correlated part once: `SELECT DISTINCT key FROM t2 WHERE t2.cond`
+///   2. Build a HashSet of matching key values
+///   3. Replace EXISTS with `In { values: [...] }` using the outer correlated column
+///
+/// Falls back to the original expression when the pattern cannot be detected.
+fn decorrelate_exists(
+    pred: &Expr,
+    outer_block: DataBlock,
+    ctx: &KqlContext,
+) -> (Expr, DataBlock) {
+    let new_pred = rewrite_exists(pred, ctx);
+    (new_pred, outer_block)
+}
+
+fn rewrite_exists(expr: &Expr, ctx: &KqlContext) -> Expr {
+    match expr {
+        Expr::Exists { subquery, negated } => {
+            // Detect pattern: EXISTS (SELECT ... FROM t [AS a] WHERE t.key = outer.key [AND ...])
+            if let Some(where_clause) = &subquery.where_clause {
+                let inner_table = &subquery.from.name;
+                let inner_alias = subquery.from.alias.as_deref().unwrap_or(inner_table.as_str());
+                if let Some(inner_block) = ctx.get(inner_table) {
+                    let mut corr_inner: Vec<String> = Vec::new();
+                    let mut corr_outer: Vec<Expr>   = Vec::new();
+                    let mut filters:    Vec<Expr>   = Vec::new();
+                    collect_exists_parts(where_clause, inner_table, inner_alias,
+                                        &mut corr_inner, &mut corr_outer, &mut filters);
+
+                    if corr_inner.len() == 1 {
+                        let inner_col = &corr_inner[0];
+                        let outer_expr = corr_outer[0].clone();
+
+                        let mut filtered = inner_block.clone();
+                        for fc in &filters {
+                            if let Ok(f) = filter_block(filtered.clone(), fc) {
+                                filtered = f;
+                            } else {
+                                return expr.clone();
+                            }
+                        }
+
+                        let resolved_col = find_col_in_block(inner_col, &filtered)
+                            .unwrap_or_else(|| inner_col.clone());
+                        if let Some(col) = filtered.columns.iter().find(|c| {
+                            c.name == resolved_col
+                                || c.name.ends_with(&format!(".{}", inner_col))
+                        }) {
+                            let mut seen = std::collections::HashSet::<String>::new();
+                            let values: Vec<Expr> = (0..filtered.num_rows)
+                                .filter_map(|r| match col.data.get_value(r) {
+                                    Value::Int(i)   => {
+                                        let k = i.to_string();
+                                        if seen.insert(k) { Some(Expr::Int(i)) } else { None }
+                                    }
+                                    Value::Float(f) => {
+                                        let k = format!("{f:.10}");
+                                        if seen.insert(k) { Some(Expr::Float(f)) } else { None }
+                                    }
+                                    Value::Str(s)   => {
+                                        if seen.insert(s.clone()) { Some(Expr::Str(s)) } else { None }
+                                    }
+                                    _               => None,
+                                })
+                                .collect();
+
+                            return Expr::In {
+                                expr: Box::new(outer_expr),
+                                values,
+                                negated: *negated,
+                            };
+                        }
+                    }
+                }
+            }
+            expr.clone()
+        }
+        Expr::BinOp { op: op @ (BinOpKind::And | BinOpKind::Or), left, right } => Expr::BinOp {
+            op: op.clone(),
+            left:  Box::new(rewrite_exists(left,  ctx)),
+            right: Box::new(rewrite_exists(right, ctx)),
+        },
+        Expr::Not(e) => Expr::Not(Box::new(rewrite_exists(e, ctx))),
+        _ => expr.clone(),
+    }
+}
+
+/// Collect the correlated equality pairs and non-correlated filters from an EXISTS WHERE clause.
+/// Correlated pair: `inner_table.col = outer_expr` or `outer_expr = inner_table.col`
+/// Accepts both the table name and its alias as "inner" identifiers.
+fn collect_exists_parts(
+    expr: &Expr,
+    inner_table: &str,
+    inner_alias: &str,
+    corr_inner: &mut Vec<String>,
+    corr_outer: &mut Vec<Expr>,
+    filters: &mut Vec<Expr>,
+) {
+    match expr {
+        Expr::BinOp { op: BinOpKind::And, left, right } => {
+            collect_exists_parts(left,  inner_table, inner_alias, corr_inner, corr_outer, filters);
+            collect_exists_parts(right, inner_table, inner_alias, corr_inner, corr_outer, filters);
+        }
+        Expr::BinOp { op: BinOpKind::Eq, left, right } => {
+            let lhs_inner = col_belongs_to_either(left,  inner_table, inner_alias);
+            let rhs_inner = col_belongs_to_either(right, inner_table, inner_alias);
+            if lhs_inner && !rhs_inner {
+                if let Some(c) = bare_col_name(left) {
+                    corr_inner.push(c);
+                    corr_outer.push(*right.clone());
+                    return;
+                }
+            } else if rhs_inner && !lhs_inner {
+                if let Some(c) = bare_col_name(right) {
+                    corr_inner.push(c);
+                    corr_outer.push(*left.clone());
+                    return;
+                }
+            }
+            filters.push(expr.clone());
+        }
+        _ => filters.push(expr.clone()),
+    }
+}
+
+fn col_belongs_to_either(expr: &Expr, table: &str, alias: &str) -> bool {
+    match expr {
+        Expr::QualCol(t, _) => t == table || t == alias,
+        Expr::Col(_)        => false,
+        _                   => false,
+    }
+}
+
+fn bare_col_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Col(c)        => Some(c.clone()),
+        Expr::QualCol(_, c) => Some(c.clone()),
+        _                   => None,
     }
 }
 

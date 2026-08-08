@@ -12,6 +12,9 @@
 
 use kore_core::types::{Column, ColumnData, DataBlock};
 
+pub mod ipc;
+pub use ipc::{encode as ipc_encode, decode as ipc_decode, IpcError, IPC_MAGIC};
+
 // ─── Core Arrow types ─────────────────────────────────────────────────────────
 
 /// A compact columnar array: raw values + 1-bit validity bitmap per value.

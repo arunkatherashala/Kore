@@ -46,6 +46,37 @@ pub enum FederationMessage {
     Pong { nonce: u64 },
     /// Disconnect politely.
     Goodbye { reason: String },
+    /// Delivery acknowledgment for a mesh envelope id (reliable mesh).
+    MeshAck { envelope_id: String },
+    /// Register a UDP endpoint with bootstrap peers for NAT rendezvous.
+    Rendezvous {
+        node_id: String,
+        udp_endpoint: String,
+        /// When set, bootstrap should relay introduction to this node only.
+        target_node_id: Option<String>,
+    },
+    /// Coordinated NAT hole punch: both sides send UDP to the listed endpoints.
+    HolePunch {
+        session_id: String,
+        initiator_id: String,
+        initiator_udp: String,
+        target_id: String,
+        target_udp: String,
+    },
+    /// LAN / local-network announcement so nearby devices find this KORE without bootstrap.
+    DeviceBeacon {
+        node_id: String,
+        owner: String,
+        mesh_port: u16,
+        federation_port: u16,
+        device_kind: String,
+        capabilities: Vec<String>,
+    },
+    /// Ask a relay/bootstrap node to forward an inner federation payload to `destination`.
+    RelayFrame {
+        destination: String,
+        payload: String,
+    },
 }
 
 /// Lightweight peer descriptor sent in peer lists.

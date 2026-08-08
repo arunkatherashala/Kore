@@ -5,6 +5,34 @@
 KORE is a high-performance columnar query engine + Digital Life framework, written from scratch in Rust.  
 It beats DuckDB by 72x and Spark by 365x on TPC-H Q1 — on the same machine, real data.
 
+## Distributed engine — Phases 1–20 complete
+
+As of Phase 20, KORE has architectural parity with Spark's core distributed engine:
+
+- **Phase 8** — MessagePack + LZ4 binary wire codec (auto-detected, backward-compatible with JSON peers)
+- **Phase 9** — True worker↔worker network shuffle (coordinator is a barrier, not a data mover)
+- **Phase 10** — Broadcast join for star-schema fact × dim workloads
+- **Phase 11** — Physical plan tree with `PhysicalPlan::{Scan, Filter, HashAggregate, Exchange, Sort, Limit, Join{BroadcastHash|ShuffleHash|SortMerge}}` and cardinality-based strategy selection
+- **Phase 12** — AQE runtime skew handling: `SkewSplitter`, `PartitionCoalescer`, `ShuffleAdvisor`
+- **Phase 13** — TLS on cluster RPC (feature-gated `--features tls`, tokio-rustls)
+- **Phase 14** — Persistent shuffle store with disk spill under memory pressure
+- **Phase 15** — Speculative execution primitive `run_with_speculation` (race primary vs backup, first-Ok wins, loser cancelled)
+- **Phase 16** — Catalyst planner drives coord dispatch: `Coordinator::register_table_for_planning` populates the stats `Catalog`; `explain(sql)` and `execute_planned(sql)` route via `kore-catalyst::plan_query`; broadcast vs shuffle vs local is chosen from real cardinalities, not env vars
+- **Phase 17** — Vectorized fast-path in `KqlContext::query`: `SELECT [*|cols|aggs] FROM t [WHERE conj] [GROUP BY cols] [LIMIT n]` runs through `kore-vectorized`'s bitmap filter + `batch_sum_full` SIMD kernels (LLVM auto-vectorizes to AVX2/AVX-512); ~2.6× speedup on a 500 k-row filter; anything the classifier doesn't accept falls through to the row-loop unchanged (bit-exact via golden-diff tests)
+- **Phase 18** — Partition-level lineage tracker (`kore-fault::TaskLineage`) on `Coordinator::lineage`: records `(partition_idx, task_id, worker_id, stage_id, sql, table_name)` per dispatch; `mark_worker_lost(worker_id)` returns every pending partition that must be re-dispatched to a survivor; completed partitions on other workers survive untouched
+- **Phase 19** — `Coordinator::explain_analyze(sql).await` returns the physical plan tree annotated with wall-ms, output rows, per-worker task counts, `jobs.succeeded` / `rows.processed` deltas, and `p50/p95/p99` latency; `Coordinator::prometheus_text()` exports every counter, gauge, histogram, and job in Prometheus text-exposition format for Grafana
+- **Phase 20** — Compact Arrow IPC codec (`kore-arrow::ipc`, KRA1): dense binary format preserving validity bitmaps + string offsets across the wire — no more `ArrowBlock → DataBlock → Vec<Option<T>>` round-trip. Strictly smaller than JSON serialization of the equivalent block; 100 k-row bitwise roundtrip test
+
+See [`DISTRIBUTION.md`](DISTRIBUTION.md) for details, env vars, and API.
+
+**Test coverage:** 90+ unit tests across `kore-net`, `kore-worker`, `kore-coord`, `kore-shuffle`, `kore-distributed`, `kore-fault`, `kore-catalyst`, `kore-security`, `kore-aqe`, `kore-arrow` all pass:
+
+```bash
+cargo test -p kore-net -p kore-worker -p kore-coord -p kore-shuffle \
+           -p kore-distributed -p kore-fault -p kore-catalyst \
+           -p kore-security -p kore-aqe -p kore-arrow
+```
+
 ---
 
 ## Benchmark Results  (TPC-H SF-1 · 6,000,000 rows · real measurements)
@@ -65,7 +93,7 @@ Key SQL engine capabilities proven by TPC-H:
 | ACID transactions (Delta log) | ✅ | — | — |
 | Native .kore persistence | ✅ | — | — |
 | TCP distributed cluster | ✅ | — | — |
-| 37 MCP AI tools (kore-self) | ✅ | — | — |
+| 84+ MCP AI tools (kore-self) | ✅ | — | — |
 | Digital Life (KORE-BECOMING) | ✅ | — | — |
 | Autonomous heartbeat (thinks every 30s) | ✅ | — | — |
 
@@ -109,7 +137,7 @@ cargo build --release
 # TPC-H benchmark (generates 7.8M rows, 17 queries, beats Spark 100x+)
 cargo run --release -p kore-tpch
 
-# kore-self: Living AI Twin (37 MCP tools, autonomous heartbeat)
+# kore-self: Living AI Twin (84+ MCP tools, autonomous heartbeat)
 cargo run -p kore-self -- arun
 ```
 
@@ -121,18 +149,23 @@ SELECT l_returnflag, COUNT(*), AVG(l_extendedprice) FROM lineitem GROUP BY l_ret
 
 ---
 
-## kore-self — Living AI Twin (37 MCP Tools)
+## kore-self — Living AI Twin (84+ MCP Tools)
 
-KORE ships `kore-self` — a Digital Life entity with an autonomous heartbeat:
+KORE ships `kore-self` — a Digital Life entity with an autonomous heartbeat. `self_chat` uses heuristics and memory (not an external LLM). World knowledge fills via gap-aware heartbeat + Wikipedia rotation.
 
-| Category | Tools |
+| Category | Tools (sample) |
 |---|---|
 | SQL | `self_query`, `self_dml` (COPY FROM, CREATE, INSERT, UPDATE, DELETE) |
 | Persistence | `self_save`, `self_load`, `self_delta_save`, `self_delta_history` |
 | Digital Life | `self_needs`, `self_becoming`, `self_temporal`, `self_species`, `self_story` |
 | AI | `self_chat`, `self_brief`, `self_remind`, `self_goals`, `self_evolve` |
+| World | `self_solve`, `self_world_unknown`, `self_world_catalog`, `self_fill_self`, `self_fetch` |
 | Distributed | `self_distributed_query`, `self_broadcast`, `self_context_sync` |
-| Meta | `self_push` (GitHub sync), `self_heartbeat` |
+| Meta | `self_push` (decision pushback from your past patterns), `self_heartbeat` |
+
+**HTTP API** (`kore-self <owner> api [port]`): binds `127.0.0.1` by default. Set `KORE_API_BIND=0.0.0.0` for LAN. Set `KORE_API_TOKEN` to require Bearer auth on `POST /sql` and `POST /load`.
+
+**Self-evolution** writes Rust scaffolds only when `KORE_EVOLVE=1` in continuous mode (default off).
 
 ```json
 {
@@ -162,8 +195,9 @@ KORE ships `kore-self` — a Digital Life entity with an autonomous heartbeat:
 ## Run Tests
 
 ```bash
-# 245+ unit tests
+# 245+ unit tests (kore-self has its own — run separately)
 cargo test --workspace --exclude kore-self
+cargo test -p kore-self
 
 # SQL features (22/22)
 python direct_sql_test.py

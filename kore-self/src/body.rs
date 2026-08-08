@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 use kore_body::{BodyCommand, BodyResult, BodyState, Capability, FileFormat, KoreBody, Observation};
 use kore_core::DataBlock;
+use kore_federation::Constitution;
 use kore_sql::executor::KqlContext;
 
 /// Errors that can occur when the body executes a command.
@@ -105,6 +106,8 @@ pub struct EngineBody {
     data_dir: PathBuf,
     /// Internal KQL workspace context.
     ctx: KqlContext,
+    /// Optional ethical constitution that can veto actions.
+    constitution: Option<Constitution>,
 }
 
 impl EngineBody {
@@ -113,7 +116,21 @@ impl EngineBody {
         Self {
             data_dir: data_dir.to_path_buf(),
             ctx: KqlContext::new(),
+            constitution: None,
         }
+    }
+
+    /// Attach an ethical constitution to this body.
+    pub fn with_constitution(mut self, constitution: &Constitution) -> Self {
+        self.constitution = Some(constitution.clone());
+        self
+    }
+
+    /// Check whether this body is allowed to perform a command by its constitution.
+    fn constitution_allows(&self, command: &BodyCommand) -> bool {
+        let Some(c) = &self.constitution else { return true };
+        let desc = format!("{:?}", command);
+        c.can_act(&desc)
     }
 
     /// Resolve a path relative to `data_dir` when it is not absolute.
@@ -207,13 +224,23 @@ impl EngineBody {
 
 impl KoreBody for EngineBody {
     fn observe(&self) -> Vec<Observation> {
+        let constitution_status = match &self.constitution {
+            Some(c) => format!("constitution with {} rules", c.rules.len()),
+            None => "no constitution".to_string(),
+        };
         vec![
             Observation::Health { status: "engine ready".to_string(), severity: 0 },
             Observation::Numeric { name: "registered_tables".to_string(), value: self.ctx.table_names().len() as f64 },
+            Observation::Text(constitution_status),
         ]
     }
 
     fn act(&mut self, command: BodyCommand) -> Result<BodyResult, kore_body::BodyError> {
+        if !self.constitution_allows(&command) {
+            return Err(kore_body::BodyError::ExecutionFailed(
+                "command rejected by KORE constitution".to_string()
+            ));
+        }
         match command {
             BodyCommand::Query { sql } => {
                 let block = self.query(&sql).map_err(kore_body::BodyError::from)?;

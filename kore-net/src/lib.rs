@@ -12,6 +12,25 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use kore_core::DataBlock;
 
+mod codec;
+pub use codec::{WireCodec, WireFormat, BINARY_MAGIC};
+
+/// Internal: encode any `KoreMsg` with the fast binary format (bincode+LZ4).
+/// Used by kore-worker's shuffle spill so on-disk and on-wire representations
+/// match. Not part of the stable public API.
+#[doc(hidden)]
+pub fn __codec_encode_shuffle_push(msg: &KoreMsg) -> std::io::Result<Vec<u8>> {
+    codec::encode(msg, WireFormat::BINARY_FAST)
+}
+
+#[doc(hidden)]
+pub fn __codec_decode_shuffle_push(bytes: &[u8]) -> std::io::Result<KoreMsg> {
+    codec::decode(bytes)
+}
+
+#[cfg(feature = "tls")]
+pub mod tls;
+
 // ─── Messages ─────────────────────────────────────────────────────────────────
 
 /// Every message exchanged between coordinator ↔ workers over TCP.
@@ -39,6 +58,19 @@ pub enum KoreMsg {
         table_name:   String,
         data:         DataBlock,
     },
+    /// Coordinator → Worker: store a table partition locally (Phase 3 — no inline ship per task).
+    RegisterTable {
+        table_name: String,
+        data:       DataBlock,
+    },
+    /// Coordinator → Worker: SQL only — data already registered via RegisterTable.
+    AssignTaskLocal {
+        task_id:      String,
+        stage_id:     usize,
+        partition_id: usize,
+        sql:          String,
+        table_name:   String,
+    },
     /// Worker → Coordinator: task completed successfully.
     TaskResult {
         task_id:      String,
@@ -61,7 +93,7 @@ pub enum KoreMsg {
         free_mem_mb:  usize,
     },
 
-    // ── Shuffle ──────────────────────────────────────────────────────────────
+    // ── Shuffle (legacy — kept for backward-compat with older peers) ─────────
     /// Worker → Coordinator (shuffle store): push a partition.
     ShuffleWrite {
         src_worker:    String,
@@ -72,6 +104,91 @@ pub enum KoreMsg {
     ShuffleRead { partition_ids: Vec<usize> },
     /// Coordinator → Worker: here are the requested shuffle partitions.
     ShuffleData { partitions: Vec<(usize, DataBlock)> },
+
+    // ── True network shuffle (Phase 9) ───────────────────────────────────────
+    // Model:
+    //   1. Coordinator → each map worker:  ShuffleMapTask
+    //   2. Worker runs map SQL, hash-partitions on `partition_keys`,
+    //      then sends each partition to the reducer worker via ShufflePush.
+    //   3. Reducer worker stores into its shuffle_store keyed by (shuffle_id, part).
+    //   4. Worker → Coordinator: ShuffleMapAck when its map+push is done.
+    //   5. Coordinator → each reduce worker: ShuffleReduceTask (waits for all N maps).
+    //   6. Reducer concats all partitions with matching (shuffle_id, part) and runs
+    //      the reduce SQL, returning ShuffleReduceResult.
+    //
+    /// Coordinator → map worker: run map SQL then hash-partition and push.
+    ShuffleMapTask {
+        task_id:        String,
+        shuffle_id:     String,
+        stage_id:       usize,
+        map_sql:        String,
+        table_name:     String,
+        partition_keys: Vec<String>,
+        n_reducers:     usize,
+        /// One address per reduce partition (`reducer_addrs[p]` = who owns
+        /// reduce partition `p`). Length must equal `n_reducers`.
+        reducer_addrs:  Vec<String>,
+    },
+    /// Worker → peer worker: here is your shuffle partition. Reducer stores it.
+    ShufflePush {
+        shuffle_id:  String,
+        src_worker:  String,
+        partition:   usize,
+        data:        DataBlock,
+    },
+    /// Peer worker → sending worker: partition accepted.
+    ShufflePushAck {
+        shuffle_id: String,
+        partition:  usize,
+    },
+    /// Worker → Coordinator: map+push phase complete for this task.
+    ShuffleMapAck {
+        task_id:       String,
+        shuffle_id:    String,
+        partitions_pushed: Vec<usize>,
+        stats:         TaskStats,
+    },
+    /// Coordinator → reduce worker: gather all pushes for `reduce_partition`
+    /// from `expected_maps` map tasks, then run `reduce_sql` over them.
+    ShuffleReduceTask {
+        task_id:          String,
+        shuffle_id:       String,
+        reduce_partition: usize,
+        expected_maps:    usize,
+        reduce_sql:       String,
+        table_name:       String,
+    },
+    /// Worker → Coordinator: reduce complete.
+    ShuffleReduceResult {
+        task_id:   String,
+        shuffle_id: String,
+        reduce_partition: usize,
+        result:    DataBlock,
+        stats:     TaskStats,
+    },
+
+    // ── Client queries ───────────────────────────────────────────────────────
+    /// Client → Coordinator: run distributed SQL on registered workers.
+    SubmitQuery {
+        query_id:     String,
+        sql:          String,
+        table_name:   String,
+        data:         DataBlock,
+        reduce_sql:   Option<String>,
+        /// When true, coordinator registers partitions on workers then sends SQL-only tasks.
+        #[serde(default)]
+        local_tables: bool,
+    },
+    /// Coordinator → Client: query succeeded.
+    QueryResult {
+        query_id: String,
+        result:   DataBlock,
+    },
+    /// Coordinator → Client: query failed.
+    QueryError {
+        query_id: String,
+        message:  String,
+    },
 
     // ── Control ──────────────────────────────────────────────────────────────
     Shutdown,
@@ -93,38 +210,54 @@ pub struct TaskStats {
 // ─── Framing ──────────────────────────────────────────────────────────────────
 
 /// Zero-copy length-prefixed framing over `tokio::io` streams.
+///
+/// Since Phase 8, the payload can be either JSON (backward-compat) or a
+/// binary format (bincode + optional LZ4). Sender picks via env var
+/// `KORE_WIRE=binary|binary-raw|json` (default: `binary` = bincode + LZ4).
+/// Readers auto-detect from the first byte of the frame body.
 pub struct KoreFrame;
 
+/// Hard safety cap on inbound frame size (protects against malformed peers).
+/// 1 GiB — larger than any legitimate DataBlock we send in one shot; use
+/// chunked shuffle for anything approaching this.
+const MAX_FRAME_BYTES: usize = 1024 * 1024 * 1024;
+
 impl KoreFrame {
-    /// Write one message: `[4-byte BE length][JSON payload]`.
+    /// Write one message using the default wire format (from `KORE_WIRE` env,
+    /// which defaults to `binary` = bincode + LZ4).
     pub async fn write<W>(w: &mut W, msg: &KoreMsg) -> std::io::Result<()>
     where W: tokio::io::AsyncWrite + Unpin
     {
-        let payload = serde_json::to_vec(msg)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        Self::write_with(w, msg, WireFormat::from_env()).await
+    }
+
+    /// Force a specific wire format for this message.
+    pub async fn write_with<W>(w: &mut W, msg: &KoreMsg, fmt: WireFormat) -> std::io::Result<()>
+    where W: tokio::io::AsyncWrite + Unpin
+    {
+        let payload = codec::encode(msg, fmt)?;
         let len = (payload.len() as u32).to_be_bytes();
         w.write_all(&len).await?;
         w.write_all(&payload).await?;
         w.flush().await
     }
 
-    /// Read one message.  Blocks until a full frame arrives.
+    /// Read one message. Auto-detects JSON vs binary in the payload body.
     pub async fn read<R>(r: &mut R) -> std::io::Result<KoreMsg>
     where R: tokio::io::AsyncRead + Unpin
     {
         let mut len_buf = [0u8; 4];
         r.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
-        if len > 256 * 1024 * 1024 {   // 256 MB safety cap
+        if len > MAX_FRAME_BYTES {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("frame too large: {len} bytes"),
+                format!("frame too large: {len} bytes (cap {MAX_FRAME_BYTES})"),
             ));
         }
         let mut payload = vec![0u8; len];
         r.read_exact(&mut payload).await?;
-        serde_json::from_slice(&payload)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        codec::decode(&payload)
     }
 }
 
@@ -136,6 +269,43 @@ pub fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Coordinator bind address (default localhost; set `KORE_COORD_BIND=0.0.0.0:7878` for LAN).
+pub fn coord_bind_addr() -> String {
+    std::env::var("KORE_COORD_BIND").unwrap_or_else(|_| "127.0.0.1:7878".into())
+}
+
+/// Use worker-local tables (register once, SQL-only tasks). Default ON.
+pub fn cluster_local_tables() -> bool {
+    match std::env::var("KORE_CLUSTER_LOCAL") {
+        Ok(v) if v == "0" || v.eq_ignore_ascii_case("false") => false,
+        _ => true,
+    }
+}
+
+/// Use true worker↔worker network shuffle instead of coord-side repartition.
+/// Default OFF for now (opt in with `KORE_NET_SHUFFLE=1`) since Phase 9 is
+/// newer than the coord-side path and we roll it out behind a flag.
+pub fn network_shuffle_enabled() -> bool {
+    match std::env::var("KORE_NET_SHUFFLE") {
+        Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => true,
+        _ => false,
+    }
+}
+
+/// Worker task listener bind (default all interfaces).
+pub fn worker_bind_addr() -> String {
+    std::env::var("KORE_WORKER_BIND").unwrap_or_else(|_| "0.0.0.0:0".into())
+}
+
+/// Address workers advertise to coordinator (`host:port`). Falls back to listener local addr.
+pub fn worker_advertise_addr(port: u16) -> String {
+    if let Ok(host) = std::env::var("KORE_WORKER_ADVERTISE") {
+        let host = host.trim().trim_end_matches(':');
+        return format!("{host}:{port}");
+    }
+    format!("127.0.0.1:{port}")
 }
 
 // ─── Partition helper ─────────────────────────────────────────────────────────

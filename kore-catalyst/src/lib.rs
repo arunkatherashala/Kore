@@ -26,6 +26,12 @@ use kore_core::DataBlock;
 use kore_sql::ast::*;
 use kore_catalog::Catalog;
 
+pub mod physical;
+pub use physical::{
+    PhysicalPlan, Partitioning, AggMode, JoinStrategy, JoinCond,
+    plan_query, choose_join_strategy,
+};
+
 // ─── Rule trait ───────────────────────────────────────────────────────────────
 
 pub trait OptRule: Send + Sync {

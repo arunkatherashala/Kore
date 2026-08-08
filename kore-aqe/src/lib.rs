@@ -15,6 +15,13 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use kore_core::{ColumnData, DataBlock};
 
+pub mod adaptive;
+pub use adaptive::{
+    SkewSplitter, PartitionCoalescer, CoalesceBucket,
+    ShuffleAdvisor, ShufflePlan, advise_with_stats,
+    DEFAULT_SKEW_SUBPARTS,
+};
+
 // ─── Runtime statistics ───────────────────────────────────────────────────────
 
 /// Per-stage statistics collected after execution.
