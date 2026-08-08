@@ -1,223 +1,36 @@
 name: Publish to PyPI
 
 on:
-  release:
-    types: [published]
   push:
     tags:
       - 'v*'
   workflow_dispatch:
 
 permissions:
-  id-token: write
   contents: read
 
 jobs:
-  build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.x"]
-    
+  build-and-publish:
+    name: Build pure-Python wheel and publish
+    runs-on: ubuntu-latest
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - uses: actions/setup-python@v5
       with:
-        python-version: ${{ matrix.python-version }}
-    
-    - name: Extract version
-      id: version
-      run: |
-        # For tag-triggered workflows, use the tag
-        # For manual workflow_dispatch, extract from Cargo.toml
-        if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-          VERSION="${GITHUB_REF#refs/tags/}"
-        else
-          # Extract version from Cargo.toml
-          VERSION="v$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')"
-        fi
-        echo "version=${VERSION}" >> $GITHUB_OUTPUT
-        echo "Version detected: ${VERSION}"
-      shell: bash
-    
+        python-version: "3.12"
+
     - name: Install build tools
-      run: |
-        python -m pip install --upgrade maturin setuptools wheel
-    
-    - name: Build wheel with maturin (Linux)
-      if: runner.os == 'Linux'
-      run: |
-        maturin build --release --out wheels
-    
-    - name: Build wheel with maturin (Windows)
-      if: runner.os == 'Windows'
-      run: |
-        maturin build --release --out wheels
-    
-    - name: Build wheel with maturin (macOS)
-      if: runner.os == 'macOS'
-      run: |
-        maturin build --release --out wheels
-    
-    
-    - name: Upload wheel artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: wheels-${{ matrix.os }}-${{ matrix.python-version }}
-        path: wheels/
-        retention-days: 1
-  
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      id-token: write
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Download all wheel artifacts (merge)
-      uses: actions/download-artifact@v4
-      with:
-        merge-multiple: true
-        path: dist
-    
+      run: pip install --upgrade build twine
+
+    - name: Build wheel + sdist from root pyproject.toml
+      run: python -m build --wheel --sdist
+
     - name: Publish to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        packages-dir: dist/
-
-    - name: Attach to GitHub Release
-      uses: softprops/action-gh-release@v1
-      if: startsWith(github.ref, 'refs/tags/')
-      with:
-        files: dist/*.whl
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    
-    - name: Extract version
-      id: version
+        TWINE_USERNAME: __token__
+        TWINE_PASSWORD: ${{ secrets.PYPI_AUG }}
       run: |
-        # For tag-triggered workflows, use the tag
-        # For manual workflow_dispatch, extract from Cargo.toml
-        if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-          VERSION="${GITHUB_REF#refs/tags/}"
-        else
-          # Extract version from Cargo.toml
-          VERSION="v$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')"
-        fi
-        echo "version=${VERSION}" >> $GITHUB_OUTPUT
-        echo "Version detected: ${VERSION}"
-      shell: bash
-    
-    - name: Download all wheel artifacts (merge)
-      uses: actions/download-artifact@v4
-      with:
-        merge-multiple: true
-        path: all-wheels
-    
-    - name: Organize wheels for publish
-      run: |
-        mkdir -p dist
-        VERSION="${{ steps.version.outputs.version }}"
-        VERSION_NO_V="${VERSION#v}"
-        echo "Looking for wheels matching version: ${VERSION_NO_V}"
-        # Find and copy ONLY wheels matching current version (avoid old artifacts)
-        find all-wheels -maxdepth 2 -name "*${VERSION_NO_V}*.whl" -exec cp {} dist/ \;
-        echo "Wheels ready for publish:"
-        ls -lh dist/
-        echo "Wheel count: $(find dist -name '*.whl' | wc -l)"
-        if [ $(find dist -name '*.whl' | wc -l) -ne 3 ]; then
-          echo "ERROR: Expected 3 wheels, found $(find dist -name '*.whl' | wc -l)"
-          find all-wheels -name "*.whl" | sort
-          exit 1
-        fi
-    
-    - name: Fix wheels metadata (remove invalid license-file)
-      run: |
-        python << 'EOF'
-        import zipfile
-        import tempfile
-        import os
-        import shutil
-        
-        for wheel_file in os.listdir('dist'):
-            if wheel_file.endswith('.whl'):
-                wheel_path = os.path.join('dist', wheel_file)
-                print(f"Processing {wheel_file}...")
-                
-                with zipfile.ZipFile(wheel_path, 'r') as z:
-                    # Find the METADATA file
-                    metadata_name = None
-                    for name in z.namelist():
-                        if 'METADATA' in name and name.endswith('/METADATA'):
-                            metadata_name = name
-                            break
-                    
-                    if not metadata_name:
-                        print(f"  No METADATA found, skipping")
-                        continue
-                    
-                    # Read metadata
-                    metadata = z.read(metadata_name).decode('utf-8')
-                    
-                    # Check if it has license-file field
-                    if 'license-file' not in metadata.lower() and 'License-File' not in metadata:
-                        print(f"  No license-file field found")
-                        continue
-                    
-                    print(f"  Found license-file field, removing...")
-                    
-                    # Remove license-file lines
-                    lines = metadata.split('\n')
-                    fixed_lines = [l for l in lines if not l.lower().startswith('license-file:')]
-                    fixed_metadata = '\n'.join(fixed_lines)
-                    
-                    # Rewrite wheel
-                    with tempfile.TemporaryDirectory() as tmpdir:
-                        # Extract all files
-                        z.extractall(tmpdir)
-                        
-                        # Write fixed metadata
-                        metadata_path = os.path.join(tmpdir, metadata_name)
-                        with open(metadata_path, 'w', encoding='utf-8') as f:
-                            f.write(fixed_metadata)
-                        
-                        # Recreate wheel
-                        os.remove(wheel_path)
-                        with zipfile.ZipFile(wheel_path, 'w', zipfile.ZIP_DEFLATED) as zout:
-                            for root, dirs, files in os.walk(tmpdir):
-                                for file in files:
-                                    file_path = os.path.join(root, file)
-                                    arcname = os.path.relpath(file_path, tmpdir)
-                                    zout.write(file_path, arcname)
-                        
-                        print(f"  ✅ Fixed {wheel_file}")
-        EOF
-    
-    - name: Validate wheels with twine
-      run: |
-        pip install --upgrade twine
-        twine check dist/*.whl --strict
-    
-    - name: Publish to PyPI (OIDC/Trusted Publisher)
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        packages-dir: dist/
-        skip-existing: true
-    
-    - name: Publish summary
-      run: |
-        echo "## PyPI Publishing Status" >> $GITHUB_STEP_SUMMARY
-        echo "Version: ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-        echo "Platforms: Linux, Windows, macOS" >> $GITHUB_STEP_SUMMARY
-        echo "Wheels published:" >> $GITHUB_STEP_SUMMARY
-        ls -1 dist/*.whl | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY
-
-
-
-
-
+        twine check dist/*
+        twine upload dist/*

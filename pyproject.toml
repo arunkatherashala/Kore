@@ -1,6 +1,12 @@
 [build-system]
-requires = ["maturin>=1.5,<2.0"]
-build-backend = "maturin"
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[tool.setuptools]
+package-dir = {"" = "kore-python"}
+
+[tool.setuptools.packages.find]
+where = ["kore-python"]
 
 [project]
 name = "kore-fileformat"
