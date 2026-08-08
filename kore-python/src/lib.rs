@@ -235,10 +235,15 @@ mod tests {
     #[test]
     fn query_empty_context() {
         let sess = kore_session_new();
-        let sql = std::ffi::CString::new("SELECT 1").unwrap();
+        let sql = std::ffi::CString::new("SELECT 1 AS val").unwrap();
         let res = unsafe { kore_query(sess, sql.as_ptr()) };
+        // SELECT 1 uses __dual__ — always succeeds even on empty context
+        assert!(!res.is_null());
+        unsafe { kore_free_string(res) };
         // unknown table → NULL
-        assert!(res.is_null());
+        let sql2 = std::ffi::CString::new("SELECT * FROM no_such_table").unwrap();
+        let res2 = unsafe { kore_query(sess, sql2.as_ptr()) };
+        assert!(res2.is_null());
         unsafe { kore_session_free(sess) };
     }
 }
