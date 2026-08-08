@@ -3,7 +3,7 @@
   "version": "1.6.6",
   "description": "KORE Binary Format — high-performance columnar file format with 11 ACID features, 8-language FFI",
   "main": "kore_ffi.js",
-  "types": "kore_fileformat.d.ts",
+  "types": "kore_fileformat.ts",
   "author": "Sai Arun Kumar Katherashala <arunkatherashala@gmail.com>",
   "license": "MIT",
   "repository": {
@@ -27,10 +27,9 @@
     "node": ">=16.0.0"
   },
   "files": [
-    "kore_fileformat.js",
-    "kore_fileformat.ts",
-    "kore_fileformat.d.ts",
     "kore_ffi.js",
+    "kore_fileformat.ts",
+    "kore_fileformat_phase3.js",
     "README.md"
   ]
 }

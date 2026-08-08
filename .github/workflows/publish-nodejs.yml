@@ -19,11 +19,6 @@ jobs:
         node-version: '18'
         registry-url: 'https://registry.npmjs.org'
     
-    - name: Install dependencies
-      run: |
-        cd kore-node
-        npm install
-
     - name: Publish to npm
       run: |
         cd kore-node
