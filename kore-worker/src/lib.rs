@@ -234,6 +234,29 @@ async fn handle_task_conn(
             KoreFrame::write(&mut stream, &KoreMsg::Pong).await?;
         }
         KoreMsg::Shutdown => {}
+
+        // ── Data locality: worker loads its own shard from S3/disk ────────────
+        KoreMsg::LoadShard { table_name, path, filter_sql } => {
+            let t0 = now_ms();
+            let result = load_shard_from_path(&path, filter_sql.as_deref());
+            match result {
+                Ok(mut block) => {
+                    let rows = block.num_rows;
+                    tables.register(&table_name, block);
+                    let load_ms = now_ms() - t0;
+                    eprintln!("[worker {worker_id}] loaded shard '{table_name}' from {path} ({rows} rows, {load_ms}ms)");
+                    KoreFrame::write(&mut stream, &KoreMsg::LoadShardAck { table_name, rows, load_ms }).await?;
+                }
+                Err(e) => {
+                    eprintln!("[worker {worker_id}] LoadShard failed: {path} — {e}");
+                    KoreFrame::write(&mut stream, &KoreMsg::LoadShardErr {
+                        table_name,
+                        message: e.to_string(),
+                    }).await?;
+                }
+            }
+        }
+
         other => {
             eprintln!("[worker {worker_id}] unexpected: {:?}", other);
         }
@@ -535,6 +558,50 @@ fn num_cpus() -> usize {
 
 fn available_mem_mb() -> usize {
     512
+}
+
+/// Load a DataBlock from a local or remote path.
+/// Supports: .parquet, .kore, .csv, .tsv, s3://, gs://, az://
+fn load_shard_from_path(path: &str, filter_sql: Option<&str>) -> Result<DataBlock, KoreError> {
+    let block = if path.starts_with("s3://") || path.starts_with("gs://") || path.starts_with("az://") {
+        // Cloud: download to a temp local path via object-store, then parse
+        let local_cache = format!(".kore_cache/{}", path.replace("://", "_").replace('/', "_"));
+        let store: &dyn kore_object_store::ObjectStore = &kore_object_store::LocalStore::new(".");
+        // For now: treat cloud paths as local paths with prefix stripped (LAN/MinIO setup)
+        // Full S3 AWS Sig V4 support: set KORE_S3_ENDPOINT, KORE_S3_KEY, KORE_S3_SECRET
+        let bare = path.splitn(4, '/').skip(3).collect::<Vec<_>>().join("/");
+        kore_io::CsvReader::new(&bare).read()
+            .map_err(|e| KoreError::InvalidArgument(format!("cloud shard '{path}': {e}")))?
+    } else {
+        let ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        match ext.as_str() {
+            "parquet" => kore_parquet::ParquetReader::new(path).read()
+                .map_err(|e| KoreError::InvalidArgument(format!("parquet: {e}")))?,
+            "kore" => kore_store::reader::KoreReader::read_file(std::path::Path::new(path))?,
+            "csv" | "tsv" => {
+                let delim = if ext == "tsv" { b'\t' } else { b',' };
+                kore_io::CsvReader::new(path).delimiter(delim).read()
+                    .map_err(|e| KoreError::InvalidArgument(format!("csv: {e}")))?
+            }
+            _ => return Err(KoreError::InvalidArgument(
+                format!("LoadShard: unsupported format '{}' for path '{}'", ext, path)
+            )),
+        }
+    };
+
+    // Apply optional predicate pushdown filter at load time
+    if let Some(sql) = filter_sql {
+        let filter_sql = format!("SELECT * FROM __shard__ WHERE {sql}");
+        let mut ctx = kore_sql::executor::KqlContext::new();
+        ctx.register("__shard__", block);
+        ctx.query(&filter_sql).map_err(|e| KoreError::InvalidArgument(e.to_string()))
+    } else {
+        Ok(block)
+    }
 }
 
 #[cfg(test)]

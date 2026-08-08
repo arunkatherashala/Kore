@@ -12,8 +12,12 @@ path = "src/lib.rs"
 
 [dependencies]
 kore-core    = { workspace = true }
-kore-net     = { path = "../kore-net" }
-kore-sql     = { path = "../kore-sql" }
-kore-shuffle = { path = "../kore-shuffle" }
-serde_json   = { workspace = true }
-tokio        = { workspace = true }
+kore-net          = { path = "../kore-net" }
+kore-sql          = { path = "../kore-sql" }
+kore-shuffle      = { path = "../kore-shuffle" }
+kore-parquet      = { path = "../kore-parquet" }
+kore-store        = { path = "../kore-store" }
+kore-io           = { path = "../kore-io" }
+kore-object-store = { path = "../kore-object-store" }
+serde_json        = { workspace = true }
+tokio             = { workspace = true }

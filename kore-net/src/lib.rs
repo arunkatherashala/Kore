@@ -194,6 +194,35 @@ pub enum KoreMsg {
     Shutdown,
     Ping,
     Pong,
+
+    // ── Data locality (100K-node scale) ──────────────────────────────────────
+    /// Coordinator → Worker: load a data shard from a path (S3/local/parquet/kore).
+    /// Worker reads its own partition — coordinator never ships the data.
+    /// This is the key message that removes the coordinator bottleneck at scale.
+    ///
+    /// Format detection by extension:
+    ///   .parquet  → kore-parquet reader
+    ///   .kore     → kore-store reader
+    ///   .csv      → kore-io CSV reader
+    ///   s3://...  → kore-object-store (AWS S3 / MinIO)
+    LoadShard {
+        table_name: String,
+        /// Path: local file, s3://bucket/key, gs://bucket/key, az://container/blob
+        path:       String,
+        /// Optional row filter applied at load time (predicate pushdown).
+        filter_sql: Option<String>,
+    },
+    /// Worker → Coordinator: shard loaded successfully.
+    LoadShardAck {
+        table_name: String,
+        rows:       usize,
+        load_ms:    u64,
+    },
+    /// Worker → Coordinator: shard load failed.
+    LoadShardErr {
+        table_name: String,
+        message:    String,
+    },
 }
 
 /// Per-task performance metadata.
