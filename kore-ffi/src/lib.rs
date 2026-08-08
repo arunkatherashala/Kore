@@ -508,7 +508,7 @@ pub unsafe extern "C" fn kore_crc32(data: *const u8, len: usize) -> u32 {
     !crc
 }
 
-/// Get a column name by index from a DataBlock.
+/// Get column name by index from a DataBlock.
 /// Returns NULL if index out of range. Caller must free with kore_free_string().
 #[no_mangle]
 pub unsafe extern "C" fn kore_block_col_name(
@@ -519,6 +519,43 @@ pub unsafe extern "C" fn kore_block_col_name(
     match block.inner.columns.get(idx) {
         Some(col) => CString::new(col.name.clone()).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut()),
         None      => std::ptr::null_mut(),
+    }
+}
+
+/// Get Int64 column data by name.
+/// Returns number of values written, or -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn kore_block_get_i64(
+    ptr:    *const KoreBlock,
+    col:    *const c_char,
+    out:    *mut c_longlong,
+    maxlen: u64,
+) -> i64 {
+    if ptr.is_null() || col.is_null() || out.is_null() { return -1; }
+    let col_name = match CStr::from_ptr(col).to_str() { Ok(s) => s, Err(_) => return -1 };
+    let block = &(*ptr).inner;
+    let column = match block.columns.iter().find(|c| c.name == col_name) {
+        Some(c) => c, None => { set_error(format!("column not found: {col_name}")); return -1; }
+    };
+    match &column.data {
+        ColumnData::Int64(v) => {
+            let n = v.len().min(maxlen as usize);
+            let out_slice = std::slice::from_raw_parts_mut(out, n);
+            for (i, val) in v[..n].iter().enumerate() {
+                out_slice[i] = val.unwrap_or(0);
+            }
+            n as i64
+        }
+        ColumnData::Float64(v) => {
+            // Allow reading float column as i64 (truncated)
+            let n = v.len().min(maxlen as usize);
+            let out_slice = std::slice::from_raw_parts_mut(out, n);
+            for (i, val) in v[..n].iter().enumerate() {
+                out_slice[i] = val.unwrap_or(0.0) as c_longlong;
+            }
+            n as i64
+        }
+        _ => { set_error("column is not numeric"); -1 }
     }
 }
 

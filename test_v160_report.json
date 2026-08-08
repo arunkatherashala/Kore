@@ -1,0 +1,106 @@
+{
+  "version": "1.6.0",
+  "run_at": "2026-08-08T14:27:57Z",
+  "passed": 17,
+  "failed": 0,
+  "total": 17,
+  "kore_file_bytes": 858,
+  "test_data": {
+    "rows": 10,
+    "columns": [
+      "order_id",
+      "price",
+      "quantity",
+      "timestamp_ms"
+    ],
+    "first_price": 10.5,
+    "first_ts_ms": 1786199277226
+  },
+  "results": [
+    {
+      "test": "Python __version__ == 1.6.0",
+      "pass": true,
+      "note": "1.6.0"
+    },
+    {
+      "test": "crc32 returns non-zero uint32",
+      "pass": true,
+      "note": "0x5946aaf8"
+    },
+    {
+      "test": "crc32 deterministic (same input \u2192 same output)",
+      "pass": true,
+      "note": ""
+    },
+    {
+      "test": "write_file creates .kore binary",
+      "pass": true,
+      "note": "858 bytes"
+    },
+    {
+      "test": "read_file: correct row count",
+      "pass": true,
+      "note": "10 rows"
+    },
+    {
+      "test": "read_file: correct column count",
+      "pass": true,
+      "note": "4 cols"
+    },
+    {
+      "test": "price values match original",
+      "pass": true,
+      "note": "got 10.50"
+    },
+    {
+      "test": "timestamps preserved (ms precision)",
+      "pass": true,
+      "note": "ts[0]=1786199277226"
+    },
+    {
+      "test": "round-trip 1: 3 rows",
+      "pass": true,
+      "note": "3"
+    },
+    {
+      "test": "round-trip 2: 3 rows",
+      "pass": true,
+      "note": "3"
+    },
+    {
+      "test": "round-trip 3: 3 rows",
+      "pass": true,
+      "note": "3"
+    },
+    {
+      "test": "Ruby: loads kore_ffi.dll",
+      "pass": true,
+      "note": "ok"
+    },
+    {
+      "test": "Ruby: reads 10 rows",
+      "pass": true,
+      "note": "got 10"
+    },
+    {
+      "test": "Ruby: reads 4 columns",
+      "pass": true,
+      "note": "got 4"
+    },
+    {
+      "test": "Ruby: crc32 matches Python",
+      "pass": true,
+      "note": "ruby=0x5946aaf8 py=0x5946aaf8"
+    },
+    {
+      "test": "Ruby: version matches 1.6.0",
+      "pass": true,
+      "note": ""
+    },
+    {
+      "test": "Python-written .kore readable by Ruby",
+      "pass": true,
+      "note": "same binary, same data"
+    }
+  ]
+}

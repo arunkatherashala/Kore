@@ -298,6 +298,9 @@ def read_file(path: Union[str, Path]) -> DataBlock:
     lib.kore_block_get_f64.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
                                         ctypes.POINTER(ctypes.c_double), ctypes.c_uint64]
     lib.kore_block_get_f64.restype = ctypes.c_int64
+    lib.kore_block_get_i64.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+                                        ctypes.POINTER(ctypes.c_longlong), ctypes.c_uint64]
+    lib.kore_block_get_i64.restype = ctypes.c_int64
     lib.kore_block_free.argtypes = [ctypes.c_void_p]
     lib.kore_last_error.restype = ctypes.c_char_p
 
@@ -314,11 +317,18 @@ def read_file(path: Union[str, Path]) -> DataBlock:
         for ci in range(ncols):
             raw_name = lib.kore_block_col_name(handle, ci)
             col_name = raw_name.decode('utf-8') if raw_name else f'col{ci}'
-            # Pass column NAME (string) not index — kore_block_get_f64 API
-            vals = (ctypes.c_double * nrows)()
-            n = lib.kore_block_get_f64(handle, col_name.encode('utf-8'), vals, nrows)
-            data = list(vals[:n]) if n > 0 else []
-            block.columns.append(Column(name=col_name, dtype=DataType.F64, data=data))
+
+            # Try F64 first, then I64
+            f64_buf = (ctypes.c_double * nrows)()
+            n_f64   = lib.kore_block_get_f64(handle, col_name.encode('utf-8'), f64_buf, nrows)
+            if n_f64 > 0:
+                block.columns.append(Column(name=col_name, dtype=DataType.F64,
+                                             data=list(f64_buf[:n_f64])))
+            else:
+                i64_buf = (ctypes.c_longlong * nrows)()
+                n_i64   = lib.kore_block_get_i64(handle, col_name.encode('utf-8'), i64_buf, nrows)
+                data    = list(i64_buf[:n_i64]) if n_i64 > 0 else []
+                block.columns.append(Column(name=col_name, dtype=DataType.I64, data=data))
 
         return block
     finally:
