@@ -1,155 +1,155 @@
 [
   {
     "description": "Scan 6M lineitem + GROUP BY",
-    "kore_ms": 13.2252,
+    "kore_ms": 8.7781,
     "query": "Q1",
     "rows": 6,
     "scale": 1,
     "spark_ms": 4200.0,
-    "speedup": 317.57553761001725
+    "speedup": 478.46344881010697
   },
   {
     "description": "orders×lineitem join + GROUP BY + LIMIT",
-    "kore_ms": 446.3662,
+    "kore_ms": 378.9318,
     "query": "Q3",
     "rows": 10,
     "scale": 1,
     "spark_ms": 8700.0,
-    "speedup": 19.49072308790406
+    "speedup": 22.959276576946035
   },
   {
     "description": "orders×lineitem semi-join + GROUP BY",
-    "kore_ms": 892.3677,
+    "kore_ms": 653.5785,
     "query": "Q4",
     "rows": 5,
     "scale": 1,
     "spark_ms": 6300.0,
-    "speedup": 7.059870051325255
+    "speedup": 9.639239968879027
   },
   {
     "description": "Scan + filter + SUM (no join)",
-    "kore_ms": 27.915100000000002,
+    "kore_ms": 17.4527,
     "query": "Q6",
     "rows": 1,
     "scale": 1,
     "spark_ms": 2800.0,
-    "speedup": 100.30413647094224
+    "speedup": 160.43362918058523
   },
   {
     "description": "5-table join + nation filter",
-    "kore_ms": 10.0483,
+    "kore_ms": 8.4008,
     "query": "Q7",
     "rows": 0,
     "scale": 1,
     "spark_ms": 14200.0,
-    "speedup": 1413.174367803509
+    "speedup": 1690.3152080754214
   },
   {
     "description": "7-table join + market share",
-    "kore_ms": 17.6833,
+    "kore_ms": 12.4791,
     "query": "Q8",
     "rows": 0,
     "scale": 1,
     "spark_ms": 18500.0,
-    "speedup": 1046.1848184445212
+    "speedup": 1482.4787043937463
   },
   {
     "description": "6-table join + profit by nation/year",
-    "kore_ms": 355.5065,
+    "kore_ms": 334.7103,
     "query": "Q9",
     "rows": 25,
     "scale": 1,
     "spark_ms": 16300.0,
-    "speedup": 45.850075877656245
+    "speedup": 48.698830003140024
   },
   {
     "description": "orders×lineitem + shipping mode GROUP BY",
-    "kore_ms": 59.4293,
+    "kore_ms": 55.228699999999996,
     "query": "Q12",
     "rows": 7,
     "scale": 1,
     "spark_ms": 7100.0,
-    "speedup": 119.46968919371422
+    "speedup": 128.556348420296
   },
   {
     "description": "customer×orders outer join distribution",
-    "kore_ms": 120.18220000000001,
+    "kore_ms": 62.55380000000001,
     "query": "Q13",
     "rows": 22,
     "scale": 1,
     "spark_ms": 5800.0,
-    "speedup": 48.26005847787775
+    "speedup": 92.72018646349221
   },
   {
     "description": "lineitem×part promo revenue",
-    "kore_ms": 17.0399,
+    "kore_ms": 14.266,
     "query": "Q14",
     "rows": 0,
     "scale": 1,
     "spark_ms": 4600.0,
-    "speedup": 269.95463588401344
+    "speedup": 322.4449740642086
   },
   {
     "description": "3-table join + large quantity orders",
-    "kore_ms": 987.973,
+    "kore_ms": 918.7755,
     "query": "Q18",
     "rows": 100,
     "scale": 1,
     "spark_ms": 11200.0,
-    "speedup": 11.33634218748893
+    "speedup": 12.190137851956218
   },
   {
     "description": "lineitem×part + nested OR filter",
-    "kore_ms": 1241.3101,
+    "kore_ms": 894.229,
     "query": "Q19",
     "rows": 1,
     "scale": 1,
     "spark_ms": 5400.0,
-    "speedup": 4.3502425381055065
+    "speedup": 6.038721624997623
   },
   {
     "description": "customer order distribution + subquery",
-    "kore_ms": 63.39019999999999,
+    "kore_ms": 38.8405,
     "query": "Q22",
     "rows": 7,
     "scale": 1,
     "spark_ms": 6900.0,
-    "speedup": 108.84963290855686
+    "speedup": 177.64961831078386
   },
   {
     "description": "Window functions over 6M rows",
-    "kore_ms": 412.1494,
+    "kore_ms": 480.04019999999997,
     "query": "W1",
     "rows": 6000000,
     "scale": 1,
     "spark_ms": 6500.0,
-    "speedup": 15.770980134873422
+    "speedup": 13.540532647057477
   },
   {
     "description": "Sort 6M rows (3 keys)",
-    "kore_ms": 78.8366,
+    "kore_ms": 105.2843,
     "query": "S1",
     "rows": 6000000,
     "scale": 1,
     "spark_ms": 5100.0,
-    "speedup": 64.69076545665338
+    "speedup": 48.44027077161552
   },
   {
     "description": "SIMD vectorized aggregation (AVX2)",
-    "kore_ms": 952.6441,
+    "kore_ms": 839.568,
     "query": "SIMD",
     "rows": 4,
     "scale": 1,
     "spark_ms": 100000.0,
-    "speedup": 104.97099598895328
+    "speedup": 119.10887504049703
   },
   {
     "description": "Distributed GROUP BY (4 workers)",
-    "kore_ms": 4101.7249,
+    "kore_ms": 3082.5804,
     "query": "D1",
     "rows": 6,
     "scale": 1,
     "spark_ms": 11300.0,
-    "speedup": 2.7549385381745126
+    "speedup": 3.665760023647721
   }
 ]
