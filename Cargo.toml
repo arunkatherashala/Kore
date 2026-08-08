@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "kore-core",
+    "kore-standalone","kore-core",
     "kore-join",
     "kore-cache",
     "kore-ml2",

@@ -17,6 +17,6 @@ jobs:
           toolchain: stable
       
       - name: Publish to crates.io
-        run: cargo publish -p kore-ffi --token "${{ secrets.CARGO_REGISTRY_TOKEN }}" --allow-dirty
+        run: cargo publish -p kore_fileformat --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
 
 

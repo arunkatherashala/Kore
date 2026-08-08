@@ -1,0 +1,13 @@
+[package]
+name        = "kore_fileformat"
+version     = "1.6.7"
+edition     = "2021"
+description = "KORE Binary Format — high-performance columnar file format with CRC32 integrity (pure Rust, zero deps)"
+license     = "MIT"
+repository  = "https://github.com/arunkatherashala/Kore"
+homepage    = "https://github.com/arunkatherashala/Kore"
+keywords    = ["kore", "columnar", "binary-format", "compression", "analytics"]
+categories  = ["encoding", "compression", "data-structures"]
+readme      = "README.md"
+
+[dependencies]
