@@ -33,3 +33,8 @@ benchmark.kore.idx/
 *.pem
 *.key
 secrets.toml
+
+# TPC-H large data files
+_tpch_tables/
+tpch_lineitem.csv
+tpch_*.csv

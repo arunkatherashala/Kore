@@ -1,13 +1,13 @@
 # KORE FileFormat — Node.js / TypeScript
 
-**Version 1.6.6** | [npm](https://www.npmjs.com/package/kore-fileformat) | [GitHub](https://github.com/arunkatherashala/Kore)
+**Version 1.6.7** | [npm](https://www.npmjs.com/package/kore-fileformat) | [GitHub](https://github.com/arunkatherashala/Kore)
 
 High-performance columnar format with 11 ACID features. Uses `koffi` for zero-compilation FFI to Rust `kore_ffi.dll`.
 
 ## Install
 
 ```bash
-npm install kore-fileformat@1.6.6
+npm install kore-fileformat@1.6.7
 ```
 
 Requires `kore_ffi.dll` / `libkore_ffi.so` (included in npm package or build from source):
