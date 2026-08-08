@@ -1,67 +1,131 @@
 //! KoreReader — deserialize bytes / a file back into a DataBlock.
 
-use std::io::{self, Read};
+use std::io::Read;
 use kore_core::{Column, ColumnData, DataBlock, KoreError};
 use crate::{Compression, DType, MAGIC, compress};
+use memmap2::Mmap;
+
+const READABLE_FOOTER_PREFIX: &[u8] = b"KORE-READABLE-FOOTER trailer_len=";
 
 pub struct KoreReader;
 
 impl KoreReader {
-    /// Parse a DataBlock from a byte slice.
+    /// Parse a DataBlock from a byte slice with zero-copy metadata parsing.
     pub fn from_bytes(data: &[u8]) -> Result<DataBlock, KoreError> {
-        let mut r = Cursor::new(data);
-        Self::read_from(&mut r)
-    }
+        let binary_data = strip_readable_trailer(data);
+        if binary_data.len() < 18 { // 4+2+4+8
+            return Err(KoreError::InvalidArgument("file too small".into()));
+        }
 
-    /// Read from any `Read` source.
-    pub fn read_from(r: &mut dyn Read) -> Result<DataBlock, KoreError> {
+        let mut pos = 0;
+
         // ── Header ────────────────────────────────────────────────────────
-        let mut magic = [0u8; 4];
-        r.read_exact(&mut magic).map_err(io_err)?;
-        if &magic != MAGIC {
+        if &binary_data[pos..pos+4] != MAGIC {
             return Err(KoreError::InvalidArgument("invalid KORE magic bytes".into()));
         }
-        let version = read_u16(r)?;
+        pos += 4;
+        let version = u16::from_le_bytes(binary_data[pos..pos+2].try_into().unwrap());
+        pos += 2;
         if version != crate::VERSION && version != 1 {
             return Err(KoreError::InvalidArgument(format!("unsupported version {version}")));
         }
-        let num_cols = read_u32(r)? as usize;
-        let num_rows = read_u64(r)? as usize;
+        let num_cols = u32::from_le_bytes(binary_data[pos..pos+4].try_into().unwrap()) as usize;
+        pos += 4;
+        let num_rows = u64::from_le_bytes(binary_data[pos..pos+8].try_into().unwrap()) as usize;
+        pos += 8;
 
         // ── Schema ────────────────────────────────────────────────────────
         let mut schema: Vec<(String, DType)> = Vec::with_capacity(num_cols);
         for _ in 0..num_cols {
-            let name_len = read_u16(r)? as usize;
-            let mut name_bytes = vec![0u8; name_len];
-            r.read_exact(&mut name_bytes).map_err(io_err)?;
-            let name = String::from_utf8(name_bytes)
+            let name_len = u16::from_le_bytes(binary_data[pos..pos+2].try_into().unwrap()) as usize;
+            pos += 2;
+            let name = String::from_utf8(binary_data[pos..pos+name_len].to_vec())
                 .map_err(|_| KoreError::InvalidArgument("invalid UTF-8 column name".into()))?;
-            let dtype_byte = read_u8(r)?;
+            pos += name_len;
+            let dtype_byte = binary_data[pos];
+            pos += 1;
             let dtype = DType::try_from(dtype_byte)?;
             schema.push((name, dtype));
         }
 
         // ── Column data ───────────────────────────────────────────────────
-        let mut columns: Vec<Column> = Vec::with_capacity(num_cols);
-        for (i, (name, dtype)) in schema.into_iter().enumerate() {
-            let comp_byte  = read_u8(r)?;
-            let comp       = Compression::try_from(comp_byte)?;
-            let data_len   = read_u64(r)? as usize;
-            let mut raw    = vec![0u8; data_len];
-            r.read_exact(&mut raw).map_err(io_err)?;
-            let col_data = decode_column(&raw, dtype, comp, num_rows)
-                .map_err(|e| KoreError::InvalidArgument(format!("col {}: {}", i, e)))?;
-            columns.push(Column { name, data: col_data });
+        use rayon::prelude::*;
+
+        struct ColChunk<'a> {
+            name: String,
+            dtype: DType,
+            comp: Compression,
+            raw: &'a [u8],
         }
 
-        Ok(DataBlock { columns, num_rows })
+        let mut chunks = Vec::with_capacity(num_cols);
+        for (name, dtype) in schema {
+            let comp_byte = binary_data[pos];
+            pos += 1;
+            let comp = Compression::try_from(comp_byte)?;
+            let data_len = u64::from_le_bytes(binary_data[pos..pos+8].try_into().unwrap()) as usize;
+            pos += 8;
+            let raw = &binary_data[pos..pos+data_len];
+            pos += data_len;
+            chunks.push(ColChunk { name, dtype, comp, raw });
+        }
+
+        let columns: Result<Vec<Column>, String> = chunks.into_par_iter()
+            .enumerate()
+            .map(|(i, chunk)| {
+                let col_data = decode_column(chunk.raw, chunk.dtype, chunk.comp, num_rows)
+                    .map_err(|e| format!("col {}: {}", i, e))?;
+                Ok(Column { name: chunk.name, data: col_data })
+            })
+            .collect();
+
+        Ok(DataBlock { 
+            columns: columns.map_err(|e| KoreError::InvalidArgument(e))?, 
+            num_rows 
+        })
     }
 
-    /// Convenience: read from a file path.
-    pub fn read_file(path: &std::path::Path) -> Result<DataBlock, KoreError> {
-        let bytes = std::fs::read(path).map_err(io_err)?;
+    /// Read from any `Read` source (no zero-copy slicing).
+    pub fn read_from(r: &mut dyn Read) -> Result<DataBlock, KoreError> {
+        let mut bytes = Vec::new();
+        r.read_to_end(&mut bytes).map_err(io_err)?;
         Self::from_bytes(&bytes)
     }
+
+    /// High Performance: Use Memory Mapped I/O for zero-copy file bridge.
+    pub fn read_file(path: &std::path::Path) -> Result<DataBlock, KoreError> {
+        let file = std::fs::File::open(path).map_err(io_err)?;
+        let mmap = unsafe { Mmap::map(&file).map_err(io_err)? };
+        Self::from_bytes(&mmap)
+    }
+}
+
+fn strip_readable_trailer(data: &[u8]) -> &[u8] {
+    match find_footer_prefix(data) {
+        Some(footer_start) => {
+            let digits_start = footer_start + READABLE_FOOTER_PREFIX.len();
+            let digits_end = digits_start.saturating_add(20);
+            if digits_end > data.len() {
+                return data;
+            }
+            let trailer_len = std::str::from_utf8(&data[digits_start..digits_end])
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok());
+            match trailer_len.and_then(|len| footer_start.checked_sub(len)) {
+                Some(binary_end) => &data[..binary_end],
+                None => data,
+            }
+        }
+        None => data,
+    }
+}
+
+fn find_footer_prefix(data: &[u8]) -> Option<usize> {
+    if data.len() < READABLE_FOOTER_PREFIX.len() {
+        return None;
+    }
+    data.windows(READABLE_FOOTER_PREFIX.len())
+        .rposition(|window| window == READABLE_FOOTER_PREFIX)
 }
 
 fn decode_column(raw: &[u8], dtype: DType, comp: Compression, n: usize) -> Result<ColumnData, String> {
@@ -84,11 +148,26 @@ fn decode_column(raw: &[u8], dtype: DType, comp: Compression, n: usize) -> Resul
                 Compression::Rle    => compress::rle_decode_i64(raw, n),
                 _                   => {
                     let mut out = Vec::with_capacity(n);
-                    let mut i = 0;
-                    while i + 9 <= raw.len() && out.len() < n {
-                        let is_null = raw[i]; i += 1;
-                        let v = i64::from_le_bytes(raw[i..i+8].try_into().unwrap()); i += 8;
-                        out.push(if is_null == 1 { None } else { Some(v) });
+                    match n * 9 <= raw.len() {
+                        true => {
+                            // Fast path: manually unrolled loop for null-tag + i64
+                            let mut i = 0;
+                            while i + 9 <= raw.len() && out.len() < n {
+                                let is_null = raw[i];
+                                let v = i64::from_le_bytes(raw[i+1..i+9].try_into().unwrap());
+                                out.push(if is_null == 1 { None } else { Some(v) });
+                                i += 9;
+                            }
+                        }
+                        false => {
+                            // Fallback for smaller/malformed blocks
+                            let mut i = 0;
+                            while i + 9 <= raw.len() && out.len() < n {
+                                let is_null = raw[i]; i += 1;
+                                let v = i64::from_le_bytes(raw[i..i+8].try_into().unwrap()); i += 8;
+                                out.push(if is_null == 1 { None } else { Some(v) });
+                            }
+                        }
                     }
                     out
                 }
@@ -109,26 +188,9 @@ fn decode_column(raw: &[u8], dtype: DType, comp: Compression, n: usize) -> Resul
     })
 }
 
-// ─── Cursor + read helpers ────────────────────────────────────────────────────
-
-struct Cursor<'a> { data: &'a [u8], pos: usize }
-impl<'a> Cursor<'a> { fn new(data: &'a [u8]) -> Self { Self { data, pos: 0 } } }
-impl<'a> Read for Cursor<'a> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = buf.len().min(self.data.len() - self.pos);
-        buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
-        self.pos += n;
-        Ok(n)
-    }
-}
-
 fn io_err<E: std::fmt::Display>(e: E) -> KoreError {
     KoreError::InvalidArgument(format!("io: {}", e))
 }
-fn read_u8(r: &mut dyn Read)  -> Result<u8,  KoreError> { let mut b = [0u8;1]; r.read_exact(&mut b).map_err(io_err)?; Ok(b[0]) }
-fn read_u16(r: &mut dyn Read) -> Result<u16, KoreError> { let mut b = [0u8;2]; r.read_exact(&mut b).map_err(io_err)?; Ok(u16::from_le_bytes(b)) }
-fn read_u32(r: &mut dyn Read) -> Result<u32, KoreError> { let mut b = [0u8;4]; r.read_exact(&mut b).map_err(io_err)?; Ok(u32::from_le_bytes(b)) }
-fn read_u64(r: &mut dyn Read) -> Result<u64, KoreError> { let mut b = [0u8;8]; r.read_exact(&mut b).map_err(io_err)?; Ok(u64::from_le_bytes(b)) }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
