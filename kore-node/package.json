@@ -1,0 +1,36 @@
+{
+  "name": "kore-fileformat",
+  "version": "1.6.0",
+  "description": "KORE Binary Format — high-performance columnar file format with 11 ACID features, 8-language FFI",
+  "main": "kore_ffi.js",
+  "types": "kore_fileformat.d.ts",
+  "author": "Sai Arun Kumar Katherashala <arunkatherashala@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/arunkatherashala/Kore.git"
+  },
+  "homepage": "https://github.com/arunkatherashala/Kore#readme",
+  "keywords": ["kore", "columnar", "binary", "format", "ACID", "compression", "analytics"],
+  "dependencies": {
+    "koffi": "^2.9.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0"
+  },
+  "scripts": {
+    "build": "tsc kore_fileformat.ts",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "files": [
+    "kore_fileformat.js",
+    "kore_fileformat.ts",
+    "kore_fileformat.d.ts",
+    "kore_ffi.js",
+    "README.md"
+  ]
+}
