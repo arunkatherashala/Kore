@@ -1,0 +1,786 @@
+[
+  {
+    "engine": "DuckDB",
+    "feature": "COUNT(*)",
+    "status": "\u2705 PASS",
+    "note": "6M rows",
+    "ms": 7076.064000008046
+  },
+  {
+    "engine": "Spark",
+    "feature": "COUNT(*)",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 233.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "COUNT(*)",
+    "status": "\u2705 PASS",
+    "note": "on memories table",
+    "ms": 2699.8578000057023
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "AVG()",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 449.11380000121426
+  },
+  {
+    "engine": "Spark",
+    "feature": "AVG()",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 315.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "AVG()",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 163.22200000286102
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "GROUP BY + ORDER BY",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 637.0975000027101
+  },
+  {
+    "engine": "Spark",
+    "feature": "GROUP BY + ORDER BY",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 817.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "GROUP BY + ORDER BY",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 218.7841999984812
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "HAVING",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 712.3676999908639
+  },
+  {
+    "engine": "Spark",
+    "feature": "HAVING",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 352.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "HAVING",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 188.39280000247527
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "DISTINCT",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 497.38929999875836
+  },
+  {
+    "engine": "Spark",
+    "feature": "DISTINCT",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 349.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "DISTINCT",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 242.40450000797864
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "INNER JOIN",
+    "status": "\u2705 PASS",
+    "note": "self-join 1M rows",
+    "ms": 489.2056999960914
+  },
+  {
+    "engine": "Spark",
+    "feature": "INNER JOIN",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 556.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "INNER JOIN",
+    "status": "\u274c FAIL",
+    "note": "timeout >15s",
+    "ms": null
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "LEFT JOIN",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 590.1333999936469
+  },
+  {
+    "engine": "Spark",
+    "feature": "LEFT JOIN",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 263.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "LEFT JOIN",
+    "status": "\u274c FAIL",
+    "note": "timeout >15s",
+    "ms": null
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "FULL OUTER JOIN",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 5443.9951999956975
+  },
+  {
+    "engine": "Spark",
+    "feature": "FULL OUTER JOIN",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 283.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "FULL OUTER JOIN",
+    "status": "\u274c FAIL",
+    "note": "timeout >15s",
+    "ms": null
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "ROW_NUMBER() OVER PARTITION",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 723.2406999974046
+  },
+  {
+    "engine": "Spark",
+    "feature": "ROW_NUMBER() OVER PARTITION",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 5485.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "ROW_NUMBER() OVER PARTITION",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 236.5482999884989
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "RANK() OVER",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 682.1723000030033
+  },
+  {
+    "engine": "Spark",
+    "feature": "RANK() OVER",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 5260.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "RANK() OVER",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 583.0795000074431
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "LAG() / LEAD()",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 667.2500999993645
+  },
+  {
+    "engine": "Spark",
+    "feature": "LAG() / LEAD()",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 5170.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "LAG() / LEAD()",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 221.96619999886025
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "NTILE()",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 708.0004000017652
+  },
+  {
+    "engine": "Spark",
+    "feature": "NTILE()",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 5792.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "NTILE()",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 232.25310000998434
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "SUM OVER (cumulative)",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 595.7127000001492
+  },
+  {
+    "engine": "Spark",
+    "feature": "SUM OVER (cumulative)",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 5386.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "SUM OVER (cumulative)",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 224.13550000055693
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "Scalar subquery (WHERE > AVG)",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 437.2612000006484
+  },
+  {
+    "engine": "Spark",
+    "feature": "Scalar subquery (WHERE > AVG)",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 299.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "Scalar subquery (WHERE > AVG)",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 265.5583000014303
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "IN (subquery)",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 540.7243999943603
+  },
+  {
+    "engine": "Spark",
+    "feature": "IN (subquery)",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 2730.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "IN (subquery)",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 214.11870000883937
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "EXISTS (subquery)",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 632.1507000102429
+  },
+  {
+    "engine": "Spark",
+    "feature": "EXISTS (subquery)",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 710.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "EXISTS (subquery)",
+    "status": "\u274c FAIL",
+    "note": "timeout >15s",
+    "ms": null
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "Subquery in FROM",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 295.7689000031678
+  },
+  {
+    "engine": "Spark",
+    "feature": "Subquery in FROM",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 569.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "Subquery in FROM",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 160.94659999362193
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "CTE (WITH clause)",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 289.80840000440367
+  },
+  {
+    "engine": "Spark",
+    "feature": "CTE (WITH clause)",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 450.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "CTE (WITH clause)",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 175.85269999108277
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "UNION ALL",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 363.5041999950772
+  },
+  {
+    "engine": "Spark",
+    "feature": "UNION ALL",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 164.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "UNION ALL",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 215.65489999193233
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "UNION (distinct)",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 375.2620000013849
+  },
+  {
+    "engine": "Spark",
+    "feature": "UNION (distinct)",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 634.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "UNION (distinct)",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 187.02559999655932
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "CASE / WHEN / ELSE",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 231.42949999601115
+  },
+  {
+    "engine": "Spark",
+    "feature": "CASE / WHEN / ELSE",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 130.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "CASE / WHEN / ELSE",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 331.02250000229105
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "LIKE wildcard",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 460.7517000113148
+  },
+  {
+    "engine": "Spark",
+    "feature": "LIKE wildcard",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 391.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "LIKE wildcard",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 351.5867999958573
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "BETWEEN",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 416.1534000013489
+  },
+  {
+    "engine": "Spark",
+    "feature": "BETWEEN",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 72.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "BETWEEN",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 282.0426999969641
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "IN (list)",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 224.21749999921303
+  },
+  {
+    "engine": "Spark",
+    "feature": "IN (list)",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 116.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "IN (list)",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 317.58350000018254
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "IS NULL",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 358.99090000020806
+  },
+  {
+    "engine": "Spark",
+    "feature": "IS NULL",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 86.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "IS NULL",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 216.22709999792278
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "Sort 6M rows",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 1099.137500001234
+  },
+  {
+    "engine": "Spark",
+    "feature": "Sort 6M rows",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 332.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "Sort memories (small)",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 266.5146000072127
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "Multi-agg 6M rows (TPC-H Q1 style)",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 796.5168999944581
+  },
+  {
+    "engine": "Spark",
+    "feature": "Multi-agg 6M rows (TPC-H Q1 style)",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 402.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "Multi-agg (memories)",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 228.05019999213982
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "Disk spill (data > RAM)",
+    "status": "\u2705 PASS",
+    "note": "auto-spills to temp files \u2014 by design",
+    "ms": null
+  },
+  {
+    "engine": "Spark",
+    "feature": "Disk spill (data > RAM)",
+    "status": "\u2705 PASS",
+    "note": "auto-spills via shuffle/sort spill manager",
+    "ms": null
+  },
+  {
+    "engine": "KORE",
+    "feature": "Disk spill (data > RAM)",
+    "status": "\u274c FAIL",
+    "note": "in-memory only; kore-spill crate is WIP",
+    "ms": null
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "Native disk format (.duckdb)",
+    "status": "\u2705 PASS",
+    "note": "ACID, instant reload",
+    "ms": null
+  },
+  {
+    "engine": "Spark",
+    "feature": "Native disk format",
+    "status": "\u2705 PASS",
+    "note": "Parquet, ORC, Delta natively",
+    "ms": null
+  },
+  {
+    "engine": "KORE",
+    "feature": "Native .kore format",
+    "status": "\u2705 PASS",
+    "note": "binary columnar format (kore-store)",
+    "ms": null
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "ACID transactions",
+    "status": "\u2705 PASS",
+    "note": "full ACID on .duckdb file",
+    "ms": null
+  },
+  {
+    "engine": "Spark",
+    "feature": "ACID transactions",
+    "status": "\u26a0\ufe0f  PARTIAL",
+    "note": "Delta Lake add-on required",
+    "ms": null
+  },
+  {
+    "engine": "KORE",
+    "feature": "ACID transactions",
+    "status": "\u2705 PASS",
+    "note": "kore-delta ACID log \u2014 tested in test_acid.delta/",
+    "ms": null
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "INSERT/UPDATE/DELETE",
+    "status": "\u2705 PASS",
+    "note": "full DML",
+    "ms": null
+  },
+  {
+    "engine": "Spark",
+    "feature": "INSERT/UPDATE/DELETE",
+    "status": "\u26a0\ufe0f  PARTIAL",
+    "note": "INSERT via .write; UPDATE/DELETE requires Delta",
+    "ms": null
+  },
+  {
+    "engine": "KORE",
+    "feature": "INSERT",
+    "status": "\u2705 PASS",
+    "note": "INSERT INTO ... SELECT / VALUES implemented",
+    "ms": null
+  },
+  {
+    "engine": "KORE",
+    "feature": "UPDATE / DELETE",
+    "status": "\u26a0\ufe0f  PARTIAL",
+    "note": "kore-dml crate: UPDATE \u2713, DELETE \u2713 \u2014 no SQL surface yet",
+    "ms": null
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "Multi-core (1 node)",
+    "status": "\u2705 PASS",
+    "note": "all cores, vectorized (SIMD)",
+    "ms": null
+  },
+  {
+    "engine": "Spark",
+    "feature": "Multi-core (1 node)",
+    "status": "\u2705 PASS",
+    "note": "local[*] mode",
+    "ms": null
+  },
+  {
+    "engine": "KORE",
+    "feature": "Multi-core (1 node)",
+    "status": "\u2705 PASS",
+    "note": "rayon parallel, all cores",
+    "ms": null
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "True multi-node cluster",
+    "status": "\u274c FAIL",
+    "note": "single-node by design",
+    "ms": null
+  },
+  {
+    "engine": "Spark",
+    "feature": "True multi-node cluster",
+    "status": "\u2705 PASS",
+    "note": "YARN / Kubernetes \u2014 1000+ nodes",
+    "ms": null
+  },
+  {
+    "engine": "KORE",
+    "feature": "True multi-node cluster (beta)",
+    "status": "\u26a0\ufe0f  PARTIAL",
+    "note": "kore-distributed: 4-worker tested, ~2.5\u00d7 vs single-node; production WIP",
+    "ms": null
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "COUNT(DISTINCT col)",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 453.4315000055358
+  },
+  {
+    "engine": "Spark",
+    "feature": "COUNT(DISTINCT col)",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 2144.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "COUNT(DISTINCT col)",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 232.38109999510925
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "COALESCE()",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 295.9375999926124
+  },
+  {
+    "engine": "Spark",
+    "feature": "COALESCE()",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 57.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "COALESCE()",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 270.0576000061119
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "String functions (UPPER/LOWER)",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 412.7664999978151
+  },
+  {
+    "engine": "Spark",
+    "feature": "String functions (UPPER/LOWER)",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 845.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "String functions (UPPER/LOWER)",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 392.1713000017917
+  },
+  {
+    "engine": "DuckDB",
+    "feature": "ROUND()",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 205.849500009208
+  },
+  {
+    "engine": "Spark",
+    "feature": "ROUND()",
+    "status": "\u2705 PASS",
+    "note": "",
+    "ms": 65.0
+  },
+  {
+    "engine": "KORE",
+    "feature": "ROUND()",
+    "status": "\u2705 PASS",
+    "note": "ok",
+    "ms": 161.69490000174847
+  }
+]

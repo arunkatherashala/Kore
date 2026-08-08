@@ -1,0 +1,9 @@
+[package]
+name    = "kore-body"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kore-core = { workspace = true }
+serde     = { workspace = true }
+thiserror = { workspace = true }

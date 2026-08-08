@@ -1,0 +1,197 @@
+{
+  "date": "2026-07-05",
+  "author": "Sai Arun Kumar Katherashala",
+  "unit_tests": {
+    "passed": 245,
+    "failed": 0
+  },
+  "benchmarks": {
+    "kore": {
+      "Q1": 11.5114,
+      "Q3": 354.58869999999996,
+      "Q6": 22.052100000000003,
+      "W1": 463.478,
+      "S1": 88.4084,
+      "SIMD": 1023.6157,
+      "D1": 3570.8677
+    },
+    "duckdb": {
+      "Q1": 918.7315999879502,
+      "Q3": 943.3971000253223,
+      "Q6": 797.5904999766499,
+      "Sort": 926.1612000409514,
+      "Count": 609.697200008668
+    },
+    "spark": {}
+  },
+  "sql_features": [
+    {
+      "feature": "SELECT COUNT(*)",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "AVG / SUM / MIN / MAX",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "GROUP BY + ORDER BY",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "SELECT DISTINCT",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "HAVING",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "WHERE + LIMIT",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "LIKE / wildcard",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "CASE WHEN THEN",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "CTE (WITH clause)",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "UNION ALL",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "INNER JOIN",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "LEFT JOIN",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "FULL OUTER JOIN",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "ROW_NUMBER() OVER",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "LAG() OVER PARTITION",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "NTILE() window",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "Scalar subquery (= MAX)",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "Scalar subquery (> AVG)",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "IN subquery",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "NOT IN subquery",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "Correlated subquery",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "EXISTS subquery",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "Sort 6M rows",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "INSERT INTO (DML)",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u26a0\ufe0f "
+    },
+    {
+      "feature": "Spill to disk (>256MB sort)",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "ACID transactions",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u26a0\ufe0f "
+    },
+    {
+      "feature": "Native .kore persistence",
+      "kore": "\u2705",
+      "duckdb": "\u2705",
+      "spark": "\u2705"
+    },
+    {
+      "feature": "Multi-node cluster",
+      "kore": "\u26a0\ufe0f ",
+      "duckdb": "\u274c",
+      "spark": "\u2705"
+    }
+  ]
+}

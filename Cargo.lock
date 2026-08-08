@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "kore-ffi"
-version = "0.1.0"
+version = "1.6.0"
 dependencies = [
  "kore-core",
  "kore-io",
@@ -1282,6 +1282,7 @@ dependencies = [
  "kore-ml3",
  "kore-parquet",
  "kore-sql",
+ "kore-store",
  "libc",
  "serde_json",
  "thiserror 2.0.18",
@@ -1591,7 +1592,7 @@ dependencies = [
 
 [[package]]
 name = "kore-store"
-version = "0.1.0"
+version = "1.6.0"
 dependencies = [
  "aes-gcm",
  "crc",

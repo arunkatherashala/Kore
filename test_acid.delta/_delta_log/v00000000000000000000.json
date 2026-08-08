@@ -1,0 +1,47 @@
+{
+  "version": 0,
+  "actions": [
+    {
+      "op": "CommitInfo",
+      "timestamp": 1783260718639,
+      "operation": "CREATE TABLE",
+      "user": "kore"
+    },
+    {
+      "op": "Metadata",
+      "schema": [
+        {
+          "name": "id",
+          "dtype": "INT64",
+          "nullable": true
+        },
+        {
+          "name": "kind",
+          "dtype": "STR",
+          "nullable": true
+        },
+        {
+          "name": "content",
+          "dtype": "STR",
+          "nullable": true
+        },
+        {
+          "name": "importance",
+          "dtype": "FLOAT64",
+          "nullable": true
+        },
+        {
+          "name": "timestamp",
+          "dtype": "STR",
+          "nullable": true
+        },
+        {
+          "name": "tags",
+          "dtype": "STR",
+          "nullable": true
+        }
+      ],
+      "description": "Created by KORE"
+    }
+  ]
+}

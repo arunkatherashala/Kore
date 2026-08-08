@@ -1,0 +1,10 @@
+[package]
+name    = "kore-federation"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+ed25519-dalek   = { version = "2.1", features = ["serde", "rand_core"] }
+rand_core       = { version = "0.6", features = ["getrandom"] }
