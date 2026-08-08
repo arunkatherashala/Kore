@@ -1,6 +1,0 @@
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"self_ingest","arguments":{"content":"Need to track my emotional state and mood while coding. Feel stressed when debugging hard bugs. Feel happy when benchmarks beat Spark.","kind":"experience","importance":0.9}}}
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"self_ingest","arguments":{"content":"Goal: finish KORE distributed layer by end of month. Milestone: all 7 TPC-H queries distributed.","kind":"goal","importance":0.95}}}
-{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"self_read_source","arguments":{}}}
-{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"self_plan_feature","arguments":{}}}
-{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"self_evolve","arguments":{"write":false}}}

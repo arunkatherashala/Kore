@@ -37,3 +37,26 @@ benchmark.kore.idx/
 *.pem
 *.key
 secrets.toml
+
+# Output/scratch files — never commit these
+*.txt
+!README.txt
+node_modules/
+*.class
+kore_self_demo.jsonl
+kore_self_evo_demo.jsonl
+build_err.txt
+bench_spark_out*.txt
+bench_formats_out.txt
+bench_result.txt
+bench_limitations_results.json
+bench_3way_results.json
+final_report.json
+full_report.json
+genuine_limits_results.json
+verify_fixes*.py
+debug*.py
+scale_demo.py
+genuine_limits_test.py
+test_acid.delta/
+test_memories.delta/

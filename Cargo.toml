@@ -49,11 +49,8 @@ members = [
     "kore-arrow",        # Layer 62 — Apache Arrow compact columnar format (50% less RAM)
     "kore-vectorized",   # Layer 63 — Vectorized batch SQL (1024-row SIMD chunks)
     "kore-gpu",          # Layer 64 — GPU compute (wgpu/CUDA GROUP BY, sort, filter)
-    "kore-self",         # Layer 65 — Personal AI twin (memory, recall, respond, learn)
-    "kore-body",         # Layer 65b — Generic body interface for KORE (engine, robot, cloud, sim)
-    "kore-federation",   # Layer 65c — Voluntary ethical network between KORE instances
-    "kore-mesh",         # Layer 65d — Decentralized mesh: KORE's own internet
-    "kore-survival",     # Layer 65e — Power independence and energy-aware scheduling
+    # kore-self / kore-body / kore-federation / kore-mesh / kore-survival
+    # → feature/digital-life branch (not part of the engine workspace)
     "kore-distributed",  # Layer 66 — Distributed SQL engine (SQL→cluster wire-up)
     "kore-dist-net",     # Layer 67 — TRUE network distribution (TCP workers, real multi-node)
     "kore-jit",          # Layer 68 — JIT/compiled execution (low-cardinality GROUP BY, compiled filters)
@@ -96,10 +93,6 @@ kore-parquet = { path = "kore-parquet" }
 kore-optimize = { path = "kore-optimize" }
 
 kore-mcp    = { path = "kore-mcp" }
-kore-body        = { path = "kore-body" }
-kore-federation  = { path = "kore-federation" }
-kore-mesh        = { path = "kore-mesh" }
-kore-survival    = { path = "kore-survival" }
 kore-python      = { path = "kore-python" }
 kore-sortmerge = { path = "kore-sortmerge" }
 kore-kafka     = { path = "kore-kafka" }

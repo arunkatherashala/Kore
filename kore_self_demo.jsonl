@@ -1,9 +1,0 @@
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"self_ingest","arguments":{"content":"Built KORE SQL engine beating Apache Spark 8x on TPC-H benchmarks. Chose performance over readability always. Rust is the right choice for data engines.","kind":"decision","importance":1.0}}}
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"self_ingest","arguments":{"content":"Decided to use zero-copy architecture for all data pipelines. Chose performance over safety in hot paths. Using unsafe Rust where benchmarks justify it.","kind":"decision","importance":0.95}}}
-{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"self_ingest","arguments":{"content":"Rejected microservices for KORE. Chose monolith architecture for the core engine. Single binary is the right choice for performance.","kind":"decision","importance":0.9}}}
-{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"self_stats","arguments":{}}}
-{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"self_predict","arguments":{"context":"choosing between microservices and monolith for the next KORE module"}}}
-{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"self_dream","arguments":{}}}
-{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"self_speak","arguments":{"prompt":"How should we design the distributed layer of KORE?"}}}
-{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"self_epitaph","arguments":{}}}
