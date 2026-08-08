@@ -53,12 +53,12 @@ Write-Host "Done — verify with: Select-String -Path pyproject.toml -Pattern 'v
 git add -A
 git commit -m "chore: release v$NEW"
 git tag "v$NEW"
-git push origin feature/phase2-acid-implementation
-git push origin feature/phase2-acid-implementation:refs/heads/release/v0.1.0 --force
+git push origin fileformat
+git push origin fileformat:refs/heads/fileformat
 git push origin "v$NEW"
 ```
 
-> **Important:** Force-pushing `release/v0.1.0` is required because GitHub Actions reads workflows from the **default branch** (`release/v0.1.0`) for tag-triggered events.
+> **Important:** `fileformat` is the permanent default branch for kore-fileformat SDK. GitHub Actions reads workflows from this branch for all tag-triggered events.
 
 ---
 
@@ -82,7 +82,7 @@ Check all runs at: https://github.com/arunkatherashala/Kore/actions
 
 NuGet does NOT yet have a secret. After adding `NUGET_API_KEY`:
 1. Go to: https://github.com/arunkatherashala/Kore/actions/workflows/publish-nuget.yml
-2. Click **"Run workflow"** → select branch `release/v0.1.0` → **Run workflow**
+2. Click **"Run workflow"** → select branch `fileformat` → **Run workflow**
 
 ---
 
