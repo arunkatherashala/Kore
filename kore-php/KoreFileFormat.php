@@ -292,82 +292,127 @@ class DeleteVector
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Main KORE FileFormat API.
+ * Main KORE FileFormat API — wired to Rust kore_ffi via PHP FFI.
  */
 class FileFormat
 {
     private static ?\FFI $ffi = null;
 
-    /**
-     * Load native FFI bindings (Phase 3 TODO).
-     */
-    private static function getFfi(): ?\FFI
+    private static function getFfi(): \FFI
     {
         if (self::$ffi !== null) {
             return self::$ffi;
         }
 
-        // TODO: Load libkore_ffi via FFI::load()
-        // if (!extension_loaded('ffi')) {
-        //     throw new \RuntimeException('PHP FFI extension is required');
-        // }
-        //
-        // self::$ffi = \FFI::load(__DIR__ . '/kore.h');
-        return null;
+        $here = __DIR__;
+        $candidates = [
+            $here . '/../target/release/kore_ffi.dll',      // Windows
+            $here . '/../target/release/libkore_ffi.so',    // Linux
+            $here . '/../target/release/libkore_ffi.dylib', // macOS
+        ];
+        $dll = null;
+        foreach ($candidates as $c) {
+            if (file_exists($c)) { $dll = realpath($c); break; }
+        }
+        if (!$dll) {
+            throw new \RuntimeException(
+                'kore_ffi not found. Build: cargo build --release -p kore-ffi'
+            );
+        }
+
+        self::$ffi = \FFI::cdef(<<<EOH
+            typedef void KoreBlock;
+            uint32_t kore_crc32(const uint8_t* data, size_t len);
+            KoreBlock* kore_block_new();
+            void       kore_block_free(KoreBlock* block);
+            int        kore_block_add_f64(KoreBlock* block, const char* name, const double* data, size_t len);
+            int        kore_block_add_i64(KoreBlock* block, const char* name, const int64_t* data, size_t len);
+            int        kore_write_file(const char* path, KoreBlock* block);
+            KoreBlock* kore_read_file(const char* path);
+            uint64_t   kore_block_num_rows(const KoreBlock* block);
+            uint32_t   kore_block_num_cols(const KoreBlock* block);
+            char*      kore_block_col_name(const KoreBlock* block, size_t idx);
+            int64_t    kore_block_get_f64(const KoreBlock* block, const char* col, double* out, uint64_t maxlen);
+            void       kore_free_string(char* s);
+EOH, $dll);
+        return self::$ffi;
     }
 
     // ─────────────────────────────────────────────────────────────────────
     // HIGH-LEVEL API
     // ─────────────────────────────────────────────────────────────────────
 
-    /**
-     * Compute CRC32 checksum.
-     */
     public static function crc32(string $data): int
     {
-        // TODO: Call Rust kore_crc32 via FFI
-        throw new \RuntimeException('Phase 3: CRC32 FFI pending');
+        $ffi = self::getFfi();
+        $buf = \FFI::new("uint8_t[" . strlen($data) . "]");
+        \FFI::memcpy($buf, $data, strlen($data));
+        return $ffi->kore_crc32($buf, strlen($data));
     }
 
-    /**
-     * Write DataBlock to KORE file (Phase 3 placeholder).
-     */
     public static function writeFile(string $path, DataBlock $dataBlock): void
     {
-        // TODO: Call Rust kore_write_file via FFI
-        // For now: JSON fallback
-        file_put_contents($path, json_encode($dataBlock->toArray(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+        $ffi    = self::getFfi();
+        $handle = $ffi->kore_block_new();
+        if (\FFI::isNull($handle)) throw new \RuntimeException('kore_block_new failed');
+        try {
+            foreach ($dataBlock->columns as $col) {
+                if ($col->dtype === DataType::F64 && count($col->data) > 0) {
+                    $arr = \FFI::new('double[' . count($col->data) . ']');
+                    foreach ($col->data as $i => $v) $arr[$i] = (float)$v;
+                    $ffi->kore_block_add_f64($handle, $col->name, $arr, count($col->data));
+                } elseif ($col->dtype === DataType::I64 && count($col->data) > 0) {
+                    $arr = \FFI::new('int64_t[' . count($col->data) . ']');
+                    foreach ($col->data as $i => $v) $arr[$i] = (int)$v;
+                    $ffi->kore_block_add_i64($handle, $col->name, $arr, count($col->data));
+                }
+            }
+            $rc = $ffi->kore_write_file($path, $handle);
+            if ($rc !== 0) throw new \RuntimeException("kore_write_file failed (rc=$rc)");
+        } finally {
+            $ffi->kore_block_free($handle);
+        }
     }
 
-    /**
-     * Read KORE file into DataBlock (Phase 3 placeholder).
-     */
     public static function readFile(string $path): DataBlock
     {
-        // TODO: Call Rust kore_read_file via FFI
-        // For now: JSON fallback
-        throw new \RuntimeException('Phase 3: Binary format reading pending');
+        $ffi    = self::getFfi();
+        $handle = $ffi->kore_read_file($path);
+        if (\FFI::isNull($handle)) throw new \RuntimeException("kore_read_file failed: $path");
+        try {
+            $nrows = $ffi->kore_block_num_rows($handle);
+            $ncols = $ffi->kore_block_num_cols($handle);
+            $block = new DataBlock();
+
+            for ($ci = 0; $ci < $ncols; $ci++) {
+                $rawName = $ffi->kore_block_col_name($handle, $ci);
+                $colName = \FFI::isNull($rawName) ? "col$ci" : \FFI::string($rawName);
+                if (!\FFI::isNull($rawName)) $ffi->kore_free_string($rawName);
+
+                $buf = \FFI::new("double[$nrows]");
+                $n   = $ffi->kore_block_get_f64($handle, $colName, $buf, $nrows);
+                if ($n > 0) {
+                    $data = [];
+                    for ($i = 0; $i < $n; $i++) $data[] = $buf[$i];
+                    $block->addColumn($colName, DataType::F64, $data);
+                }
+            }
+            return $block;
+        } finally {
+            $ffi->kore_block_free($handle);
+        }
     }
 
-    /**
-     * Read KORE data at specific version (time travel).
-     */
     public static function readAtVersion(string $data, int $timestamp): DataBlock
     {
         throw new \RuntimeException('Phase 3: Time travel API pending');
     }
 
-    /**
-     * Encrypt data with AES-256-GCM.
-     */
     public static function encryptAes256(string $password, string $data): string
     {
         throw new \RuntimeException('Phase 3: Encryption API pending');
     }
 
-    /**
-     * Decrypt data with AES-256-GCM.
-     */
     public static function decryptAes256(string $password, string $encryptedData): string
     {
         throw new \RuntimeException('Phase 3: Decryption API pending');

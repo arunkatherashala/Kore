@@ -219,16 +219,12 @@ export function crc32(data: Buffer): number {
  * @param data - DataBlock to serialize
  */
 export async function writeFile(path: string, data: DataBlock): Promise<void> {
-  const native = getNativeBinding();
-
-  if (native && native.writeFile) {
-    return new Promise((resolve, reject) => {
-      native.writeFile(path, JSON.stringify(data.toObject()), (err: any) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
-  }
+  try {
+    // Use koffi-based real FFI (no compilation needed)
+    const koreFfi = require('./kore_ffi.js');
+    koreFfi.writeFile(path, data);
+    return;
+  } catch (_) { /* fall through to JSON */ }
 
   // Fallback: JSON serialization
   const fs = require('fs').promises;
@@ -242,19 +238,17 @@ export async function writeFile(path: string, data: DataBlock): Promise<void> {
  * @returns DataBlock with deserialized data
  */
 export async function readFile(path: string): Promise<DataBlock> {
-  const native = getNativeBinding();
-
-  if (native && native.readFile) {
-    return new Promise((resolve, reject) => {
-      native.readFile(path, (err: any, data: any) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(parseDataBlock(data));
-        }
-      });
-    });
-  }
+  try {
+    // Use koffi-based real FFI
+    const koreFfi = require('./kore_ffi.js');
+    const raw = koreFfi.readFile(path);
+    const block = new DataBlock();
+    block.numRows = raw.numRows;
+    for (const col of raw.columns) {
+      block.columns.push(new Column(col.name, DataType.F64, col.data));
+    }
+    return block;
+  } catch (_) { /* fall through to JSON */ }
 
   // Fallback: JSON deserialization
   const fs = require('fs').promises;

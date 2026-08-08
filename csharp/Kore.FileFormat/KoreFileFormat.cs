@@ -24,24 +24,59 @@ namespace Kore
         // P/INVOKE FFI DECLARATIONS
         // ─────────────────────────────────────────────────────────────────────────
 
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        private static extern uint KoreCrc32(IntPtr data, UIntPtr len);
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "kore_crc32")]
+        private static extern uint KoreCrc32(byte[] data, UIntPtr len);
 
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        private static extern IntPtr KoreWriteFile(
-            [MarshalAs(UnmanagedType.LPStr)] string path,
-            IntPtr data,
-            UIntPtr len
-        );
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "kore_block_new")]
+        private static extern IntPtr KoreBlockNew();
 
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "kore_block_free")]
+        private static extern void KoreBlockFree(IntPtr block);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "kore_block_add_f64")]
+        private static extern int KoreBlockAddF64(IntPtr block,
+            [MarshalAs(UnmanagedType.LPStr)] string name, double[] data, UIntPtr len);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "kore_block_add_i64")]
+        private static extern int KoreBlockAddI64(IntPtr block,
+            [MarshalAs(UnmanagedType.LPStr)] string name, long[] data, UIntPtr len);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "kore_write_file")]
+        private static extern int KoreWriteFile(
+            [MarshalAs(UnmanagedType.LPStr)] string path, IntPtr block);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "kore_read_file")]
         private static extern IntPtr KoreReadFile(
-            [MarshalAs(UnmanagedType.LPStr)] string path,
-            out UIntPtr outLen
-        );
+            [MarshalAs(UnmanagedType.LPStr)] string path);
 
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        private static extern void KoreFree(IntPtr ptr);
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "kore_block_num_rows")]
+        private static extern ulong KoreBlockNumRows(IntPtr block);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "kore_block_num_cols")]
+        private static extern uint KoreBlockNumCols(IntPtr block);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "kore_block_col_name")]
+        private static extern IntPtr KoreBlockColName(IntPtr block, UIntPtr idx);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "kore_block_get_f64")]
+        private static extern long KoreBlockGetF64(IntPtr block,
+            [MarshalAs(UnmanagedType.LPStr)] string col, double[] outBuf, ulong maxlen);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "kore_free_string")]
+        private static extern void KoreFreeString(IntPtr s);
+
+        private static string DllPath()
+        {
+            // Search target/release/ relative to assembly location
+            var here = System.IO.Path.GetDirectoryName(typeof(KoreFileFormat).Assembly.Location) ?? ".";
+            var candidates = new[] {
+                System.IO.Path.Combine(here, "..", "..", "..", "..", "target", "release", "kore_ffi.dll"),
+                "kore_ffi.dll",
+            };
+            foreach (var c in candidates)
+                if (System.IO.File.Exists(c)) return c;
+            return "kore_ffi"; // let OS search PATH
+        }
 
         // ─────────────────────────────────────────────────────────────────────────
         // DATA TYPES & ENUMS
@@ -215,30 +250,55 @@ namespace Kore
             }
         }
 
-        /// <summary>
-        /// Write DataBlock to KORE file.
-        /// </summary>
+        /// <summary>Write DataBlock to KORE binary file via P/Invoke kore-ffi.</summary>
         public static void WriteFile(string path, DataBlock data)
         {
-            if (data == null)
-                throw new ArgumentNullException(nameof(data));
+            if (data == null) throw new ArgumentNullException(nameof(data));
 
-            // TODO: Serialize DataBlock to binary format
-            // For now: JSON fallback implementation
-            throw new NotImplementedException("Phase 3: Binary FFI pending");
+            var handle = KoreBlockNew();
+            if (handle == IntPtr.Zero) throw new InvalidOperationException("kore_block_new failed");
+            try
+            {
+                foreach (var col in data.Columns)
+                {
+                    if (col.Data is double[] f64 && f64.Length > 0)
+                        KoreBlockAddF64(handle, col.Name, f64, (UIntPtr)f64.Length);
+                    else if (col.Data is long[] i64 && i64.Length > 0)
+                        KoreBlockAddI64(handle, col.Name, i64, (UIntPtr)i64.Length);
+                }
+                int rc = KoreWriteFile(path, handle);
+                if (rc != 0) throw new System.IO.IOException($"kore_write_file failed (rc={rc})");
+            }
+            finally { KoreBlockFree(handle); }
         }
 
-        /// <summary>
-        /// Read KORE file into DataBlock.
-        /// </summary>
+        /// <summary>Read KORE binary file into DataBlock via P/Invoke kore-ffi.</summary>
         public static DataBlock ReadFile(string path)
         {
-            if (string.IsNullOrEmpty(path))
-                throw new ArgumentNullException(nameof(path));
+            if (string.IsNullOrEmpty(path)) throw new ArgumentNullException(nameof(path));
 
-            // TODO: Call Rust kore_read_file via P/Invoke
-            // For now: JSON fallback implementation
-            throw new NotImplementedException("Phase 3: Binary FFI pending");
+            var handle = KoreReadFile(path);
+            if (handle == IntPtr.Zero) throw new System.IO.IOException($"kore_read_file failed: {path}");
+            try
+            {
+                ulong nrows = KoreBlockNumRows(handle);
+                uint  ncols = KoreBlockNumCols(handle);
+                var block = new DataBlock { NumRows = (long)nrows };
+
+                for (uint ci = 0; ci < ncols; ci++)
+                {
+                    var rawName = KoreBlockColName(handle, (UIntPtr)ci);
+                    var colName = rawName != IntPtr.Zero ? Marshal.PtrToStringAnsi(rawName) ?? $"col{ci}" : $"col{ci}";
+                    if (rawName != IntPtr.Zero) KoreFreeString(rawName);
+
+                    var vals = new double[nrows];
+                    long n   = KoreBlockGetF64(handle, colName, vals, nrows);
+                    if (n > 0)
+                        block.Columns.Add(new Column(colName, DataType.F64, vals[..(int)n]));
+                }
+                return block;
+            }
+            finally { KoreBlockFree(handle); }
         }
 
         /// <summary>

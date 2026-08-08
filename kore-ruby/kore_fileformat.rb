@@ -204,59 +204,114 @@ module Kore
     end
 
     # ─────────────────────────────────────────────────────────────────────────
-    # FFI BINDINGS
+    # ─────────────────────────────────────────────────────────────────────────
+    # FFI BINDINGS — Fiddle-based, loads kore_ffi.dll at runtime
     # ─────────────────────────────────────────────────────────────────────────
 
+    @_lib = nil
+
     class << self
-      # Load native FFI bindings (Phase 3 TODO).
       def load_library
-        # TODO: Use Fiddle to load libkore_ffi.so/.dylib/.dll
-        # require 'fiddle/import'
-        # Fiddle.dlopen('libkore_ffi.so')
-        raise NotImplementedError, 'Phase 3: FFI library loading pending'
+        return @_lib if @_lib
+
+        here = File.dirname(__FILE__)
+        candidates = [
+          File.join(here, '..', 'target', 'release', 'kore_ffi.dll'),    # Windows
+          File.join(here, '..', 'target', 'release', 'libkore_ffi.so'),  # Linux
+          File.join(here, '..', 'target', 'release', 'libkore_ffi.dylib'), # macOS
+          'libkore_ffi.so', 'libkore_ffi.dylib', 'kore_ffi.dll',
+        ]
+        path = candidates.find { |c| File.exist?(c) }
+        raise 'kore_ffi not found. Build: cargo build --release -p kore-ffi' unless path
+        @_lib = Fiddle.dlopen(path)
+      end
+
+      def ffi_fn(name, ret, args)
+        lib = load_library
+        Fiddle::Function.new(lib[name.to_s], args, ret)
       end
 
       # ─────────────────────────────────────────────────────────────────────
       # HIGH-LEVEL API
       # ─────────────────────────────────────────────────────────────────────
 
-      # Compute CRC32 checksum.
       def crc32(data)
-        raise NotImplementedError, 'Phase 3: CRC32 FFI pending'
+        fn = ffi_fn(:kore_crc32, Fiddle::TYPE_INT, [Fiddle::TYPE_VOIDP, Fiddle::TYPE_SIZE_T])
+        fn.call(data, data.bytesize) & 0xFFFF_FFFF
       end
 
-      # Write DataBlock to KORE file (Phase 3 placeholder).
       def write_file(path, data_block)
-        # TODO: Implement FFI call to kore_write_file
-        # For now: JSON fallback
-        require 'json'
-        File.write(path, JSON.pretty_generate(data_block.to_h))
+        block_new  = ffi_fn(:kore_block_new,     Fiddle::TYPE_VOIDP, [])
+        block_free = ffi_fn(:kore_block_free,    Fiddle::TYPE_VOID,  [Fiddle::TYPE_VOIDP])
+        add_f64    = ffi_fn(:kore_block_add_f64, Fiddle::TYPE_INT,   [Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP, Fiddle::TYPE_SIZE_T])
+        add_i64    = ffi_fn(:kore_block_add_i64, Fiddle::TYPE_INT,   [Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP, Fiddle::TYPE_SIZE_T])
+        write_fn   = ffi_fn(:kore_write_file,    Fiddle::TYPE_INT,   [Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP])
+
+        handle = block_new.call
+        begin
+          data_block.columns.each do |col|
+            name_ptr = Fiddle::Pointer[col.name + "\0"]
+            case col.dtype
+            when DataType::F64
+              buf = col.data.map(&:to_f).pack('d*')
+              add_f64.call(handle, name_ptr, Fiddle::Pointer[buf], col.data.length)
+            when DataType::I64
+              buf = col.data.map(&:to_i).pack('q*')
+              add_i64.call(handle, name_ptr, Fiddle::Pointer[buf], col.data.length)
+            end
+          end
+          rc = write_fn.call(Fiddle::Pointer[path + "\0"], handle)
+          raise "kore_write_file failed (rc=#{rc})" unless rc == 0
+        ensure
+          block_free.call(handle)
+        end
       end
 
-      # Read KORE file into DataBlock (Phase 3 placeholder).
       def read_file(path)
-        # TODO: Implement FFI call to kore_read_file
-        # For now: JSON fallback
-        require 'json'
-        raise NotImplementedError, 'Phase 3: Binary format reading pending'
+        read_fn   = ffi_fn(:kore_read_file,      Fiddle::TYPE_VOIDP, [Fiddle::TYPE_VOIDP])
+        block_free= ffi_fn(:kore_block_free,     Fiddle::TYPE_VOID,  [Fiddle::TYPE_VOIDP])
+        num_rows  = ffi_fn(:kore_block_num_rows, Fiddle::TYPE_LONG,  [Fiddle::TYPE_VOIDP])
+        num_cols  = ffi_fn(:kore_block_num_cols, Fiddle::TYPE_INT,   [Fiddle::TYPE_VOIDP])
+        col_name  = ffi_fn(:kore_block_col_name, Fiddle::TYPE_VOIDP, [Fiddle::TYPE_VOIDP, Fiddle::TYPE_SIZE_T])
+        get_f64   = ffi_fn(:kore_block_get_f64,  Fiddle::TYPE_LONG,  [Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP, -Fiddle::TYPE_LONG_LONG])
+        free_str  = ffi_fn(:kore_free_string,    Fiddle::TYPE_VOID,  [Fiddle::TYPE_VOIDP])
+
+        handle = read_fn.call(Fiddle::Pointer[path + "\0"])
+        raise "kore_read_file failed: #{path}" if handle.null?
+        begin
+          nrows = num_rows.call(handle)
+          ncols = num_cols.call(handle)
+          block = DataBlock.new
+          block.instance_variable_set(:@num_rows, nrows)
+
+          ncols.times do |ci|
+            name_ptr = col_name.call(handle, ci)
+            cname = name_ptr.null? ? "col#{ci}" : name_ptr.to_s
+            free_str.call(name_ptr) unless name_ptr.null?
+
+            buf_ptr = Fiddle::Pointer.malloc(nrows * 8)
+            n = get_f64.call(handle, Fiddle::Pointer[cname + "\0"], buf_ptr, nrows)
+            data = buf_ptr.to_str(n * 8).unpack("d#{n}") if n > 0
+            block.add_column(cname, DataType::F64, data || []) if data
+          end
+          block
+        ensure
+          block_free.call(handle)
+        end
       end
 
-      # Read KORE data at specific version (time travel).
       def read_at_version(data, timestamp)
         raise NotImplementedError, 'Phase 3: Time travel API pending'
       end
 
-      # Encrypt data with AES-256-GCM.
       def encrypt_aes256(password, data)
         raise NotImplementedError, 'Phase 3: Encryption API pending'
       end
 
-      # Decrypt data with AES-256-GCM.
       def decrypt_aes256(password, encrypted_data)
         raise NotImplementedError, 'Phase 3: Decryption API pending'
       end
 
-      # Get statistics for a column.
       def get_column_stats(data, column_name)
         raise NotImplementedError, 'Phase 3: Stats API pending'
       end

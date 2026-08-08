@@ -44,23 +44,24 @@ package kore
 #include <stdint.h>
 #include <stdlib.h>
 
-// Opaque Rust type handles
-typedef void* KoreDataBlock;
-typedef void* KoreBloomFilter;
+typedef void* KoreBlock;
 
-// FFI function declarations (implemented in Rust)
 extern uint32_t kore_crc32(const uint8_t* data, size_t len);
-extern KoreDataBlock kore_write_file(const char* path, uint8_t* data, size_t len);
-extern uint8_t* kore_read_file(const char* path, size_t* out_len);
-extern KoreDataBlock kore_read_at_version(uint8_t* data, size_t len, uint64_t timestamp);
-extern uint8_t* kore_encrypt_aes256_gcm(const char* password, uint8_t* data, size_t len, size_t* out_len);
-extern uint8_t* kore_decrypt_aes256_gcm(const char* password, uint8_t* encrypted, size_t len, size_t* out_len);
-extern void kore_free(void* ptr);
+extern int      kore_write_file(const char* path, KoreBlock block);
+extern KoreBlock kore_read_file(const char* path);
+extern KoreBlock kore_block_new();
+extern void     kore_block_free(KoreBlock block);
+extern int      kore_block_add_f64(KoreBlock block, const char* name, const double* data, size_t len);
+extern int      kore_block_add_i64(KoreBlock block, const char* name, const int64_t* data, size_t len);
+extern uint64_t kore_block_num_rows(KoreBlock block);
+extern uint32_t kore_block_num_cols(KoreBlock block);
+extern char*    kore_block_col_name(KoreBlock block, size_t idx);
+extern int64_t  kore_block_get_f64(KoreBlock block, const char* col, double* out, uint64_t maxlen);
+extern void     kore_free_string(char* s);
 */
 import "C"
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"unsafe"
@@ -264,29 +265,70 @@ func CRC32(data []byte) uint32 {
 	return uint32(result)
 }
 
-// WriteFile writes a DataBlock to KORE file.
+// WriteFile writes a DataBlock to KORE binary file via CGo kore-ffi.
 func WriteFile(path string, db *DataBlock) error {
-	// For now: JSON serialization (Phase 3 placeholder)
-	// TODO: Call Rust kore_write_file() via FFI
-
-	jsonData, err := json.MarshalIndent(db, "", "  ")
-	if err != nil {
-		return err
-	}
-
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 
-	// TODO: Implement proper FFI call
+	handle := C.kore_block_new()
+	if handle == nil {
+		return errors.New("kore_block_new returned null")
+	}
+	defer C.kore_block_free(handle)
+
+	for _, col := range db.Columns {
+		cName := C.CString(col.Name)
+		switch d := col.Data.(type) {
+		case []float64:
+			if len(d) > 0 {
+				C.kore_block_add_f64(handle, cName, (*C.double)(&d[0]), C.size_t(len(d)))
+			}
+		case []int64:
+			if len(d) > 0 {
+				C.kore_block_add_i64(handle, cName, (*C.int64_t)(&d[0]), C.size_t(len(d)))
+			}
+		}
+		C.free(unsafe.Pointer(cName))
+	}
+
+	rc := C.kore_write_file(cPath, handle)
+	if rc != 0 {
+		return fmt.Errorf("kore_write_file failed (rc=%d)", int(rc))
+	}
 	return nil
 }
 
-// ReadFile reads KORE file into DataBlock.
+// ReadFile reads KORE binary file into DataBlock via CGo kore-ffi.
 func ReadFile(path string) (*DataBlock, error) {
-	// For now: JSON deserialization (Phase 3 placeholder)
-	// TODO: Call Rust kore_read_file() via FFI
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
 
-	return nil, errors.New("Phase 3: ReadFile pending FFI implementation")
+	handle := C.kore_read_file(cPath)
+	if handle == nil {
+		return nil, fmt.Errorf("kore_read_file failed: %s", path)
+	}
+	defer C.kore_block_free(handle)
+
+	nrows := int64(C.kore_block_num_rows(handle))
+	ncols := int(C.kore_block_num_cols(handle))
+	db := NewDataBlock()
+	db.NumRows = nrows
+
+	for ci := 0; ci < ncols; ci++ {
+		cName := C.kore_block_col_name(handle, C.size_t(ci))
+		if cName == nil {
+			continue
+		}
+		colName := C.GoString(cName)
+		C.kore_free_string(cName)
+
+		vals := make([]float64, nrows)
+		n := int64(C.kore_block_get_f64(handle, C.CString(colName), (*C.double)(&vals[0]), C.uint64_t(nrows)))
+		if n > 0 {
+			_ = db.AddColumn(colName, F64, vals[:n])
+		}
+	}
+	return db, nil
 }
 
 // ReadAtVersion reads KORE data at specific timestamp (time travel).
