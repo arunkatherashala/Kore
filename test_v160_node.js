@@ -26,7 +26,7 @@ function check(label, ok, note = '') {
 // ── Load koffi + DLL ──────────────────────────────────────────────────────────
 let koffi, lib;
 try {
-  koffi = require(path.join(REPO_ROOT, 'node_modules', 'koffi'));
+  koffi = require(path.join(REPO_ROOT, 'node_modules', 'koffi', 'src', 'koffi', 'index.cjs'));
   lib   = koffi.load(DLL_PATH);
   check('Load kore_ffi.dll via koffi', true, DLL_PATH);
 } catch (e) {
