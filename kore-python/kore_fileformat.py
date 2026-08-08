@@ -187,11 +187,18 @@ class KoreFFI:
         if cls._lib is not None:
             return cls._lib
 
-        # Try multiple library paths
+        # Resolve the DLL relative to this file's location (works when installed)
+        _here = Path(__file__).resolve().parent
+        _repo_root = _here.parent  # kore/ root
+        _target = _repo_root / 'target' / 'release'
+
         lib_names = [
-            'libkore_ffi.so',           # Linux
-            'libkore_ffi.dylib',        # macOS
-            'kore_ffi.dll',             # Windows
+            str(_target / 'kore_ffi.dll'),       # Windows (built locally)
+            str(_target / 'libkore_ffi.so'),      # Linux   (built locally)
+            str(_target / 'libkore_ffi.dylib'),   # macOS   (built locally)
+            'libkore_ffi.so',                     # Linux   (installed)
+            'libkore_ffi.dylib',                  # macOS   (installed)
+            'kore_ffi.dll',                       # Windows (installed)
         ]
 
         for lib_name in lib_names:
@@ -203,7 +210,8 @@ class KoreFFI:
 
         raise RuntimeError(
             f"Could not load kore-ffi library. "
-            f"Tried: {', '.join(lib_names)}"
+            f"Build it with: cargo build --release -p kore-ffi\n"
+            f"Tried: {[str(n) for n in lib_names]}"
         )
 
     @classmethod
@@ -234,67 +242,87 @@ def crc32(data: bytes) -> int:
 
 
 def write_file(path: Union[str, Path], data_block: DataBlock) -> None:
-    """Write DataBlock to KORE file.
-    
-    Args:
-        path: Output file path
-        data_block: DataBlock to serialize
-        
-    Raises:
-        IOError: If write fails
-    """
+    """Write DataBlock to KORE binary file via Rust kore-ffi."""
+    import struct
     lib = KoreFFI.get_library()
-    
-    # For now: simple JSON serialization (Phase 3 placeholder)
-    # TODO: Call Rust kore_write_file() via FFI
-    
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(path, 'w') as f:
-        json.dump(data_block.to_dict(), f, indent=2)
+
+    # Build a KoreBlock handle via FFI, fill columns, then write
+    lib.kore_block_new.restype = ctypes.c_void_p
+    lib.kore_block_add_f64.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+                                        ctypes.POINTER(ctypes.c_double), ctypes.c_size_t]
+    lib.kore_block_add_i64.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+                                        ctypes.POINTER(ctypes.c_longlong), ctypes.c_size_t]
+    lib.kore_block_free.argtypes = [ctypes.c_void_p]
+    lib.kore_write_file.argtypes = [ctypes.c_char_p, ctypes.c_void_p]
+    lib.kore_write_file.restype = ctypes.c_int
+
+    handle = lib.kore_block_new()
+    try:
+        for col in data_block.columns:
+            name_b = col.name.encode('utf-8')
+            if col.dtype in (DataType.F64,):
+                arr = (ctypes.c_double * len(col.data))(*[float(x) for x in col.data])
+                lib.kore_block_add_f64(handle, name_b, arr, len(col.data))
+            elif col.dtype in (DataType.I64,):
+                arr = (ctypes.c_longlong * len(col.data))(*[int(x) for x in col.data])
+                lib.kore_block_add_i64(handle, name_b, arr, len(col.data))
+            else:
+                # String / other types: fall back to writing via session JSON
+                # TODO: add kore_block_add_str() to kore-ffi
+                pass
+
+        rc = lib.kore_write_file(str(path).encode('utf-8'), handle)
+        if rc != 0:
+            lib.kore_last_error.restype = ctypes.c_char_p
+            err = lib.kore_last_error()
+            raise IOError(f'kore_write_file failed: {err.decode() if err else "unknown"}')
+    finally:
+        lib.kore_block_free(handle)
 
 
 def read_file(path: Union[str, Path]) -> DataBlock:
-    """Read KORE file into DataBlock.
-    
-    Args:
-        path: Input file path
-        
-    Returns:
-        DataBlock with deserialized data
-        
-    Raises:
-        IOError: If read fails
-    """
+    """Read KORE binary file into DataBlock via Rust kore-ffi."""
     lib = KoreFFI.get_library()
-    
-    # For now: simple JSON deserialization (Phase 3 placeholder)
-    # TODO: Call Rust kore_read_file() via FFI
-    
-    path = Path(path)
-    
-    with open(path, 'r') as f:
-        data = json.load(f)
-    
-    block = DataBlock(num_rows=data['num_rows'])
-    for col_data in data['columns']:
-        col = Column(
-            name=col_data['name'],
-            dtype=DataType[col_data['type']],
-            data=col_data['data'],
-        )
-        if col_data.get('stats'):
-            col.stats = ColumnStats(
-                min_value=col_data['stats']['min'],
-                max_value=col_data['stats']['max'],
-                null_count=col_data['stats']['nulls'],
-                cardinality=col_data['stats']['cardinality'],
-                crc32=col_data['stats']['crc32'],
-            )
-        block.columns.append(col)
-    
-    return block
+
+    lib.kore_read_file.argtypes = [ctypes.c_char_p]
+    lib.kore_read_file.restype = ctypes.c_void_p
+    lib.kore_block_num_rows.argtypes = [ctypes.c_void_p]
+    lib.kore_block_num_rows.restype = ctypes.c_uint64
+    lib.kore_block_num_cols.argtypes = [ctypes.c_void_p]
+    lib.kore_block_num_cols.restype = ctypes.c_uint32
+    lib.kore_block_col_name.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.kore_block_col_name.restype = ctypes.c_char_p
+    lib.kore_block_get_f64.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+                                        ctypes.POINTER(ctypes.c_double), ctypes.c_uint64]
+    lib.kore_block_get_f64.restype = ctypes.c_int64
+    lib.kore_block_free.argtypes = [ctypes.c_void_p]
+    lib.kore_last_error.restype = ctypes.c_char_p
+
+    handle = lib.kore_read_file(str(path).encode('utf-8'))
+    if not handle:
+        err = lib.kore_last_error()
+        raise IOError(f'kore_read_file failed: {err.decode() if err else "unknown"}')
+
+    try:
+        nrows = int(lib.kore_block_num_rows(handle))
+        ncols = int(lib.kore_block_num_cols(handle))
+        block = DataBlock(num_rows=nrows)
+
+        for ci in range(ncols):
+            raw_name = lib.kore_block_col_name(handle, ci)
+            col_name = raw_name.decode('utf-8') if raw_name else f'col{ci}'
+            # Pass column NAME (string) not index — kore_block_get_f64 API
+            vals = (ctypes.c_double * nrows)()
+            n = lib.kore_block_get_f64(handle, col_name.encode('utf-8'), vals, nrows)
+            data = list(vals[:n]) if n > 0 else []
+            block.columns.append(Column(name=col_name, dtype=DataType.F64, data=data))
+
+        return block
+    finally:
+        lib.kore_block_free(handle)
 
 
 def read_at_version(data: bytes, timestamp: int) -> DataBlock:

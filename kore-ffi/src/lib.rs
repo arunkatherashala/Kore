@@ -409,6 +409,119 @@ pub unsafe extern "C" fn kore_free_string(s: *mut c_char) {
     if !s.is_null() { drop(CString::from_raw(s)); }
 }
 
+// ── File I/O — kore_write_file / kore_read_file / kore_crc32 ─────────────────
+
+/// Write a DataBlock to a .kore binary file.
+/// Returns 0 on success, -1 on error (call kore_last_error() for message).
+#[no_mangle]
+pub unsafe extern "C" fn kore_write_file(
+    path: *const c_char,
+    block: *const KoreBlock,
+) -> c_int {
+    let path = match ptr_to_str(path) {
+        Some(p) => p,
+        None => { set_error("kore_write_file: null path"); return -1; }
+    };
+    let block = match block.as_ref() {
+        Some(b) => &b.inner,
+        None    => { set_error("kore_write_file: null block"); return -1; }
+    };
+    match kore_store::KoreWriter::write_file(std::path::Path::new(path), block) {
+        Ok(_)  => 0,
+        Err(e) => { set_error(e.to_string()); -1 }
+    }
+}
+
+/// Read a .kore binary file into a new DataBlock handle.
+/// Returns NULL on error (call kore_last_error() for message).
+/// Caller must free with kore_block_free().
+#[no_mangle]
+pub unsafe extern "C" fn kore_read_file(path: *const c_char) -> *mut KoreBlock {
+    let path = match ptr_to_str(path) {
+        Some(p) => p,
+        None => { set_error("kore_read_file: null path"); return std::ptr::null_mut(); }
+    };
+    match kore_store::reader::KoreReader::read_file(std::path::Path::new(path)) {
+        Ok(block)  => Box::into_raw(Box::new(KoreBlock { inner: block })),
+        Err(e)     => { set_error(e.to_string()); std::ptr::null_mut() }
+    }
+}
+
+/// Write a DataBlock to bytes in memory.
+/// Returns a malloc'd byte buffer; caller must free with kore_free_bytes().
+/// Sets *out_len to the number of bytes written.
+#[no_mangle]
+pub unsafe extern "C" fn kore_write_bytes(
+    block: *const KoreBlock,
+    out_len: *mut usize,
+) -> *mut u8 {
+    let block = match block.as_ref() {
+        Some(b) => &b.inner,
+        None    => { set_error("kore_write_bytes: null block"); return std::ptr::null_mut(); }
+    };
+    let bytes = kore_store::KoreWriter::to_bytes(block);
+    let len = bytes.len();
+    if !out_len.is_null() { *out_len = len; }
+    let mut v = bytes.into_boxed_slice();
+    let ptr = v.as_mut_ptr();
+    std::mem::forget(v);
+    ptr
+}
+
+/// Read a DataBlock from a byte buffer.
+/// Returns NULL on error. Caller must free with kore_block_free().
+#[no_mangle]
+pub unsafe extern "C" fn kore_read_bytes(
+    data: *const u8,
+    len: usize,
+) -> *mut KoreBlock {
+    if data.is_null() { set_error("kore_read_bytes: null data"); return std::ptr::null_mut(); }
+    let slice = std::slice::from_raw_parts(data, len);
+    match kore_store::reader::KoreReader::from_bytes(slice) {
+        Ok(block)  => Box::into_raw(Box::new(KoreBlock { inner: block })),
+        Err(e)     => { set_error(e.to_string()); std::ptr::null_mut() }
+    }
+}
+
+/// Free a byte buffer returned by kore_write_bytes.
+#[no_mangle]
+pub unsafe extern "C" fn kore_free_bytes(ptr: *mut u8, len: usize) {
+    if !ptr.is_null() {
+        drop(Vec::from_raw_parts(ptr, len, len));
+    }
+}
+
+/// Compute CRC32 checksum of a byte buffer.
+#[no_mangle]
+pub unsafe extern "C" fn kore_crc32(data: *const u8, len: usize) -> u32 {
+    if data.is_null() { return 0; }
+    let slice = std::slice::from_raw_parts(data, len);
+    // Simple CRC32 using the standard polynomial
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &b in slice {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            if crc & 1 != 0 { crc = (crc >> 1) ^ 0xEDB8_8320; }
+            else             { crc >>= 1; }
+        }
+    }
+    !crc
+}
+
+/// Get a column name by index from a DataBlock.
+/// Returns NULL if index out of range. Caller must free with kore_free_string().
+#[no_mangle]
+pub unsafe extern "C" fn kore_block_col_name(
+    block: *const KoreBlock,
+    idx: usize,
+) -> *mut c_char {
+    let block = match block.as_ref() { Some(b) => b, None => return std::ptr::null_mut() };
+    match block.inner.columns.get(idx) {
+        Some(col) => CString::new(col.name.clone()).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut()),
+        None      => std::ptr::null_mut(),
+    }
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 unsafe fn ptr_to_str<'a>(p: *const c_char) -> Option<&'a str> {

@@ -15,6 +15,7 @@ kore-ml3     = { workspace = true }
 kore-sql     = { workspace = true }
 kore-io      = { workspace = true }
 kore-parquet = { workspace = true }
+kore-store   = { path = "../kore-store" }
 serde_json   = { workspace = true }
 thiserror    = { workspace = true }
 libc         = { workspace = true }
