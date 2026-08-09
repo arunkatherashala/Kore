@@ -7,7 +7,7 @@
 
     <groupId>com.github.arunkatherashala</groupId>
     <artifactId>kore-fileformat</artifactId>
-    <version>1.6.17</version>
+    <version>1.6.18</version>
     <packaging>jar</packaging>
 
     <name>KORE FileFormat</name>

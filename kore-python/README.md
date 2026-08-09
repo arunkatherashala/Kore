@@ -1,13 +1,13 @@
 # KORE FileFormat — Python
 
-**Version 1.6.17** | [PyPI](https://pypi.org/project/kore-fileformat/) | [GitHub](https://github.com/arunkatherashala/Kore)
+**Version 1.6.18** | [PyPI](https://pypi.org/project/kore-fileformat/) | [GitHub](https://github.com/arunkatherashala/Kore)
 
 High-performance columnar format with 11 ACID features. Reads/writes via Rust `kore_ffi.dll` through `ctypes`.
 
 ## Install
 
 ```bash
-pip install kore-fileformat==1.6.17
+pip install kore-fileformat==1.6.18
 ```
 
 Or from source (requires Rust):
