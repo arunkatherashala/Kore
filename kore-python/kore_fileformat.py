@@ -488,6 +488,15 @@ __all__ = [
     'append_file_locked',
     'merge_into',
     'delete_rows',
+    'to_arrow',
+    'from_arrow',
+    'to_spark',
+    'from_spark',
+    'to_duckdb',
+    'to_polars',
+    'from_polars',
+    'to_parquet',
+    'from_parquet',
 ]
 
 
@@ -923,6 +932,162 @@ def delete_rows(path: Union[str, 'Path'], key_col: str, delete_keys: list) -> No
     for col in base.columns:
         result.add_column(col.name, col.dtype, [col.data[i] for i in keep])
     write_file(path, result)
+
+
+# ── Multi-Engine Connectors ───────────────────────────────────────────────────
+# Spark, Arrow, DuckDB, Polars — all through kore_fileformat
+
+def to_arrow(path_or_block: Union[str, 'Path', 'DataBlock']):
+    """Convert .kore file or DataBlock to PyArrow Table.
+
+    Requires: pip install pyarrow
+
+        table = kore.to_arrow("data.kore")
+        # Works with: Spark, DuckDB, Polars, Dask, pandas, etc.
+        spark_df = spark.createDataFrame(table.to_pandas())
+    """
+    try:
+        import pyarrow as pa
+    except ImportError:
+        raise ImportError("pyarrow required: pip install pyarrow")
+
+    block = read_file(str(path_or_block)) if isinstance(path_or_block, (str, Path)) else path_or_block
+    arrays = {}
+    for col in block.columns:
+        dtype_name = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
+        if dtype_name in ('F64', 'FLOAT64'):
+            arrays[col.name] = pa.array([float(v) for v in col.data], type=pa.float64())
+        elif dtype_name in ('I64', 'INT64'):
+            arrays[col.name] = pa.array([int(v) for v in col.data], type=pa.int64())
+        elif dtype_name in ('BOOL',):
+            arrays[col.name] = pa.array([bool(v) for v in col.data], type=pa.bool_())
+        else:
+            arrays[col.name] = pa.array([str(v) for v in col.data], type=pa.string())
+    return pa.table(arrays)
+
+
+def from_arrow(path: Union[str, 'Path'], table) -> None:
+    """Write a PyArrow Table to a .kore file.
+
+        import pyarrow as pa
+        table = pa.table({"price": [10.5, 20.0], "qty": [100, 200]})
+        kore.from_arrow("data.kore", table)
+    """
+    try:
+        import pyarrow as pa
+    except ImportError:
+        raise ImportError("pyarrow required: pip install pyarrow")
+
+    block = DataBlock()
+    for name in table.schema.names:
+        col = table.column(name)
+        t = col.type
+        if pa.types.is_floating(t):
+            block.add_column(name, DataType.F64, col.to_pylist())
+        elif pa.types.is_integer(t):
+            block.add_column(name, DataType.I64, col.to_pylist())
+        elif pa.types.is_boolean(t):
+            block.add_column(name, DataType.BOOL, col.to_pylist())
+        else:
+            block.add_column(name, DataType.STR, [str(v) for v in col.to_pylist()])
+    write_file(path, block)
+
+
+def to_spark(spark, path: Union[str, 'Path']):
+    """Read a .kore file as a PySpark DataFrame.
+
+    Requires: pyspark + pyarrow
+
+        spark = SparkSession.builder.appName("kore").getOrCreate()
+        df = kore.to_spark(spark, "data.kore")
+        df.show()
+        df.createOrReplaceTempView("sales")
+        spark.sql("SELECT region, SUM(amount) FROM sales GROUP BY region").show()
+    """
+    table = to_arrow(path)
+    return spark.createDataFrame(table.to_pandas())
+
+
+def from_spark(path: Union[str, 'Path'], df) -> None:
+    """Write a PySpark DataFrame to a .kore file.
+
+        kore.from_spark("output.kore", spark_df)
+    """
+    from_pandas(path, df.toPandas())
+
+
+def to_duckdb(path: Union[str, 'Path'], table_name: str = "kore_table", conn=None):
+    """Register a .kore file as a DuckDB table (zero-copy via Arrow).
+
+    Requires: duckdb + pyarrow
+
+        import duckdb
+        conn = duckdb.connect()
+        kore.to_duckdb("data.kore", "sales", conn)
+        result = conn.execute("SELECT SUM(amount) FROM sales").fetchall()
+    """
+    try:
+        import duckdb
+    except ImportError:
+        raise ImportError("duckdb required: pip install duckdb")
+
+    table = to_arrow(path)
+    if conn is None:
+        conn = duckdb.connect()
+    conn.register(table_name, table)
+    return conn
+
+
+def to_polars(path: Union[str, 'Path']):
+    """Read a .kore file as a Polars DataFrame.
+
+    Requires: polars + pyarrow
+
+        df = kore.to_polars("data.kore")
+        df.group_by("region").agg(pl.col("amount").sum())
+    """
+    try:
+        import polars as pl
+    except ImportError:
+        raise ImportError("polars required: pip install polars")
+    return pl.from_arrow(to_arrow(path))
+
+
+def from_polars(path: Union[str, 'Path'], df) -> None:
+    """Write a Polars DataFrame to a .kore file.
+
+        kore.from_polars("data.kore", polars_df)
+    """
+    from_arrow(path, df.to_arrow())
+
+
+def to_parquet(path: Union[str, 'Path'], output_path: str) -> None:
+    """Export .kore to Parquet format (for Spark/Hive native reading).
+
+    Requires: pyarrow
+
+        kore.to_parquet("data.kore", "data.parquet")
+        # Spark: spark.read.parquet("data.parquet")
+    """
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        raise ImportError("pyarrow required: pip install pyarrow")
+    pq.write_table(to_arrow(path), output_path)
+
+
+def from_parquet(kore_path: Union[str, 'Path'], parquet_path: str) -> None:
+    """Import Parquet file to .kore format.
+
+    Requires: pyarrow
+
+        kore.from_parquet("data.kore", "data.parquet")
+    """
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        raise ImportError("pyarrow required: pip install pyarrow")
+    from_arrow(kore_path, pq.read_table(parquet_path))
 
 
 

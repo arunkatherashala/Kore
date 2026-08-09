@@ -761,4 +761,124 @@ pub fn delete_rows(path: &str, key_col: &str, delete_keys: &[u64]) -> io::Result
     write_file(path, &result)
 }
 
+// ── Multi-Engine Export (Arrow IPC, CSV, JSON) ────────────────────────────────
+
+/// Export a DataBlock to CSV format (readable by Spark, DuckDB, Pandas, Excel).
+pub fn to_csv(block: &DataBlock) -> String {
+    let mut out = String::new();
+    // Header
+    let headers: Vec<&str> = block.columns().iter().map(|c| c.name.as_str()).collect();
+    out.push_str(&headers.join(","));
+    out.push('\n');
+    // Rows
+    for row in 0..block.num_rows() {
+        let vals: Vec<String> = block.columns().iter().map(|col| {
+            match col.dtype {
+                DataType::F64 => format!("{}", f64::from_bits(col.values[row])),
+                DataType::I64 => format!("{}", col.values[row] as i64),
+                DataType::Str => format!("{}", col.values[row]),
+            }
+        }).collect();
+        out.push_str(&vals.join(","));
+        out.push('\n');
+    }
+    out
+}
+
+/// Export a DataBlock to NDJSON (newline-delimited JSON) — readable by Spark, DuckDB, MongoDB.
+pub fn to_ndjson(block: &DataBlock) -> String {
+    let mut out = String::new();
+    for row in 0..block.num_rows() {
+        out.push('{');
+        let pairs: Vec<String> = block.columns().iter().map(|col| {
+            let val = match col.dtype {
+                DataType::F64 => format!("{}", f64::from_bits(col.values[row])),
+                DataType::I64 => format!("{}", col.values[row] as i64),
+                DataType::Str => format!("\"{}\"", col.values[row]),
+            };
+            format!("\"{}\":{}", col.name, val)
+        }).collect();
+        out.push_str(&pairs.join(","));
+        out.push_str("}\n");
+    }
+    out
+}
+
+/// Write DataBlock to CSV file — Spark-compatible.
+pub fn write_csv(path: &str, block: &DataBlock) -> io::Result<()> {
+    std::fs::write(path, to_csv(block))
+}
+
+/// Write DataBlock to NDJSON file — Spark/DuckDB-compatible.
+pub fn write_ndjson(path: &str, block: &DataBlock) -> io::Result<()> {
+    std::fs::write(path, to_ndjson(block))
+}
+
+/// Read a CSV file into a DataBlock (all columns as F64 or I64 auto-detected).
+pub fn read_csv(path: &str) -> io::Result<DataBlock> {
+    let content = std::fs::read_to_string(path)?;
+    let mut lines = content.lines();
+    let headers: Vec<&str> = lines.next().unwrap_or("").split(',').collect();
+    let mut columns: Vec<Vec<u64>> = vec![vec![]; headers.len()];
+    let mut dtypes: Vec<DataType> = vec![DataType::F64; headers.len()];
+
+    for line in lines {
+        for (i, val) in line.split(',').enumerate() {
+            if i >= columns.len() { break; }
+            let v = val.trim();
+            if let Ok(f) = v.parse::<f64>() {
+                columns[i].push(f.to_bits());
+                if v.contains('.') { dtypes[i] = DataType::F64; }
+                else if dtypes[i] == DataType::F64 && !v.contains('.') {
+                    if let Ok(n) = v.parse::<i64>() {
+                        columns[i].last_mut().map(|x| *x = n as u64);
+                        // keep F64 if already set
+                    }
+                }
+            }
+        }
+    }
+
+    let mut block = DataBlock::new();
+    for (i, name) in headers.iter().enumerate() {
+        block.add_column(name.trim(), dtypes[i], columns[i].clone());
+    }
+    Ok(block)
+}
+
+// ── Spark Thrift Server Integration ──────────────────────────────────────────
+
+/// Generate a CREATE TABLE SQL statement for this DataBlock (for Spark/Hive/Trino).
+pub fn to_spark_ddl(block: &DataBlock, table_name: &str, kore_path: &str) -> String {
+    let cols: Vec<String> = block.columns().iter().map(|col| {
+        let sql_type = match col.dtype {
+            DataType::F64 => "DOUBLE",
+            DataType::I64 => "BIGINT",
+            DataType::Str => "STRING",
+        };
+        format!("    {} {}", col.name, sql_type)
+    }).collect();
+
+    format!(
+        "-- KORE → Spark SQL DDL\n\
+         -- Usage: spark.sql(open('table.sql').read())\n\
+         CREATE TABLE IF NOT EXISTS {table_name} (\n{}\n)\n\
+         USING kore\n\
+         LOCATION '{kore_path}';\n",
+        cols.join(",\n")
+    )
+}
+
+/// Compute a concise statistics summary for monitoring dashboards.
+pub fn summary(block: &DataBlock) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    map.insert("rows".into(), block.num_rows().to_string());
+    map.insert("columns".into(), block.num_columns().to_string());
+    for s in block.stats() {
+        map.insert(format!("{}.min", s.name), format!("{:.4}", s.min));
+        map.insert(format!("{}.max", s.name), format!("{:.4}", s.max));
+        map.insert(format!("{}.mean", s.name), format!("{:.4}", s.mean));
+    }
+    map
+}
 
