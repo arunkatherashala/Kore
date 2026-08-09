@@ -171,3 +171,103 @@ pub fn crc32(data: &[u8]) -> u32 {
     }
     !crc
 }
+
+// ── Schema Evolution ─────────────────────────────────────────────────────────
+
+/// Add a new column to an existing `.kore` file (schema evolution).
+/// New column is filled with `default_val` for existing rows.
+///
+/// ```
+/// kore_fileformat::add_column("data.kore", "region", kore_fileformat::DataType::I64, 0);
+/// ```
+pub fn add_column(path: &str, name: &str, dtype: DataType, default_val: u64) -> io::Result<()> {
+    let mut block = read_file(path)?;
+    let n = block.num_rows();
+    block.add_column(name, dtype, vec![default_val; n]);
+    write_file(path, &block)
+}
+
+/// Remove a column from an existing `.kore` file by name.
+pub fn drop_column(path: &str, name: &str) -> io::Result<()> {
+    let mut block = read_file(path)?;
+    block.columns.retain(|c| c.name != name);
+    write_file(path, &block)
+}
+
+/// Rename a column in an existing `.kore` file.
+pub fn rename_column(path: &str, old_name: &str, new_name: &str) -> io::Result<()> {
+    let mut block = read_file(path)?;
+    if let Some(col) = block.columns.iter_mut().find(|c| c.name == old_name) {
+        col.name = new_name.to_string();
+    }
+    write_file(path, &block)
+}
+
+// ── Append Mode ───────────────────────────────────────────────────────────────
+
+/// Append rows from `new_block` to an existing `.kore` file.
+/// Both blocks must have the same column names and types.
+///
+/// ```
+/// let mut extra = kore_fileformat::DataBlock::new();
+/// extra.add_column("price", kore_fileformat::DataType::F64, vec![50.0f64.to_bits()]);
+/// kore_fileformat::append_file("data.kore", &extra).unwrap();
+/// ```
+pub fn append_file(path: &str, new_block: &DataBlock) -> io::Result<()> {
+    let mut base = read_file(path)?;
+    for new_col in &new_block.columns {
+        if let Some(base_col) = base.columns.iter_mut().find(|c| c.name == new_col.name) {
+            base_col.values.extend_from_slice(&new_col.values);
+        }
+    }
+    write_file(path, &base)
+}
+
+// ── Column Stats ──────────────────────────────────────────────────────────────
+
+/// Basic statistics for a numeric column.
+#[derive(Debug, Clone)]
+pub struct ColStats {
+    pub name:  String,
+    pub dtype: DataType,
+    pub count: usize,
+    pub min:   f64,
+    pub max:   f64,
+    pub mean:  f64,
+    pub nulls: usize,
+}
+
+impl DataBlock {
+    /// Compute stats for all numeric columns.
+    pub fn stats(&self) -> Vec<ColStats> {
+        self.columns.iter().map(|col| {
+            let nums: Vec<f64> = match col.dtype {
+                DataType::F64 => col.values.iter().map(|&v| f64::from_bits(v)).collect(),
+                DataType::I64 => col.values.iter().map(|&v| v as i64 as f64).collect(),
+                DataType::Str => return ColStats {
+                    name: col.name.clone(), dtype: col.dtype,
+                    count: col.values.len(), min: 0.0, max: 0.0, mean: 0.0, nulls: 0,
+                },
+            };
+            let count = nums.len();
+            let min = nums.iter().cloned().fold(f64::INFINITY, f64::min);
+            let max = nums.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let mean = if count > 0 { nums.iter().sum::<f64>() / count as f64 } else { 0.0 };
+            ColStats { name: col.name.clone(), dtype: col.dtype, count, min, max, mean, nulls: 0 }
+        }).collect()
+    }
+
+    /// Filter rows where column `name` equals `value` (exact match for I64/F64 bits).
+    pub fn filter_eq(&self, col_name: &str, value: u64) -> DataBlock {
+        let Some(filter_col) = self.column(col_name) else { return DataBlock::new() };
+        let keep: Vec<usize> = filter_col.values.iter().enumerate()
+            .filter_map(|(i, &v)| if v == value { Some(i) } else { None })
+            .collect();
+        let mut result = DataBlock::new();
+        for col in &self.columns {
+            let filtered: Vec<u64> = keep.iter().map(|&i| col.values[i]).collect();
+            result.add_column(&col.name, col.dtype, filtered);
+        }
+        result
+    }
+}

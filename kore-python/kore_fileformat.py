@@ -470,6 +470,10 @@ __all__ = [
     'column_stats_from_bytes',
     'to_pandas',
     'from_pandas',
+    'add_column',
+    'drop_column',
+    'rename_column',
+    'append_file',
 ]
 
 
@@ -600,3 +604,54 @@ def from_pandas(path: Union[str, 'Path'], df) -> None:
             # fallback: convert to string → STR type
             block.add_column(col_name, DataType.STR, series.astype(str).tolist())
     write_file(path, block)
+
+
+# ── Schema Evolution & Append ────────────────────────────────────────────────
+
+def add_column(path: Union[str, 'Path'], name: str, dtype: 'DataType', default=None) -> None:
+    """Add a new column to an existing .kore file (schema evolution).
+
+    Existing rows get `default` value. Example:
+        kore.add_column("data.kore", "region", kore.DataType.I64, 0)
+    """
+    block = read_file(path)
+    n = block.num_rows
+    val = default if default is not None else (0.0 if dtype == DataType.F64 else 0)
+    block.add_column(name, dtype, [val] * n)
+    write_file(path, block)
+
+
+def drop_column(path: Union[str, 'Path'], name: str) -> None:
+    """Remove a column from an existing .kore file.
+
+        kore.drop_column("data.kore", "old_col")
+    """
+    block = read_file(path)
+    block.columns = [c for c in block.columns if c.name != name]
+    write_file(path, block)
+
+
+def rename_column(path: Union[str, 'Path'], old_name: str, new_name: str) -> None:
+    """Rename a column in an existing .kore file.
+
+        kore.rename_column("data.kore", "qty", "quantity")
+    """
+    block = read_file(path)
+    for col in block.columns:
+        if col.name == old_name:
+            col.name = new_name
+    write_file(path, block)
+
+
+def append_file(path: Union[str, 'Path'], new_block: 'DataBlock') -> None:
+    """Append rows from new_block to an existing .kore file.
+
+        kore.append_file("sales.kore", new_rows_block)
+    """
+    base = read_file(path)
+    base_cols = {c.name: c for c in base.columns}
+    for col in new_block.columns:
+        if col.name in base_cols:
+            base_cols[col.name].data.extend(col.data)
+            base_cols[col.name].num_rows = len(base_cols[col.name].data)
+    write_file(path, base)
