@@ -470,6 +470,24 @@ __all__ = [
     'column_stats_from_bytes',
     'to_pandas',
     'from_pandas',
+    'add_column',
+    'drop_column',
+    'rename_column',
+    'append_file',
+    'filter_eq',
+    'filter_range',
+    'select_columns',
+    'write_snapshot',
+    'read_snapshot',
+    'list_snapshots',
+    'write_partitioned',
+    'read_partitioned',
+    'FileLock',
+    'BloomFilter',
+    'write_file_locked',
+    'append_file_locked',
+    'merge_into',
+    'delete_rows',
 ]
 
 
@@ -600,3 +618,311 @@ def from_pandas(path: Union[str, 'Path'], df) -> None:
             # fallback: convert to string → STR type
             block.add_column(col_name, DataType.STR, series.astype(str).tolist())
     write_file(path, block)
+
+
+# ── Schema Evolution & Append ────────────────────────────────────────────────
+
+def add_column(path: Union[str, 'Path'], name: str, dtype: 'DataType', default=None) -> None:
+    """Add a new column to an existing .kore file (schema evolution).
+
+    Existing rows get `default` value. Example:
+        kore.add_column("data.kore", "region", kore.DataType.I64, 0)
+    """
+    block = read_file(path)
+    n = block.num_rows
+    val = default if default is not None else (0.0 if dtype == DataType.F64 else 0)
+    block.add_column(name, dtype, [val] * n)
+    write_file(path, block)
+
+
+def drop_column(path: Union[str, 'Path'], name: str) -> None:
+    """Remove a column from an existing .kore file.
+
+        kore.drop_column("data.kore", "old_col")
+    """
+    block = read_file(path)
+    block.columns = [c for c in block.columns if c.name != name]
+    write_file(path, block)
+
+
+def rename_column(path: Union[str, 'Path'], old_name: str, new_name: str) -> None:
+    """Rename a column in an existing .kore file.
+
+        kore.rename_column("data.kore", "qty", "quantity")
+    """
+    block = read_file(path)
+    for col in block.columns:
+        if col.name == old_name:
+            col.name = new_name
+    write_file(path, block)
+
+
+def append_file(path: Union[str, 'Path'], new_block: 'DataBlock') -> None:
+    """Append rows from new_block to an existing .kore file.
+
+        kore.append_file("sales.kore", new_rows_block)
+    """
+    base = read_file(path)
+    base_cols = {c.name: c for c in base.columns}
+    for col in new_block.columns:
+        if col.name in base_cols:
+            base_cols[col.name].data.extend(col.data)
+            base_cols[col.name].num_rows = len(base_cols[col.name].data)
+    write_file(path, base)
+
+
+# ── Row Filtering ─────────────────────────────────────────────────────────────
+
+def filter_eq(block: 'DataBlock', col_name: str, value) -> 'DataBlock':
+    """Return rows where column equals value."""
+    col = block.get_column(col_name)
+    if col is None: return DataBlock()
+    keep = [i for i, v in enumerate(col.data) if v == value]
+    result = DataBlock()
+    for c in block.columns:
+        result.add_column(c.name, c.dtype, [c.data[i] for i in keep])
+    return result
+
+
+def filter_range(block: 'DataBlock', col_name: str, lo, hi) -> 'DataBlock':
+    """Return rows where lo <= column <= hi."""
+    col = block.get_column(col_name)
+    if col is None: return DataBlock()
+    keep = [i for i, v in enumerate(col.data) if lo <= v <= hi]
+    result = DataBlock()
+    for c in block.columns:
+        result.add_column(c.name, c.dtype, [c.data[i] for i in keep])
+    return result
+
+
+def select_columns(block: 'DataBlock', names: list) -> 'DataBlock':
+    """Projection — return only specified columns."""
+    result = DataBlock()
+    for c in block.columns:
+        if c.name in names:
+            result.add_column(c.name, c.dtype, list(c.data))
+    return result
+
+
+# ── Time Travel / Snapshots ───────────────────────────────────────────────────
+
+def write_snapshot(base_path: str, block: 'DataBlock') -> str:
+    """Write a versioned snapshot. Returns the snapshot file path.
+
+        snap = kore.write_snapshot("sales", block)  # creates sales.v001.kore
+        snap2 = kore.write_snapshot("sales", block) # creates sales.v002.kore
+    """
+    import os
+    version = _next_snapshot_version(base_path)
+    snap_path = f"{base_path}.v{version:03d}.kore"
+    write_file(snap_path, block)
+    with open(f"{base_path}.latest", "w") as f: f.write(str(version))
+    return snap_path
+
+
+def read_snapshot(base_path: str, version: int = 0) -> 'DataBlock':
+    """Read a snapshot. version=0 means latest.
+
+        old = kore.read_snapshot("sales", version=1)  # time travel!
+        latest = kore.read_snapshot("sales")
+    """
+    v = _current_snapshot_version(base_path) if version == 0 else version
+    return read_file(f"{base_path}.v{v:03d}.kore")
+
+
+def list_snapshots(base_path: str) -> list:
+    """List all available snapshot version numbers."""
+    import os
+    return [v for v in range(1, 1000)
+            if os.path.exists(f"{base_path}.v{v:03d}.kore")]
+
+
+def _next_snapshot_version(base_path: str) -> int:
+    return _current_snapshot_version(base_path) + 1
+
+
+def _current_snapshot_version(base_path: str) -> int:
+    import os
+    latest_file = f"{base_path}.latest"
+    if os.path.exists(latest_file):
+        try: return int(open(latest_file).read().strip())
+        except: pass
+    return 0
+
+
+# ── Partitioned Tables ────────────────────────────────────────────────────────
+
+def write_partitioned(base_dir: str, block: 'DataBlock', partition_col: str) -> list:
+    """Write a partitioned table split by unique values of partition_col.
+
+        paths = kore.write_partitioned("sales_db", block, "region")
+        # Creates: sales_db/region=1/data.kore, sales_db/region=2/data.kore ...
+    """
+    import os
+    col = block.get_column(partition_col)
+    if col is None: raise ValueError(f"Column '{partition_col}' not found")
+    partitions: dict = {}
+    for i, v in enumerate(col.data):
+        partitions.setdefault(v, []).append(i)
+    paths = []
+    for part_val, indices in partitions.items():
+        dir_path = os.path.join(base_dir, f"{partition_col}={part_val}")
+        os.makedirs(dir_path, exist_ok=True)
+        file_path = os.path.join(dir_path, "data.kore")
+        part_block = DataBlock()
+        for c in block.columns:
+            part_block.add_column(c.name, c.dtype, [c.data[i] for i in indices])
+        write_file(file_path, part_block)
+        paths.append(file_path)
+    return paths
+
+
+def read_partitioned(base_dir: str) -> 'DataBlock':
+    """Read all partitions from a partitioned table directory into one DataBlock."""
+    import os
+    merged = None
+    for entry in os.listdir(base_dir):
+        path = os.path.join(base_dir, entry, "data.kore")
+        if os.path.exists(path):
+            block = read_file(path)
+            if merged is None:
+                merged = block
+            else:
+                for col in block.columns:
+                    mc = merged.get_column(col.name)
+                    if mc:
+                        mc.data.extend(col.data)
+                        mc.num_rows = len(mc.data)
+            # keep merged.num_rows in sync with actual column length
+            if merged.columns:
+                merged.num_rows = len(merged.columns[0].data)
+    return merged or DataBlock()
+
+
+# ── ACID File Locking ─────────────────────────────────────────────────────────
+
+class FileLock:
+    """Context manager for exclusive file locking (ACID safe writes)."""
+    def __init__(self, path: str, timeout_ms: int = 5000):
+        import time
+        self._lock_path = f"{path}.lock"
+        deadline = time.time() + timeout_ms / 1000
+        while True:
+            try:
+                fd = open(self._lock_path, 'x')
+                fd.close()
+                return
+            except FileExistsError:
+                if time.time() > deadline:
+                    raise TimeoutError(f"Could not acquire lock on {path}")
+                time.sleep(0.01)
+
+    def __enter__(self): return self
+
+    def __exit__(self, *_):
+        import os
+        try: os.remove(self._lock_path)
+        except: pass
+
+
+def write_file_locked(path: Union[str, 'Path'], block: 'DataBlock', timeout_ms: int = 5000) -> None:
+    """Write with ACID file lock — safe for concurrent writers."""
+    with FileLock(str(path), timeout_ms):
+        write_file(path, block)
+
+
+def append_file_locked(path: Union[str, 'Path'], block: 'DataBlock', timeout_ms: int = 5000) -> None:
+    """Append with ACID file lock — safe for concurrent appenders."""
+    with FileLock(str(path), timeout_ms):
+        append_file(path, block)
+
+
+# ── Bloom Filter ──────────────────────────────────────────────────────────────
+
+class BloomFilter:
+    """Fast membership testing with ~1% false positive rate."""
+
+    def __init__(self, capacity: int):
+        self._n_bits = max(int(capacity * 9.585), 64)
+        self._bits = bytearray((self._n_bits + 7) // 8)
+        self._n_hashes = 7
+
+    def insert(self, value: int) -> None:
+        for seed in range(self._n_hashes):
+            bit = self._hash(value, seed) % self._n_bits
+            self._bits[bit // 8] |= 1 << (bit % 8)
+
+    def contains(self, value: int) -> bool:
+        return all(
+            self._bits[self._hash(value, s) % self._n_bits // 8]
+            & (1 << (self._hash(value, s) % self._n_bits % 8))
+            for s in range(self._n_hashes)
+        )
+
+    def _hash(self, value: int, seed: int) -> int:
+        h = (value ^ (seed * 0x517CC1B727220A95)) & 0xFFFFFFFFFFFFFFFF
+        h ^= h >> 33; h = (h * 0xff51afd7ed558ccd) & 0xFFFFFFFFFFFFFFFF
+        h ^= h >> 33; h = (h * 0xc4ceb9fe1a85ec53) & 0xFFFFFFFFFFFFFFFF
+        return h ^ (h >> 33)
+
+    @classmethod
+    def from_column(cls, col) -> 'BloomFilter':
+        bf = cls(len(col.data))
+        for v in col.data:
+            if isinstance(v, float): bf.insert(int.from_bytes(__import__('struct').pack('d', v), 'little'))
+            else: bf.insert(int(v))
+        return bf
+
+
+# ── Delta / Merge (Upsert) ────────────────────────────────────────────────────
+
+def merge_into(path: Union[str, 'Path'], delta: 'DataBlock', key_col: str) -> None:
+    """UPSERT: update matching rows, insert new ones.
+
+        kore.merge_into("orders.kore", updates, key_col="order_id")
+    """
+    base = read_file(path)
+    base_key_col = base.get_column(key_col)
+    delta_key_col = delta.get_column(key_col)
+    if not base_key_col or not delta_key_col:
+        raise ValueError(f"key column '{key_col}' not found")
+
+    key_to_idx = {v: i for i, v in enumerate(base_key_col.data)}
+    inserts = []
+
+    for di, dk in enumerate(delta_key_col.data):
+        if dk in key_to_idx:
+            bi = key_to_idx[dk]
+            for col in base.columns:
+                dc = delta.get_column(col.name)
+                if dc: col.data[bi] = dc.data[di]
+        else:
+            inserts.append(di)
+            key_to_idx[dk] = base.num_rows + len(inserts) - 1
+
+    for di in inserts:
+        for col in base.columns:
+            dc = delta.get_column(col.name)
+            col.data.append(dc.data[di] if dc else 0)
+        base.num_rows += 1
+
+    write_file(path, base)
+
+
+def delete_rows(path: Union[str, 'Path'], key_col: str, delete_keys: list) -> None:
+    """Delete rows from a .kore file where key_col is in delete_keys.
+
+        kore.delete_rows("orders.kore", "order_id", [101, 203, 405])
+    """
+    base = read_file(path)
+    kc = base.get_column(key_col)
+    if not kc: raise ValueError(f"key column '{key_col}' not found")
+    del_set = set(delete_keys)
+    keep = [i for i, v in enumerate(kc.data) if v not in del_set]
+    result = DataBlock()
+    for col in base.columns:
+        result.add_column(col.name, col.dtype, [col.data[i] for i in keep])
+    write_file(path, result)
+
+
+
