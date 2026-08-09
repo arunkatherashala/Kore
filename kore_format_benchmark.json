@@ -1,0 +1,48 @@
+{
+  "rows": 100000,
+  "benchmarks": {
+    "KORE": {
+      "write_ms": 202.8977999871131,
+      "read_ms": 51.0239000141155,
+      "size_kb": 1129.884765625
+    },
+    "KORE-RLE*": {
+      "write_ms": 116.49640000541694,
+      "read_ms": 25.319899985333905,
+      "size_kb": 406.25
+    },
+    "CSV": {
+      "write_ms": 337.49349997378886,
+      "read_ms": 17.959699995117262,
+      "size_kb": 2859.314453125
+    },
+    "JSON/NDJSON": {
+      "write_ms": 425.6625999987591,
+      "read_ms": 278.91490000183694,
+      "size_kb": 8328.029296875
+    },
+    "Raw Binary": {
+      "write_ms": 64.78889999561943,
+      "read_ms": 14.386099996045232,
+      "size_kb": 3906.2578125
+    }
+  },
+  "kore_speedups": {
+    "KORE-RLE*": {
+      "write_speedup": 0.57,
+      "read_speedup": 0.5
+    },
+    "CSV": {
+      "write_speedup": 1.66,
+      "read_speedup": 0.35
+    },
+    "JSON/NDJSON": {
+      "write_speedup": 2.1,
+      "read_speedup": 5.47
+    },
+    "Raw Binary": {
+      "write_speedup": 0.32,
+      "read_speedup": 0.28
+    }
+  }
+}
