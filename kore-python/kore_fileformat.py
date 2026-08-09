@@ -2757,7 +2757,7 @@ _HKORE_BINARY_MARKER = b'\x00KORE_BINARY_START\x00'
 
 def write_hybrid(path, block, preview_rows=5):
     """Write .hkore - human readable header + binary data. World-first format."""
-    import datetime
+    import datetime, tempfile, os
     lines = [
         "# KORE Hybrid Format v1.0",
         f"# Created: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
@@ -2782,8 +2782,20 @@ def write_hybrid(path, block, preview_rows=5):
             v = float(col.data[i]) if dtype_name in ('F64','FLOAT64') else col.data[i]
             parts.append(f"{col.name}={v}")
         lines.append(f"#   {' | '.join(parts)}")
-    binary_data = _block_to_bytes(block)
-    lines += ["#", f"# CRC32: {_crc32(binary_data):#010x}", f"# Binary: {len(binary_data):,} bytes", "# [Binary below - do not edit]", ""]
+    # Use Rust FFI format for binary section so read_hybrid() can use Rust FFI
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.kore', delete=False) as tmp:
+            tmp_path = tmp.name
+        write_file(tmp_path, block)
+        with open(tmp_path, 'rb') as f:
+            binary_data = f.read()
+        os.unlink(tmp_path)
+        format_tag = "# Format: rust-ffi\n"
+    except Exception:
+        # Fallback to Python format
+        binary_data = _block_to_bytes(block)
+        format_tag = "# Format: python\n"
+    lines += ["#", f"# Binary: {len(binary_data):,} bytes", format_tag.strip(), "# [Binary below - do not edit]", ""]
     with open(str(path), 'wb') as f:
         f.write('\n'.join(lines).encode('utf-8'))
         f.write(_HKORE_BINARY_MARKER)
@@ -2791,11 +2803,25 @@ def write_hybrid(path, block, preview_rows=5):
 
 
 def read_hybrid(path):
-    """Read .hkore at full binary speed (header skipped)."""
-    with open(str(path), 'rb') as f: data = f.read()
+    """Read .hkore at full binary speed — extracts binary section, uses Rust FFI."""
+    import tempfile
+    with open(str(path), 'rb') as f:
+        data = f.read()
     pos = data.find(_HKORE_BINARY_MARKER)
-    if pos == -1: raise ValueError("Not a valid .hkore file")
-    return _bytes_to_block(data[pos + len(_HKORE_BINARY_MARKER):])
+    if pos == -1:
+        raise ValueError("Not a valid .hkore file")
+    binary_data = data[pos + len(_HKORE_BINARY_MARKER):]
+    # Try Rust FFI path first (same speed as read_file)
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.kore', delete=False) as tmp:
+            tmp.write(binary_data)
+            tmp_path = tmp.name
+        result = read_file(tmp_path)
+        import os; os.unlink(tmp_path)
+        return result
+    except Exception:
+        # Fallback to pure Python parser if Rust FFI unavailable
+        return _bytes_to_block(binary_data)
 
 
 def read_hybrid_header(path):
