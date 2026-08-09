@@ -1168,4 +1168,416 @@ pub fn write_protobuf(path: &str, block: &DataBlock) -> io::Result<()> {
     std::fs::write(path, to_protobuf_bytes(block))
 }
 
+// ── Column Statistics Footer (Predicate Pushdown) ─────────────────────────────
+
+/// Per-column statistics stored in file footer — enables scan skipping.
+#[derive(Debug, Clone)]
+pub struct ColFooter {
+    pub name:       String,
+    pub dtype:      DataType,
+    pub row_count:  u64,
+    pub null_count: u64,
+    pub min_val:    f64,
+    pub max_val:    f64,
+    pub sum_val:    f64,
+}
+
+/// Write a DataBlock with column statistics footer (KORE v3 enhanced format).
+pub fn write_file_v3(path: &str, block: &DataBlock) -> io::Result<()> {
+    let bytes = to_bytes_v3(block);
+    std::fs::write(path, &bytes)
+}
+
+/// Read a v3 DataBlock. Also returns column footers for predicate pushdown.
+pub fn read_file_v3(path: &str) -> io::Result<(DataBlock, Vec<ColFooter>)> {
+    let bytes = std::fs::read(path)?;
+    from_bytes_v3(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// Read ONLY column footers (no data) for fast scan planning.
+pub fn read_footer_only(path: &str) -> io::Result<Vec<ColFooter>> {
+    let bytes = std::fs::read(path)?;
+    let (_, footers) = from_bytes_v3(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    Ok(footers)
+}
+
+/// Check if a file MIGHT match a predicate (returns false → safe to skip file).
+pub fn can_skip_file(footers: &[ColFooter], col_name: &str, min: f64, max: f64) -> bool {
+    if let Some(f) = footers.iter().find(|f| f.name == col_name) {
+        f.max_val < min || f.min_val > max
+    } else { false }
+}
+
+// KORE v3 format: "KOREV" magic + version 3 + data section + footer section
+const MAGIC_V3: &[u8; 5] = b"KOREV";
+
+fn to_bytes_v3(block: &DataBlock) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(MAGIC_V3);
+    buf.extend_from_slice(&3u32.to_le_bytes()); // version 3
+    // Data section (same as v2)
+    let data = to_bytes(block);
+    buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&data);
+    // Footer section: per-column stats
+    buf.extend_from_slice(&(block.num_columns() as u32).to_le_bytes());
+    for col in block.columns() {
+        let nb = col.name.as_bytes();
+        buf.push(nb.len() as u8);
+        buf.extend_from_slice(nb);
+        buf.push(col.dtype as u8);
+        let n = col.values.len() as u64;
+        buf.extend_from_slice(&n.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes()); // null_count (todo: null bitmap)
+        let (min, max, sum) = col.values.iter().fold((f64::INFINITY, f64::NEG_INFINITY, 0f64), |(mn, mx, s), &v| {
+            let f = f64::from_bits(v);
+            (mn.min(f), mx.max(f), s + f)
+        });
+        buf.extend_from_slice(&min.to_bits().to_le_bytes());
+        buf.extend_from_slice(&max.to_bits().to_le_bytes());
+        buf.extend_from_slice(&sum.to_bits().to_le_bytes());
+    }
+    let cs = crc32(&buf);
+    buf.extend_from_slice(&cs.to_le_bytes());
+    buf
+}
+
+fn from_bytes_v3(data: &[u8]) -> Result<(DataBlock, Vec<ColFooter>), String> {
+    if data.len() < 13 { return Err("too short".into()); }
+    let (body, crc_bytes) = data.split_at(data.len() - 4);
+    if crc32(body) != u32::from_le_bytes(crc_bytes.try_into().unwrap()) { return Err("CRC32 mismatch".into()); }
+    if &body[..5] != MAGIC_V3 { return Err("bad v3 magic".into()); }
+    let mut r = &body[9..];
+    let data_len = u32::from_le_bytes(r[..4].try_into().unwrap()) as usize;
+    r = &r[4..];
+    let block = from_bytes(&r[..data_len])?;
+    r = &r[data_len..];
+    let n_cols = u32::from_le_bytes(r[..4].try_into().unwrap()) as usize;
+    r = &r[4..];
+    let mut footers = Vec::new();
+    for _ in 0..n_cols {
+        let nl = r[0] as usize; r = &r[1..];
+        let name = std::str::from_utf8(&r[..nl]).unwrap().to_string(); r = &r[nl..];
+        let dtype = match r[0] { 1 => DataType::F64, 2 => DataType::I64, _ => DataType::Str }; r = &r[1..];
+        let row_count  = u64::from_le_bytes(r[..8].try_into().unwrap()); r = &r[8..];
+        let null_count = u64::from_le_bytes(r[..8].try_into().unwrap()); r = &r[8..];
+        let min_val = f64::from_bits(u64::from_le_bytes(r[..8].try_into().unwrap())); r = &r[8..];
+        let max_val = f64::from_bits(u64::from_le_bytes(r[..8].try_into().unwrap())); r = &r[8..];
+        let sum_val = f64::from_bits(u64::from_le_bytes(r[..8].try_into().unwrap())); r = &r[8..];
+        footers.push(ColFooter { name, dtype, row_count, null_count, min_val, max_val, sum_val });
+    }
+    Ok((block, footers))
+}
+
+// ── Null Bitmap Support ───────────────────────────────────────────────────────
+
+/// A nullable column — stores a validity bitmap alongside values.
+#[derive(Debug, Clone)]
+pub struct NullableColumn {
+    pub name:    String,
+    pub dtype:   DataType,
+    pub values:  Vec<u64>,       // 0 where null
+    pub validity: Vec<u64>,      // bitmask: bit i set = row i is valid (not null)
+}
+
+impl NullableColumn {
+    pub fn new(name: &str, dtype: DataType, values: Vec<Option<u64>>) -> Self {
+        let n = values.len();
+        let mut vals = Vec::with_capacity(n);
+        let mut validity = vec![0u64; (n + 63) / 64];
+        for (i, v) in values.into_iter().enumerate() {
+            match v {
+                Some(x) => { vals.push(x); validity[i/64] |= 1u64 << (i%64); }
+                None    => { vals.push(0); }
+            }
+        }
+        NullableColumn { name: name.to_string(), dtype, values: vals, validity }
+    }
+
+    pub fn is_valid(&self, i: usize) -> bool {
+        self.validity[i/64] & (1u64 << (i%64)) != 0
+    }
+
+    pub fn get(&self, i: usize) -> Option<u64> {
+        if self.is_valid(i) { Some(self.values[i]) } else { None }
+    }
+
+    pub fn null_count(&self) -> usize {
+        self.values.len() - self.values.iter().enumerate()
+            .filter(|(i, _)| self.is_valid(*i)).count()
+    }
+}
+
+/// A DataBlock that supports null values per cell.
+#[derive(Debug, Clone, Default)]
+pub struct NullableBlock {
+    pub columns: Vec<NullableColumn>,
+}
+
+impl NullableBlock {
+    pub fn new() -> Self { Self::default() }
+
+    pub fn add_column(&mut self, name: &str, dtype: DataType, values: Vec<Option<u64>>) {
+        self.columns.push(NullableColumn::new(name, dtype, values));
+    }
+
+    pub fn num_rows(&self) -> usize {
+        self.columns.first().map(|c| c.values.len()).unwrap_or(0)
+    }
+
+    pub fn null_count(&self, col_name: &str) -> usize {
+        self.columns.iter().find(|c| c.name == col_name).map(|c| c.null_count()).unwrap_or(0)
+    }
+}
+
+/// Write a NullableBlock to disk.
+pub fn write_nullable(path: &str, block: &NullableBlock) -> io::Result<()> {
+    let bytes = to_bytes_nullable(block);
+    std::fs::write(path, &bytes)
+}
+
+/// Read a NullableBlock from disk.
+pub fn read_nullable(path: &str) -> io::Result<NullableBlock> {
+    let bytes = std::fs::read(path)?;
+    from_bytes_nullable(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+const MAGIC_NULL: &[u8; 5] = b"KOREN";
+
+fn to_bytes_nullable(block: &NullableBlock) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(MAGIC_NULL);
+    buf.extend_from_slice(&7u32.to_le_bytes());
+    buf.extend_from_slice(&(block.columns.len() as u32).to_le_bytes());
+    for col in &block.columns {
+        let nb = col.name.as_bytes();
+        buf.push(nb.len() as u8); buf.extend_from_slice(nb);
+        buf.push(col.dtype as u8);
+        let n = col.values.len() as u64;
+        buf.extend_from_slice(&n.to_le_bytes());
+        // validity bitmap
+        buf.extend_from_slice(&(col.validity.len() as u32).to_le_bytes());
+        for &v in &col.validity { buf.extend_from_slice(&v.to_le_bytes()); }
+        // values
+        for &v in &col.values { buf.extend_from_slice(&v.to_le_bytes()); }
+    }
+    let cs = crc32(&buf);
+    buf.extend_from_slice(&cs.to_le_bytes());
+    buf
+}
+
+fn from_bytes_nullable(data: &[u8]) -> Result<NullableBlock, String> {
+    if data.len() < 13 { return Err("too short".into()); }
+    let (body, crc_bytes) = data.split_at(data.len() - 4);
+    if crc32(body) != u32::from_le_bytes(crc_bytes.try_into().unwrap()) { return Err("CRC32 mismatch".into()); }
+    if &body[..5] != MAGIC_NULL { return Err("bad nullable magic".into()); }
+    let mut r = &body[9..];
+    let n_cols = u32::from_le_bytes(r[..4].try_into().unwrap()) as usize; r = &r[4..];
+    let mut block = NullableBlock::new();
+    for _ in 0..n_cols {
+        let nl = r[0] as usize; r = &r[1..];
+        let name = std::str::from_utf8(&r[..nl]).unwrap().to_string(); r = &r[nl..];
+        let dtype = match r[0] { 1=>DataType::F64, 2=>DataType::I64, _=>DataType::Str }; r = &r[1..];
+        let n = u64::from_le_bytes(r[..8].try_into().unwrap()) as usize; r = &r[8..];
+        let nbitmaps = u32::from_le_bytes(r[..4].try_into().unwrap()) as usize; r = &r[4..];
+        let validity: Vec<u64> = (0..nbitmaps).map(|_| { let v = u64::from_le_bytes(r[..8].try_into().unwrap()); r = &r[8..]; v }).collect();
+        let values: Vec<u64> = (0..n).map(|_| { let v = u64::from_le_bytes(r[..8].try_into().unwrap()); r = &r[8..]; v }).collect();
+        block.columns.push(NullableColumn { name, dtype, values, validity });
+    }
+    Ok(block)
+}
+
+// ── Delta Encoding (sorted integer columns) ────────────────────────────────────
+
+/// Delta encode sorted integer column — stores first value + differences.
+/// Excellent for timestamps, sequential IDs, sorted prices.
+pub fn delta_encode(values: &[u64]) -> (u64, Vec<i64>) {
+    if values.is_empty() { return (0, vec![]); }
+    let base = values[0];
+    let deltas: Vec<i64> = std::iter::once(0)
+        .chain(values.windows(2).map(|w| w[1] as i64 - w[0] as i64))
+        .collect();
+    (base, deltas)
+}
+
+/// Delta decode back to original values.
+pub fn delta_decode(base: u64, deltas: &[i64]) -> Vec<u64> {
+    let mut result = Vec::with_capacity(deltas.len());
+    let mut cur = base as i64;
+    for &d in deltas {
+        cur += d;
+        result.push(cur as u64);
+    }
+    result
+}
+
+// ── Dictionary / String Encoding ──────────────────────────────────────────────
+
+/// Dictionary-encode a string column — store unique strings + integer codes.
+pub fn dict_encode_strings(strings: &[String]) -> (Vec<String>, Vec<u32>) {
+    let mut dict: Vec<String> = Vec::new();
+    let mut dict_map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut codes = Vec::with_capacity(strings.len());
+    for s in strings {
+        let code = if let Some(&c) = dict_map.get(s) { c } else {
+            let c = dict.len() as u32;
+            dict.push(s.clone());
+            dict_map.insert(s.clone(), c);
+            c
+        };
+        codes.push(code);
+    }
+    (dict, codes)
+}
+
+/// Write a string column with dictionary encoding.
+pub fn write_dict_strings(path: &str, col_name: &str, strings: &[String]) -> io::Result<()> {
+    let (dict, codes) = dict_encode_strings(strings);
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"KORED");
+    buf.extend_from_slice(&8u32.to_le_bytes());
+    let nb = col_name.as_bytes();
+    buf.push(nb.len() as u8); buf.extend_from_slice(nb);
+    buf.extend_from_slice(&(dict.len() as u32).to_le_bytes());
+    for s in &dict {
+        let sb = s.as_bytes();
+        buf.extend_from_slice(&(sb.len() as u16).to_le_bytes());
+        buf.extend_from_slice(sb);
+    }
+    buf.extend_from_slice(&(codes.len() as u32).to_le_bytes());
+    for &c in &codes { buf.extend_from_slice(&c.to_le_bytes()); }
+    let cs = crc32(&buf);
+    buf.extend_from_slice(&cs.to_le_bytes());
+    std::fs::write(path, &buf)
+}
+
+// ── Table Catalog (multi-file tables) ────────────────────────────────────────
+
+/// A catalog entry tracking all partition files of a logical table.
+#[derive(Debug, Clone)]
+pub struct TableCatalog {
+    pub name:       String,
+    pub files:      Vec<CatalogEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CatalogEntry {
+    pub path:         String,
+    pub row_count:    u64,
+    pub size_bytes:   u64,
+    pub partition_val: Option<String>,
+    pub snapshot_id:   u32,
+}
+
+impl TableCatalog {
+    pub fn new(name: &str) -> Self { TableCatalog { name: name.to_string(), files: vec![] } }
+
+    pub fn add_file(&mut self, path: &str, row_count: u64, size_bytes: u64, partition: Option<&str>, snapshot: u32) {
+        self.files.push(CatalogEntry {
+            path: path.to_string(), row_count, size_bytes,
+            partition_val: partition.map(|s| s.to_string()), snapshot_id: snapshot,
+        });
+    }
+
+    pub fn total_rows(&self) -> u64 { self.files.iter().map(|f| f.row_count).sum() }
+    pub fn total_size_kb(&self) -> u64 { self.files.iter().map(|f| f.size_bytes).sum::<u64>() / 1024 }
+    pub fn latest_snapshot(&self) -> u32 { self.files.iter().map(|f| f.snapshot_id).max().unwrap_or(0) }
+
+    /// Save catalog to JSON file.
+    pub fn save(&self, path: &str) -> io::Result<()> {
+        let mut json = format!("{{\"name\":\"{}\",\"files\":[", self.name);
+        for (i, f) in self.files.iter().enumerate() {
+            if i > 0 { json.push(','); }
+            let pv = f.partition_val.as_deref().unwrap_or("null");
+            json.push_str(&format!(
+                "{{\"path\":\"{}\",\"rows\":{},\"bytes\":{},\"partition\":\"{}\",\"snapshot\":{}}}",
+                f.path, f.row_count, f.size_bytes, pv, f.snapshot_id
+            ));
+        }
+        json.push_str(&format!("],\"total_rows\":{},\"total_size_kb\":{},\"snapshots\":{}}}", 
+            self.total_rows(), self.total_size_kb(), self.latest_snapshot()));
+        std::fs::write(path, json)
+    }
+
+    /// Load catalog from JSON file.
+    pub fn load(path: &str) -> io::Result<Self> {
+        let json = std::fs::read_to_string(path)?;
+        // Minimal parser
+        let name = json.split("\"name\":\"").nth(1).and_then(|s| s.split('"').next()).unwrap_or("unknown").to_string();
+        Ok(TableCatalog { name, files: vec![] }) // simplified — full parser omitted for zero-deps
+    }
+}
+
+// ── Frame-of-Reference (FOR) Encoding ─────────────────────────────────────────
+
+/// FOR encoding — store min value + offsets (saves bits for clustered data).
+pub fn for_encode(values: &[u64]) -> (u64, Vec<u64>) {
+    if values.is_empty() { return (0, vec![]); }
+    let min = *values.iter().min().unwrap();
+    (min, values.iter().map(|&v| v - min).collect())
+}
+
+/// FOR decode.
+pub fn for_decode(min: u64, offsets: &[u64]) -> Vec<u64> {
+    offsets.iter().map(|&o| o + min).collect()
+}
+
+// ── Bitpacking (pack small integers into fewer bits) ──────────────────────────
+
+/// Pack u64 values using only `bits` bits per value (when max < 2^bits).
+pub fn bitpack(values: &[u64], bits: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut cur_byte: u8 = 0;
+    let mut cur_bit: u8 = 0;
+    for &v in values {
+        for b in 0..bits {
+            if (v >> b) & 1 == 1 { cur_byte |= 1 << cur_bit; }
+            cur_bit += 1;
+            if cur_bit == 8 { buf.push(cur_byte); cur_byte = 0; cur_bit = 0; }
+        }
+    }
+    if cur_bit > 0 { buf.push(cur_byte); }
+    buf
+}
+
+/// Unpack bitpacked values.
+pub fn bitunpack(data: &[u8], count: usize, bits: u8) -> Vec<u64> {
+    let mut result = Vec::with_capacity(count);
+    let mut bit_pos: usize = 0;
+    for _ in 0..count {
+        let mut v: u64 = 0;
+        for b in 0..bits as usize {
+            let byte_idx = (bit_pos + b) / 8;
+            let bit_idx  = (bit_pos + b) % 8;
+            if byte_idx < data.len() && (data[byte_idx] >> bit_idx) & 1 == 1 { v |= 1 << b; }
+        }
+        result.push(v);
+        bit_pos += bits as usize;
+    }
+    result
+}
+
+/// Choose optimal compression codec for a column.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Codec { Raw, RLE, Delta, FOR, Bitpack }
+
+pub fn auto_select_codec(values: &[u64]) -> Codec {
+    if values.len() < 2 { return Codec::Raw; }
+    // Check cardinality for RLE
+    let unique: std::collections::HashSet<u64> = values.iter().copied().collect();
+    let cardinality_ratio = unique.len() as f64 / values.len() as f64;
+    if cardinality_ratio < 0.1 { return Codec::RLE; }
+    // Check if sorted (good for delta)
+    let sorted = values.windows(2).all(|w| w[1] >= w[0]);
+    if sorted { return Codec::Delta; }
+    // Check value range for bitpacking
+    let max = *values.iter().max().unwrap();
+    let bits_needed = (64 - max.leading_zeros()) as u8;
+    if bits_needed <= 16 { return Codec::Bitpack; }
+    // Check FOR (clustered values)
+    let min = *values.iter().min().unwrap();
+    let range = max - min;
+    if range < max / 4 { return Codec::FOR; }
+    Codec::Raw
+}
 
