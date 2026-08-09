@@ -241,6 +241,80 @@ def crc32(data: bytes) -> int:
     return lib.kore_crc32(data, len(data))
 
 
+# ── Rust FFI byte-level I/O (zero temp file) ──────────────────────────────────
+
+def _block_to_bytes_ffi(block: 'DataBlock') -> bytes:
+    """Serialize DataBlock to bytes using Rust FFI (same format as write_file)."""
+    import ctypes as ct
+    lib = KoreFFI.get_library()
+    # Build handle
+    lib.kore_block_new.restype = ct.c_void_p
+    lib.kore_block_add_f64.argtypes = [ct.c_void_p, ct.c_char_p, ct.POINTER(ct.c_double), ct.c_size_t]
+    lib.kore_block_add_i64.argtypes = [ct.c_void_p, ct.c_char_p, ct.POINTER(ct.c_longlong), ct.c_size_t]
+    lib.kore_write_bytes.argtypes = [ct.c_void_p, ct.POINTER(ct.c_size_t)]
+    lib.kore_write_bytes.restype = ct.c_void_p
+    lib.kore_free_bytes.argtypes = [ct.c_void_p, ct.c_size_t]
+    lib.kore_block_free.argtypes = [ct.c_void_p]
+
+    handle = lib.kore_block_new()
+    try:
+        for col in block.columns:
+            dtype_name = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
+            n = len(col.data)
+            if dtype_name in ('F64', 'FLOAT64'):
+                arr = (ct.c_double * n)(*[float(v) for v in col.data])
+                lib.kore_block_add_f64(handle, col.name.encode(), arr, n)
+            else:
+                arr = (ct.c_longlong * n)(*[int(v) for v in col.data])
+                lib.kore_block_add_i64(handle, col.name.encode(), arr, n)
+        out_len = ct.c_size_t(0)
+        ptr = lib.kore_write_bytes(handle, ct.byref(out_len))
+        if not ptr:
+            raise IOError("kore_write_bytes failed")
+        data = bytes(ct.cast(ptr, ct.POINTER(ct.c_uint8 * out_len.value)).contents)
+        lib.kore_free_bytes(ptr, out_len.value)
+        return data
+    finally:
+        lib.kore_block_free(handle)
+
+
+def _block_from_bytes_ffi(data: bytes) -> 'DataBlock':
+    """Deserialize bytes to DataBlock using Rust FFI (fast, same as read_file)."""
+    import ctypes as ct
+    lib = KoreFFI.get_library()
+    lib.kore_read_bytes.argtypes = [ct.c_void_p, ct.c_size_t]
+    lib.kore_read_bytes.restype = ct.c_void_p
+    lib.kore_block_num_rows.argtypes = [ct.c_void_p]; lib.kore_block_num_rows.restype = ct.c_uint64
+    lib.kore_block_num_cols.argtypes = [ct.c_void_p]; lib.kore_block_num_cols.restype = ct.c_uint32
+    lib.kore_block_col_name.argtypes = [ct.c_void_p, ct.c_size_t]; lib.kore_block_col_name.restype = ct.c_char_p
+    lib.kore_block_get_f64.argtypes = [ct.c_void_p, ct.c_char_p, ct.POINTER(ct.c_double), ct.c_uint64]; lib.kore_block_get_f64.restype = ct.c_int64
+    lib.kore_block_get_i64.argtypes = [ct.c_void_p, ct.c_char_p, ct.POINTER(ct.c_longlong), ct.c_uint64]; lib.kore_block_get_i64.restype = ct.c_int64
+    lib.kore_block_free.argtypes = [ct.c_void_p]
+
+    buf = ct.create_string_buffer(binary_data, len(data))
+    handle = lib.kore_read_bytes(buf, len(data))
+    if not handle:
+        raise IOError("kore_read_bytes failed")
+    try:
+        nrows = int(lib.kore_block_num_rows(handle))
+        ncols = int(lib.kore_block_num_cols(handle))
+        block = DataBlock(num_rows=nrows)
+        for ci in range(ncols):
+            raw_name = lib.kore_block_col_name(handle, ci)
+            col_name = raw_name.decode('utf-8') if raw_name else f'col{ci}'
+            f64_buf = (ct.c_double * nrows)()
+            n_read = lib.kore_block_get_f64(handle, col_name.encode(), f64_buf, nrows)
+            if n_read > 0:
+                block.add_column(col_name, DataType.F64, list(f64_buf[:n_read]))
+            else:
+                i64_buf = (ct.c_longlong * nrows)()
+                n_read2 = lib.kore_block_get_i64(handle, col_name.encode(), i64_buf, nrows)
+                block.add_column(col_name, DataType.I64, list(i64_buf[:max(n_read2,0)]))
+        return block
+    finally:
+        lib.kore_block_free(handle)
+
+
 def write_file(path: Union[str, Path], data_block: DataBlock) -> None:
     """Write DataBlock to KORE binary file via Rust kore-ffi."""
     import struct
@@ -2757,7 +2831,7 @@ _HKORE_BINARY_MARKER = b'\x00KORE_BINARY_START\x00'
 
 def write_hybrid(path, block, preview_rows=5):
     """Write .hkore - human readable header + binary data. World-first format."""
-    import datetime, tempfile, os
+    import datetime
     lines = [
         "# KORE Hybrid Format v1.0",
         f"# Created: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
@@ -2782,20 +2856,14 @@ def write_hybrid(path, block, preview_rows=5):
             v = float(col.data[i]) if dtype_name in ('F64','FLOAT64') else col.data[i]
             parts.append(f"{col.name}={v}")
         lines.append(f"#   {' | '.join(parts)}")
-    # Use Rust FFI format for binary section so read_hybrid() can use Rust FFI
+    # Binary section: use Rust FFI bytes directly (no temp file!)
     try:
-        with tempfile.NamedTemporaryFile(suffix='.kore', delete=False) as tmp:
-            tmp_path = tmp.name
-        write_file(tmp_path, block)
-        with open(tmp_path, 'rb') as f:
-            binary_data = f.read()
-        os.unlink(tmp_path)
-        format_tag = "# Format: rust-ffi\n"
+        binary_data = _block_to_bytes_ffi(block)
+        format_tag = "# Format: rust-ffi"
     except Exception:
-        # Fallback to Python format
         binary_data = _block_to_bytes(block)
-        format_tag = "# Format: python\n"
-    lines += ["#", f"# Binary: {len(binary_data):,} bytes", format_tag.strip(), "# [Binary below - do not edit]", ""]
+        format_tag = "# Format: python"
+    lines += ["#", f"# Binary: {len(binary_data):,} bytes", format_tag, "# [Binary below - do not edit]", ""]
     with open(str(path), 'wb') as f:
         f.write('\n'.join(lines).encode('utf-8'))
         f.write(_HKORE_BINARY_MARKER)
@@ -2803,25 +2871,27 @@ def write_hybrid(path, block, preview_rows=5):
 
 
 def read_hybrid(path):
-    """Read .hkore at full binary speed — extracts binary section, uses Rust FFI."""
-    import tempfile
+    """Read .hkore at full Rust FFI speed — zero temp file, direct byte parsing."""
     with open(str(path), 'rb') as f:
         data = f.read()
     pos = data.find(_HKORE_BINARY_MARKER)
     if pos == -1:
         raise ValueError("Not a valid .hkore file")
     binary_data = data[pos + len(_HKORE_BINARY_MARKER):]
-    # Try Rust FFI path first (same speed as read_file)
+    # Use Rust FFI byte reader (fastest path - no temp file)
     try:
+        return _block_from_bytes_ffi(binary_data)
+    except Exception:
+        # Fallback: temp file path for compatibility
+        import tempfile, os
         with tempfile.NamedTemporaryFile(suffix='.kore', delete=False) as tmp:
             tmp.write(binary_data)
             tmp_path = tmp.name
-        result = read_file(tmp_path)
-        import os; os.unlink(tmp_path)
+        try:
+            result = read_file(tmp_path)
+        finally:
+            os.unlink(tmp_path)
         return result
-    except Exception:
-        # Fallback to pure Python parser if Rust FFI unavailable
-        return _bytes_to_block(binary_data)
 
 
 def read_hybrid_header(path):
