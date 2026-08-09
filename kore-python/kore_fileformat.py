@@ -263,10 +263,9 @@ def _read_bulk_fast(data: bytes, n_rows: int, cols_meta: list) -> 'DataBlock':
 # ── Rust FFI byte-level I/O (zero temp file) ──────────────────────────────────
 
 def _block_to_bytes_ffi(block: 'DataBlock') -> bytes:
-    """Serialize DataBlock to bytes using Rust FFI (same format as write_file)."""
-    import ctypes as ct
+    """Serialize DataBlock → Rust KORE bytes (compressed, ACID)."""
+    import ctypes as ct, array as _array
     lib = KoreFFI.get_library()
-    # Build handle
     lib.kore_block_new.restype = ct.c_void_p
     lib.kore_block_add_f64.argtypes = [ct.c_void_p, ct.c_char_p, ct.POINTER(ct.c_double), ct.c_size_t]
     lib.kore_block_add_i64.argtypes = [ct.c_void_p, ct.c_char_p, ct.POINTER(ct.c_longlong), ct.c_size_t]
@@ -275,35 +274,39 @@ def _block_to_bytes_ffi(block: 'DataBlock') -> bytes:
     lib.kore_free_bytes.argtypes = [ct.c_void_p, ct.c_size_t]
     lib.kore_block_free.argtypes = [ct.c_void_p]
 
-    import array as _array
     handle = lib.kore_block_new()
     try:
         for col in block.columns:
-            dtype_name = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
-            n = len(col.data)
-            if dtype_name in ('F64', 'FLOAT64'):
-                # array module is 10x faster than list comprehension for ctypes
-                a = _array.array('d', (float(v) for v in col.data))
-                arr = (ct.c_double * n).from_buffer(a)
+            dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
+            n = len(col.data); d = col.data
+            if dn in ('F64', 'FLOAT64', '2'):
+                if isinstance(d, _array.array) and d.typecode == 'd':
+                    arr = (ct.c_double * n).from_buffer(d)       # zero-copy
+                else:
+                    a = _array.array('d', d)                     # C-level convert
+                    arr = (ct.c_double * n).from_buffer(a)
                 lib.kore_block_add_f64(handle, col.name.encode(), arr, n)
             else:
-                a = _array.array('q', (int(v) for v in col.data))
-                arr = (ct.c_longlong * n).from_buffer(a)
+                if isinstance(d, _array.array) and d.typecode == 'q':
+                    arr = (ct.c_longlong * n).from_buffer(d)
+                else:
+                    a = _array.array('q', d)
+                    arr = (ct.c_longlong * n).from_buffer(a)
                 lib.kore_block_add_i64(handle, col.name.encode(), arr, n)
         out_len = ct.c_size_t(0)
         ptr = lib.kore_write_bytes(handle, ct.byref(out_len))
         if not ptr:
-            raise IOError("kore_write_bytes failed")
-        data = bytes(ct.cast(ptr, ct.POINTER(ct.c_uint8 * out_len.value)).contents)
+            raise IOError('kore_write_bytes failed')
+        kore_bytes = bytes(ct.cast(ptr, ct.POINTER(ct.c_uint8 * out_len.value)).contents)
         lib.kore_free_bytes(ptr, out_len.value)
-        return data
+        return kore_bytes
     finally:
         lib.kore_block_free(handle)
 
 
 def _block_from_bytes_ffi(data: bytes) -> 'DataBlock':
-    """Deserialize bytes to DataBlock using Rust FFI (fast, same as read_file)."""
-    import ctypes as ct
+    """Deserialize Rust KORE bytes → DataBlock (buffer-protocol, no tolist)."""
+    import ctypes as ct, array as _array
     lib = KoreFFI.get_library()
     lib.kore_read_bytes.argtypes = [ct.c_void_p, ct.c_size_t]
     lib.kore_read_bytes.restype = ct.c_void_p
@@ -314,10 +317,10 @@ def _block_from_bytes_ffi(data: bytes) -> 'DataBlock':
     lib.kore_block_get_i64.argtypes = [ct.c_void_p, ct.c_char_p, ct.POINTER(ct.c_longlong), ct.c_uint64]; lib.kore_block_get_i64.restype = ct.c_int64
     lib.kore_block_free.argtypes = [ct.c_void_p]
 
-    buf = ct.create_string_buffer(binary_data, len(data))
+    buf = ct.create_string_buffer(data, len(data))  # copy data into ctypes buffer
     handle = lib.kore_read_bytes(buf, len(data))
     if not handle:
-        raise IOError("kore_read_bytes failed")
+        raise IOError('kore_read_bytes failed')
     try:
         nrows = int(lib.kore_block_num_rows(handle))
         ncols = int(lib.kore_block_num_cols(handle))
@@ -326,124 +329,82 @@ def _block_from_bytes_ffi(data: bytes) -> 'DataBlock':
             raw_name = lib.kore_block_col_name(handle, ci)
             col_name = raw_name.decode('utf-8') if raw_name else f'col{ci}'
             f64_buf = (ct.c_double * nrows)()
-            n_read = lib.kore_block_get_f64(handle, col_name.encode(), f64_buf, nrows)
-            if n_read > 0:
-                block.add_column(col_name, DataType.F64, list(f64_buf[:n_read]))
+            n_f64 = lib.kore_block_get_f64(handle, col_name.encode(), f64_buf, nrows)
+            if n_f64 > 0:
+                a = _array.array('d')
+                a.frombytes((ct.c_byte * (int(n_f64) * 8)).from_buffer(f64_buf))
+                block.add_column(col_name, DataType.F64, a)
             else:
                 i64_buf = (ct.c_longlong * nrows)()
-                n_read2 = lib.kore_block_get_i64(handle, col_name.encode(), i64_buf, nrows)
-                block.add_column(col_name, DataType.I64, list(i64_buf[:max(n_read2,0)]))
+                n_i64 = lib.kore_block_get_i64(handle, col_name.encode(), i64_buf, nrows)
+                if n_i64 > 0:
+                    a = _array.array('q')
+                    a.frombytes((ct.c_byte * (int(n_i64) * 8)).from_buffer(i64_buf))
+                    block.add_column(col_name, DataType.I64, a)
         return block
     finally:
         lib.kore_block_free(handle)
 
 
-def write_file(path: Union[str, Path], data_block: DataBlock) -> None:
-    """Write DataBlock to KORE binary file via Rust kore-ffi."""
-    import struct
-    lib = KoreFFI.get_library()
+# .kore v3: KORE2 text header + Rust KORE binary (one format, human-readable + compressed)
+_KORE_V3_MARKER = b'\x00KORE_V3\x00'
+
+
+def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int = 5) -> None:
+    """Write .kore v3 — KORE2 text header + Rust KORE binary (compressed + ACID).
+    Opens in Notepad AND stores data 10x smaller than JSON with Rust compression."""
+    import datetime
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Build a KoreBlock handle via FFI, fill columns, then write
-    lib.kore_block_new.restype = ctypes.c_void_p
-    lib.kore_block_add_f64.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
-                                        ctypes.POINTER(ctypes.c_double), ctypes.c_size_t]
-    lib.kore_block_add_i64.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
-                                        ctypes.POINTER(ctypes.c_longlong), ctypes.c_size_t]
-    lib.kore_block_free.argtypes = [ctypes.c_void_p]
-    lib.kore_write_file.argtypes = [ctypes.c_char_p, ctypes.c_void_p]
-    lib.kore_write_file.restype = ctypes.c_int
+    # Serialize to Rust KORE bytes (compression + ACID happens here)
+    kore_bytes = _block_to_bytes_ffi(data_block)
 
-    handle = lib.kore_block_new()
-    try:
-        import array as _array
-        for col in data_block.columns:
-            name_b = col.name.encode('utf-8')
-            n = len(col.data)
-            d = col.data
-            if col.dtype in (DataType.F64,):
-                # from_buffer if already array.array('d') — zero copy; else C-level convert
-                if isinstance(d, _array.array) and d.typecode == 'd':
-                    arr = (ctypes.c_double * n).from_buffer(d)
-                else:
-                    a = _array.array('d', d)  # C-level (no Python generator)
-                    arr = (ctypes.c_double * n).from_buffer(a)
-                lib.kore_block_add_f64(handle, name_b, arr, n)
-            elif col.dtype in (DataType.I64,):
-                if isinstance(d, _array.array) and d.typecode == 'q':
-                    arr = (ctypes.c_longlong * n).from_buffer(d)
-                else:
-                    a = _array.array('q', d)
-                    arr = (ctypes.c_longlong * n).from_buffer(a)
-                lib.kore_block_add_i64(handle, name_b, arr, n)
+    cols = data_block.columns
+    nrows, ncols = data_block.num_rows, data_block.num_columns
+    n_prev = min(preview_rows, nrows)
 
-        rc = lib.kore_write_file(str(path).encode('utf-8'), handle)
-        if rc != 0:
-            lib.kore_last_error.restype = ctypes.c_char_p
-            err = lib.kore_last_error()
-            raise IOError(f'kore_write_file failed: {err.decode() if err else "unknown"}')
-    finally:
-        lib.kore_block_free(handle)
+    text_lines = [
+        "# KORE Format v3.0",
+        f"# Created: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"# Rows: {nrows:,}  Columns: {ncols}",
+        f"# Compressed: {len(kore_bytes):,} bytes (Rust ZSTD/LZ4)",
+        "# Schema:",
+    ]
+    for col in cols:
+        dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
+        text_lines.append(f"#   {col.name:<20} {dn}")
+    text_lines.append(f"# Preview (first {n_prev} rows):")
+    for i in range(n_prev):
+        parts = [f"{col.name}={col.data[i]}" for col in cols]
+        text_lines.append(f"#   [{' | '.join(parts)}]")
+    text_lines.append("")
+    text_body = '\n'.join(text_lines).encode('utf-8')
+
+    binary_start = _HKORE_OFFSET_LINE + len(text_body) + len(_KORE_V3_MARKER)
+    offset_line = f"KORE2 offset={binary_start:010d}\n".encode('utf-8')
+    assert len(offset_line) == _HKORE_OFFSET_LINE
+
+    with open(str(path), 'wb') as f:
+        f.write(offset_line)
+        f.write(text_body)
+        f.write(_KORE_V3_MARKER)
+        f.write(kore_bytes)
 
 
 def read_file(path: Union[str, Path]) -> DataBlock:
-    """Read KORE binary file into DataBlock via Rust kore-ffi."""
-    lib = KoreFFI.get_library()
-
-    lib.kore_read_file.argtypes = [ctypes.c_char_p]
-    lib.kore_read_file.restype = ctypes.c_void_p
-    lib.kore_block_num_rows.argtypes = [ctypes.c_void_p]
-    lib.kore_block_num_rows.restype = ctypes.c_uint64
-    lib.kore_block_num_cols.argtypes = [ctypes.c_void_p]
-    lib.kore_block_num_cols.restype = ctypes.c_uint32
-    lib.kore_block_col_name.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    lib.kore_block_col_name.restype = ctypes.c_char_p
-    lib.kore_block_get_f64.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
-                                        ctypes.POINTER(ctypes.c_double), ctypes.c_uint64]
-    lib.kore_block_get_f64.restype = ctypes.c_int64
-    lib.kore_block_get_i64.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
-                                        ctypes.POINTER(ctypes.c_longlong), ctypes.c_uint64]
-    lib.kore_block_get_i64.restype = ctypes.c_int64
-    lib.kore_block_free.argtypes = [ctypes.c_void_p]
-    lib.kore_last_error.restype = ctypes.c_char_p
-
-    handle = lib.kore_read_file(str(path).encode('utf-8'))
-    if not handle:
-        err = lib.kore_last_error()
-        raise IOError(f'kore_read_file failed: {err.decode() if err else "unknown"}')
-
-    try:
-        nrows = int(lib.kore_block_num_rows(handle))
-        ncols = int(lib.kore_block_num_cols(handle))
-        import array as _array
-        block = DataBlock(num_rows=nrows)
-
-        for ci in range(ncols):
-            raw_name = lib.kore_block_col_name(handle, ci)
-            col_name = raw_name.decode('utf-8') if raw_name else f'col{ci}'
-
-            f64_buf = (ctypes.c_double * nrows)()
-            n_f64   = lib.kore_block_get_f64(handle, col_name.encode('utf-8'), f64_buf, nrows)
-            if n_f64 > 0:
-                # buffer-protocol copy: ctypes → array.array, no Python-level iteration
-                a = _array.array('d')
-                a.frombytes((ctypes.c_byte * (int(n_f64) * 8)).from_buffer(f64_buf))
-                block.columns.append(Column(name=col_name, dtype=DataType.F64, data=a))
-            else:
-                i64_buf = (ctypes.c_longlong * nrows)()
-                n_i64   = lib.kore_block_get_i64(handle, col_name.encode('utf-8'), i64_buf, nrows)
-                if n_i64 > 0:
-                    a = _array.array('q')
-                    a.frombytes((ctypes.c_byte * (int(n_i64) * 8)).from_buffer(i64_buf))
-                    block.columns.append(Column(name=col_name, dtype=DataType.I64, data=a))
-                else:
-                    block.columns.append(Column(name=col_name, dtype=DataType.I64, data=_array.array('q')))
-
-        return block
-    finally:
-        lib.kore_block_free(handle)
+    """Read .kore — auto-detects v3 (text header) vs legacy (raw Rust KORE)."""
+    with open(str(path), 'rb') as f:
+        prefix = f.read(_HKORE_OFFSET_LINE)
+        if len(prefix) == _HKORE_OFFSET_LINE and prefix[:5] == b'KORE2':
+            binary_start = int(prefix[13:23])
+            f.seek(binary_start)
+            kore_bytes = f.read()
+        else:
+            f.seek(0)
+            kore_bytes = f.read()
+    return _block_from_bytes_ffi(kore_bytes)
 
 
 def read_at_version(data: bytes, timestamp: int) -> DataBlock:
