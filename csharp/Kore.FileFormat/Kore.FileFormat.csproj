@@ -3,11 +3,11 @@
     <TargetFrameworks>net6.0;net7.0;net8.0;netstandard2.1</TargetFrameworks>
     <AssemblyName>KoreFileFormat</AssemblyName>
     <RootNamespace>Kore</RootNamespace>
-    <Version>1.6.10</Version>
-    <AssemblyVersion>1.6.10.0</AssemblyVersion>
-    <FileVersion>1.6.10.0</FileVersion>
+    <Version>1.6.11</Version>
+    <AssemblyVersion>1.6.11.0</AssemblyVersion>
+    <FileVersion>1.6.11.0</FileVersion>
     <PackageId>KoreFileFormat</PackageId>
-    <PackageVersion>1.6.10</PackageVersion>
+    <PackageVersion>1.6.11</PackageVersion>
     <Authors>Sai Arun Kumar Katherashala</Authors>
     <Company>KORE</Company>
     <Description>KORE Binary Format — columnar file format with 11 ACID features. Supports CRC32, ZSTD compression, Bloom filters, AES-256-GCM encryption, schema evolution, MVCC time travel, partition evolution, row-level deletes. 8-language FFI via Rust kore-ffi.</Description>
