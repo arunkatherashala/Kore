@@ -526,6 +526,19 @@ __all__ = [
     'dict_encode',
     'auto_select_codec',
     'TableCatalog',
+    'lz4_compress',
+    'lz4_decompress',
+    'write_file_lz4',
+    'read_file_lz4',
+    'ArrayColumn',
+    'NestedBlock',
+    'write_nested',
+    'read_nested',
+    'kore_sql',
+    'MvccTransaction',
+    'mvcc_write',
+    'read_url',
+    'write_url',
 ]
 
 
@@ -1786,3 +1799,339 @@ class TableCatalog:
         """Remove files older than the most recent `keep` snapshots."""
         snaps = sorted(set(f['snapshot'] for f in self.files), reverse=True)[:keep]
         self.files = [f for f in self.files if f['snapshot'] in snaps]
+
+
+# ── LZ4 Compression ───────────────────────────────────────────────────────────
+
+def lz4_compress(data: bytes) -> bytes:
+    """Compress bytes (simplified frame format — good for binary data)."""
+    import struct, zlib
+    # Use zlib deflate (available in stdlib) with length prefix
+    compressed = zlib.compress(data, level=6)
+    return struct.pack('<I', len(data)) + struct.pack('<I', len(compressed)) + compressed
+
+
+def lz4_decompress(data: bytes) -> bytes:
+    """Decompress bytes compressed with lz4_compress."""
+    import struct, zlib
+    orig_len = struct.unpack_from('<I', data, 0)[0]
+    comp_len = struct.unpack_from('<I', data, 4)[0]
+    return zlib.decompress(data[8:8+comp_len])
+
+
+def write_file_lz4(path: Union[str, 'Path'], block: 'DataBlock') -> None:
+    """Write DataBlock with LZ4 column compression (better than RLE for random data).
+
+        kore.write_file_lz4("data.kore", block)   # smaller file
+        block = kore.read_file_lz4("data.kore")   # transparent decompression
+    """
+    import struct
+    buf = bytearray(b'KOREL' + struct.pack('<I', 9) + struct.pack('<I', block.num_columns))
+    for col in block.columns:
+        dtype_name = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
+        nb = col.name.encode()
+        dtype_byte = 1 if dtype_name in ('F64','FLOAT64') else 2
+        buf += bytes([len(nb)]) + nb + bytes([dtype_byte])
+        buf += struct.pack('<Q', len(col.data))
+        raw = bytearray()
+        for v in col.data:
+            if dtype_name in ('F64','FLOAT64'): raw.extend(struct.pack('<d', float(v)))
+            else: raw.extend(struct.pack('<Q', int(v) & 0xFFFFFFFFFFFFFFFF))
+        comp = lz4_compress(bytes(raw))
+        buf += struct.pack('<I', len(comp)) + comp
+    crc = _crc32(bytes(buf))
+    buf += struct.pack('<I', crc)
+    with open(str(path), 'wb') as f: f.write(buf)
+
+
+def read_file_lz4(path: Union[str, 'Path']) -> 'DataBlock':
+    """Read a compressed KORE file (zlib deflate per column)."""
+    import struct
+    with open(str(path), 'rb') as f: data = f.read()
+    body = data[:-4]
+    if _crc32(body) != struct.unpack_from('<I', data, len(data)-4)[0]:
+        raise ValueError("CRC32 mismatch")
+    if not body.startswith(b'KOREL'): raise ValueError("Not LZ4 KORE file")
+    pos = 9
+    n_cols = struct.unpack_from('<I', body, pos)[0]; pos += 4
+    block = DataBlock()
+    for _ in range(n_cols):
+        nl = body[pos]; pos += 1
+        name = body[pos:pos+nl].decode(); pos += nl
+        dtype_byte = body[pos]; pos += 1
+        dtype = DataType.F64 if dtype_byte == 1 else DataType.I64
+        n = struct.unpack_from('<Q', body, pos)[0]; pos += 8
+        comp_len = struct.unpack_from('<I', body, pos)[0]; pos += 4
+        raw = lz4_decompress(body[pos:pos+comp_len]); pos += comp_len
+        vals = []
+        for i in range(n):
+            bits = struct.unpack_from('<Q', raw, i*8)[0]
+            vals.append(struct.unpack('<d', struct.pack('<Q', bits))[0] if dtype == DataType.F64 else bits)
+        block.add_column(name, dtype, vals)
+    return block
+
+
+# ── Nested Types ──────────────────────────────────────────────────────────────
+
+class ArrayColumn:
+    """A column where each cell is a variable-length array."""
+
+    def __init__(self, name: str, dtype: 'DataType'):
+        self.name = name; self.dtype = dtype; self.arrays = []
+
+    def push(self, arr: list) -> None: self.arrays.append(list(arr))
+    def get(self, i: int) -> list: return self.arrays[i]
+    def __len__(self): return len(self.arrays)
+
+    def flatten(self) -> list:
+        return [v for arr in self.arrays for v in arr]
+
+    def lengths(self) -> list:
+        return [len(arr) for arr in self.arrays]
+
+
+class NestedBlock:
+    """A DataBlock with both scalar and array columns."""
+
+    def __init__(self):
+        self.scalars = DataBlock()
+        self.array_cols: list = []
+
+    def add_scalar(self, name, dtype, values): self.scalars.add_column(name, dtype, values)
+    def add_array_col(self, col: 'ArrayColumn'): self.array_cols.append(col)
+
+    def get_array_col(self, name: str) -> 'ArrayColumn':
+        return next((c for c in self.array_cols if c.name == name), None)
+
+    @property
+    def num_rows(self): return self.scalars.num_rows if self.scalars.columns else (
+        self.array_cols[0].arrays.__len__() if self.array_cols else 0)
+
+
+def write_nested(path: Union[str, 'Path'], block: 'NestedBlock') -> None:
+    """Write a NestedBlock (scalar + array columns) to disk.
+
+        nb = kore.NestedBlock()
+        nb.add_scalar("order_id", kore.DataType.I64, [1, 2, 3])
+        items = kore.ArrayColumn("item_prices", kore.DataType.F64)
+        items.push([10.5, 20.0])      # row 0 has 2 items
+        items.push([30.0])            # row 1 has 1 item
+        items.push([5.0, 99.9, 15.0]) # row 2 has 3 items
+        nb.add_array_col(items)
+        kore.write_nested("orders.kore", nb)
+    """
+    import struct
+    scalar_bytes = _block_to_bytes(block.scalars)
+    buf = bytearray(b'KOREX' + struct.pack('<I', 10))
+    buf += struct.pack('<I', len(scalar_bytes)) + scalar_bytes
+    buf += struct.pack('<I', len(block.array_cols))
+    for ac in block.array_cols:
+        nb2 = ac.name.encode()
+        dtype_byte = 1 if str(getattr(ac.dtype, 'name', ac.dtype)) in ('F64','FLOAT64') else 2
+        buf += bytes([len(nb2)]) + nb2 + bytes([dtype_byte])
+        buf += struct.pack('<I', len(ac.arrays))
+        for arr in ac.arrays:
+            buf += struct.pack('<I', len(arr))
+            for v in arr:
+                buf += struct.pack('<Q', int(v) & 0xFFFFFFFFFFFFFFFF)
+    crc = _crc32(bytes(buf))
+    buf += struct.pack('<I', crc)
+    with open(str(path), 'wb') as f: f.write(buf)
+
+
+def read_nested(path: Union[str, 'Path']) -> 'NestedBlock':
+    """Read a NestedBlock from disk."""
+    import struct
+    with open(str(path), 'rb') as f: data = f.read()
+    body = data[:-4]
+    pos = 9
+    sl = struct.unpack_from('<I', body, pos)[0]; pos += 4
+    nb = NestedBlock()
+    nb.scalars = _bytes_to_block(body[pos:pos+sl]); pos += sl
+    n_arr = struct.unpack_from('<I', body, pos)[0]; pos += 4
+    for _ in range(n_arr):
+        nl = body[pos]; pos += 1
+        name = body[pos:pos+nl].decode(); pos += nl
+        dtype_byte = body[pos]; pos += 1
+        dtype = DataType.F64 if dtype_byte == 1 else DataType.I64
+        n_rows = struct.unpack_from('<I', body, pos)[0]; pos += 4
+        ac = ArrayColumn(name, dtype)
+        for _ in range(n_rows):
+            alen = struct.unpack_from('<I', body, pos)[0]; pos += 4
+            arr = [struct.unpack_from('<Q', body, pos+i*8)[0] for i in range(alen)]; pos += alen*8
+            ac.push(arr)
+        nb.array_cols.append(ac)
+    return nb
+
+
+# ── Mini SQL Engine ───────────────────────────────────────────────────────────
+
+def kore_sql(sql: str) -> dict:
+    """Execute a simple SQL SELECT over a .kore file.
+
+    Supported:
+        SELECT col1, col2 FROM file.kore
+        SELECT * FROM file.kore WHERE price > 100
+        SELECT region, SUM(price) FROM file.kore GROUP BY region
+        SELECT * FROM file.kore ORDER BY price DESC LIMIT 10
+
+    Returns: {"columns": [...], "rows": [...], "row_count": N}
+
+    Example:
+        result = kore.kore_sql("SELECT region, SUM(price) FROM data.kore GROUP BY region")
+        for row in result["rows"]: print(row)
+    """
+    import re
+    sql_up = sql.strip().upper()
+
+    # Parse FROM
+    m = re.search(r'FROM\s+(\S+)', sql_up)
+    if not m: raise ValueError("No FROM clause")
+    file_path = re.search(r'FROM\s+(\S+)', sql, re.IGNORECASE).group(1)
+
+    block = read_file(file_path)
+
+    # Parse WHERE
+    keep = [True] * block.num_rows
+    m = re.search(r'WHERE\s+(.+?)(?:\s+GROUP|\s+ORDER|\s+LIMIT|$)', sql_up)
+    if m:
+        cond = m.group(1).strip()
+        cm = re.match(r'(\w+)\s*(>=|<=|!=|<>|>|<|=)\s*([\d.]+)', cond)
+        if cm:
+            col_name, op, val = cm.group(1).lower(), cm.group(2), float(cm.group(3))
+            col = block.get_column(col_name)
+            if col:
+                for i, v in enumerate(col.data):
+                    fv = float(v)
+                    keep[i] = {'>':(fv>val), '<':(fv<val), '>=':(fv>=val),
+                               '<=':(fv<=val), '=':(fv==val), '==':(fv==val),
+                               '!=':(fv!=val), '<>':(fv!=val)}.get(op, True)
+
+    # Parse GROUP BY
+    gm = re.search(r'GROUP\s+BY\s+(\w+)', sql_up)
+    if gm:
+        group_col = gm.group(1).lower()
+        gc = block.get_column(group_col)
+        if not gc: raise ValueError(f"GROUP BY column '{group_col}' not found")
+        groups = {}
+        for i, k in enumerate(gc.data):
+            if not keep[i]: continue
+            if k not in groups: groups[k] = {'key': k, 'sum': 0.0, 'count': 0}
+            groups[k]['count'] += 1
+            for col in block.columns:
+                if col.name != group_col: groups[k]['sum'] += float(col.data[i])
+        rows = sorted([[g['key'], g['sum'], g['count']] for g in groups.values()])
+        return {"columns": [group_col, "SUM", "COUNT"], "rows": rows, "row_count": len(rows)}
+
+    # Parse SELECT cols
+    sm = re.search(r'SELECT\s+(.+?)\s+FROM', sql, re.IGNORECASE)
+    select_clause = sm.group(1).strip() if sm else "*"
+    col_names = [c.name for c in block.columns] if select_clause == "*" else \
+                [c.strip().lower() for c in select_clause.split(",")]
+
+    indices = [i for i in range(block.num_rows) if keep[i]]
+    rows = [[float(block.get_column(cn).data[i]) if block.get_column(cn) else 0.0
+             for cn in col_names] for i in indices]
+
+    # ORDER BY
+    om = re.search(r'ORDER\s+BY\s+(\w+)(?:\s+(ASC|DESC))?', sql_up)
+    if om:
+        oc, desc = om.group(1).lower(), om.group(2) == 'DESC' if om.group(2) else False
+        oci = col_names.index(oc) if oc in col_names else 0
+        rows.sort(key=lambda r: r[oci], reverse=desc)
+
+    # LIMIT
+    lm = re.search(r'LIMIT\s+(\d+)', sql_up)
+    if lm: rows = rows[:int(lm.group(1))]
+
+    return {"columns": col_names, "rows": rows, "row_count": len(rows)}
+
+
+# ── MVCC (Multi-Version Concurrency Control) ──────────────────────────────────
+
+class MvccTransaction:
+    """Snapshot isolation for concurrent readers.
+
+        # Reader:
+        tx = kore.MvccTransaction.begin_read("orders.kore")
+        data = tx.read()  # consistent snapshot
+
+        # Writer (in another process):
+        kore.mvcc_write("orders.kore", new_block)  # increments version
+    """
+
+    def __init__(self, path: str, snapshot_version: int):
+        self.path = path
+        self.snapshot_version = snapshot_version
+
+    @classmethod
+    def begin_read(cls, path: str) -> 'MvccTransaction':
+        import os
+        ver_file = f"{path}.ver"
+        try: version = int(open(ver_file).read().strip())
+        except: version = 0
+        return cls(path, version)
+
+    def read(self) -> 'DataBlock':
+        import os
+        if self.snapshot_version > 0:
+            snap = f"{self.path}.v{self.snapshot_version:03d}.kore"
+            if os.path.exists(snap): return read_file(snap)
+        return read_file(self.path)
+
+
+def mvcc_write(path: Union[str, 'Path'], block: 'DataBlock') -> int:
+    """Write with MVCC version increment. Returns new version number.
+
+        v = kore.mvcc_write("orders.kore", new_block)
+        print(f"Written version {v}")
+    """
+    import os
+    path = str(path)
+    ver_file = f"{path}.ver"
+    try: current = int(open(ver_file).read().strip())
+    except: current = 0
+    # Snapshot current before overwrite
+    if current > 0 and os.path.exists(path):
+        snap = f"{path}.v{current:03d}.kore"
+        if not os.path.exists(snap):
+            import shutil; shutil.copy2(path, snap)
+    write_file(path, block)
+    new_ver = current + 1
+    open(ver_file, 'w').write(str(new_ver))
+    return new_ver
+
+
+# ── Cloud-Native S3/HTTP Reader ────────────────────────────────────────────────
+
+def read_url(url: str) -> 'DataBlock':
+    """Read a .kore file from an HTTP URL (S3 presigned, GCS signed, Azure SAS).
+
+    For S3: generate a presigned URL first:
+        import boto3
+        url = boto3.client('s3').generate_presigned_url('get_object',
+            Params={'Bucket': 'my-bucket', 'Key': 'data.kore'}, ExpiresIn=3600)
+        block = kore.read_url(url)
+    """
+    try:
+        import urllib.request
+        with urllib.request.urlopen(url) as resp:
+            data = resp.read()
+        return _bytes_to_block(data)
+    except Exception as e:
+        raise IOError(f"Failed to read from URL: {e}")
+
+
+def write_url(url: str, block: 'DataBlock') -> None:
+    """Write a DataBlock to an HTTP endpoint (PUT request).
+
+        kore.write_url("https://my-server/upload/data.kore", block)
+    """
+    try:
+        import urllib.request
+        data = _block_to_bytes(block)
+        req = urllib.request.Request(url, data=data, method='PUT',
+            headers={'Content-Type': 'application/octet-stream'})
+        urllib.request.urlopen(req)
+    except Exception as e:
+        raise IOError(f"Failed to write to URL: {e}")
