@@ -1,6 +1,6 @@
 {
   "name": "arunkatherashala/kore-fileformat",
-  "version": "1.6.7",
+  "version": "1.6.8",
   "description": "KORE Binary Format — columnar file format with 11 ACID features, 8-language FFI",
   "type": "library",
   "license": "MIT",
