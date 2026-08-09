@@ -882,3 +882,290 @@ pub fn summary(block: &DataBlock) -> std::collections::HashMap<String, String> {
     map
 }
 
+// ── Kafka / Streaming Connector ───────────────────────────────────────────────
+
+/// Serialize a DataBlock to Kafka message bytes (KORE binary framed for Kafka).
+/// Format: [4-byte magic][4-byte version=5][kore_bytes]
+pub fn to_kafka_bytes(block: &DataBlock) -> Vec<u8> {
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"KOREK");       // Kafka magic
+    msg.extend_from_slice(&5u32.to_le_bytes()); // version 5
+    msg.extend_from_slice(&to_bytes(block));
+    msg
+}
+
+/// Deserialize a Kafka message back to a DataBlock.
+pub fn from_kafka_bytes(msg: &[u8]) -> Result<DataBlock, String> {
+    if msg.len() < 9 { return Err("Kafka message too short".into()); }
+    if &msg[..5] != b"KOREK" { return Err("Not a KORE Kafka message".into()); }
+    from_bytes(&msg[9..])
+}
+
+/// Streaming writer — writes DataBlock chunks to a file in append mode.
+/// Each chunk is length-prefixed for safe streaming reads.
+pub fn write_stream_chunk(path: &str, block: &DataBlock) -> io::Result<()> {
+    use std::io::Write;
+    let chunk = to_bytes(block);
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    // 4-byte length prefix + chunk
+    file.write_all(&(chunk.len() as u32).to_le_bytes())?;
+    file.write_all(&chunk)
+}
+
+/// Read all chunks from a streaming .kore file into a merged DataBlock.
+pub fn read_stream_all(path: &str) -> io::Result<DataBlock> {
+    let data = std::fs::read(path)?;
+    let mut r = data.as_slice();
+    let mut merged = DataBlock::new();
+    let mut first = true;
+    while r.len() >= 4 {
+        let chunk_len = u32::from_le_bytes(r[..4].try_into().unwrap()) as usize;
+        r = &r[4..];
+        if r.len() < chunk_len { break; }
+        let block = from_bytes(&r[..chunk_len]).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        r = &r[chunk_len..];
+        if first {
+            for col in block.columns() {
+                merged.add_column(&col.name, col.dtype, col.values.clone());
+            }
+            first = false;
+        } else {
+            for col in block.columns() {
+                if let Some(mc) = merged.columns.iter_mut().find(|c| c.name == col.name) {
+                    mc.values.extend_from_slice(&col.values);
+                }
+            }
+        }
+    }
+    Ok(merged)
+}
+
+// ── ML / Tensor Support ───────────────────────────────────────────────────────
+
+/// A multi-dimensional tensor stored as flat f64 data + shape.
+#[derive(Debug, Clone)]
+pub struct Tensor {
+    pub name:   String,
+    pub shape:  Vec<usize>,   // e.g. [100, 768] for 100 embeddings of dim 768
+    pub data:   Vec<f64>,     // row-major (C-order)
+}
+
+impl Tensor {
+    pub fn new(name: &str, shape: Vec<usize>, data: Vec<f64>) -> Self {
+        let expected: usize = shape.iter().product();
+        assert_eq!(data.len(), expected, "data length must equal shape product");
+        Tensor { name: name.to_string(), shape, data }
+    }
+
+    pub fn ndim(&self) -> usize { self.shape.len() }
+    pub fn size(&self) -> usize { self.data.len() }
+    pub fn num_rows(&self) -> usize { self.shape[0] }
+    pub fn num_cols(&self) -> usize { if self.shape.len() > 1 { self.shape[1] } else { 1 } }
+
+    /// Get row i as a slice.
+    pub fn row(&self, i: usize) -> &[f64] {
+        let nc = self.num_cols();
+        &self.data[i * nc..(i + 1) * nc]
+    }
+
+    /// Dot product of row i with a query vector (for similarity search).
+    pub fn dot_row(&self, i: usize, query: &[f64]) -> f64 {
+        self.row(i).iter().zip(query.iter()).map(|(a, b)| a * b).sum()
+    }
+}
+
+/// A block of tensors (e.g. embedding matrix + metadata).
+#[derive(Debug, Clone, Default)]
+pub struct TensorBlock {
+    pub tensors: Vec<Tensor>,
+    pub metadata: DataBlock,   // row-level metadata (ids, labels, etc.)
+}
+
+impl TensorBlock {
+    pub fn new() -> Self { Self::default() }
+
+    pub fn add_tensor(&mut self, tensor: Tensor) { self.tensors.push(tensor); }
+
+    pub fn tensor(&self, name: &str) -> Option<&Tensor> {
+        self.tensors.iter().find(|t| t.name == name)
+    }
+
+    /// KNN search: find top-k rows closest to query vector (cosine similarity).
+    pub fn knn(&self, tensor_name: &str, query: &[f64], k: usize) -> Vec<(usize, f64)> {
+        let Some(t) = self.tensor(tensor_name) else { return vec![]; };
+        let query_norm: f64 = query.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let mut scores: Vec<(usize, f64)> = (0..t.num_rows()).map(|i| {
+            let row = t.row(i);
+            let row_norm: f64 = row.iter().map(|x| x * x).sum::<f64>().sqrt();
+            let dot: f64 = t.dot_row(i, query);
+            let cos = if row_norm > 0.0 && query_norm > 0.0 { dot / (row_norm * query_norm) } else { 0.0 };
+            (i, cos)
+        }).collect();
+        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        scores.truncate(k);
+        scores
+    }
+}
+
+// KORE-T format: "KORET" + version(4) + n_tensors(4) + tensors + kore_metadata
+const MAGIC_TENSOR: &[u8; 5] = b"KORET";
+
+pub fn write_tensors(path: &str, block: &TensorBlock) -> io::Result<()> {
+    let bytes = to_bytes_tensors(block);
+    std::fs::write(path, &bytes)
+}
+
+pub fn read_tensors(path: &str) -> io::Result<TensorBlock> {
+    let bytes = std::fs::read(path)?;
+    from_bytes_tensors(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+fn to_bytes_tensors(block: &TensorBlock) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(MAGIC_TENSOR);
+    buf.extend_from_slice(&6u32.to_le_bytes()); // version 6
+    buf.extend_from_slice(&(block.tensors.len() as u32).to_le_bytes());
+    for t in &block.tensors {
+        let nb = t.name.as_bytes();
+        buf.push(nb.len() as u8);
+        buf.extend_from_slice(nb);
+        buf.extend_from_slice(&(t.shape.len() as u32).to_le_bytes());
+        for &d in &t.shape { buf.extend_from_slice(&(d as u64).to_le_bytes()); }
+        buf.extend_from_slice(&(t.data.len() as u64).to_le_bytes());
+        for &v in &t.data { buf.extend_from_slice(&v.to_bits().to_le_bytes()); }
+    }
+    let meta = to_bytes(&block.metadata);
+    buf.extend_from_slice(&(meta.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&meta);
+    let cs = crc32(&buf);
+    buf.extend_from_slice(&cs.to_le_bytes());
+    buf
+}
+
+fn from_bytes_tensors(data: &[u8]) -> Result<TensorBlock, String> {
+    if data.len() < 13 { return Err("too short".into()); }
+    let (body, crc_bytes) = data.split_at(data.len() - 4);
+    if crc32(body) != u32::from_le_bytes(crc_bytes.try_into().unwrap()) { return Err("CRC32 mismatch".into()); }
+    if &body[..5] != MAGIC_TENSOR { return Err("bad tensor magic".into()); }
+    let mut r = &body[9..];
+    let n_tensors = u32::from_le_bytes(r[..4].try_into().unwrap()) as usize;
+    r = &r[4..];
+    let mut tensors = Vec::new();
+    for _ in 0..n_tensors {
+        let name_len = r[0] as usize; r = &r[1..];
+        let name = std::str::from_utf8(&r[..name_len]).unwrap().to_string(); r = &r[name_len..];
+        let ndim = u32::from_le_bytes(r[..4].try_into().unwrap()) as usize; r = &r[4..];
+        let shape: Vec<usize> = (0..ndim).map(|_| { let v = u64::from_le_bytes(r[..8].try_into().unwrap()) as usize; r = &r[8..]; v }).collect();
+        let n_vals = u64::from_le_bytes(r[..8].try_into().unwrap()) as usize; r = &r[8..];
+        let data: Vec<f64> = (0..n_vals).map(|_| { let v = f64::from_bits(u64::from_le_bytes(r[..8].try_into().unwrap())); r = &r[8..]; v }).collect();
+        tensors.push(Tensor { name, shape, data });
+    }
+    let meta_len = u32::from_le_bytes(r[..4].try_into().unwrap()) as usize; r = &r[4..];
+    let metadata = from_bytes(&r[..meta_len])?;
+    Ok(TensorBlock { tensors, metadata })
+}
+
+// ── Avro Wire Format (simplified — for Kafka/Hadoop interop) ─────────────────
+
+/// Serialize DataBlock as simplified Avro binary (compatible subset).
+/// Full Avro requires schema registry; this is a self-describing subset.
+pub fn to_avro_bytes(block: &DataBlock) -> Vec<u8> {
+    // Simplified Avro: [schema_json_len(4)][schema_json][blocks...]
+    // Each block: [count(8)][size(8)][records...]
+    let schema = avro_schema(block);
+    let schema_bytes = schema.as_bytes();
+    let mut buf = Vec::new();
+    // Magic
+    buf.extend_from_slice(b"Obj\x01");
+    // Schema metadata (simplified)
+    buf.extend_from_slice(&(schema_bytes.len() as u32).to_le_bytes());
+    buf.extend_from_slice(schema_bytes);
+    // Data: one block with all rows
+    let n = block.num_rows() as i64;
+    buf.extend_from_slice(&n.to_le_bytes()); // block count
+    // Write each row in columnar → row order
+    let col_data: Vec<&Column> = block.columns().iter().collect();
+    let mut row_bytes: Vec<u8> = Vec::new();
+    for i in 0..block.num_rows() {
+        for col in &col_data {
+            match col.dtype {
+                DataType::F64 => row_bytes.extend_from_slice(&col.values[i].to_le_bytes()),
+                DataType::I64 => row_bytes.extend_from_slice(&(col.values[i] as i64).to_le_bytes()),
+                DataType::Str => row_bytes.extend_from_slice(&col.values[i].to_le_bytes()),
+            }
+        }
+    }
+    buf.extend_from_slice(&(row_bytes.len() as u64).to_le_bytes());
+    buf.extend_from_slice(&row_bytes);
+    buf.extend_from_slice(&0i64.to_le_bytes()); // end of blocks
+    // CRC32 sync marker
+    let cs = crc32(&buf);
+    buf.extend_from_slice(&cs.to_le_bytes());
+    buf
+}
+
+fn avro_schema(block: &DataBlock) -> String {
+    let fields: Vec<String> = block.columns().iter().map(|col| {
+        let avro_type = match col.dtype {
+            DataType::F64 => "double",
+            DataType::I64 => "long",
+            DataType::Str => "string",
+        };
+        format!("{{\"name\":\"{}\",\"type\":\"{}\"}}", col.name, avro_type)
+    }).collect();
+    format!("{{\"type\":\"record\",\"name\":\"KoreRecord\",\"fields\":[{}]}}", fields.join(","))
+}
+
+pub fn write_avro(path: &str, block: &DataBlock) -> io::Result<()> {
+    std::fs::write(path, to_avro_bytes(block))
+}
+
+// ── Protocol Buffers Wire Format (simplified) ─────────────────────────────────
+
+/// Serialize DataBlock as simplified protobuf-compatible binary.
+/// Field numbers: col 0 = field 1, col 1 = field 2, etc.
+pub fn to_protobuf_bytes(block: &DataBlock) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for row in 0..block.num_rows() {
+        let mut row_buf = Vec::new();
+        for (fi, col) in block.columns().iter().enumerate() {
+            let field_num = (fi + 1) as u64;
+            match col.dtype {
+                DataType::F64 => {
+                    // wire type 1 = 64-bit
+                    row_buf.extend_from_slice(&encode_varint((field_num << 3) | 1));
+                    row_buf.extend_from_slice(&col.values[row].to_le_bytes());
+                }
+                DataType::I64 => {
+                    // wire type 0 = varint
+                    row_buf.extend_from_slice(&encode_varint((field_num << 3) | 0));
+                    row_buf.extend_from_slice(&encode_varint(col.values[row]));
+                }
+                DataType::Str => {
+                    row_buf.extend_from_slice(&encode_varint((field_num << 3) | 1));
+                    row_buf.extend_from_slice(&col.values[row].to_le_bytes());
+                }
+            }
+        }
+        // Each row is a length-delimited message
+        buf.extend_from_slice(&encode_varint(row_buf.len() as u64));
+        buf.extend_from_slice(&row_buf);
+    }
+    buf
+}
+
+fn encode_varint(mut v: u64) -> Vec<u8> {
+    let mut buf = Vec::new();
+    loop {
+        if v < 0x80 { buf.push(v as u8); break; }
+        buf.push((v & 0x7F) as u8 | 0x80);
+        v >>= 7;
+    }
+    buf
+}
+
+pub fn write_protobuf(path: &str, block: &DataBlock) -> io::Result<()> {
+    std::fs::write(path, to_protobuf_bytes(block))
+}
+
+

@@ -497,6 +497,20 @@ __all__ = [
     'from_polars',
     'to_parquet',
     'from_parquet',
+    'to_kafka_message',
+    'from_kafka_message',
+    'write_stream_chunk',
+    'read_stream_all',
+    'Tensor',
+    'TensorBlock',
+    'write_tensors',
+    'read_tensors',
+    'to_numpy',
+    'from_numpy',
+    'to_avro_schema',
+    'write_avro',
+    'to_mongodb_docs',
+    'from_mongodb_docs',
 ]
 
 
@@ -1088,6 +1102,355 @@ def from_parquet(kore_path: Union[str, 'Path'], parquet_path: str) -> None:
     except ImportError:
         raise ImportError("pyarrow required: pip install pyarrow")
     from_arrow(kore_path, pq.read_table(parquet_path))
+
+
+# ── Kafka / Streaming Connector ───────────────────────────────────────────────
+
+def to_kafka_message(block: 'DataBlock') -> bytes:
+    """Serialize a DataBlock to Kafka message bytes.
+
+        producer.send('topic', kore.to_kafka_message(block))
+    """
+    return b'KOREK' + (5).to_bytes(4, 'little') + _block_to_bytes(block)
+
+
+def from_kafka_message(msg: bytes) -> 'DataBlock':
+    """Deserialize a Kafka message to DataBlock.
+
+        block = kore.from_kafka_message(consumer_record.value)
+    """
+    if not msg.startswith(b'KOREK'):
+        raise ValueError("Not a KORE Kafka message")
+    return _bytes_to_block(msg[9:])
+
+
+def write_stream_chunk(path: Union[str, 'Path'], block: 'DataBlock') -> None:
+    """Append a DataBlock chunk to a streaming .kore file (length-prefixed).
+
+        # Producer side:
+        kore.write_stream_chunk("stream.kore", block1)
+        kore.write_stream_chunk("stream.kore", block2)
+    """
+    import struct
+    chunk = _block_to_bytes(block)
+    with open(str(path), 'ab') as f:
+        f.write(struct.pack('<I', len(chunk)))
+        f.write(chunk)
+
+
+def read_stream_all(path: Union[str, 'Path']) -> 'DataBlock':
+    """Read all chunks from a streaming .kore file into a merged DataBlock.
+
+        merged = kore.read_stream_all("stream.kore")
+    """
+    import struct
+    merged = None
+    with open(str(path), 'rb') as f:
+        while True:
+            header = f.read(4)
+            if len(header) < 4: break
+            chunk_len = struct.unpack('<I', header)[0]
+            chunk = f.read(chunk_len)
+            if len(chunk) < chunk_len: break
+            block = _bytes_to_block(chunk)
+            if merged is None:
+                merged = block
+            else:
+                for col in block.columns:
+                    mc = merged.get_column(col.name)
+                    if mc:
+                        mc.data.extend(col.data)
+                        mc.num_rows = len(mc.data)
+    if merged and merged.columns:
+        merged.num_rows = len(merged.columns[0].data)
+    return merged or DataBlock()
+
+
+def _block_to_bytes(block: 'DataBlock') -> bytes:
+    """Internal: serialize DataBlock to raw bytes."""
+    import struct
+    buf = bytearray()
+    buf += b'KORE'
+    buf += struct.pack('<I', 2)  # version 2
+    buf += struct.pack('<I', block.num_columns)
+    for col in block.columns:
+        dtype_val = {'F64': 1, 'I64': 2, 'STR': 3, 'BOOL': 2}.get(
+            col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype), 2)
+        name_bytes = col.name.encode()
+        buf += bytes([dtype_val, len(name_bytes)]) + name_bytes
+        vals = col.data
+        buf += struct.pack('<Q', len(vals))
+        for v in vals:
+            if isinstance(v, float): buf += struct.pack('<d', v)
+            else: buf += struct.pack('<Q', int(v) & 0xFFFFFFFFFFFFFFFF)
+    crc = _crc32(bytes(buf))
+    buf += struct.pack('<I', crc)
+    return bytes(buf)
+
+
+def _bytes_to_block(data: bytes) -> 'DataBlock':
+    """Internal: deserialize raw bytes to DataBlock."""
+    import struct
+    block = DataBlock()
+    body, crc_bytes = data[:-4], data[-4:]
+    stored = struct.unpack('<I', crc_bytes)[0]
+    if _crc32(body) != stored:
+        raise ValueError("CRC32 mismatch in stream chunk")
+    r, pos = body, 0
+    pos += 4  # magic
+    pos += 4  # version
+    n_cols = struct.unpack_from('<I', r, pos)[0]; pos += 4
+    for _ in range(n_cols):
+        dtype_byte = r[pos]; name_len = r[pos+1]; pos += 2
+        name = r[pos:pos+name_len].decode(); pos += name_len
+        n_rows = struct.unpack_from('<Q', r, pos)[0]; pos += 8
+        vals = []
+        dtype = {1: DataType.F64, 2: DataType.I64}.get(dtype_byte, DataType.I64)
+        for _ in range(n_rows):
+            if dtype == DataType.F64:
+                vals.append(struct.unpack_from('<d', r, pos)[0])
+            else:
+                vals.append(struct.unpack_from('<Q', r, pos)[0])
+            pos += 8
+        block.add_column(name, dtype, vals)
+    return block
+
+
+def _crc32(data: bytes) -> int:
+    crc = 0xFFFFFFFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 1: crc = (crc >> 1) ^ 0xEDB88320
+            else: crc >>= 1
+    return (~crc) & 0xFFFFFFFF
+
+
+# ── ML / Tensor Support ───────────────────────────────────────────────────────
+
+class Tensor:
+    """Multi-dimensional tensor for ML workloads (embeddings, weights, etc.)."""
+
+    def __init__(self, name: str, shape: list, data: list):
+        expected = 1
+        for d in shape: expected *= d
+        if len(data) != expected:
+            raise ValueError(f"data length {len(data)} != shape product {expected}")
+        self.name = name
+        self.shape = shape
+        self.data = data
+
+    @property
+    def ndim(self): return len(self.shape)
+
+    @property
+    def num_rows(self): return self.shape[0]
+
+    @property
+    def num_cols(self): return self.shape[1] if len(self.shape) > 1 else 1
+
+    def row(self, i: int) -> list:
+        nc = self.num_cols
+        return self.data[i * nc:(i + 1) * nc]
+
+    def dot(self, i: int, query: list) -> float:
+        return sum(a * b for a, b in zip(self.row(i), query))
+
+    def knn(self, query: list, k: int = 5) -> list:
+        """Find k nearest rows by cosine similarity."""
+        import math
+        qn = math.sqrt(sum(x*x for x in query))
+        scores = []
+        for i in range(self.num_rows):
+            row = self.row(i)
+            rn = math.sqrt(sum(x*x for x in row))
+            dot = self.dot(i, query)
+            cos = dot / (rn * qn) if rn > 0 and qn > 0 else 0.0
+            scores.append((i, cos))
+        scores.sort(key=lambda x: -x[1])
+        return scores[:k]
+
+
+class TensorBlock:
+    """A block combining tensors (embeddings) + metadata (ids, labels)."""
+
+    def __init__(self):
+        self.tensors: list = []
+        self.metadata: DataBlock = DataBlock()
+
+    def add_tensor(self, tensor: 'Tensor') -> None:
+        self.tensors.append(tensor)
+
+    def get_tensor(self, name: str) -> 'Tensor':
+        return next((t for t in self.tensors if t.name == name), None)
+
+    def knn_search(self, tensor_name: str, query: list, k: int = 5) -> list:
+        """KNN search across the tensor, returning (row_idx, score) pairs."""
+        t = self.get_tensor(tensor_name)
+        if not t: raise ValueError(f"Tensor '{tensor_name}' not found")
+        return t.knn(query, k)
+
+
+def write_tensors(path: Union[str, 'Path'], block: 'TensorBlock') -> None:
+    """Write a TensorBlock (embeddings + metadata) to a .kore tensor file.
+
+        tb = kore.TensorBlock()
+        tb.add_tensor(kore.Tensor("embeddings", [100, 768], flat_data))
+        tb.metadata.add_column("id", kore.DataType.I64, list(range(100)))
+        kore.write_tensors("vectors.kore", tb)
+    """
+    import struct
+    buf = bytearray()
+    buf += b'KORET'
+    buf += struct.pack('<I', 6)  # version 6
+    buf += struct.pack('<I', len(block.tensors))
+    for t in block.tensors:
+        nb = t.name.encode()
+        buf += bytes([len(nb)]) + nb
+        buf += struct.pack('<I', len(t.shape))
+        for d in t.shape: buf += struct.pack('<Q', d)
+        buf += struct.pack('<Q', len(t.data))
+        for v in t.data: buf += struct.pack('<d', float(v))
+    meta_bytes = _block_to_bytes(block.metadata)
+    buf += struct.pack('<I', len(meta_bytes)) + meta_bytes
+    crc = _crc32(bytes(buf))
+    buf += struct.pack('<I', crc)
+    with open(str(path), 'wb') as f: f.write(buf)
+
+
+def read_tensors(path: Union[str, 'Path']) -> 'TensorBlock':
+    """Read a TensorBlock from a .kore tensor file.
+
+        tb = kore.read_tensors("vectors.kore")
+        results = tb.knn_search("embeddings", query_vector, k=10)
+    """
+    import struct
+    with open(str(path), 'rb') as f: data = f.read()
+    body, crc_bytes = data[:-4], data[-4:]
+    if _crc32(body) != struct.unpack('<I', crc_bytes)[0]:
+        raise ValueError("CRC32 mismatch in tensor file")
+    pos = 5 + 4  # magic + version
+    n_tensors = struct.unpack_from('<I', body, pos)[0]; pos += 4
+    block = TensorBlock()
+    for _ in range(n_tensors):
+        nl = body[pos]; pos += 1
+        name = body[pos:pos+nl].decode(); pos += nl
+        ndim = struct.unpack_from('<I', body, pos)[0]; pos += 4
+        shape = [struct.unpack_from('<Q', body, pos + i*8)[0] for i in range(ndim)]; pos += ndim * 8
+        n_vals = struct.unpack_from('<Q', body, pos)[0]; pos += 8
+        vals = [struct.unpack_from('<d', body, pos + i*8)[0] for i in range(n_vals)]; pos += n_vals * 8
+        block.add_tensor(Tensor(name, shape, vals))
+    meta_len = struct.unpack_from('<I', body, pos)[0]; pos += 4
+    block.metadata = _bytes_to_block(body[pos:pos+meta_len])
+    return block
+
+
+def to_numpy(block: 'DataBlock'):
+    """Convert a DataBlock column to a numpy array (for ML pipelines).
+
+    Requires: numpy
+
+        arr = kore.to_numpy(block)['price']  # → numpy array
+    """
+    try: import numpy as np
+    except ImportError: raise ImportError("numpy required: pip install numpy")
+    result = {}
+    for col in block.columns:
+        dtype_name = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
+        if dtype_name in ('F64', 'FLOAT64'):
+            result[col.name] = np.array(col.data, dtype=np.float64)
+        elif dtype_name in ('I64', 'INT64'):
+            result[col.name] = np.array(col.data, dtype=np.int64)
+        else:
+            result[col.name] = np.array(col.data)
+    return result
+
+
+def from_numpy(path: Union[str, 'Path'], arrays: dict) -> None:
+    """Write a dict of numpy arrays to a .kore file.
+
+        import numpy as np
+        kore.from_numpy("data.kore", {
+            "price": np.array([10.5, 20.0], dtype=np.float64),
+            "qty":   np.array([100, 200], dtype=np.int64),
+        })
+    """
+    block = DataBlock()
+    for name, arr in arrays.items():
+        import numpy as np
+        if np.issubdtype(arr.dtype, np.floating):
+            block.add_column(name, DataType.F64, arr.tolist())
+        else:
+            block.add_column(name, DataType.I64, arr.tolist())
+    write_file(path, block)
+
+
+# ── Avro Bridge ───────────────────────────────────────────────────────────────
+
+def to_avro_schema(block: 'DataBlock') -> dict:
+    """Generate Avro schema dict from a DataBlock."""
+    fields = []
+    for col in block.columns:
+        dtype_name = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
+        avro_type = "double" if dtype_name in ('F64', 'FLOAT64') else "long"
+        fields.append({"name": col.name, "type": avro_type})
+    return {"type": "record", "name": "KoreRecord", "fields": fields}
+
+
+def write_avro(path: Union[str, 'Path'], block: 'DataBlock') -> None:
+    """Write a DataBlock to Avro format (for Kafka/Hadoop interop).
+
+    Requires: fastavro
+
+        kore.write_avro("data.avro", block)
+        # kafka producer can then send the avro bytes
+    """
+    try: import fastavro
+    except ImportError: raise ImportError("fastavro required: pip install fastavro")
+    schema = to_avro_schema(block)
+    records = []
+    for i in range(block.num_rows):
+        row = {}
+        for col in block.columns:
+            dtype_name = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
+            row[col.name] = float(col.data[i]) if dtype_name in ('F64', 'FLOAT64') else int(col.data[i])
+        records.append(row)
+    with open(str(path), 'wb') as f:
+        fastavro.writer(f, schema, records)
+
+
+# ── MongoDB / BSON Bridge ─────────────────────────────────────────────────────
+
+def to_mongodb_docs(block: 'DataBlock') -> list:
+    """Convert DataBlock to list of MongoDB-compatible dicts.
+
+        docs = kore.to_mongodb_docs(block)
+        collection.insert_many(docs)
+    """
+    docs = []
+    for i in range(block.num_rows):
+        doc = {}
+        for col in block.columns:
+            dtype_name = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
+            doc[col.name] = float(col.data[i]) if dtype_name in ('F64', 'FLOAT64') else int(col.data[i])
+        docs.append(doc)
+    return docs
+
+
+def from_mongodb_docs(path: Union[str, 'Path'], docs: list, col_types: dict = None) -> None:
+    """Write MongoDB documents to a .kore file.
+
+        cursor = collection.find({"region": 1})
+        kore.from_mongodb_docs("region1.kore", list(cursor))
+    """
+    if not docs: return
+    keys = [k for k in docs[0].keys() if k != '_id']
+    block = DataBlock()
+    for k in keys:
+        vals = [doc.get(k, 0) for doc in docs]
+        dtype = DataType.F64 if any(isinstance(v, float) for v in vals) else DataType.I64
+        block.add_column(k, dtype, vals)
+    write_file(path, block)
 
 
 
