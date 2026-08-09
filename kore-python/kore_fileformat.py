@@ -469,3 +469,70 @@ __all__ = [
     'create_data_block',
     'column_stats_from_bytes',
 ]
+
+
+# ── CLI — `kore inspect <file>` ─────────────────────────────────────────────
+
+def _cli_inspect(path: str) -> None:
+    """Print human-readable summary of a .kore file."""
+    import os
+    file_size = os.path.getsize(path)
+    block = read_file(path)
+
+    print(f"\n{'='*55}")
+    print(f"  KORE File: {os.path.basename(path)}")
+    print(f"{'='*55}")
+    print(f"  Rows    : {block.num_rows:,}")
+    print(f"  Columns : {block.num_columns}")
+    print(f"  Size    : {file_size / 1024:.1f} KB ({file_size:,} bytes)")
+    print(f"{'='*55}")
+    print(f"  {'Column':<20} {'Type':<8} {'Min':>12} {'Max':>12} {'Avg':>12}")
+    print(f"  {'-'*20} {'-'*8} {'-'*12} {'-'*12} {'-'*12}")
+
+    for col in block.columns:
+        dtype = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
+        vals = col.data if col.data else []
+        if vals and dtype in ('F64', 'I64', 'FLOAT64', 'INT64'):
+            try:
+                nums = [float(v) for v in vals]
+                mn = f"{min(nums):>12.3f}"
+                mx = f"{max(nums):>12.3f}"
+                av = f"{sum(nums)/len(nums):>12.3f}"
+            except Exception:
+                mn = mx = av = f"{'N/A':>12}"
+        else:
+            mn = mx = av = f"{'N/A':>12}"
+        print(f"  {col.name:<20} {dtype:<8} {mn} {mx} {av}")
+    print(f"{'='*55}\n")
+
+
+def _cli_main() -> None:
+    """Entry point for `kore` command."""
+    import sys
+    args = sys.argv[1:]
+
+    if not args or args[0] in ('-h', '--help'):
+        print(f"kore-fileformat {__version__}")
+        print("\nUsage:")
+        print("  kore inspect <file.kore>   — show file summary")
+        print("  kore version               — show version")
+        return
+
+    cmd = args[0]
+
+    if cmd == 'version':
+        print(f"kore-fileformat {__version__}")
+
+    elif cmd == 'inspect':
+        if len(args) < 2:
+            print("Error: provide a file path. Usage: kore inspect <file.kore>")
+            return
+        _cli_inspect(args[1])
+
+    else:
+        print(f"Unknown command: {cmd}")
+        print("Run `kore --help` for usage.")
+
+
+if __name__ == '__main__':
+    _cli_main()
