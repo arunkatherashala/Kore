@@ -1,13 +1,13 @@
 # KORE FileFormat — C# / .NET
 
-**Version 1.6.23** | [NuGet](https://www.nuget.org/packages/KoreFileFormat/) | [GitHub](https://github.com/arunkatherashala/Kore)
+**Version 1.6.24** | [NuGet](https://www.nuget.org/packages/KoreFileFormat/) | [GitHub](https://github.com/arunkatherashala/Kore)
 
 High-performance columnar format with 11 ACID features. Uses P/Invoke to call Rust `kore_ffi.dll`.
 
 ## Install
 
 ```bash
-dotnet add package KoreFileFormat --version 1.6.23
+dotnet add package KoreFileFormat --version 1.6.24
 ```
 
 Or from source:
