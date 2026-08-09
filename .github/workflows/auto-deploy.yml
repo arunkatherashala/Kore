@@ -1,4 +1,4 @@
-name: Auto Deploy on Version Bump
+name: Auto Version Bump & Deploy
 
 on:
   push:
@@ -9,34 +9,66 @@ permissions:
   contents: write
 
 jobs:
-  check-and-deploy:
+  auto-bump-deploy:
     runs-on: ubuntu-latest
+    # Prevent infinite loop — skip if this push was made by the bot
+    if: github.actor != 'github-actions[bot]'
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
-      - name: Check if version changed
-        id: version_check
+      - name: Read and bump patch version
+        id: bump
         run: |
-          NEW=$(grep '^version' pyproject.toml | head -1 | grep -oP '[\d]+\.[\d]+\.[\d]+')
-          OLD=$(git show HEAD~1:pyproject.toml 2>/dev/null | grep '^version' | head -1 | grep -oP '[\d]+\.[\d]+\.[\d]+' || echo "0.0.0")
+          CURRENT=$(grep '^version' pyproject.toml | head -1 | grep -oP '[0-9]+\.[0-9]+\.[0-9]+')
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          NEW="$MAJOR.$MINOR.$((PATCH + 1))"
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
           echo "new=$NEW" >> $GITHUB_OUTPUT
-          echo "old=$OLD" >> $GITHUB_OUTPUT
-          if [ "$NEW" != "$OLD" ]; then
-            echo "changed=true" >> $GITHUB_OUTPUT
-            echo "Version changed: $OLD → $NEW"
-          else
-            echo "changed=false" >> $GITHUB_OUTPUT
-            echo "Version unchanged ($NEW) — skipping deploy"
-          fi
+          echo "Bumping: $CURRENT → $NEW"
 
-      - name: Create and push tag
-        if: steps.version_check.outputs.changed == 'true'
+      - name: Update version in all language files
         run: |
-          VERSION="v${{ steps.version_check.outputs.new }}"
+          OLD="${{ steps.bump.outputs.current }}"
+          NEW="${{ steps.bump.outputs.new }}"
+          FILES=(
+            "pyproject.toml"
+            "kore-python/kore_fileformat.py"
+            "kore-python/README.md"
+            "kore-node/package.json"
+            "kore-node/README.md"
+            "kore-ruby/kore_fileformat.gemspec"
+            "kore-ruby/README.md"
+            "kore-go/go.mod"
+            "kore-go/README.md"
+            "kore-php/composer.json"
+            "kore-php/README.md"
+            "maven/README.md"
+            "csharp/Kore.FileFormat/README.md"
+            "kore-standalone/Cargo.toml"
+            "kore-standalone/README.md"
+          )
+          for f in "${FILES[@]}"; do
+            [ -f "$f" ] && sed -i "s/$OLD/$NEW/g" "$f"
+          done
+          # C# has x.x.x.x pattern
+          sed -i "s/${OLD}\.0/${NEW}.0/g; s/$OLD/$NEW/g" "csharp/Kore.FileFormat/Kore.FileFormat.csproj"
+          # Java pom.xml
+          sed -i "s|<version>${OLD}</version>|<version>${NEW}</version>|g" "maven/pom.xml"
+
+      - name: Commit version bump
+        run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: auto-bump ${{ steps.bump.outputs.current }} → ${{ steps.bump.outputs.new }} [skip ci]"
+          git push origin fileformat
+
+      - name: Tag and trigger all registry deploys
+        run: |
+          VERSION="v${{ steps.bump.outputs.new }}"
           git tag "$VERSION"
           git push origin "$VERSION"
-          echo "✅ Tagged $VERSION — all publish workflows will now trigger"
+          echo "✅ $VERSION tagged — PyPI, npm, crates.io, Maven, RubyGems deploying..."
