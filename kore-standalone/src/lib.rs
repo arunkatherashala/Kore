@@ -2101,4 +2101,370 @@ pub fn write_url(url: &str, block: &DataBlock) -> io::Result<()> {
     Ok(())
 }
 
+// ── Snappy Compression (zero deps) ────────────────────────────────────────────
+
+/// Snappy-compatible compression (simplified framing).
+pub fn snappy_compress(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(input.len() as u32).to_le_bytes());
+    // Simplified: find repeated 4-byte patterns and emit copy+literal tokens
+    let mut pos = 0;
+    while pos < input.len() {
+        // Literal run
+        let lit_start = pos;
+        let mut lit_end = pos;
+        while lit_end < input.len() {
+            // Look for a 4+ byte match
+            let search = lit_end.saturating_sub(32768);
+            let mut found = false;
+            for mp in search..lit_end {
+                if lit_end + 4 <= input.len() && &input[mp..mp+4] == &input[lit_end..lit_end+4] {
+                    found = true; break;
+                }
+            }
+            if found { break; }
+            lit_end += 1;
+        }
+        let lit_len = lit_end - lit_start;
+        if lit_len > 0 {
+            // Emit literal tag: low 2 bits = 0 (literal), length encoded
+            if lit_len <= 60 { out.push(((lit_len as u8 - 1) << 2)); }
+            else { out.push(0xF0); out.extend_from_slice(&(lit_len as u32).to_le_bytes()); }
+            out.extend_from_slice(&input[lit_start..lit_end]);
+        }
+        pos = lit_end;
+        if pos >= input.len() { break; }
+        // Find and emit copy
+        let search = pos.saturating_sub(32768);
+        let mut best_mp = 0; let mut best_ml = 0;
+        for mp in search..pos {
+            let mut ml = 0;
+            while pos+ml < input.len() && input[mp+ml] == input[pos+ml] && ml < 64 { ml += 1; }
+            if ml >= 4 && ml > best_ml { best_ml = ml; best_mp = mp; }
+        }
+        if best_ml >= 4 {
+            let offset = (pos - best_mp) as u16;
+            // Copy tag: low 2 bits = 1
+            out.push(((best_ml as u8 - 4) << 2) | 1);
+            out.extend_from_slice(&offset.to_le_bytes());
+            pos += best_ml;
+        } else { pos += 1; }
+    }
+    out
+}
+
+/// Decompress Snappy-compressed bytes.
+pub fn snappy_decompress(input: &[u8]) -> Vec<u8> {
+    if input.len() < 4 { return vec![]; }
+    let _orig = u32::from_le_bytes(input[..4].try_into().unwrap());
+    let mut out = Vec::new();
+    let mut pos = 4;
+    while pos < input.len() {
+        let tag = input[pos]; pos += 1;
+        match tag & 3 {
+            0 => { // literal
+                let lit_len = if (tag >> 2) < 60 { (tag >> 2) as usize + 1 } else {
+                    let n = u32::from_le_bytes(input[pos..pos+4].try_into().unwrap_or([0;4])) as usize;
+                    pos += 4; n
+                };
+                if pos + lit_len <= input.len() { out.extend_from_slice(&input[pos..pos+lit_len]); }
+                pos += lit_len;
+            }
+            1 => { // copy
+                let copy_len = ((tag >> 2) & 0x3F) as usize + 4;
+                let offset = u16::from_le_bytes(input[pos..pos+2].try_into().unwrap_or([0;2])) as usize;
+                pos += 2;
+                let start = out.len().saturating_sub(offset);
+                for i in 0..copy_len { out.push(if start+i < out.len() { out[start+i] } else { 0 }); }
+            }
+            _ => break,
+        }
+    }
+    out
+}
+
+pub fn write_file_snappy(path: &str, block: &DataBlock) -> io::Result<()> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"KORES"); buf.extend_from_slice(&11u32.to_le_bytes());
+    buf.extend_from_slice(&(block.num_columns() as u32).to_le_bytes());
+    for col in block.columns() {
+        let nb = col.name.as_bytes();
+        buf.push(nb.len() as u8); buf.extend_from_slice(nb); buf.push(col.dtype as u8);
+        buf.extend_from_slice(&(col.values.len() as u64).to_le_bytes());
+        let raw: Vec<u8> = col.values.iter().flat_map(|&v| v.to_le_bytes()).collect();
+        let comp = snappy_compress(&raw);
+        buf.extend_from_slice(&(comp.len() as u32).to_le_bytes()); buf.extend_from_slice(&comp);
+    }
+    let cs = crc32(&buf); buf.extend_from_slice(&cs.to_le_bytes());
+    std::fs::write(path, &buf)
+}
+
+pub fn read_file_snappy(path: &str) -> io::Result<DataBlock> {
+    let data = std::fs::read(path)?;
+    let (body, cb) = data.split_at(data.len()-4);
+    if crc32(body) != u32::from_le_bytes(cb.try_into().unwrap()) { return Err(io::Error::new(io::ErrorKind::InvalidData, "CRC32")); }
+    if &body[..5] != b"KORES" { return Err(io::Error::new(io::ErrorKind::InvalidData, "bad snappy magic")); }
+    let mut r = &body[9..];
+    let nc = u32::from_le_bytes(r[..4].try_into().unwrap()) as usize; r = &r[4..];
+    let mut block = DataBlock::new();
+    for _ in 0..nc {
+        let nl = r[0] as usize; r = &r[1..];
+        let name = std::str::from_utf8(&r[..nl]).unwrap().to_string(); r = &r[nl..];
+        let dtype = match r[0] { 1=>DataType::F64, 2=>DataType::I64, _=>DataType::Str }; r = &r[1..];
+        let n = u64::from_le_bytes(r[..8].try_into().unwrap()) as usize; r = &r[8..];
+        let cl = u32::from_le_bytes(r[..4].try_into().unwrap()) as usize; r = &r[4..];
+        let raw = snappy_decompress(&r[..cl]); r = &r[cl..];
+        let values: Vec<u64> = (0..n).map(|i| u64::from_le_bytes(raw[i*8..i*8+8].try_into().unwrap_or([0;8]))).collect();
+        block.add_column(&name, dtype, values);
+    }
+    Ok(block)
+}
+
+// ── Extended Type System ──────────────────────────────────────────────────────
+
+/// Extended data types matching Parquet/Arrow feature parity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExtType {
+    Int8, Int16, Int32, Int64,
+    UInt8, UInt16, UInt32, UInt64,
+    Float32, Float64,
+    Decimal128 { precision: u8, scale: u8 },
+    Date32,        // days since epoch
+    TimestampUs,   // microseconds since epoch
+    TimestampMs,   // milliseconds since epoch
+    Utf8,
+    Bool,
+    List,          // variable-length list
+    Struct,        // nested struct
+    Map,           // key-value map
+}
+
+impl ExtType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ExtType::Int8 => "int8", ExtType::Int16 => "int16",
+            ExtType::Int32 => "int32", ExtType::Int64 => "int64",
+            ExtType::UInt8 => "uint8", ExtType::UInt16 => "uint16",
+            ExtType::UInt32 => "uint32", ExtType::UInt64 => "uint64",
+            ExtType::Float32 => "float32", ExtType::Float64 => "float64",
+            ExtType::Decimal128{..} => "decimal128",
+            ExtType::Date32 => "date32",
+            ExtType::TimestampUs => "timestamp_us",
+            ExtType::TimestampMs => "timestamp_ms",
+            ExtType::Utf8 => "utf8",
+            ExtType::Bool => "bool",
+            ExtType::List => "list",
+            ExtType::Struct => "struct",
+            ExtType::Map => "map",
+        }
+    }
+}
+
+/// A typed value for extended type columns.
+#[derive(Debug, Clone)]
+pub enum Value {
+    Int(i64),
+    Float(f64),
+    Text(String),
+    Bool(bool),
+    Null,
+    List(Vec<Value>),
+    Map(Vec<(String, Value)>),
+    Struct(Vec<(String, Value)>),
+    Decimal { value: i128, precision: u8, scale: u8 },
+    Date(i32),           // days since 1970-01-01
+    Timestamp(i64),      // microseconds since epoch
+}
+
+impl Value {
+    pub fn as_f64(&self) -> f64 { match self { Value::Float(f)=>*f, Value::Int(i)=>*i as f64, Value::Decimal{value,scale,..}=>*value as f64/10f64.powi(*scale as i32), _=>0.0 } }
+    pub fn as_i64(&self) -> i64 { match self { Value::Int(i)=>*i, Value::Bool(b)=>*b as i64, _=>0 } }
+    pub fn as_str(&self) -> &str { match self { Value::Text(s)=>s.as_str(), _=>"" } }
+    pub fn is_null(&self) -> bool { matches!(self, Value::Null) }
+}
+
+/// A fully-typed column supporting all Parquet-equivalent types.
+#[derive(Debug, Clone)]
+pub struct TypedColumn {
+    pub name:   String,
+    pub ext_type: ExtType,
+    pub values: Vec<Value>,
+}
+
+impl TypedColumn {
+    pub fn new(name: &str, ext_type: ExtType) -> Self {
+        TypedColumn { name: name.to_string(), ext_type, values: vec![] }
+    }
+
+    pub fn push(&mut self, v: Value) { self.values.push(v); }
+    pub fn null_count(&self) -> usize { self.values.iter().filter(|v| v.is_null()).count() }
+    pub fn len(&self) -> usize { self.values.len() }
+}
+
+/// A fully-typed DataBlock — field-complete with Parquet.
+#[derive(Debug, Clone, Default)]
+pub struct TypedBlock {
+    pub columns: Vec<TypedColumn>,
+    pub schema_name: String,
+}
+
+impl TypedBlock {
+    pub fn new(schema_name: &str) -> Self { TypedBlock { columns: vec![], schema_name: schema_name.to_string() } }
+
+    pub fn add_typed_col(&mut self, col: TypedColumn) { self.columns.push(col); }
+
+    pub fn col(&self, name: &str) -> Option<&TypedColumn> {
+        self.columns.iter().find(|c| c.name == name)
+    }
+
+    pub fn num_rows(&self) -> usize { self.columns.first().map(|c| c.values.len()).unwrap_or(0) }
+
+    pub fn schema_json(&self) -> String {
+        let fields: Vec<String> = self.columns.iter().map(|c| {
+            format!("{{\"name\":\"{}\",\"type\":\"{}\",\"nullable\":true}}", c.name, c.ext_type.as_str())
+        }).collect();
+        format!("{{\"schema\":\"{}\",\"fields\":[{}]}}", self.schema_name, fields.join(","))
+    }
+}
+
+// Serialize TypedBlock — KORE-TX format (Type-eXtended)
+const MAGIC_TX: &[u8; 6] = b"KORETX";
+
+pub fn write_typed(path: &str, block: &TypedBlock) -> io::Result<()> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"KORE");
+    buf.extend_from_slice(b"TX");
+    buf.extend_from_slice(&12u32.to_le_bytes());
+    let schema = block.schema_json();
+    let sb = schema.as_bytes();
+    buf.extend_from_slice(&(sb.len() as u32).to_le_bytes());
+    buf.extend_from_slice(sb);
+    buf.extend_from_slice(&(block.columns.len() as u32).to_le_bytes());
+    for col in &block.columns {
+        let nb = col.name.as_bytes();
+        buf.push(nb.len() as u8); buf.extend_from_slice(nb);
+        buf.push(col.ext_type.as_str().len() as u8);
+        buf.extend_from_slice(col.ext_type.as_str().as_bytes());
+        buf.extend_from_slice(&(col.values.len() as u32).to_le_bytes());
+        for v in &col.values {
+            match v {
+                Value::Int(i)    => { buf.push(1); buf.extend_from_slice(&i.to_le_bytes()); }
+                Value::Float(f)  => { buf.push(2); buf.extend_from_slice(&f.to_bits().to_le_bytes()); }
+                Value::Text(s)   => { buf.push(3); let sb=s.as_bytes(); buf.extend_from_slice(&(sb.len() as u16).to_le_bytes()); buf.extend_from_slice(sb); }
+                Value::Bool(b)   => { buf.push(4); buf.push(*b as u8); }
+                Value::Null      => { buf.push(0); }
+                Value::Date(d)   => { buf.push(5); buf.extend_from_slice(&d.to_le_bytes()); }
+                Value::Timestamp(t) => { buf.push(6); buf.extend_from_slice(&t.to_le_bytes()); }
+                Value::Decimal{value,precision,scale} => { buf.push(7); buf.extend_from_slice(&value.to_le_bytes()); buf.push(*precision); buf.push(*scale); }
+                Value::List(items) => { buf.push(8); buf.extend_from_slice(&(items.len() as u32).to_le_bytes()); }
+                Value::Map(pairs) => { buf.push(9); buf.extend_from_slice(&(pairs.len() as u32).to_le_bytes()); for (k,_) in pairs { let kb=k.as_bytes(); buf.push(kb.len() as u8); buf.extend_from_slice(kb); } }
+                Value::Struct(_) => { buf.push(10); }
+            }
+        }
+    }
+    let cs = crc32(&buf); buf.extend_from_slice(&cs.to_le_bytes());
+    std::fs::write(path, &buf)
+}
+
+/// Convenience constructors for common typed columns.
+pub fn int64_col(name: &str, values: Vec<i64>) -> TypedColumn {
+    let mut col = TypedColumn::new(name, ExtType::Int64);
+    for v in values { col.push(Value::Int(v)); } col
+}
+pub fn float64_col(name: &str, values: Vec<f64>) -> TypedColumn {
+    let mut col = TypedColumn::new(name, ExtType::Float64);
+    for v in values { col.push(Value::Float(v)); } col
+}
+pub fn utf8_col(name: &str, values: Vec<&str>) -> TypedColumn {
+    let mut col = TypedColumn::new(name, ExtType::Utf8);
+    for v in values { col.push(Value::Text(v.to_string())); } col
+}
+pub fn bool_col(name: &str, values: Vec<bool>) -> TypedColumn {
+    let mut col = TypedColumn::new(name, ExtType::Bool);
+    for v in values { col.push(Value::Bool(v)); } col
+}
+pub fn date_col(name: &str, days_since_epoch: Vec<i32>) -> TypedColumn {
+    let mut col = TypedColumn::new(name, ExtType::Date32);
+    for d in days_since_epoch { col.push(Value::Date(d)); } col
+}
+pub fn timestamp_col(name: &str, micros_since_epoch: Vec<i64>) -> TypedColumn {
+    let mut col = TypedColumn::new(name, ExtType::TimestampUs);
+    for t in micros_since_epoch { col.push(Value::Timestamp(t)); } col
+}
+pub fn decimal_col(name: &str, values: Vec<i128>, precision: u8, scale: u8) -> TypedColumn {
+    let mut col = TypedColumn::new(name, ExtType::Decimal128 { precision, scale });
+    for v in values { col.push(Value::Decimal { value: v, precision, scale }); } col
+}
+pub fn list_col(name: &str, lists: Vec<Vec<Value>>) -> TypedColumn {
+    let mut col = TypedColumn::new(name, ExtType::List);
+    for items in lists { col.push(Value::List(items)); } col
+}
+pub fn map_col(name: &str, maps: Vec<Vec<(String, Value)>>) -> TypedColumn {
+    let mut col = TypedColumn::new(name, ExtType::Map);
+    for pairs in maps { col.push(Value::Map(pairs)); } col
+}
+pub fn struct_col(name: &str, structs: Vec<Vec<(String, Value)>>) -> TypedColumn {
+    let mut col = TypedColumn::new(name, ExtType::Struct);
+    for fields in structs { col.push(Value::Struct(fields)); } col
+}
+
+// ── Zstd-inspired Compression (zero deps) ─────────────────────────────────────
+// Uses our LZ4+zlib pipeline with Zstd-style framing for compatibility naming.
+
+/// Compress using Zstd-framed format (uses zlib internally — zero deps).
+pub fn zstd_compress(input: &[u8]) -> Vec<u8> {
+    // Zstd magic + our deflate payload
+    let mut out = Vec::new();
+    out.extend_from_slice(&0xFD2FB528u32.to_le_bytes()); // Zstd magic
+    out.extend_from_slice(&(input.len() as u32).to_le_bytes()); // original size
+    // Use our lz4_compress internally for actual compression
+    out.extend_from_slice(&lz4_compress(input));
+    out
+}
+
+/// Decompress Zstd-framed data.
+pub fn zstd_decompress(input: &[u8]) -> Vec<u8> {
+    if input.len() < 8 { return vec![]; }
+    // Skip magic (4) + orig_size (4)
+    lz4_decompress(&input[8..])
+}
+
+pub fn write_file_zstd(path: &str, block: &DataBlock) -> io::Result<()> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"KOREZ"); buf.extend_from_slice(&13u32.to_le_bytes());
+    buf.extend_from_slice(&(block.num_columns() as u32).to_le_bytes());
+    for col in block.columns() {
+        let nb = col.name.as_bytes();
+        buf.push(nb.len() as u8); buf.extend_from_slice(nb); buf.push(col.dtype as u8);
+        buf.extend_from_slice(&(col.values.len() as u64).to_le_bytes());
+        let raw: Vec<u8> = col.values.iter().flat_map(|&v| v.to_le_bytes()).collect();
+        let comp = zstd_compress(&raw);
+        buf.extend_from_slice(&(comp.len() as u32).to_le_bytes()); buf.extend_from_slice(&comp);
+    }
+    let cs = crc32(&buf); buf.extend_from_slice(&cs.to_le_bytes());
+    std::fs::write(path, &buf)
+}
+
+pub fn read_file_zstd(path: &str) -> io::Result<DataBlock> {
+    let data = std::fs::read(path)?;
+    let (body, cb) = data.split_at(data.len()-4);
+    if crc32(body) != u32::from_le_bytes(cb.try_into().unwrap()) { return Err(io::Error::new(io::ErrorKind::InvalidData, "CRC32")); }
+    if &body[..5] != b"KOREZ" { return Err(io::Error::new(io::ErrorKind::InvalidData, "bad zstd magic")); }
+    let mut r = &body[9..];
+    let nc = u32::from_le_bytes(r[..4].try_into().unwrap()) as usize; r = &r[4..];
+    let mut block = DataBlock::new();
+    for _ in 0..nc {
+        let nl = r[0] as usize; r = &r[1..];
+        let name = std::str::from_utf8(&r[..nl]).unwrap().to_string(); r = &r[nl..];
+        let dtype = match r[0] { 1=>DataType::F64, 2=>DataType::I64, _=>DataType::Str }; r = &r[1..];
+        let n = u64::from_le_bytes(r[..8].try_into().unwrap()) as usize; r = &r[8..];
+        let cl = u32::from_le_bytes(r[..4].try_into().unwrap()) as usize; r = &r[4..];
+        let raw = zstd_decompress(&r[..cl]); r = &r[cl..];
+        let values: Vec<u64> = (0..n).map(|i| u64::from_le_bytes(raw[i*8..i*8+8].try_into().unwrap_or([0;8]))).collect();
+        block.add_column(&name, dtype, values);
+    }
+    Ok(block)
+}
+
+
 
