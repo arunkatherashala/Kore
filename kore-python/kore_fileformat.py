@@ -241,83 +241,13 @@ def crc32(data: bytes) -> int:
     return lib.kore_crc32(data, len(data))
 
 
-# ── ULTRA-FAST path: struct.pack bulk serialization ───────────────────────────
-# Bypasses per-element Python iteration — single C-level memcpy
+# ── Fast bulk read (internal — used by read_hybrid for .hkore files) ──────────
 
-def _pack_col_fast(col) -> bytes:
-    """Pack a column to raw bytes using struct — fastest Python serialization."""
+def _read_bulk_fast(data: bytes, n_rows: int, cols_meta: list) -> 'DataBlock':
+    """Internal bulk read — array.frombytes for zero-loop column loading."""
     import struct, array as _arr
-    dtype_name = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
-    n = len(col.data)
-    if dtype_name in ('F64', 'FLOAT64'):
-        a = _arr.array('d', col.data)
-        return struct.pack('<I', 1) + struct.pack('<Q', n) + a.tobytes()
-    else:
-        a = _arr.array('q', (int(v) for v in col.data))
-        return struct.pack('<I', 2) + struct.pack('<Q', n) + a.tobytes()
-
-
-def write_file_fast(path: Union[str, 'Path'], block: 'DataBlock') -> None:
-    """Ultra-fast write using struct.pack bulk serialization.
-
-    Best for READ: use read_file_fast() which reads at 66ns/row.
-    Best for WRITE: write_file() (Rust FFI) at 568ns/row.
-    Combined: write_file_fast() + read_file_fast() = optimal pipeline.
-
-        kore.write_file_fast("data.kore", block)   # write custom fast format
-        block = kore.read_file_fast("data.kore")   # read at 66ns/row!
-    """
-    import struct, array as _arr
-    # Header
-    name_bytes = b''.join(
-        struct.pack('<B', len(col.name.encode())) + col.name.encode()
-        for col in block.columns
-    )
-    buf = bytearray()
-    buf.extend(b'KOREF')                              # fast format magic
-    buf.extend(struct.pack('<I', 14))                  # version 14
-    buf.extend(struct.pack('<I', block.num_columns))
-    buf.extend(struct.pack('<I', block.num_rows))
-    for col in block.columns:
-        dtype_name = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
-        nb = col.name.encode()
-        dtype_byte = 1 if dtype_name in ('F64','FLOAT64') else 2
-        buf.extend(struct.pack('<BB', len(nb), dtype_byte))
-        buf.extend(nb)
-    # Data — one bulk pack per column, no Python loops
-    for col in block.columns:
-        dtype_name = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
-        if dtype_name in ('F64','FLOAT64'):
-            # If already floats, frombytes is zero-copy; otherwise map once
-            try:
-                a = _arr.array('d', col.data)  # fast if data is already float/int list
-            except TypeError:
-                a = _arr.array('d', map(float, col.data))
-        else:
-            try:
-                a = _arr.array('q', col.data)
-            except TypeError:
-                a = _arr.array('q', map(int, col.data))
-        buf.extend(a.tobytes())
-    buf.extend(struct.pack('<I', _crc32(bytes(buf))))
-    with open(str(path), 'wb') as f: f.write(buf)
-
-
-def read_file_fast(path: Union[str, 'Path']) -> 'DataBlock':
-    """Ultra-fast read — single bulk unpack per column, zero Python loops."""
-    import struct, array as _arr
-    with open(str(path), 'rb') as f: data = f.read()
-    if not data.startswith(b'KOREF'):
-        return read_file(path)  # fallback to Rust FFI
-    pos = 9  # magic(5) + version(4)
-    n_cols = struct.unpack_from('<I', data, pos)[0]; pos += 4
-    n_rows = struct.unpack_from('<I', data, pos)[0]; pos += 4
-    cols_meta = []
-    for _ in range(n_cols):
-        nl, dtype_byte = struct.unpack_from('<BB', data, pos); pos += 2
-        name = data[pos:pos+nl].decode(); pos += nl
-        cols_meta.append((name, dtype_byte))
     block = DataBlock()
+    pos = 0
     for name, dtype_byte in cols_meta:
         nbytes = n_rows * 8
         if dtype_byte == 1:
@@ -328,106 +258,6 @@ def read_file_fast(path: Union[str, 'Path']) -> 'DataBlock':
             block.add_column(name, DataType.I64, a.tolist())
         pos += nbytes
     return block
-
-
-def write_file_mmap(path: Union[str, 'Path'], block: 'DataBlock') -> None:
-    """Memory-mapped write — OS manages buffering, fastest for large files.
-
-        kore.write_file_mmap("big_data.kore", block)
-    """
-    import mmap, struct, array as _arr
-    # Pre-compute total size  
-    header_base = 13  # magic(5) + version(4) + n_cols(4)
-    header_size = header_base + sum(2 + len(col.name.encode()) for col in block.columns)
-    data_size = block.num_rows * 8 * block.num_columns
-    total = header_size + data_size + 4  # +4 for CRC32
-
-    with open(str(path), 'w+b') as f:
-        f.seek(total - 1); f.write(b'\x00'); f.seek(0)  # pre-allocate
-        # Write header + data without mmap (mmap size pre-compute is tricky)
-        # Use buffered I/O which OS converts to mmap internally
-        buf = bytearray()
-        buf.extend(b'KOREM')
-        buf.extend(struct.pack('<I', 15))
-        buf.extend(struct.pack('<I', block.num_columns))
-        buf.extend(struct.pack('<I', block.num_rows))
-        for col in block.columns:
-            nb = col.name.encode()
-            dtype_name = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
-            dtype_byte = 1 if dtype_name in ('F64','FLOAT64') else 2
-            buf.extend(struct.pack('<BB', len(nb), dtype_byte))
-            buf.extend(nb)
-        for col in block.columns:
-            dtype_name = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
-            if dtype_name in ('F64','FLOAT64'):
-                a = _arr.array('d', (float(v) for v in col.data))
-            else:
-                a = _arr.array('q', (int(v) for v in col.data))
-            buf.extend(a.tobytes())
-        buf.extend(struct.pack('<I', _crc32(bytes(buf))))
-        f.seek(0); f.write(buf); f.truncate(len(buf))
-
-
-def read_file_mmap(path: Union[str, 'Path']) -> 'DataBlock':
-    """Memory-mapped read — OS page cache, fastest for repeated reads."""
-    import mmap, struct, array as _arr
-    with open(str(path), 'rb') as f:
-        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-            data = bytes(mm)
-    if not data.startswith(b'KOREM'):
-        return read_file_fast(path)
-    pos = 9
-    n_cols = struct.unpack_from('<I', data, pos)[0]; pos += 4
-    n_rows = struct.unpack_from('<I', data, pos)[0]; pos += 4
-    cols_meta = []
-    for _ in range(n_cols):
-        nl, dtype_byte = struct.unpack_from('<BB', data, pos); pos += 2
-        name = data[pos:pos+nl].decode(); pos += nl
-        cols_meta.append((name, dtype_byte))
-    block = DataBlock()
-    for name, dtype_byte in cols_meta:
-        nbytes = n_rows * 8
-        if dtype_byte == 1:
-            a = _arr.array('d'); a.frombytes(data[pos:pos+nbytes])
-            block.add_column(name, DataType.F64, a.tolist())
-        else:
-            a = _arr.array('q'); a.frombytes(data[pos:pos+nbytes])
-            block.add_column(name, DataType.I64, a.tolist())
-        pos += nbytes
-    return block
-
-
-def benchmark_speed(n_rows: int = 100_000) -> dict:
-    """Benchmark all write/read paths and return results dict.
-
-        results = kore.benchmark_speed(100000)
-        for name, (w, r) in results.items():
-            print(f"{name}: write={w:.1f}ms read={r:.1f}ms")
-    """
-    import time, random, os, tempfile
-    random.seed(42)
-    block = DataBlock()
-    block.add_column('price',  DataType.F64, [round(random.uniform(1,9999),2) for _ in range(n_rows)])
-    block.add_column('qty',    DataType.I64, [random.randint(1,1000) for _ in range(n_rows)])
-    block.add_column('region', DataType.I64, [random.randint(1,50) for _ in range(n_rows)])
-
-    def bm(fn, r=3):
-        best = 9999
-        for _ in range(r):
-            t0 = time.perf_counter(); fn(); t = (time.perf_counter()-t0)*1000
-            if t < best: best = t
-        return best
-
-    results = {}
-    tmp = tempfile.mktemp(suffix='.kore')
-    try:
-        write_file(tmp, block); results['rust_ffi']   = (bm(lambda: write_file(tmp, block)), bm(lambda: read_file(tmp)))
-        write_file_fast(tmp, block); results['fast_bulk'] = (bm(lambda: write_file_fast(tmp, block)), bm(lambda: read_file_fast(tmp)))
-        write_file_mmap(tmp, block); results['mmap']      = (bm(lambda: write_file_mmap(tmp, block)), bm(lambda: read_file_mmap(tmp)))
-    finally:
-        try: os.unlink(tmp)
-        except: pass
-    return results
 
 
 # ── Rust FFI byte-level I/O (zero temp file) ──────────────────────────────────
@@ -846,11 +676,6 @@ __all__ = [
     'read_metadata',
     'read_file_with_metadata',
     'parallel_read',
-    'write_file_fast',
-    'read_file_fast',
-    'write_file_mmap',
-    'read_file_mmap',
-    'benchmark_speed',
 ]
 
 
