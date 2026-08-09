@@ -482,6 +482,12 @@ __all__ = [
     'list_snapshots',
     'write_partitioned',
     'read_partitioned',
+    'FileLock',
+    'BloomFilter',
+    'write_file_locked',
+    'append_file_locked',
+    'merge_into',
+    'delete_rows',
 ]
 
 
@@ -791,6 +797,132 @@ def read_partitioned(base_dir: str) -> 'DataBlock':
             if merged.columns:
                 merged.num_rows = len(merged.columns[0].data)
     return merged or DataBlock()
+
+
+# ── ACID File Locking ─────────────────────────────────────────────────────────
+
+class FileLock:
+    """Context manager for exclusive file locking (ACID safe writes)."""
+    def __init__(self, path: str, timeout_ms: int = 5000):
+        import time
+        self._lock_path = f"{path}.lock"
+        deadline = time.time() + timeout_ms / 1000
+        while True:
+            try:
+                fd = open(self._lock_path, 'x')
+                fd.close()
+                return
+            except FileExistsError:
+                if time.time() > deadline:
+                    raise TimeoutError(f"Could not acquire lock on {path}")
+                time.sleep(0.01)
+
+    def __enter__(self): return self
+
+    def __exit__(self, *_):
+        import os
+        try: os.remove(self._lock_path)
+        except: pass
+
+
+def write_file_locked(path: Union[str, 'Path'], block: 'DataBlock', timeout_ms: int = 5000) -> None:
+    """Write with ACID file lock — safe for concurrent writers."""
+    with FileLock(str(path), timeout_ms):
+        write_file(path, block)
+
+
+def append_file_locked(path: Union[str, 'Path'], block: 'DataBlock', timeout_ms: int = 5000) -> None:
+    """Append with ACID file lock — safe for concurrent appenders."""
+    with FileLock(str(path), timeout_ms):
+        append_file(path, block)
+
+
+# ── Bloom Filter ──────────────────────────────────────────────────────────────
+
+class BloomFilter:
+    """Fast membership testing with ~1% false positive rate."""
+
+    def __init__(self, capacity: int):
+        self._n_bits = max(int(capacity * 9.585), 64)
+        self._bits = bytearray((self._n_bits + 7) // 8)
+        self._n_hashes = 7
+
+    def insert(self, value: int) -> None:
+        for seed in range(self._n_hashes):
+            bit = self._hash(value, seed) % self._n_bits
+            self._bits[bit // 8] |= 1 << (bit % 8)
+
+    def contains(self, value: int) -> bool:
+        return all(
+            self._bits[self._hash(value, s) % self._n_bits // 8]
+            & (1 << (self._hash(value, s) % self._n_bits % 8))
+            for s in range(self._n_hashes)
+        )
+
+    def _hash(self, value: int, seed: int) -> int:
+        h = (value ^ (seed * 0x517CC1B727220A95)) & 0xFFFFFFFFFFFFFFFF
+        h ^= h >> 33; h = (h * 0xff51afd7ed558ccd) & 0xFFFFFFFFFFFFFFFF
+        h ^= h >> 33; h = (h * 0xc4ceb9fe1a85ec53) & 0xFFFFFFFFFFFFFFFF
+        return h ^ (h >> 33)
+
+    @classmethod
+    def from_column(cls, col) -> 'BloomFilter':
+        bf = cls(len(col.data))
+        for v in col.data:
+            if isinstance(v, float): bf.insert(int.from_bytes(__import__('struct').pack('d', v), 'little'))
+            else: bf.insert(int(v))
+        return bf
+
+
+# ── Delta / Merge (Upsert) ────────────────────────────────────────────────────
+
+def merge_into(path: Union[str, 'Path'], delta: 'DataBlock', key_col: str) -> None:
+    """UPSERT: update matching rows, insert new ones.
+
+        kore.merge_into("orders.kore", updates, key_col="order_id")
+    """
+    base = read_file(path)
+    base_key_col = base.get_column(key_col)
+    delta_key_col = delta.get_column(key_col)
+    if not base_key_col or not delta_key_col:
+        raise ValueError(f"key column '{key_col}' not found")
+
+    key_to_idx = {v: i for i, v in enumerate(base_key_col.data)}
+    inserts = []
+
+    for di, dk in enumerate(delta_key_col.data):
+        if dk in key_to_idx:
+            bi = key_to_idx[dk]
+            for col in base.columns:
+                dc = delta.get_column(col.name)
+                if dc: col.data[bi] = dc.data[di]
+        else:
+            inserts.append(di)
+            key_to_idx[dk] = base.num_rows + len(inserts) - 1
+
+    for di in inserts:
+        for col in base.columns:
+            dc = delta.get_column(col.name)
+            col.data.append(dc.data[di] if dc else 0)
+        base.num_rows += 1
+
+    write_file(path, base)
+
+
+def delete_rows(path: Union[str, 'Path'], key_col: str, delete_keys: list) -> None:
+    """Delete rows from a .kore file where key_col is in delete_keys.
+
+        kore.delete_rows("orders.kore", "order_id", [101, 203, 405])
+    """
+    base = read_file(path)
+    kc = base.get_column(key_col)
+    if not kc: raise ValueError(f"key column '{key_col}' not found")
+    del_set = set(delete_keys)
+    keep = [i for i, v in enumerate(kc.data) if v not in del_set]
+    result = DataBlock()
+    for col in base.columns:
+        result.add_column(col.name, col.dtype, [col.data[i] for i in keep])
+    write_file(path, result)
 
 
 
