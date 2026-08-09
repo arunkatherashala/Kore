@@ -1,0 +1,42 @@
+name: Auto Deploy on Version Bump
+
+on:
+  push:
+    branches:
+      - fileformat
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check if version changed
+        id: version_check
+        run: |
+          NEW=$(grep '^version' pyproject.toml | head -1 | grep -oP '[\d]+\.[\d]+\.[\d]+')
+          OLD=$(git show HEAD~1:pyproject.toml 2>/dev/null | grep '^version' | head -1 | grep -oP '[\d]+\.[\d]+\.[\d]+' || echo "0.0.0")
+          echo "new=$NEW" >> $GITHUB_OUTPUT
+          echo "old=$OLD" >> $GITHUB_OUTPUT
+          if [ "$NEW" != "$OLD" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Version changed: $OLD → $NEW"
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "Version unchanged ($NEW) — skipping deploy"
+          fi
+
+      - name: Create and push tag
+        if: steps.version_check.outputs.changed == 'true'
+        run: |
+          VERSION="v${{ steps.version_check.outputs.new }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$VERSION"
+          git push origin "$VERSION"
+          echo "✅ Tagged $VERSION — all publish workflows will now trigger"
