@@ -560,6 +560,19 @@ __all__ = [
     'list_col',
     'map_col',
     'struct_col',
+    'write_file_lzma',
+    'read_file_lzma',
+    'uuid_col',
+    'binary_col',
+    'RowGroup',
+    'write_row_groups',
+    'read_row_groups',
+    'read_row_group',
+    'FileMetadata',
+    'write_with_metadata',
+    'read_metadata',
+    'read_file_with_metadata',
+    'parallel_read',
 ]
 
 
@@ -2416,3 +2429,322 @@ def struct_col(name: str, structs: list) -> 'TypedColumn':
     col = TypedColumn(name, ExtType.STRUCT)
     for s in structs: col.push(dict(s) if s is not None else None)
     return col
+
+
+# ── LZMA High-Compression ─────────────────────────────────────────────────────
+
+def write_file_lzma(path: Union[str, 'Path'], block: 'DataBlock') -> None:
+    """Write DataBlock with LZMA compression (best compression ratio, stdlib).
+
+    Use when file size matters more than speed.
+        kore.write_file_lzma("archive.kore", block)  # smallest possible size
+        block = kore.read_file_lzma("archive.kore")
+    """
+    import struct, lzma
+    buf = bytearray(b'KOREM' + struct.pack('<I', 11) + struct.pack('<I', block.num_columns))
+    for col in block.columns:
+        dtype_name = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
+        nb = col.name.encode()
+        dtype_byte = 1 if dtype_name in ('F64','FLOAT64') else 2
+        buf += bytes([len(nb)]) + nb + bytes([dtype_byte])
+        buf += struct.pack('<Q', len(col.data))
+        raw = bytearray()
+        for v in col.data:
+            raw.extend(struct.pack('<d', float(v)) if dtype_byte == 1
+                       else struct.pack('<Q', int(v) & 0xFFFFFFFFFFFFFFFF))
+        comp = lzma.compress(bytes(raw), preset=6)
+        buf += struct.pack('<I', len(comp)) + comp
+    buf += struct.pack('<I', _crc32(bytes(buf)))
+    with open(str(path), 'wb') as f: f.write(buf)
+
+
+def read_file_lzma(path: Union[str, 'Path']) -> 'DataBlock':
+    """Read an LZMA-compressed KORE file."""
+    import struct, lzma
+    with open(str(path), 'rb') as f: data = f.read()
+    body = data[:-4]
+    if not body.startswith(b'KOREM'): raise ValueError("Not LZMA KORE file")
+    pos = 9
+    n_cols = struct.unpack_from('<I', body, pos)[0]; pos += 4
+    block = DataBlock()
+    for _ in range(n_cols):
+        nl = body[pos]; pos += 1
+        name = body[pos:pos+nl].decode(); pos += nl
+        dtype_byte = body[pos]; pos += 1
+        dtype = DataType.F64 if dtype_byte == 1 else DataType.I64
+        n = struct.unpack_from('<Q', body, pos)[0]; pos += 8
+        cl = struct.unpack_from('<I', body, pos)[0]; pos += 4
+        raw = lzma.decompress(body[pos:pos+cl]); pos += cl
+        vals = [struct.unpack_from('<d' if dtype==DataType.F64 else '<Q', raw, i*8)[0] for i in range(n)]
+        block.add_column(name, dtype, vals)
+    return block
+
+
+# ── UUID & Binary Column Types ────────────────────────────────────────────────
+
+def uuid_col(name: str, uuids: list) -> 'TypedColumn':
+    """Create a UUID column (stored as string).
+
+        col = kore.uuid_col("session_id", [
+            "550e8400-e29b-41d4-a716-446655440000",
+            "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+        ])
+    """
+    col = TypedColumn(name, "uuid")
+    for u in uuids: col.push(str(u) if u is not None else None)
+    return col
+
+
+def binary_col(name: str, blobs: list) -> 'TypedColumn':
+    """Create a binary/blob column (stored as base64 string).
+
+        import base64
+        col = kore.binary_col("image", [
+            bytes([0xFF, 0xD8, 0xFF]),  # JPEG magic bytes
+            bytes([0x89, 0x50, 0x4E, 0x47]),  # PNG magic
+        ])
+    """
+    import base64
+    col = TypedColumn(name, "binary")
+    for b in blobs:
+        if b is None: col.push(None)
+        elif isinstance(b, bytes): col.push(base64.b64encode(b).decode())
+        else: col.push(str(b))
+    return col
+
+
+# ── Row Groups (Parquet-style) ─────────────────────────────────────────────────
+
+class RowGroup:
+    """A subset of rows — enables parallel reads and selective loading.
+
+    Large files are split into row groups (default 64K rows each).
+    Each row group is independently readable for parallel processing.
+    """
+
+    def __init__(self, group_id: int, block: 'DataBlock', offset_bytes: int = 0):
+        self.group_id = group_id
+        self.block = block
+        self.offset_bytes = offset_bytes
+        self.num_rows = block.num_rows
+        self.footer = {col.name: {
+            'min': min(col.data) if col.data else 0,
+            'max': max(col.data) if col.data else 0,
+            'null_count': sum(1 for v in col.data if v is None),
+        } for col in block.columns}
+
+    def can_skip(self, col_name: str, lo, hi) -> bool:
+        """Return True if this row group can be safely skipped for range [lo, hi]."""
+        f = self.footer.get(col_name)
+        return f is not None and (f['max'] < lo or f['min'] > hi)
+
+
+def write_row_groups(path: Union[str, 'Path'], block: 'DataBlock',
+                     rows_per_group: int = 65536) -> list:
+    """Write a DataBlock as row groups (Parquet-style split for parallel reads).
+
+        groups = kore.write_row_groups("big_data.kore", block, rows_per_group=10000)
+        print(f"Written {len(groups)} row groups")
+
+        # Read only groups matching a predicate:
+        for rg in kore.read_row_groups_meta("big_data.kore"):
+            if not rg.can_skip("price", 100.0, 200.0):
+                data = kore.read_row_group("big_data.kore", rg.group_id)
+    """
+    import struct, os
+    n = block.num_rows
+    n_groups = max(1, (n + rows_per_group - 1) // rows_per_group)
+    groups = []
+
+    with open(str(path), 'wb') as f:
+        # Header
+        header = b'KOREG' + struct.pack('<I', 12) + struct.pack('<I', n_groups)
+        f.write(header)
+        offsets = []
+        for gi in range(n_groups):
+            start = gi * rows_per_group
+            end = min(start + rows_per_group, n)
+            sub = DataBlock()
+            for col in block.columns:
+                sub.add_column(col.name, col.dtype, col.data[start:end])
+            offset = f.tell()
+            offsets.append(offset)
+            chunk = _block_to_bytes(sub)
+            f.write(struct.pack('<I', len(chunk)))
+            f.write(chunk)
+            groups.append(RowGroup(gi, sub, offset))
+        # Footer: offsets table
+        footer_pos = f.tell()
+        for off in offsets: f.write(struct.pack('<Q', off))
+        f.write(struct.pack('<Q', footer_pos))
+        f.write(struct.pack('<I', n_groups))
+        f.write(struct.pack('<I', _crc32(open(str(path), 'rb').read(footer_pos))))
+
+    return groups
+
+
+def read_row_groups(path: Union[str, 'Path'], group_ids: list = None) -> 'DataBlock':
+    """Read specific row groups from a row-grouped KORE file.
+
+        # Read all:
+        full = kore.read_row_groups("big_data.kore")
+
+        # Read only groups 0 and 2:
+        partial = kore.read_row_groups("big_data.kore", group_ids=[0, 2])
+    """
+    import struct
+    with open(str(path), 'rb') as f: data = f.read()
+    if not data.startswith(b'KOREG'): raise ValueError("Not a row-group KORE file")
+    n_groups = struct.unpack_from('<I', data, 9)[0]
+    if group_ids is None: group_ids = list(range(n_groups))
+    merged = DataBlock()
+    first = True
+    for gi in group_ids:
+        # Read footer offset table
+        footer_pos = struct.unpack_from('<Q', data, len(data) - 16)[0]
+        off = struct.unpack_from('<Q', data, footer_pos + gi * 8)[0]
+        chunk_len = struct.unpack_from('<I', data, off)[0]
+        block = _bytes_to_block(data[off+4:off+4+chunk_len])
+        if first:
+            for col in block.columns:
+                merged.add_column(col.name, col.dtype, list(col.data))
+            first = False
+        else:
+            for col in block.columns:
+                mc = merged.get_column(col.name)
+                if mc: mc.data.extend(col.data); mc.num_rows = len(mc.data)
+    if merged.columns: merged.num_rows = len(merged.columns[0].data)
+    return merged
+
+
+def read_row_group(path: Union[str, 'Path'], group_id: int) -> 'DataBlock':
+    """Read a single row group by ID."""
+    return read_row_groups(path, group_ids=[group_id])
+
+
+# ── File Metadata ──────────────────────────────────────────────────────────────
+
+class FileMetadata:
+    """Custom key-value metadata embedded in a .kore file header.
+
+        meta = kore.FileMetadata()
+        meta.set("created_by", "KORE FileFormat v1.7.0")
+        meta.set("source", "sales_pipeline")
+        meta.set("schema_version", "2")
+        kore.write_with_metadata("data.kore", block, meta)
+        m = kore.read_metadata("data.kore")
+        print(m.get("source"))  # "sales_pipeline"
+    """
+
+    def __init__(self):
+        self._data: dict = {}
+
+    def set(self, key: str, value: str) -> None: self._data[key] = str(value)
+    def get(self, key: str, default: str = None) -> str: return self._data.get(key, default)
+    def keys(self) -> list: return list(self._data.keys())
+    def items(self) -> list: return list(self._data.items())
+    def to_dict(self) -> dict: return dict(self._data)
+
+    def _serialize(self) -> bytes:
+        import struct, json
+        j = json.dumps(self._data).encode()
+        return struct.pack('<I', len(j)) + j
+
+    @classmethod
+    def _deserialize(cls, data: bytes, pos: int) -> tuple:
+        import struct, json
+        ln = struct.unpack_from('<I', data, pos)[0]; pos += 4
+        m = cls()
+        m._data = json.loads(data[pos:pos+ln].decode()); pos += ln
+        return m, pos
+
+
+def write_with_metadata(path: Union[str, 'Path'], block: 'DataBlock',
+                        metadata: 'FileMetadata') -> None:
+    """Write a DataBlock with embedded key-value metadata.
+
+        meta = kore.FileMetadata()
+        meta.set("source", "ETL pipeline v3")
+        meta.set("rows_processed", str(block.num_rows))
+        kore.write_with_metadata("data.kore", block, meta)
+    """
+    import struct
+    meta_bytes = metadata._serialize()
+    data_bytes = _block_to_bytes(block)
+    buf = bytearray(b'KORMD' + struct.pack('<I', 13))
+    buf += struct.pack('<I', len(meta_bytes)) + meta_bytes
+    buf += struct.pack('<I', len(data_bytes)) + data_bytes
+    buf += struct.pack('<I', _crc32(bytes(buf)))
+    with open(str(path), 'wb') as f: f.write(buf)
+
+
+def read_metadata(path: Union[str, 'Path']) -> 'FileMetadata':
+    """Read ONLY the metadata from a .kore file (no data loaded).
+
+        meta = kore.read_metadata("data.kore")
+        print("Source:", meta.get("source"))
+    """
+    import struct
+    with open(str(path), 'rb') as f: data = f.read()
+    if not data.startswith(b'KORMD'): raise ValueError("No metadata in this file (use write_with_metadata)")
+    pos = 9
+    meta_len = struct.unpack_from('<I', data, pos)[0]; pos += 4
+    meta, _ = FileMetadata._deserialize(data, pos)
+    return meta
+
+
+def read_file_with_metadata(path: Union[str, 'Path']) -> tuple:
+    """Read both data and metadata from a .kore file.
+
+        block, meta = kore.read_file_with_metadata("data.kore")
+        print("Rows:", block.num_rows, "Source:", meta.get("source"))
+    """
+    import struct
+    with open(str(path), 'rb') as f: data = f.read()
+    if not data.startswith(b'KORMD'): raise ValueError("No metadata in this file")
+    pos = 9
+    meta_len = struct.unpack_from('<I', data, pos)[0]; pos += 4
+    meta, _ = FileMetadata._deserialize(data, pos)
+    pos += meta_len
+    data_len = struct.unpack_from('<I', data, pos)[0]; pos += 4
+    block = _bytes_to_block(data[pos:pos+data_len])
+    return block, meta
+
+
+# ── Parallel Read ──────────────────────────────────────────────────────────────
+
+def parallel_read(paths: list, max_workers: int = 4) -> 'DataBlock':
+    """Read multiple .kore files in parallel and merge into one DataBlock.
+
+    Uses threading for I/O-bound parallel reads.
+
+        # Read 10 partition files at once:
+        files = ["sales/region=1/data.kore", "sales/region=2/data.kore", ...]
+        merged = kore.parallel_read(files, max_workers=8)
+        print(f"Merged {merged.num_rows} total rows")
+    """
+    import concurrent.futures
+    blocks = [None] * len(paths)
+
+    def _read(args):
+        i, p = args
+        return i, read_file(p)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for i, block in ex.map(_read, enumerate(paths)):
+            blocks[i] = block
+
+    merged = DataBlock()
+    first = True
+    for block in blocks:
+        if block is None: continue
+        if first:
+            for col in block.columns:
+                merged.add_column(col.name, col.dtype, list(col.data))
+            first = False
+        else:
+            for col in block.columns:
+                mc = merged.get_column(col.name)
+                if mc: mc.data.extend(col.data); mc.num_rows = len(mc.data)
+    if merged.columns: merged.num_rows = len(merged.columns[0].data)
+    return merged
