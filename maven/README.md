@@ -1,6 +1,6 @@
 # KORE FileFormat — Java
 
-**Version 1.6.22** | [Maven Central](https://central.sonatype.com/artifact/com.github.arunkatherashala/kore-fileformat) | [GitHub](https://github.com/arunkatherashala/Kore)
+**Version 1.6.23** | [Maven Central](https://central.sonatype.com/artifact/com.github.arunkatherashala/kore-fileformat) | [GitHub](https://github.com/arunkatherashala/Kore)
 
 High-performance columnar format with 11 ACID features. Pure Java implementation — reads and writes `.kore` binary files directly.
 
@@ -11,13 +11,13 @@ High-performance columnar format with 11 ACID features. Pure Java implementation
 <dependency>
   <groupId>com.github.arunkatherashala</groupId>
   <artifactId>kore-fileformat</artifactId>
-  <version>1.6.22</version>
+  <version>1.6.23</version>
 </dependency>
 ```
 
 ### Gradle
 ```groovy
-implementation 'com.github.arunkatherashala:kore-fileformat:1.6.22'
+implementation 'com.github.arunkatherashala:kore-fileformat:1.6.23'
 ```
 
 ## Quick Start
