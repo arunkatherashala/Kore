@@ -511,6 +511,21 @@ __all__ = [
     'write_avro',
     'to_mongodb_docs',
     'from_mongodb_docs',
+    'ColFooter',
+    'write_file_v3',
+    'read_footer_only',
+    'can_skip_file',
+    'NullableColumn',
+    'NullableBlock',
+    'write_nullable',
+    'read_nullable',
+    'delta_encode',
+    'delta_decode',
+    'for_encode',
+    'for_decode',
+    'dict_encode',
+    'auto_select_codec',
+    'TableCatalog',
 ]
 
 
@@ -1453,4 +1468,321 @@ def from_mongodb_docs(path: Union[str, 'Path'], docs: list, col_types: dict = No
     write_file(path, block)
 
 
+# ── Column Statistics Footer (Predicate Pushdown) ─────────────────────────────
 
+class ColFooter:
+    """Column-level statistics for predicate pushdown (scan skipping)."""
+    def __init__(self, name, dtype, row_count, null_count, min_val, max_val, sum_val):
+        self.name = name; self.dtype = dtype
+        self.row_count = row_count; self.null_count = null_count
+        self.min_val = min_val; self.max_val = max_val; self.sum_val = sum_val
+        self.mean_val = sum_val / row_count if row_count > 0 else 0.0
+
+    def __repr__(self):
+        return f"ColFooter({self.name}: min={self.min_val:.4f} max={self.max_val:.4f} nulls={self.null_count})"
+
+
+def write_file_v3(path: Union[str, 'Path'], block: 'DataBlock') -> None:
+    """Write DataBlock with column statistics footer for predicate pushdown.
+
+        kore.write_file_v3("data.kore", block)
+        footers = kore.read_footer_only("data.kore")
+        # Skip file if no match:
+        if not kore.can_skip_file(footers, "price", 100.0, 200.0):
+            block = kore.read_file_v3("data.kore")
+    """
+    import struct
+    data_bytes = _block_to_bytes(block)
+    buf = bytearray(b'KOREV' + struct.pack('<I', 3) + struct.pack('<I', len(data_bytes)) + data_bytes)
+    buf += struct.pack('<I', block.num_columns)
+    for col in block.columns:
+        dtype_name = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
+        nb = col.name.encode()
+        buf += bytes([len(nb)]) + nb
+        buf += bytes([1 if dtype_name in ('F64','FLOAT64') else 2])
+        vals = col.data
+        n = len(vals)
+        nums = [float(v) for v in vals] if dtype_name in ('F64','FLOAT64') else [int(v) for v in vals]
+        mn = min(nums) if nums else 0.0
+        mx = max(nums) if nums else 0.0
+        sm = sum(nums) if nums else 0.0
+        buf += struct.pack('<Q', n) + struct.pack('<Q', 0)  # rows, null_count
+        buf += struct.pack('<d', mn) + struct.pack('<d', mx) + struct.pack('<d', sm)
+    crc = _crc32(bytes(buf))
+    buf += struct.pack('<I', crc)
+    with open(str(path), 'wb') as f: f.write(buf)
+
+
+def read_footer_only(path: Union[str, 'Path']) -> list:
+    """Read ONLY column footers — fast, no data loaded.
+
+        footers = kore.read_footer_only("data.kore")
+        for f in footers:
+            print(f"{f.name}: min={f.min_val} max={f.max_val}")
+    """
+    import struct
+    with open(str(path), 'rb') as f: data = f.read()
+    body = data[:-4]
+    if not body.startswith(b'KOREV'): raise ValueError("Not a v3 KORE file")
+    pos = 9  # magic(5)+version(4)
+    data_len = struct.unpack_from('<I', body, pos)[0]; pos += 4 + data_len
+    n_cols = struct.unpack_from('<I', body, pos)[0]; pos += 4
+    footers = []
+    for _ in range(n_cols):
+        nl = body[pos]; pos += 1
+        name = body[pos:pos+nl].decode(); pos += nl
+        dtype_byte = body[pos]; pos += 1
+        row_count, null_count = struct.unpack_from('<QQ', body, pos); pos += 16
+        mn, mx, sm = struct.unpack_from('<ddd', body, pos); pos += 24
+        dtype = DataType.F64 if dtype_byte == 1 else DataType.I64
+        footers.append(ColFooter(name, dtype, row_count, null_count, mn, mx, sm))
+    return footers
+
+
+def can_skip_file(footers: list, col_name: str, lo: float, hi: float) -> bool:
+    """Return True if the file can be SKIPPED (no rows can match [lo, hi]).
+
+        # Only read files that might have price in 100-200:
+        if not kore.can_skip_file(footers, "price", 100.0, 200.0):
+            data = kore.read_file("data.kore")
+    """
+    for f in footers:
+        if f.name == col_name:
+            return f.max_val < lo or f.min_val > hi
+    return False
+
+
+# ── Null/None Values Support ──────────────────────────────────────────────────
+
+class NullableColumn:
+    """A column that supports None values with a validity bitmap."""
+
+    def __init__(self, name: str, dtype: 'DataType', values: list):
+        self.name = name
+        self.dtype = dtype
+        self._raw = values  # list of (value | None)
+        self.validity = [v is not None for v in values]
+        self.data = [v if v is not None else 0 for v in values]
+        self.num_rows = len(values)
+
+    def get(self, i: int):
+        return self.data[i] if self.validity[i] else None
+
+    @property
+    def null_count(self): return sum(1 for v in self.validity if not v)
+
+    @property
+    def valid_count(self): return sum(1 for v in self.validity if v)
+
+    def non_null_values(self): return [v for v, ok in zip(self.data, self.validity) if ok]
+
+    def fill_null(self, fill_value) -> 'NullableColumn':
+        """Replace None with fill_value."""
+        return NullableColumn(self.name, self.dtype, [v if v is not None else fill_value for v in self._raw])
+
+
+class NullableBlock:
+    """A DataBlock that supports None values per cell."""
+
+    def __init__(self):
+        self.columns: list = []
+        self.num_columns: int = 0
+
+    def add_column(self, name: str, dtype: 'DataType', values: list) -> None:
+        self.columns.append(NullableColumn(name, dtype, values))
+        self.num_columns += 1
+
+    @property
+    def num_rows(self): return self.columns[0].num_rows if self.columns else 0
+
+    def get_column(self, name: str) -> 'NullableColumn':
+        return next((c for c in self.columns if c.name == name), None)
+
+    def null_count(self, col_name: str) -> int:
+        col = self.get_column(col_name)
+        return col.null_count if col else 0
+
+    def drop_nulls(self) -> 'DataBlock':
+        """Return a new DataBlock with all rows containing any null removed."""
+        valid_rows = [i for i in range(self.num_rows)
+                      if all(c.validity[i] for c in self.columns)]
+        result = DataBlock()
+        for col in self.columns:
+            result.add_column(col.name, col.dtype, [col.data[i] for i in valid_rows])
+        return result
+
+    def fill_nulls(self, fill_values: dict) -> 'NullableBlock':
+        """Fill nulls in each column with specified values."""
+        result = NullableBlock()
+        for col in self.columns:
+            fill = fill_values.get(col.name, 0)
+            result.columns.append(col.fill_null(fill))
+        result.num_columns = self.num_columns
+        return result
+
+
+def write_nullable(path: Union[str, 'Path'], block: 'NullableBlock') -> None:
+    """Write a NullableBlock (supports None values) to a .kore file."""
+    import struct
+    buf = bytearray(b'KOREN' + struct.pack('<I', 7) + struct.pack('<I', block.num_columns))
+    for col in block.columns:
+        nb = col.name.encode()
+        dtype_val = {'F64':1,'FLOAT64':1,'I64':2,'INT64':2}.get(
+            col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype), 2)
+        buf += bytes([len(nb)]) + nb + bytes([dtype_val])
+        buf += struct.pack('<Q', col.num_rows)
+        # Validity bitmap
+        n_words = (col.num_rows + 63) // 64
+        bitmap = [0] * n_words
+        for i, ok in enumerate(col.validity):
+            if ok: bitmap[i//64] |= (1 << (i%64))
+        buf += struct.pack('<I', n_words)
+        for w in bitmap: buf += struct.pack('<Q', w)
+        for v in col.data:
+            buf += struct.pack('<Q', int(v) & 0xFFFFFFFFFFFFFFFF)
+    crc = _crc32(bytes(buf))
+    buf += struct.pack('<I', crc)
+    with open(str(path), 'wb') as f: f.write(buf)
+
+
+def read_nullable(path: Union[str, 'Path']) -> 'NullableBlock':
+    """Read a NullableBlock preserving None values."""
+    import struct
+    with open(str(path), 'rb') as f: data = f.read()
+    body = data[:-4]
+    if not body.startswith(b'KOREN'): raise ValueError("Not a nullable KORE file")
+    pos = 9
+    n_cols = struct.unpack_from('<I', body, pos)[0]; pos += 4
+    block = NullableBlock()
+    for _ in range(n_cols):
+        nl = body[pos]; pos += 1
+        name = body[pos:pos+nl].decode(); pos += nl
+        dtype_byte = body[pos]; pos += 1
+        dtype = DataType.F64 if dtype_byte == 1 else DataType.I64
+        n = struct.unpack_from('<Q', body, pos)[0]; pos += 8
+        n_words = struct.unpack_from('<I', body, pos)[0]; pos += 4
+        bitmap = [struct.unpack_from('<Q', body, pos+i*8)[0] for i in range(n_words)]; pos += n_words*8
+        raw_vals = [struct.unpack_from('<Q', body, pos+i*8)[0] for i in range(n)]; pos += n*8
+        nullable_vals = [raw_vals[i] if (bitmap[i//64] & (1<<(i%64))) else None for i in range(n)]
+        block.add_column(name, dtype, nullable_vals)
+    return block
+
+
+# ── Delta / FOR / Bitpack Encoding ────────────────────────────────────────────
+
+def delta_encode(values: list) -> tuple:
+    """Delta encode sorted integers. Good for timestamps, sequential IDs.
+
+        base, deltas = kore.delta_encode([100, 101, 103, 106, 110])
+        # base=100, deltas=[0, 1, 2, 3, 4]
+    """
+    if not values: return 0, []
+    base = values[0]
+    return base, [0] + [values[i] - values[i-1] for i in range(1, len(values))]
+
+
+def delta_decode(base: int, deltas: list) -> list:
+    result, cur = [], base
+    for d in deltas: cur += d; result.append(cur)
+    return result
+
+
+def for_encode(values: list) -> tuple:
+    """Frame-of-Reference encoding. Good for clustered values."""
+    if not values: return 0, []
+    mn = min(values)
+    return mn, [v - mn for v in values]
+
+
+def for_decode(minimum: int, offsets: list) -> list:
+    return [minimum + o for o in offsets]
+
+
+def dict_encode(values: list) -> tuple:
+    """Dictionary encode a list. Returns (dictionary, codes).
+
+        d, codes = kore.dict_encode(["NY","CA","NY","TX","CA"])
+        # d=["NY","CA","TX"], codes=[0,1,0,2,1]
+    """
+    d, seen = [], {}
+    codes = []
+    for v in values:
+        if v not in seen: seen[v] = len(d); d.append(v)
+        codes.append(seen[v])
+    return d, codes
+
+
+def auto_select_codec(values: list) -> str:
+    """Automatically choose best compression codec for a column.
+
+        codec = kore.auto_select_codec(data['region'])
+        print(f"Best codec for region: {codec}")
+    """
+    if len(values) < 2: return "RAW"
+    unique_ratio = len(set(values)) / len(values)
+    if unique_ratio < 0.2: return "RLE"       # low cardinality — check FIRST
+    try:
+        nums = [int(v) for v in values]
+        sorted_check = all(nums[i] <= nums[i+1] for i in range(len(nums)-1))
+        if sorted_check: return "DELTA"         # sorted integers
+        mn, mx = min(nums), max(nums)
+        bits = (mx - mn).bit_length() if mx > mn else 1
+        if bits <= 16: return "BITPACK"         # small range
+        if (mx - mn) < mx // 4: return "FOR"   # clustered
+    except: pass
+    return "RAW"
+
+
+# ── Table Catalog ──────────────────────────────────────────────────────────────
+
+class TableCatalog:
+    """Multi-file table catalog — tracks all partition files of a logical table.
+
+        cat = kore.TableCatalog("sales")
+        cat.add_file("sales/region=1/data.kore", rows=50000, size=512000)
+        cat.add_file("sales/region=2/data.kore", rows=50000, size=498000)
+        cat.save("sales/catalog.json")
+        print(f"Total rows: {cat.total_rows}")
+    """
+
+    def __init__(self, name: str):
+        self.name = name
+        self.files = []
+
+    def add_file(self, path: str, rows: int, size: int, partition=None, snapshot=1) -> None:
+        self.files.append({'path': path, 'rows': rows, 'size': size,
+                           'partition': str(partition) if partition else None, 'snapshot': snapshot})
+
+    @property
+    def total_rows(self): return sum(f['rows'] for f in self.files)
+
+    @property
+    def total_size_mb(self): return sum(f['size'] for f in self.files) / (1024*1024)
+
+    @property
+    def latest_snapshot(self): return max((f['snapshot'] for f in self.files), default=0)
+
+    def save(self, path: Union[str, 'Path']) -> None:
+        """Save catalog to JSON."""
+        import json as _json
+        with open(str(path), 'w') as f:
+            _json.dump({'name': self.name, 'files': self.files,
+                       'total_rows': self.total_rows, 'total_size_mb': round(self.total_size_mb, 3),
+                       'snapshots': self.latest_snapshot}, f, indent=2)
+
+    @classmethod
+    def load(cls, path: Union[str, 'Path']) -> 'TableCatalog':
+        """Load catalog from JSON."""
+        import json as _json
+        with open(str(path)) as f: data = _json.load(f)
+        cat = cls(data['name'])
+        cat.files = data.get('files', [])
+        return cat
+
+    def files_for_snapshot(self, snapshot: int) -> list:
+        return [f for f in self.files if f['snapshot'] == snapshot]
+
+    def prune_old_snapshots(self, keep: int = 3) -> None:
+        """Remove files older than the most recent `keep` snapshots."""
+        snaps = sorted(set(f['snapshot'] for f in self.files), reverse=True)[:keep]
+        self.files = [f for f in self.files if f['snapshot'] in snaps]
