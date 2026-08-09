@@ -474,6 +474,14 @@ __all__ = [
     'drop_column',
     'rename_column',
     'append_file',
+    'filter_eq',
+    'filter_range',
+    'select_columns',
+    'write_snapshot',
+    'read_snapshot',
+    'list_snapshots',
+    'write_partitioned',
+    'read_partitioned',
 ]
 
 
@@ -655,3 +663,134 @@ def append_file(path: Union[str, 'Path'], new_block: 'DataBlock') -> None:
             base_cols[col.name].data.extend(col.data)
             base_cols[col.name].num_rows = len(base_cols[col.name].data)
     write_file(path, base)
+
+
+# ── Row Filtering ─────────────────────────────────────────────────────────────
+
+def filter_eq(block: 'DataBlock', col_name: str, value) -> 'DataBlock':
+    """Return rows where column equals value."""
+    col = block.get_column(col_name)
+    if col is None: return DataBlock()
+    keep = [i for i, v in enumerate(col.data) if v == value]
+    result = DataBlock()
+    for c in block.columns:
+        result.add_column(c.name, c.dtype, [c.data[i] for i in keep])
+    return result
+
+
+def filter_range(block: 'DataBlock', col_name: str, lo, hi) -> 'DataBlock':
+    """Return rows where lo <= column <= hi."""
+    col = block.get_column(col_name)
+    if col is None: return DataBlock()
+    keep = [i for i, v in enumerate(col.data) if lo <= v <= hi]
+    result = DataBlock()
+    for c in block.columns:
+        result.add_column(c.name, c.dtype, [c.data[i] for i in keep])
+    return result
+
+
+def select_columns(block: 'DataBlock', names: list) -> 'DataBlock':
+    """Projection — return only specified columns."""
+    result = DataBlock()
+    for c in block.columns:
+        if c.name in names:
+            result.add_column(c.name, c.dtype, list(c.data))
+    return result
+
+
+# ── Time Travel / Snapshots ───────────────────────────────────────────────────
+
+def write_snapshot(base_path: str, block: 'DataBlock') -> str:
+    """Write a versioned snapshot. Returns the snapshot file path.
+
+        snap = kore.write_snapshot("sales", block)  # creates sales.v001.kore
+        snap2 = kore.write_snapshot("sales", block) # creates sales.v002.kore
+    """
+    import os
+    version = _next_snapshot_version(base_path)
+    snap_path = f"{base_path}.v{version:03d}.kore"
+    write_file(snap_path, block)
+    with open(f"{base_path}.latest", "w") as f: f.write(str(version))
+    return snap_path
+
+
+def read_snapshot(base_path: str, version: int = 0) -> 'DataBlock':
+    """Read a snapshot. version=0 means latest.
+
+        old = kore.read_snapshot("sales", version=1)  # time travel!
+        latest = kore.read_snapshot("sales")
+    """
+    v = _current_snapshot_version(base_path) if version == 0 else version
+    return read_file(f"{base_path}.v{v:03d}.kore")
+
+
+def list_snapshots(base_path: str) -> list:
+    """List all available snapshot version numbers."""
+    import os
+    return [v for v in range(1, 1000)
+            if os.path.exists(f"{base_path}.v{v:03d}.kore")]
+
+
+def _next_snapshot_version(base_path: str) -> int:
+    return _current_snapshot_version(base_path) + 1
+
+
+def _current_snapshot_version(base_path: str) -> int:
+    import os
+    latest_file = f"{base_path}.latest"
+    if os.path.exists(latest_file):
+        try: return int(open(latest_file).read().strip())
+        except: pass
+    return 0
+
+
+# ── Partitioned Tables ────────────────────────────────────────────────────────
+
+def write_partitioned(base_dir: str, block: 'DataBlock', partition_col: str) -> list:
+    """Write a partitioned table split by unique values of partition_col.
+
+        paths = kore.write_partitioned("sales_db", block, "region")
+        # Creates: sales_db/region=1/data.kore, sales_db/region=2/data.kore ...
+    """
+    import os
+    col = block.get_column(partition_col)
+    if col is None: raise ValueError(f"Column '{partition_col}' not found")
+    partitions: dict = {}
+    for i, v in enumerate(col.data):
+        partitions.setdefault(v, []).append(i)
+    paths = []
+    for part_val, indices in partitions.items():
+        dir_path = os.path.join(base_dir, f"{partition_col}={part_val}")
+        os.makedirs(dir_path, exist_ok=True)
+        file_path = os.path.join(dir_path, "data.kore")
+        part_block = DataBlock()
+        for c in block.columns:
+            part_block.add_column(c.name, c.dtype, [c.data[i] for i in indices])
+        write_file(file_path, part_block)
+        paths.append(file_path)
+    return paths
+
+
+def read_partitioned(base_dir: str) -> 'DataBlock':
+    """Read all partitions from a partitioned table directory into one DataBlock."""
+    import os
+    merged = None
+    for entry in os.listdir(base_dir):
+        path = os.path.join(base_dir, entry, "data.kore")
+        if os.path.exists(path):
+            block = read_file(path)
+            if merged is None:
+                merged = block
+            else:
+                for col in block.columns:
+                    mc = merged.get_column(col.name)
+                    if mc:
+                        mc.data.extend(col.data)
+                        mc.num_rows = len(mc.data)
+            # keep merged.num_rows in sync with actual column length
+            if merged.columns:
+                merged.num_rows = len(merged.columns[0].data)
+    return merged or DataBlock()
+
+
+

@@ -270,4 +270,212 @@ impl DataBlock {
         }
         result
     }
+
+    /// Filter rows where column value is in range [lo, hi] (inclusive, raw u64 bits).
+    pub fn filter_range(&self, col_name: &str, lo: u64, hi: u64) -> DataBlock {
+        let Some(fc) = self.column(col_name) else { return DataBlock::new() };
+        let keep: Vec<usize> = fc.values.iter().enumerate()
+            .filter_map(|(i, &v)| if v >= lo && v <= hi { Some(i) } else { None })
+            .collect();
+        let mut result = DataBlock::new();
+        for col in &self.columns {
+            result.add_column(&col.name, col.dtype, keep.iter().map(|&i| col.values[i]).collect());
+        }
+        result
+    }
+
+    /// Select only specified columns (projection pushdown).
+    pub fn select(&self, names: &[&str]) -> DataBlock {
+        let mut result = DataBlock::new();
+        for col in &self.columns {
+            if names.contains(&col.name.as_str()) {
+                result.add_column(&col.name, col.dtype, col.values.clone());
+            }
+        }
+        result
+    }
 }
+
+// ── RLE Compression (zero deps) ───────────────────────────────────────────────
+
+/// RLE-compress a column's values. Returns (values, run_lengths).
+pub fn rle_encode(values: &[u64]) -> (Vec<u64>, Vec<u32>) {
+    if values.is_empty() { return (vec![], vec![]); }
+    let mut vals = Vec::new();
+    let mut runs = Vec::new();
+    let mut cur = values[0];
+    let mut count: u32 = 1;
+    for &v in &values[1..] {
+        if v == cur {
+            count += 1;
+        } else {
+            vals.push(cur);
+            runs.push(count);
+            cur = v;
+            count = 1;
+        }
+    }
+    vals.push(cur);
+    runs.push(count);
+    (vals, runs)
+}
+
+/// RLE-decompress back to original values.
+pub fn rle_decode(vals: &[u64], runs: &[u32]) -> Vec<u64> {
+    let mut result = Vec::new();
+    for (&v, &r) in vals.iter().zip(runs.iter()) {
+        for _ in 0..r { result.push(v); }
+    }
+    result
+}
+
+/// Write with RLE compression for all columns. Saves space for repetitive data.
+pub fn write_file_rle(path: &str, block: &DataBlock) -> io::Result<()> {
+    let bytes = to_bytes_rle(block);
+    std::fs::write(path, &bytes)
+}
+
+/// Read a RLE-compressed .kore file.
+pub fn read_file_rle(path: &str) -> io::Result<DataBlock> {
+    let bytes = std::fs::read(path)?;
+    from_bytes_rle(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+// KORE-RLE format: magic "KORER" + version 3 + same column layout but:
+//   each column: dtype, name_len, name, n_unique u64le, n_unique*8 values, n_unique*4 run_lengths
+const MAGIC_RLE: &[u8; 5] = b"KORER";
+
+fn to_bytes_rle(block: &DataBlock) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(MAGIC_RLE);
+    buf.extend_from_slice(&3u32.to_le_bytes());
+    buf.extend_from_slice(&(block.columns.len() as u32).to_le_bytes());
+    for col in &block.columns {
+        let (vals, runs) = rle_encode(&col.values);
+        buf.push(col.dtype as u8);
+        let nb = col.name.as_bytes();
+        buf.push(nb.len() as u8);
+        buf.extend_from_slice(nb);
+        buf.extend_from_slice(&(col.values.len() as u64).to_le_bytes()); // original rows
+        buf.extend_from_slice(&(vals.len() as u32).to_le_bytes());
+        for &v in &vals { buf.extend_from_slice(&v.to_le_bytes()); }
+        for &r in &runs { buf.extend_from_slice(&r.to_le_bytes()); }
+    }
+    let cs = crc32(&buf);
+    buf.extend_from_slice(&cs.to_le_bytes());
+    buf
+}
+
+fn from_bytes_rle(data: &[u8]) -> Result<DataBlock, String> {
+    if data.len() < 13 { return Err("too short".into()); }
+    let (body, crc_bytes) = data.split_at(data.len() - 4);
+    let stored = u32::from_le_bytes(crc_bytes.try_into().unwrap());
+    if crc32(body) != stored { return Err("CRC32 mismatch".into()); }
+    let mut r = body;
+    if &r[..5] != MAGIC_RLE { return Err("bad RLE magic".into()); }
+    r = &r[9..]; // skip magic(5) + version(4)
+    let n_cols = u32::from_le_bytes(r[..4].try_into().unwrap()) as usize;
+    r = &r[4..];
+    let mut block = DataBlock::new();
+    for _ in 0..n_cols {
+        let dtype_byte = r[0];
+        let name_len = r[1] as usize;
+        r = &r[2..];
+        let name = std::str::from_utf8(&r[..name_len]).unwrap().to_string();
+        r = &r[name_len..];
+        let _n_rows = u64::from_le_bytes(r[..8].try_into().unwrap());
+        r = &r[8..];
+        let n_unique = u32::from_le_bytes(r[..4].try_into().unwrap()) as usize;
+        r = &r[4..];
+        let vals: Vec<u64> = (0..n_unique).map(|_| { let v = u64::from_le_bytes(r[..8].try_into().unwrap()); r = &r[8..]; v }).collect();
+        let runs: Vec<u32> = (0..n_unique).map(|_| { let v = u32::from_le_bytes(r[..4].try_into().unwrap()); r = &r[4..]; v }).collect();
+        let dtype = match dtype_byte { 1 => DataType::F64, 2 => DataType::I64, _ => DataType::Str };
+        block.add_column(&name, dtype, rle_decode(&vals, &runs));
+    }
+    Ok(block)
+}
+
+// ── Time Travel / Snapshots ───────────────────────────────────────────────────
+
+/// Write a versioned snapshot. Creates `path.v001.kore`, `path.v002.kore`, etc.
+/// Returns the snapshot path created.
+pub fn write_snapshot(base_path: &str, block: &DataBlock) -> io::Result<String> {
+    let version = next_snapshot_version(base_path);
+    let snap_path = format!("{}.v{:03}.kore", base_path, version);
+    write_file(&snap_path, block)?;
+    // Update latest pointer
+    std::fs::write(format!("{}.latest", base_path), version.to_string())?;
+    Ok(snap_path)
+}
+
+/// Read a specific snapshot version. Version 0 = latest.
+pub fn read_snapshot(base_path: &str, version: u32) -> io::Result<DataBlock> {
+    let v = if version == 0 { current_snapshot_version(base_path) } else { version };
+    read_file(&format!("{}.v{:03}.kore", base_path, v))
+}
+
+/// List all available snapshot versions.
+pub fn list_snapshots(base_path: &str) -> Vec<u32> {
+    let prefix = format!("{}.v", base_path);
+    (1..=999).filter(|&v| std::path::Path::new(&format!("{}{:03}.kore", prefix, v)).exists()).collect()
+}
+
+fn next_snapshot_version(base_path: &str) -> u32 { current_snapshot_version(base_path) + 1 }
+fn current_snapshot_version(base_path: &str) -> u32 {
+    std::fs::read_to_string(format!("{}.latest", base_path))
+        .ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+}
+
+// ── Partitioned Tables ────────────────────────────────────────────────────────
+
+/// Write a partitioned table — splits data by unique values of `partition_col`.
+/// Creates: `base_dir/partition_col=VALUE/data.kore`
+pub fn write_partitioned(base_dir: &str, block: &DataBlock, partition_col: &str) -> io::Result<Vec<String>> {
+    let Some(pc) = block.column(partition_col) else {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "partition column not found"));
+    };
+    let mut partitions: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
+    for (i, &v) in pc.values.iter().enumerate() {
+        partitions.entry(v).or_default().push(i);
+    }
+    let mut paths = Vec::new();
+    for (part_val, indices) in &partitions {
+        let dir = format!("{}/{}={}", base_dir, partition_col, part_val);
+        std::fs::create_dir_all(&dir)?;
+        let path = format!("{}/data.kore", dir);
+        let mut part_block = DataBlock::new();
+        for col in block.columns() {
+            part_block.add_column(&col.name, col.dtype, indices.iter().map(|&i| col.values[i]).collect());
+        }
+        write_file(&path, &part_block)?;
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+/// Read all partitions from a partitioned table directory into one merged DataBlock.
+pub fn read_partitioned(base_dir: &str) -> io::Result<DataBlock> {
+    let mut merged = DataBlock::new();
+    let mut initialized = false;
+    for entry in std::fs::read_dir(base_dir)? {
+        let entry = entry?;
+        let path = entry.path().join("data.kore");
+        if path.exists() {
+            let block = read_file(path.to_str().unwrap())?;
+            if !initialized {
+                for col in block.columns() {
+                    merged.add_column(&col.name, col.dtype, col.values.clone());
+                }
+                initialized = true;
+            } else {
+                for col in block.columns() {
+                    if let Some(mc) = merged.columns.iter_mut().find(|c| c.name == col.name) {
+                        mc.values.extend_from_slice(&col.values);
+                    }
+                }
+            }
+        }
+    }
+    Ok(merged)
+}
+
