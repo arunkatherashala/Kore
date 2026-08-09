@@ -1,4 +1,4 @@
-"""
+﻿"""
 KORE File Format Python FFI Wrapper
 =====================================
 
@@ -2748,3 +2748,73 @@ def parallel_read(paths: list, max_workers: int = 4) -> 'DataBlock':
                 if mc: mc.data.extend(col.data); mc.num_rows = len(mc.data)
     if merged.columns: merged.num_rows = len(merged.columns[0].data)
     return merged
+
+
+# -- HKORE: World-First Hybrid Format (Human Readable + Binary Fast) -----------
+
+_HKORE_BINARY_MARKER = b'\x00KORE_BINARY_START\x00'
+
+
+def write_hybrid(path, block, preview_rows=5):
+    """Write .hkore - human readable header + binary data. World-first format."""
+    import datetime
+    lines = [
+        "# KORE Hybrid Format v1.0",
+        f"# Created: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"# Rows: {block.num_rows:,}  Columns: {block.num_columns}",
+        "#",
+        "# Schema:",
+    ]
+    for col in block.columns:
+        dtype_name = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
+        try:
+            nums = [float(v) for v in col.data]
+            stat = f"min={min(nums):.2f}  max={max(nums):.2f}  avg={sum(nums)/len(nums):.2f}"
+        except Exception:
+            stat = "non-numeric"
+        lines.append(f"#   {col.name:<20} {dtype_name:<8}  [{stat}]")
+    n_prev = min(preview_rows, block.num_rows)
+    lines += ["#", f"# Preview (first {n_prev} rows):"]
+    for i in range(n_prev):
+        parts = []
+        for col in block.columns:
+            dtype_name = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
+            v = float(col.data[i]) if dtype_name in ('F64','FLOAT64') else col.data[i]
+            parts.append(f"{col.name}={v}")
+        lines.append(f"#   {' | '.join(parts)}")
+    binary_data = _block_to_bytes(block)
+    lines += ["#", f"# CRC32: {_crc32(binary_data):#010x}", f"# Binary: {len(binary_data):,} bytes", "# [Binary below - do not edit]", ""]
+    with open(str(path), 'wb') as f:
+        f.write('\n'.join(lines).encode('utf-8'))
+        f.write(_HKORE_BINARY_MARKER)
+        f.write(binary_data)
+
+
+def read_hybrid(path):
+    """Read .hkore at full binary speed (header skipped)."""
+    with open(str(path), 'rb') as f: data = f.read()
+    pos = data.find(_HKORE_BINARY_MARKER)
+    if pos == -1: raise ValueError("Not a valid .hkore file")
+    return _bytes_to_block(data[pos + len(_HKORE_BINARY_MARKER):])
+
+
+def read_hybrid_header(path):
+    """Read ONLY the human-readable header. No data loaded."""
+    with open(str(path), 'rb') as f: data = f.read()
+    pos = data.find(_HKORE_BINARY_MARKER)
+    if pos == -1: raise ValueError("Not a valid .hkore file")
+    return data[:pos].decode('utf-8')
+
+
+def inspect_hybrid(path):
+    """Print the human-readable header of a .hkore file."""
+    print(read_hybrid_header(path))
+
+
+def hkore_stats(path):
+    """Get file stats: header size, binary size, overhead %."""
+    with open(str(path), 'rb') as f: data = f.read()
+    pos = data.find(_HKORE_BINARY_MARKER)
+    hb = pos; bb = len(data) - pos - len(_HKORE_BINARY_MARKER)
+    return {'header_bytes': hb, 'header_kb': hb/1024, 'binary_bytes': bb,
+            'binary_kb': bb/1024, 'total_kb': len(data)/1024, 'overhead_pct': hb/len(data)*100}
