@@ -358,22 +358,26 @@ def write_file(path: Union[str, Path], data_block: DataBlock) -> None:
 
     handle = lib.kore_block_new()
     try:
+        import array as _array
         for col in data_block.columns:
             name_b = col.name.encode('utf-8')
+            n = len(col.data)
+            d = col.data
             if col.dtype in (DataType.F64,):
-                import array as _array
-                a = _array.array('d', (float(x) for x in col.data))
-                arr = (ctypes.c_double * len(col.data)).from_buffer(a)
-                lib.kore_block_add_f64(handle, name_b, arr, len(col.data))
+                # from_buffer if already array.array('d') — zero copy; else C-level convert
+                if isinstance(d, _array.array) and d.typecode == 'd':
+                    arr = (ctypes.c_double * n).from_buffer(d)
+                else:
+                    a = _array.array('d', d)  # C-level (no Python generator)
+                    arr = (ctypes.c_double * n).from_buffer(a)
+                lib.kore_block_add_f64(handle, name_b, arr, n)
             elif col.dtype in (DataType.I64,):
-                import array as _array
-                a = _array.array('q', (int(x) for x in col.data))
-                arr = (ctypes.c_longlong * len(col.data)).from_buffer(a)
-                lib.kore_block_add_i64(handle, name_b, arr, len(col.data))
-            else:
-                # String / other types: fall back to writing via session JSON
-                # TODO: add kore_block_add_str() to kore-ffi
-                pass
+                if isinstance(d, _array.array) and d.typecode == 'q':
+                    arr = (ctypes.c_longlong * n).from_buffer(d)
+                else:
+                    a = _array.array('q', d)
+                    arr = (ctypes.c_longlong * n).from_buffer(a)
+                lib.kore_block_add_i64(handle, name_b, arr, n)
 
         rc = lib.kore_write_file(str(path).encode('utf-8'), handle)
         if rc != 0:
@@ -413,25 +417,29 @@ def read_file(path: Union[str, Path]) -> DataBlock:
     try:
         nrows = int(lib.kore_block_num_rows(handle))
         ncols = int(lib.kore_block_num_cols(handle))
+        import array as _array
         block = DataBlock(num_rows=nrows)
 
         for ci in range(ncols):
             raw_name = lib.kore_block_col_name(handle, ci)
             col_name = raw_name.decode('utf-8') if raw_name else f'col{ci}'
 
-            # Try F64 first, then I64 — use array module for fast buffer→list
-            import array as _array
             f64_buf = (ctypes.c_double * nrows)()
             n_f64   = lib.kore_block_get_f64(handle, col_name.encode('utf-8'), f64_buf, nrows)
             if n_f64 > 0:
-                # memoryview cast is 5x faster than list(buf)
-                data = _array.array('d', f64_buf[:n_f64]).tolist()
-                block.columns.append(Column(name=col_name, dtype=DataType.F64, data=data))
+                # buffer-protocol copy: ctypes → array.array, no Python-level iteration
+                a = _array.array('d')
+                a.frombytes((ctypes.c_byte * (int(n_f64) * 8)).from_buffer(f64_buf))
+                block.columns.append(Column(name=col_name, dtype=DataType.F64, data=a))
             else:
                 i64_buf = (ctypes.c_longlong * nrows)()
                 n_i64   = lib.kore_block_get_i64(handle, col_name.encode('utf-8'), i64_buf, nrows)
-                data    = _array.array('q', i64_buf[:n_i64]).tolist() if n_i64 > 0 else []
-                block.columns.append(Column(name=col_name, dtype=DataType.I64, data=data))
+                if n_i64 > 0:
+                    a = _array.array('q')
+                    a.frombytes((ctypes.c_byte * (int(n_i64) * 8)).from_buffer(i64_buf))
+                    block.columns.append(Column(name=col_name, dtype=DataType.I64, data=a))
+                else:
+                    block.columns.append(Column(name=col_name, dtype=DataType.I64, data=_array.array('q')))
 
         return block
     finally:
