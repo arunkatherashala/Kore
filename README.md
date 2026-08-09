@@ -1,7 +1,110 @@
-﻿# KORE — Distributed Data Processing Engine
+﻿# KORE FileFormat
 
-**A high-performance distributed data processing engine written in Rust.**
-**KORE beats Apache Spark on ALL 7 TPC-H benchmark queries.**
+**The fastest columnar binary format — 59x faster than DuckDB, 84x faster than Apache Spark.**  
+**Zero dependencies. 8 language SDKs. CRC32 integrity. Auto-deploy CI/CD.**
+
+[![PyPI](https://img.shields.io/pypi/v/kore-fileformat)](https://pypi.org/project/kore-fileformat/)
+[![npm](https://img.shields.io/npm/v/kore-fileformat)](https://www.npmjs.com/package/kore-fileformat)
+[![crates.io](https://img.shields.io/crates/v/kore_fileformat)](https://crates.io/crates/kore_fileformat)
+
+---
+
+## 🚀 Benchmark — Real Data (6M rows TPC-H lineitem)
+
+| Query | **KORE** | DuckDB | Apache Spark | KORE Speedup |
+|-------|----------|--------|--------------|--------------|
+| Q1 — Aggregation | **11.9ms** | 699ms | 997ms | **59x vs DuckDB** |
+| Q6 — Filter+Sum | **27.1ms** | 780ms | 476ms | **28x vs DuckDB** |
+| Write 100K rows | **9.5ms** | ~80ms | ~500ms | **8x vs DuckDB** |
+| Read 100K rows | **5.5ms** | ~60ms | ~400ms | **11x vs DuckDB** |
+
+> Benchmarked on same machine. TPC-H lineitem, 6M rows. Results in `bench_3way_results.json`.
+
+---
+
+## 📦 Install
+
+```bash
+# Python
+pip install kore-fileformat
+
+# Node.js
+npm install kore-fileformat
+
+# Rust
+cargo add kore_fileformat
+
+# Ruby
+gem install kore-fileformat
+
+# Java (Maven)
+# com.github.arunkatherashala:kore-fileformat:1.6.7
+```
+
+---
+
+## ⚡ Quick Start
+
+```python
+import kore_fileformat as kore
+
+# Write
+block = kore.DataBlock()
+block.add_column("price",    kore.DataType.F64, [10.5, 20.0, 30.75])
+block.add_column("quantity", kore.DataType.I64, [100,  200,  300])
+kore.write_file("data.kore", block)
+
+# Read
+result = kore.read_file("data.kore")
+print(result.get_column("price").data)  # [10.5, 20.0, 30.75]
+
+# Pandas
+df = kore.to_pandas("data.kore")        # → DataFrame
+kore.from_pandas("output.kore", df)     # ← DataFrame
+
+# CLI
+# kore inspect data.kore
+```
+
+---
+
+## 🌍 8 Language SDKs
+
+| Language | Install | Package |
+|----------|---------|---------|
+| 🐍 Python | `pip install kore-fileformat` | [PyPI](https://pypi.org/project/kore-fileformat/) |
+| 🟨 Node.js | `npm install kore-fileformat` | [npm](https://www.npmjs.com/package/kore-fileformat) |
+| 🦀 Rust | `cargo add kore_fileformat` | [crates.io](https://crates.io/crates/kore_fileformat) |
+| 💎 Ruby | `gem install kore-fileformat` | [RubyGems](https://rubygems.org/gems/kore-fileformat) |
+| ☕ Java | Maven Central | [Sonatype](https://central.sonatype.com/artifact/com.github.arunkatherashala/kore-fileformat) |
+| 🔷 C# | NuGet | [NuGet](https://www.nuget.org/packages/KoreFileFormat) |
+| 🐘 PHP | `composer require arunkatherashala/kore-fileformat` | Packagist |
+| 🐹 Go | `go get github.com/arunkatherashala/kore/kore-go` | pkg.go.dev |
+
+---
+
+## 📊 Format Comparison
+
+| Feature | **KORE** | Parquet | Arrow | CSV | JSON |
+|---------|----------|---------|-------|-----|------|
+| Binary columnar | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Zero dependencies | ✅ | ❌ | ❌ | ✅ | ✅ |
+| CRC32 integrity | ✅ | ❌ | ❌ | ❌ | ❌ |
+| 8 language SDKs | ✅ | partial | partial | ✅ | ✅ |
+| CLI inspect tool | ✅ | ❌ | ❌ | ✅ | ✅ |
+| Human readable | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Query speed | 🥇 | 🥈 | 🥈 | 🥉 | 🥉 |
+
+---
+
+## 🏗️ Repository Structure
+
+| Branch | Purpose |
+|--------|---------|
+| `fileformat` ⭐ | kore-fileformat SDK — this branch (default) |
+| `master-kore-engine` | KORE SQL Engine (Rust, 310 tests) |
+| `main-Digital-Life-AI` | Digital Life / AI research |
+
 
 ---
 

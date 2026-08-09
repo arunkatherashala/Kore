@@ -32,3 +32,6 @@ classifiers = [
 Homepage = "https://github.com/arunkatherashala/Kore"
 Repository = "https://github.com/arunkatherashala/Kore"
 Issues = "https://github.com/arunkatherashala/Kore/issues"
+
+[project.scripts]
+kore = "kore_fileformat:_cli_main"
