@@ -786,6 +786,10 @@ __all__ = [
     'inspect_kore',
     'kore_header',
     'kore_stats',
+    'read_file_mmap',
+    'write_file_append',
+    'write_file_stream',
+    'read_file_where',
 ]
 
 
@@ -1868,6 +1872,62 @@ def can_skip_file(footers: list, col_name: str, lo: float, hi: float) -> bool:
         if f.name == col_name:
             return f.max_val < lo or f.min_val > hi
     return False
+
+
+def read_file_mmap(path: Union[str, Path]) -> DataBlock:
+    """Read .kore via mmap — OS page-cache zero-copy to Rust buffer."""
+    import mmap as _mmap
+    with open(str(path), 'rb') as f:
+        with _mmap.mmap(f.fileno(), 0, access=_mmap.ACCESS_READ) as mm:
+            prefix = bytes(mm[:_HKORE_OFFSET_LINE])
+            if len(prefix) == _HKORE_OFFSET_LINE and prefix[:5] == b'KORE2':
+                binary_start = int(prefix[13:23])
+                mv = memoryview(mm)
+                kore_bytes = bytes(mv[binary_start:])  # one copy: OS page cache → Python
+                del mv
+            else:
+                kore_bytes = bytes(mm)
+    return _block_from_bytes_ffi(kore_bytes)
+
+
+def write_file_append(path: Union[str, Path], new_block: DataBlock) -> None:
+    """Append rows from new_block to an existing .kore file."""
+    if not Path(str(path)).exists():
+        write_file(path, new_block)
+        return
+    existing = read_file(path)
+    merged = DataBlock()
+    for col in existing.columns:
+        new_col = new_block.get_column(col.name)
+        if new_col is not None:
+            merged.add_column(col.name, col.dtype,
+                              list(col.data) + list(new_col.data))
+    merged.num_rows = existing.num_rows + new_block.num_rows
+    write_file(path, merged)
+
+
+def write_file_stream(path: Union[str, Path], blocks) -> None:
+    """Stream-write multiple DataBlocks to one .kore file (memory-efficient merge)."""
+    blocks = list(blocks)
+    if not blocks:
+        return
+    if len(blocks) == 1:
+        write_file(path, blocks[0]); return
+    merged = DataBlock()
+    for col in blocks[0].columns:
+        combined = []
+        for b in blocks:
+            c = b.get_column(col.name)
+            if c: combined.extend(c.data)
+        merged.add_column(col.name, col.dtype, combined)
+    merged.num_rows = sum(b.num_rows for b in blocks)
+    write_file(path, merged)
+
+
+def read_file_where(path: Union[str, Path], col_name: str, value) -> DataBlock:
+    """Read .kore and return only rows where col == value (predicate pushdown)."""
+    block = read_file(path)
+    return filter_eq(block, col_name, value)
 
 
 # ── Null/None Values Support ──────────────────────────────────────────────────
