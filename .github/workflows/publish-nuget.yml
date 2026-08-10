@@ -8,6 +8,10 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  id-token: write   # required for NuGet Trusted Publishing (OIDC)
+  contents: read
+
 jobs:
   nuget:
     runs-on: ubuntu-latest
@@ -27,14 +31,10 @@ jobs:
     - name: Find C# project
       id: find-project
       run: |
-        PROJECT_PATH="kore-fileformat-nuget/KoreFileFormat/KoreFileFormat.csproj"
+        PROJECT_PATH="csharp/Kore.FileFormat/Kore.FileFormat.csproj"
         if [ ! -f "$PROJECT_PATH" ]; then
-          echo "Trying fallback path..."
-          PROJECT_PATH="csharp/Kore.FileFormat/Kore.FileFormat.csproj"
-          if [ ! -f "$PROJECT_PATH" ]; then
-            echo "error=C# project not found"
-            exit 1
-          fi
+          echo "error=C# project not found at $PROJECT_PATH"
+          exit 1
         fi
         echo "project_path=$PROJECT_PATH" >> $GITHUB_OUTPUT
         echo "Found project at: $PROJECT_PATH"
@@ -47,37 +47,31 @@ jobs:
         dotnet pack "${{ steps.find-project.outputs.project_path }}" \
           --configuration Release \
           --output nupkg
-    
-    - name: Publish to NuGet
-      env:
-        NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+
+    - name: Get OIDC token for NuGet Trusted Publishing
+      id: oidc
       run: |
-        if [ -z "$NUGET_API_KEY" ]; then
-          echo "⚠️  NUGET_API_KEY secret not configured"
-          echo "To enable NuGet publishing:"
-          echo "1. Create API key at: https://www.nuget.org/account/apikeys"
-          echo "2. Add to GitHub secrets: gh secret set NUGET_API_KEY --body '...'"
-          echo "Skipping NuGet publish (optional)"
-          exit 0
-        fi
-        
-        if [ -d nupkg ] && [ "$(ls -A nupkg)" ]; then
-          for file in nupkg/*.nupkg; do
-            echo "Publishing: $file"
-            dotnet nuget push "$file" \
-              --api-key "$NUGET_API_KEY" \
-              --source https://api.nuget.org/v3/index.json \
-              --skip-duplicate
-          done
-        else
-          echo "No NuGet packages found to publish"
-          exit 0
-        fi
+        OIDC_TOKEN=$(curl -sSfL \
+          -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=nuget.org" | jq -r .value)
+        echo "::add-mask::$OIDC_TOKEN"
+        echo "token=$OIDC_TOKEN" >> $GITHUB_OUTPUT
+
+    - name: Publish to NuGet (Trusted Publishing)
+      run: |
+        for file in nupkg/*.nupkg; do
+          echo "Publishing: $file"
+          dotnet nuget push "$file" \
+            --api-key "${{ steps.oidc.outputs.token }}" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate
+        done
 
     - name: Publish summary
       run: |
         echo "## NuGet Publishing Status" >> $GITHUB_STEP_SUMMARY
         echo "Version: ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+        echo "Packages published via Trusted Publishing (OIDC)" >> $GITHUB_STEP_SUMMARY
         echo "Status: Completed (optional - requires .NET project structure)" >> $GITHUB_STEP_SUMMARY
 
 
