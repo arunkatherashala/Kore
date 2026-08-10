@@ -1,13 +1,13 @@
 # KORE FileFormat — Go
 
-**Version 1.6.31** | [pkg.go.dev](https://pkg.go.dev/github.com/arunkatherashala/kore/kore-go) | [GitHub](https://github.com/arunkatherashala/Kore)
+**Version 1.6.32** | [pkg.go.dev](https://pkg.go.dev/github.com/arunkatherashala/kore/kore-go) | [GitHub](https://github.com/arunkatherashala/Kore)
 
 High-performance columnar format with 11 ACID features. Uses CGo to call Rust `kore_ffi.dll`/`libkore_ffi.so`.
 
 ## Install
 
 ```bash
-go get github.com/arunkatherashala/kore/kore-go@v1.6.31
+go get github.com/arunkatherashala/kore/kore-go@v1.6.32
 ```
 
 Requires `kore_ffi` library in `LD_LIBRARY_PATH` (Linux) or same directory (Windows):

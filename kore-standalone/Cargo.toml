@@ -1,6 +1,6 @@
 [package]
 name        = "kore_fileformat"
-version     = "1.6.31"
+version     = "1.6.32"
 edition     = "2021"
 description = "KORE Binary Format — high-performance columnar file format with CRC32 integrity (pure Rust, zero deps)"
 license     = "MIT"
