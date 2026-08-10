@@ -560,7 +560,7 @@ def column_stats_from_bytes(data: bytes) -> dict:
     raise NotImplementedError("Phase 3: Stats extraction pending")
 
 
-__version__ = "1.6.27"
+__version__ = "1.6.28"
 __all__ = [
     'DataType',
     'Compression',
