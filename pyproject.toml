@@ -8,7 +8,7 @@ package-dir = {"" = "kore-python"}
 
 [project]
 name = "kore-fileformat"
-version = "1.7.1"
+version = "1.7.2"
 description = "KORE Binary Format - High-performance columnar compression with 5-8x compression ratio"
 readme = "kore-python/README.md"
 requires-python = ">=3.9"
