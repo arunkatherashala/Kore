@@ -1,6 +1,6 @@
 # KORE FileFormat — PHP
 
-**Version 1.6.28** | [Packagist](https://packagist.org/packages/arunkatherashala/kore-fileformat) | [GitHub](https://github.com/arunkatherashala/Kore)
+**Version 1.6.29** | [Packagist](https://packagist.org/packages/arunkatherashala/kore-fileformat) | [GitHub](https://github.com/arunkatherashala/Kore)
 
 High-performance columnar format with 11 ACID features. Uses PHP's built-in `FFI` extension to call Rust `kore_ffi.dll`.
 
@@ -12,7 +12,7 @@ High-performance columnar format with 11 ACID features. Uses PHP's built-in `FFI
 ## Install
 
 ```bash
-composer require arunkatherashala/kore-fileformat:1.6.28
+composer require arunkatherashala/kore-fileformat:1.6.29
 ```
 
 Or from source:
