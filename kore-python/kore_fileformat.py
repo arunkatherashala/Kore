@@ -695,49 +695,53 @@ __all__ = [
 # ── CLI — `kore inspect <file>` ─────────────────────────────────────────────
 
 def _cli_inspect(path: str) -> None:
-    """Print human-readable summary of a .kore file."""
+    """Print human-readable summary of a .kore or .hkore file."""
     import os
-    file_size = os.path.getsize(path)
+    # Fast path for v3: just print the embedded text header (no data load)
+    try:
+        with open(path, 'rb') as f:
+            prefix = f.read(_HKORE_OFFSET_LINE)
+        if len(prefix) == _HKORE_OFFSET_LINE and prefix[:5] == b'KORE2':
+            print(kore_header(path))
+            s = kore_stats(path)
+            print(f"  File: {os.path.basename(path)}  "
+                  f"{s['total_kb']:.0f} KB  "
+                  f"binary={s['binary_kb']:.0f} KB  "
+                  f"header overhead={s['overhead_pct']:.2f}%")
+            return
+    except Exception:
+        pass
+    # Fallback: full read (legacy files)
     block = read_file(path)
-
-    print(f"\n{'='*55}")
-    print(f"  KORE File: {os.path.basename(path)}")
-    print(f"{'='*55}")
-    print(f"  Rows    : {block.num_rows:,}")
-    print(f"  Columns : {block.num_columns}")
-    print(f"  Size    : {file_size / 1024:.1f} KB ({file_size:,} bytes)")
-    print(f"{'='*55}")
-    print(f"  {'Column':<20} {'Type':<8} {'Min':>12} {'Max':>12} {'Avg':>12}")
-    print(f"  {'-'*20} {'-'*8} {'-'*12} {'-'*12} {'-'*12}")
-
+    file_size = os.path.getsize(path)
+    print(f"\n{'='*58}")
+    print(f"  {os.path.basename(path)}  —  {block.num_rows:,} rows × {block.num_columns} cols  ({file_size/1024:.0f} KB)")
+    print(f"{'='*58}")
+    print(f"  {'Column':<20} {'Type':<8} {'Sample values'}")
+    print(f"  {'-'*54}")
     for col in block.columns:
         dtype = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
-        vals = col.data if col.data else []
-        if vals and dtype in ('F64', 'I64', 'FLOAT64', 'INT64'):
-            try:
-                nums = [float(v) for v in vals]
-                mn = f"{min(nums):>12.3f}"
-                mx = f"{max(nums):>12.3f}"
-                av = f"{sum(nums)/len(nums):>12.3f}"
-            except Exception:
-                mn = mx = av = f"{'N/A':>12}"
-        else:
-            mn = mx = av = f"{'N/A':>12}"
-        print(f"  {col.name:<20} {dtype:<8} {mn} {mx} {av}")
-    print(f"{'='*55}\n")
+        sample = str(list(col.data[:3]))[1:-1]
+        print(f"  {col.name:<20} {dtype:<8} {sample}")
+    print(f"{'='*58}\n")
 
 
 def _cli_main() -> None:
-    """Entry point for `kore` command."""
-    import sys
-    args = sys.argv[1:]
+    """Entry point for `kore` CLI."""
+    import sys, os
 
-    if not args or args[0] in ('-h', '--help'):
+    def usage():
         print(f"kore-fileformat {__version__}")
         print("\nUsage:")
-        print("  kore inspect <file.kore>   — show file summary")
-        print("  kore version               — show version")
-        return
+        print("  kore inspect <file>          — show schema + preview (fast, no full read)")
+        print("  kore stats   <file>          — show file size breakdown")
+        print("  kore convert <src> <dst>     — convert .kore ↔ .hkore")
+        print("  kore bench                   — quick write/read benchmark")
+        print("  kore version                 — show version")
+
+    args = sys.argv[1:]
+    if not args or args[0] in ('-h', '--help'):
+        usage(); return
 
     cmd = args[0]
 
@@ -746,13 +750,67 @@ def _cli_main() -> None:
 
     elif cmd == 'inspect':
         if len(args) < 2:
-            print("Error: provide a file path. Usage: kore inspect <file.kore>")
-            return
-        _cli_inspect(args[1])
+            print("Usage: kore inspect <file.kore>"); return
+        path = args[1]
+        if not os.path.exists(path):
+            print(f"File not found: {path}"); return
+        _cli_inspect(path)
+
+    elif cmd == 'stats':
+        if len(args) < 2:
+            print("Usage: kore stats <file.kore>"); return
+        path = args[1]
+        try:
+            s = kore_stats(path)
+            print(f"  File     : {os.path.basename(path)}")
+            print(f"  Format   : {s['format']}")
+            print(f"  Total    : {s['total_kb']:.1f} KB")
+            print(f"  Header   : {s['header_kb']:.2f} KB  ({s['overhead_pct']:.3f}% overhead)")
+            print(f"  Binary   : {s['binary_kb']:.1f} KB")
+        except Exception:
+            try:
+                sz = os.path.getsize(path)
+                print(f"  File: {os.path.basename(path)}  {sz/1024:.1f} KB  (legacy format)")
+            except Exception as e:
+                print(f"Error: {e}")
+
+    elif cmd == 'convert':
+        if len(args) < 3:
+            print("Usage: kore convert <src> <dst>"); return
+        src, dst = args[1], args[2]
+        block = read_file(src) if src.endswith('.kore') else read_hybrid(src)
+        if dst.endswith('.hkore'):
+            write_hybrid(dst, block)
+        else:
+            write_file(dst, block)
+        print(f"  Converted: {src} → {dst}")
+
+    elif cmd == 'bench':
+        import time, array as _arr
+        N = 50_000
+        b = DataBlock()
+        b.add_column('price', DataType.F64, [float(i)*1.5 for i in range(N)])
+        b.add_column('qty',   DataType.I64, [i*2 for i in range(N)])
+        import tempfile, os as _os
+        tf = tempfile.mktemp(suffix='.kore')
+        write_file(tf, b)
+        times = []
+        for _ in range(5):
+            t = time.perf_counter(); write_file(tf, b); times.append(time.perf_counter()-t)
+        w = min(times)*1000
+        times = []
+        for _ in range(5):
+            t = time.perf_counter(); read_file(tf); times.append(time.perf_counter()-t)
+        r = min(times)*1000
+        _os.remove(tf)
+        sz = _os.path.getsize(tf) if _os.path.exists(tf) else 0
+        print(f"  kore-fileformat {__version__}  ({N:,} rows × 2 cols)")
+        print(f"  write : {w:.1f}ms  ({w*1e6/N:.0f} ns/row)")
+        print(f"  read  : {r:.1f}ms  ({r*1e6/N:.0f} ns/row)")
 
     else:
         print(f"Unknown command: {cmd}")
-        print("Run `kore --help` for usage.")
+        usage()
 
 
 if __name__ == '__main__':
