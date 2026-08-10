@@ -352,18 +352,40 @@ _KORE_V3_MARKER = b'\x00KORE_V3\x00'
 
 def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int = 5) -> None:
     """Write .kore v3 — KORE2 text header + Rust KORE binary (compressed + ACID).
-    Opens in Notepad AND stores data 10x smaller than JSON with Rust compression."""
-    import datetime
+    Supports F64, I64, STR columns and None/null values."""
+    import datetime, math
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Serialize to Rust KORE bytes (compression + ACID happens here)
-    kore_bytes = _block_to_bytes_ffi(data_block)
-
     cols = data_block.columns
     nrows, ncols = data_block.num_rows, data_block.num_columns
     n_prev = min(preview_rows, nrows)
+
+    # Dict-encode string columns → I64 ID columns; store dicts in header
+    str_dicts = {}   # original_name → list of unique strings
+    encode_block = DataBlock()
+    for col in cols:
+        dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
+        d = col.data
+        if dn in ('STR', 'STR_DICT'):
+            # Dict-encode: strings → integer IDs
+            unique = list(dict.fromkeys('' if v is None else str(v) for v in d))
+            vid = {v: i for i, v in enumerate(unique)}
+            str_dicts[col.name] = unique
+            encode_block.add_column(f'__str_{col.name}', DataType.I64,
+                                    [vid['' if v is None else str(v)] for v in d])
+        elif dn in ('F64', 'FLOAT64', '2'):
+            # Replace None → NaN
+            encode_block.add_column(col.name, DataType.F64,
+                                    [float('nan') if v is None else v for v in d])
+        else:
+            # Replace None → 0 for integer-like types
+            encode_block.add_column(col.name, col.dtype,
+                                    [0 if v is None else v for v in d])
+    encode_block.num_rows = nrows
+
+    kore_bytes = _block_to_bytes_ffi(encode_block)
 
     text_lines = [
         "# KORE Format v3.0",
@@ -375,6 +397,10 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
     for col in cols:
         dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
         text_lines.append(f"#   {col.name:<20} {dn}")
+    # Embed string dictionaries so read_file can reconstruct string columns
+    for col_name, strings in str_dicts.items():
+        escaped = ','.join(f'"{s}"' for s in strings)
+        text_lines.append(f"# StringDict {col_name}: {escaped}")
     text_lines.append(f"# Preview (first {n_prev} rows):")
     for i in range(n_prev):
         parts = [f"{col.name}={col.data[i]}" for col in cols]
@@ -394,17 +420,57 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
 
 
 def read_file(path: Union[str, Path]) -> DataBlock:
-    """Read .kore — auto-detects v3 (text header) vs legacy (raw Rust KORE)."""
+    """Read .kore — auto-detects v3 (text header) vs legacy (raw Rust KORE).
+    Decodes string columns and restores column order from header."""
     with open(str(path), 'rb') as f:
         prefix = f.read(_HKORE_OFFSET_LINE)
         if len(prefix) == _HKORE_OFFSET_LINE and prefix[:5] == b'KORE2':
             binary_start = int(prefix[13:23])
+            f.seek(0)
+            header_bytes = f.read(binary_start)
             f.seek(binary_start)
             kore_bytes = f.read()
         else:
             f.seek(0)
-            kore_bytes = f.read()
-    return _block_from_bytes_ffi(kore_bytes)
+            return _block_from_bytes_ffi(f.read())
+
+    # Parse string dicts and original schema from header
+    str_dicts = {}
+    schema_order = []   # [(orig_name, dtype_str)]
+    for line in header_bytes.decode('utf-8', errors='replace').split('\n'):
+        if line.startswith('# StringDict '):
+            rest = line[13:]
+            col_name, vals_str = rest.split(': ', 1)
+            # Parse comma-separated quoted strings
+            import re as _re
+            strings = _re.findall(r'"((?:[^"\\]|\\.)*)"', vals_str)
+            str_dicts[col_name] = strings
+        elif line.startswith('#   ') and not line.startswith('#   [') and '  ' in line[4:]:
+            parts = line[4:].split()
+            if len(parts) >= 2:
+                schema_order.append((parts[0], parts[1]))
+
+    raw_block = _block_from_bytes_ffi(kore_bytes)
+
+    if not str_dicts and not schema_order:
+        return raw_block
+
+    # Rebuild block in original column order, decoding __str_ columns
+    raw_by_name = {col.name: col for col in raw_block.columns}
+    result = DataBlock()
+    for orig_name, dtype_str in schema_order:
+        if orig_name in str_dicts:
+            id_col = raw_by_name.get(f'__str_{orig_name}')
+            if id_col is not None:
+                mapping = str_dicts[orig_name]
+                decoded = [mapping[int(i)] if 0 <= int(i) < len(mapping) else ''
+                           for i in id_col.data]
+                result.add_column(orig_name, DataType.STR, decoded)
+        elif orig_name in raw_by_name:
+            col = raw_by_name[orig_name]
+            result.add_column(orig_name, col.dtype, col.data)
+    result.num_rows = raw_block.num_rows
+    return result if result.num_columns > 0 else raw_block
 
 
 def kore_header(path: Union[str, Path]) -> str:
