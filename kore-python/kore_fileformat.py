@@ -364,6 +364,7 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
 
     str_dicts = {}      # col_name → list of unique strings
     null_positions = {} # col_name → sorted list of null row indices
+    bool_cols = set()   # col names with DataType.BOOL
     encode_block = DataBlock()
     for col in cols:
         dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
@@ -377,10 +378,17 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
         elif dn in ('F64', 'FLOAT64', '2'):
             encode_block.add_column(col.name, DataType.F64,
                                     [float('nan') if v is None else v for v in d])
+        elif dn == 'BOOL':
+            bool_cols.add(col.name)  # store as I64 0/1, restore on read
+            nulls = [i for i, v in enumerate(d) if v is None]
+            if nulls:
+                null_positions[col.name] = nulls
+            encode_block.add_column(col.name, DataType.I64,
+                                    [0 if v is None else int(bool(v)) for v in d])
         else:
             nulls = [i for i, v in enumerate(d) if v is None]
             if nulls:
-                null_positions[col.name] = nulls  # stored in header; 0 written to binary
+                null_positions[col.name] = nulls
             encode_block.add_column(col.name, col.dtype,
                                     [0 if v is None else v for v in d])
     encode_block.num_rows = nrows
@@ -403,6 +411,8 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
         text_lines.append(f"# StringDict {col_name}: {escaped}")
     for col_name, positions in null_positions.items():
         text_lines.append(f"# NullRows {col_name}: {','.join(map(str, positions))}")
+    for col_name in bool_cols:
+        text_lines.append(f"# BoolCol {col_name}")
     text_lines.append(f"# Preview (first {n_prev} rows):")
     for i in range(n_prev):
         parts = [f"{col.name}={col.data[i]}" for col in cols]
@@ -440,6 +450,7 @@ def read_file(path: Union[str, Path]) -> DataBlock:
     import re as _re
     str_dicts = {}
     null_positions = {}  # col_name → list of null row indices
+    bool_cols = set()    # col names to decode as bool
     schema_order = []
     for line in header_bytes.decode('utf-8', errors='replace').split('\n'):
         if line.startswith('# StringDict '):
@@ -450,8 +461,9 @@ def read_file(path: Union[str, Path]) -> DataBlock:
             rest = line[11:]
             col_name, idxs = rest.split(': ', 1)
             null_positions[col_name] = [int(x) for x in idxs.split(',') if x]
+        elif line.startswith('# BoolCol '):
+            bool_cols.add(line[10:].strip())
         elif line.startswith('# NullableI64 '):
-            # legacy annotation — treat all as null_positions with no positions known
             null_positions.setdefault(line[14:].strip(), [])
         elif line.startswith('#   ') and not line.startswith('#   [') and '  ' in line[4:]:
             parts = line[4:].split()
@@ -476,14 +488,18 @@ def read_file(path: Union[str, Path]) -> DataBlock:
                 result.add_column(orig_name, DataType.STR, decoded)
         elif orig_name in raw_by_name:
             col = raw_by_name[orig_name]
+            raw_data = col.data
             if orig_name in null_positions and null_positions[orig_name]:
-                data = list(col.data)
+                data = list(raw_data)
                 for idx in null_positions[orig_name]:
                     if 0 <= idx < len(data):
                         data[idx] = None
-                result.add_column(orig_name, col.dtype, data)
+                raw_data = data
+            if orig_name in bool_cols:
+                raw_data = [None if v is None else bool(v) for v in raw_data]
+                result.add_column(orig_name, DataType.BOOL, raw_data)
             else:
-                result.add_column(orig_name, col.dtype, col.data)
+                result.add_column(orig_name, col.dtype, raw_data)
     result.num_rows = raw_block.num_rows
     return result if result.num_columns > 0 else raw_block
 
