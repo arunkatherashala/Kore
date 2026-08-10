@@ -1,4 +1,4 @@
-﻿"""
+"""
 KORE File Format Python FFI Wrapper
 =====================================
 
@@ -11,7 +11,7 @@ Features:
     AES-256-GCM encryption, schema evolution, append writes, MVCC/time travel,
     partition evolution, row-level deletes
   - Zero-copy mmap reads via Rust
-  - Automatic codec selection (RAW → LZ4 vs ZSTD)
+  - Automatic codec selection (RAW ? LZ4 vs ZSTD)
 
 Example:
     >>> import kore_fileformat as kore
@@ -44,9 +44,9 @@ from typing import Any, List, Optional, Tuple, Union
 from pathlib import Path
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # DATA TYPES & ENUMS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 class DataType(IntEnum):
     """KORE data types (must match Rust DType enum)."""
@@ -70,9 +70,9 @@ class Compression(IntEnum):
     ZSTD = 6          # ZSTD compression
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # CORE CLASSES
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @dataclass
 class ColumnStats:
@@ -172,9 +172,9 @@ class DeleteVector:
     timestamp: int
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # FFI BINDINGS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 class KoreFFI:
     """FFI wrapper for calling Rust KORE library functions."""
@@ -222,9 +222,9 @@ class KoreFFI:
         return cls._lib
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # HIGH-LEVEL API
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def crc32(data: bytes) -> int:
     """Compute CRC32 checksum.
@@ -241,10 +241,10 @@ def crc32(data: bytes) -> int:
     return lib.kore_crc32(data, len(data))
 
 
-# ── Fast bulk read (internal — used by read_hybrid for .hkore files) ──────────
+# -- Fast bulk read (internal � used by read_hybrid for .hkore files) ----------
 
 def _read_bulk_fast(data: bytes, n_rows: int, cols_meta: list) -> 'DataBlock':
-    """Internal bulk read — array.frombytes for zero-loop column loading."""
+    """Internal bulk read � array.frombytes for zero-loop column loading."""
     import struct, array as _arr
     block = DataBlock()
     pos = 0
@@ -260,10 +260,10 @@ def _read_bulk_fast(data: bytes, n_rows: int, cols_meta: list) -> 'DataBlock':
     return block
 
 
-# ── Rust FFI byte-level I/O (zero temp file) ──────────────────────────────────
+# -- Rust FFI byte-level I/O (zero temp file) ----------------------------------
 
 def _block_to_bytes_ffi(block: 'DataBlock') -> bytes:
-    """Serialize DataBlock → Rust KORE bytes (compressed, ACID)."""
+    """Serialize DataBlock ? Rust KORE bytes (compressed, ACID)."""
     import ctypes as ct, array as _array
     lib = KoreFFI.get_library()
     lib.kore_block_new.restype = ct.c_void_p
@@ -305,7 +305,7 @@ def _block_to_bytes_ffi(block: 'DataBlock') -> bytes:
 
 
 def _block_from_bytes_ffi(data: bytes) -> 'DataBlock':
-    """Deserialize Rust KORE bytes → DataBlock (buffer-protocol, no tolist)."""
+    """Deserialize Rust KORE bytes ? DataBlock (buffer-protocol, no tolist)."""
     import ctypes as ct, array as _array
     lib = KoreFFI.get_library()
     lib.kore_read_bytes.argtypes = [ct.c_void_p, ct.c_size_t]
@@ -351,7 +351,7 @@ _KORE_V3_MARKER = b'\x00KORE_V3\x00'
 
 
 def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int = 5) -> None:
-    """Write .kore v3 — KORE2 text header + Rust KORE binary (compressed + ACID).
+    """Write .kore v3 � KORE2 text header + Rust KORE binary (compressed + ACID).
     Supports F64, I64, STR columns and None/null values."""
     import datetime, math
 
@@ -362,8 +362,8 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
     nrows, ncols = data_block.num_rows, data_block.num_columns
     n_prev = min(preview_rows, nrows)
 
-    str_dicts = {}      # col_name → list of unique strings
-    null_positions = {} # col_name → sorted list of null row indices
+    str_dicts = {}      # col_name ? list of unique strings
+    null_positions = {} # col_name ? sorted list of null row indices
     bool_cols = set()   # col names with DataType.BOOL
     encode_block = DataBlock()
     for col in cols:
@@ -432,7 +432,7 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
 
 
 def read_file(path: Union[str, Path]) -> DataBlock:
-    """Read .kore — auto-detects v3 (text header) vs legacy (raw Rust KORE).
+    """Read .kore � auto-detects v3 (text header) vs legacy (raw Rust KORE).
     Decodes string columns and restores column order from header."""
     with open(str(path), 'rb') as f:
         prefix = f.read(_HKORE_OFFSET_LINE)
@@ -449,7 +449,7 @@ def read_file(path: Union[str, Path]) -> DataBlock:
     _I64_NULL = -(2**63)
     import re as _re
     str_dicts = {}
-    null_positions = {}  # col_name → list of null row indices
+    null_positions = {}  # col_name ? list of null row indices
     bool_cols = set()    # col names to decode as bool
     schema_order = []
     for line in header_bytes.decode('utf-8', errors='replace').split('\n'):
@@ -642,9 +642,9 @@ def get_bloom_filter(data: bytes, column_name: str) -> bytes:
     raise NotImplementedError("Phase 3: Bloom filter API pending")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # CONVENIENCE FUNCTIONS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def create_data_block() -> DataBlock:
     """Create an empty data block."""
@@ -657,7 +657,7 @@ def column_stats_from_bytes(data: bytes) -> dict:
     raise NotImplementedError("Phase 3: Stats extraction pending")
 
 
-__version__ = "1.6.38"
+__version__ = "1.7.0"
 __all__ = [
     'DataType',
     'Compression',
@@ -793,7 +793,7 @@ __all__ = [
 ]
 
 
-# ── CLI — `kore inspect <file>` ─────────────────────────────────────────────
+# -- CLI � `kore inspect <file>` ---------------------------------------------
 
 def _cli_inspect(path: str) -> None:
     """Print human-readable summary of a .kore or .hkore file."""
@@ -816,7 +816,7 @@ def _cli_inspect(path: str) -> None:
     block = read_file(path)
     file_size = os.path.getsize(path)
     print(f"\n{'='*58}")
-    print(f"  {os.path.basename(path)}  —  {block.num_rows:,} rows × {block.num_columns} cols  ({file_size/1024:.0f} KB)")
+    print(f"  {os.path.basename(path)}  �  {block.num_rows:,} rows � {block.num_columns} cols  ({file_size/1024:.0f} KB)")
     print(f"{'='*58}")
     print(f"  {'Column':<20} {'Type':<8} {'Sample values'}")
     print(f"  {'-'*54}")
@@ -834,11 +834,11 @@ def _cli_main() -> None:
     def usage():
         print(f"kore-fileformat {__version__}")
         print("\nUsage:")
-        print("  kore inspect <file>          — show schema + preview (fast, no full read)")
-        print("  kore stats   <file>          — show file size breakdown")
-        print("  kore convert <src> <dst>     — convert .kore ↔ .hkore")
-        print("  kore bench                   — quick write/read benchmark")
-        print("  kore version                 — show version")
+        print("  kore inspect <file>          � show schema + preview (fast, no full read)")
+        print("  kore stats   <file>          � show file size breakdown")
+        print("  kore convert <src> <dst>     � convert .kore ? .hkore")
+        print("  kore bench                   � quick write/read benchmark")
+        print("  kore version                 � show version")
 
     args = sys.argv[1:]
     if not args or args[0] in ('-h', '--help'):
@@ -884,7 +884,7 @@ def _cli_main() -> None:
             write_hybrid(dst, block)
         else:
             write_file(dst, block)
-        print(f"  Converted: {src} → {dst}")
+        print(f"  Converted: {src} ? {dst}")
 
     elif cmd == 'bench':
         import time, array as _arr
@@ -905,7 +905,7 @@ def _cli_main() -> None:
         r = min(times)*1000
         _os.remove(tf)
         sz = _os.path.getsize(tf) if _os.path.exists(tf) else 0
-        print(f"  kore-fileformat {__version__}  ({N:,} rows × 2 cols)")
+        print(f"  kore-fileformat {__version__}  ({N:,} rows � 2 cols)")
         print(f"  write : {w:.1f}ms  ({w*1e6/N:.0f} ns/row)")
         print(f"  read  : {r:.1f}ms  ({r*1e6/N:.0f} ns/row)")
 
@@ -918,7 +918,7 @@ if __name__ == '__main__':
     _cli_main()
 
 
-# ── Pandas integration ───────────────────────────────────────────────────────
+# -- Pandas integration -------------------------------------------------------
 
 def to_pandas(path: Union[str, 'Path']):
     """Read a .kore file and return a pandas DataFrame.
@@ -975,12 +975,12 @@ def from_pandas(path: Union[str, 'Path'], df) -> None:
         elif pd.api.types.is_bool_dtype(series):
             block.add_column(col_name, DataType.BOOL, series.tolist())
         else:
-            # fallback: convert to string → STR type
+            # fallback: convert to string ? STR type
             block.add_column(col_name, DataType.STR, series.astype(str).tolist())
     write_file(path, block)
 
 
-# ── Schema Evolution & Append ────────────────────────────────────────────────
+# -- Schema Evolution & Append ------------------------------------------------
 
 def add_column(path: Union[str, 'Path'], name: str, dtype: 'DataType', default=None) -> None:
     """Add a new column to an existing .kore file (schema evolution).
@@ -1031,7 +1031,7 @@ def append_file(path: Union[str, 'Path'], new_block: 'DataBlock') -> None:
     write_file(path, base)
 
 
-# ── Row Filtering ─────────────────────────────────────────────────────────────
+# -- Row Filtering -------------------------------------------------------------
 
 def filter_eq(block: 'DataBlock', col_name: str, value) -> 'DataBlock':
     """Return rows where column equals value."""
@@ -1056,7 +1056,7 @@ def filter_range(block: 'DataBlock', col_name: str, lo, hi) -> 'DataBlock':
 
 
 def select_columns(block: 'DataBlock', names: list) -> 'DataBlock':
-    """Projection — return only specified columns."""
+    """Projection � return only specified columns."""
     result = DataBlock()
     for c in block.columns:
         if c.name in names:
@@ -1064,7 +1064,7 @@ def select_columns(block: 'DataBlock', names: list) -> 'DataBlock':
     return result
 
 
-# ── Time Travel / Snapshots ───────────────────────────────────────────────────
+# -- Time Travel / Snapshots ---------------------------------------------------
 
 def write_snapshot(base_path: str, block: 'DataBlock') -> str:
     """Write a versioned snapshot. Returns the snapshot file path.
@@ -1110,7 +1110,7 @@ def _current_snapshot_version(base_path: str) -> int:
     return 0
 
 
-# ── Partitioned Tables ────────────────────────────────────────────────────────
+# -- Partitioned Tables --------------------------------------------------------
 
 def write_partitioned(base_dir: str, block: 'DataBlock', partition_col: str) -> list:
     """Write a partitioned table split by unique values of partition_col.
@@ -1159,7 +1159,7 @@ def read_partitioned(base_dir: str) -> 'DataBlock':
     return merged or DataBlock()
 
 
-# ── ACID File Locking ─────────────────────────────────────────────────────────
+# -- ACID File Locking ---------------------------------------------------------
 
 class FileLock:
     """Context manager for exclusive file locking (ACID safe writes)."""
@@ -1186,18 +1186,18 @@ class FileLock:
 
 
 def write_file_locked(path: Union[str, 'Path'], block: 'DataBlock', timeout_ms: int = 5000) -> None:
-    """Write with ACID file lock — safe for concurrent writers."""
+    """Write with ACID file lock � safe for concurrent writers."""
     with FileLock(str(path), timeout_ms):
         write_file(path, block)
 
 
 def append_file_locked(path: Union[str, 'Path'], block: 'DataBlock', timeout_ms: int = 5000) -> None:
-    """Append with ACID file lock — safe for concurrent appenders."""
+    """Append with ACID file lock � safe for concurrent appenders."""
     with FileLock(str(path), timeout_ms):
         append_file(path, block)
 
 
-# ── Bloom Filter ──────────────────────────────────────────────────────────────
+# -- Bloom Filter --------------------------------------------------------------
 
 class BloomFilter:
     """Fast membership testing with ~1% false positive rate."""
@@ -1234,7 +1234,7 @@ class BloomFilter:
         return bf
 
 
-# ── Delta / Merge (Upsert) ────────────────────────────────────────────────────
+# -- Delta / Merge (Upsert) ----------------------------------------------------
 
 def merge_into(path: Union[str, 'Path'], delta: 'DataBlock', key_col: str) -> None:
     """UPSERT: update matching rows, insert new ones.
@@ -1285,8 +1285,8 @@ def delete_rows(path: Union[str, 'Path'], key_col: str, delete_keys: list) -> No
     write_file(path, result)
 
 
-# ── Multi-Engine Connectors ───────────────────────────────────────────────────
-# Spark, Arrow, DuckDB, Polars — all through kore_fileformat
+# -- Multi-Engine Connectors ---------------------------------------------------
+# Spark, Arrow, DuckDB, Polars � all through kore_fileformat
 
 def to_arrow(path_or_block: Union[str, 'Path', 'DataBlock']):
     """Convert .kore file or DataBlock to PyArrow Table.
@@ -1441,7 +1441,7 @@ def from_parquet(kore_path: Union[str, 'Path'], parquet_path: str) -> None:
     from_arrow(kore_path, pq.read_table(parquet_path))
 
 
-# ── Kafka / Streaming Connector ───────────────────────────────────────────────
+# -- Kafka / Streaming Connector -----------------------------------------------
 
 def to_kafka_message(block: 'DataBlock') -> bytes:
     """Serialize a DataBlock to Kafka message bytes.
@@ -1563,7 +1563,7 @@ def _crc32(data: bytes) -> int:
     return (~crc) & 0xFFFFFFFF
 
 
-# ── ML / Tensor Support ───────────────────────────────────────────────────────
+# -- ML / Tensor Support -------------------------------------------------------
 
 class Tensor:
     """Multi-dimensional tensor for ML workloads (embeddings, weights, etc.)."""
@@ -1687,7 +1687,7 @@ def to_numpy(block: 'DataBlock'):
 
     Requires: numpy
 
-        arr = kore.to_numpy(block)['price']  # → numpy array
+        arr = kore.to_numpy(block)['price']  # ? numpy array
     """
     try: import numpy as np
     except ImportError: raise ImportError("numpy required: pip install numpy")
@@ -1722,7 +1722,7 @@ def from_numpy(path: Union[str, 'Path'], arrays: dict) -> None:
     write_file(path, block)
 
 
-# ── Avro Bridge ───────────────────────────────────────────────────────────────
+# -- Avro Bridge ---------------------------------------------------------------
 
 def to_avro_schema(block: 'DataBlock') -> dict:
     """Generate Avro schema dict from a DataBlock."""
@@ -1756,7 +1756,7 @@ def write_avro(path: Union[str, 'Path'], block: 'DataBlock') -> None:
         fastavro.writer(f, schema, records)
 
 
-# ── MongoDB / BSON Bridge ─────────────────────────────────────────────────────
+# -- MongoDB / BSON Bridge -----------------------------------------------------
 
 def to_mongodb_docs(block: 'DataBlock') -> list:
     """Convert DataBlock to list of MongoDB-compatible dicts.
@@ -1790,7 +1790,7 @@ def from_mongodb_docs(path: Union[str, 'Path'], docs: list, col_types: dict = No
     write_file(path, block)
 
 
-# ── Column Statistics Footer (Predicate Pushdown) ─────────────────────────────
+# -- Column Statistics Footer (Predicate Pushdown) -----------------------------
 
 class ColFooter:
     """Column-level statistics for predicate pushdown (scan skipping)."""
@@ -1836,7 +1836,7 @@ def write_file_v3(path: Union[str, 'Path'], block: 'DataBlock') -> None:
 
 
 def read_footer_only(path: Union[str, 'Path']) -> list:
-    """Read ONLY column footers — fast, no data loaded.
+    """Read ONLY column footers � fast, no data loaded.
 
         footers = kore.read_footer_only("data.kore")
         for f in footers:
@@ -1875,7 +1875,7 @@ def can_skip_file(footers: list, col_name: str, lo: float, hi: float) -> bool:
 
 
 def read_file_mmap(path: Union[str, Path]) -> DataBlock:
-    """Read .kore via mmap — OS page-cache zero-copy to Rust buffer."""
+    """Read .kore via mmap � OS page-cache zero-copy to Rust buffer."""
     import mmap as _mmap
     with open(str(path), 'rb') as f:
         with _mmap.mmap(f.fileno(), 0, access=_mmap.ACCESS_READ) as mm:
@@ -1883,7 +1883,7 @@ def read_file_mmap(path: Union[str, Path]) -> DataBlock:
             if len(prefix) == _HKORE_OFFSET_LINE and prefix[:5] == b'KORE2':
                 binary_start = int(prefix[13:23])
                 mv = memoryview(mm)
-                kore_bytes = bytes(mv[binary_start:])  # one copy: OS page cache → Python
+                kore_bytes = bytes(mv[binary_start:])  # one copy: OS page cache ? Python
                 del mv
             else:
                 kore_bytes = bytes(mm)
@@ -1930,7 +1930,7 @@ def read_file_where(path: Union[str, Path], col_name: str, value) -> DataBlock:
     return filter_eq(block, col_name, value)
 
 
-# ── Null/None Values Support ──────────────────────────────────────────────────
+# -- Null/None Values Support --------------------------------------------------
 
 class NullableColumn:
     """A column that supports None values with a validity bitmap."""
@@ -2046,7 +2046,7 @@ def read_nullable(path: Union[str, 'Path']) -> 'NullableBlock':
     return block
 
 
-# ── Delta / FOR / Bitpack Encoding ────────────────────────────────────────────
+# -- Delta / FOR / Bitpack Encoding --------------------------------------------
 
 def delta_encode(values: list) -> tuple:
     """Delta encode sorted integers. Good for timestamps, sequential IDs.
@@ -2098,7 +2098,7 @@ def auto_select_codec(values: list) -> str:
     """
     if len(values) < 2: return "RAW"
     unique_ratio = len(set(values)) / len(values)
-    if unique_ratio < 0.2: return "RLE"       # low cardinality — check FIRST
+    if unique_ratio < 0.2: return "RLE"       # low cardinality � check FIRST
     try:
         nums = [int(v) for v in values]
         sorted_check = all(nums[i] <= nums[i+1] for i in range(len(nums)-1))
@@ -2111,10 +2111,10 @@ def auto_select_codec(values: list) -> str:
     return "RAW"
 
 
-# ── Table Catalog ──────────────────────────────────────────────────────────────
+# -- Table Catalog --------------------------------------------------------------
 
 class TableCatalog:
-    """Multi-file table catalog — tracks all partition files of a logical table.
+    """Multi-file table catalog � tracks all partition files of a logical table.
 
         cat = kore.TableCatalog("sales")
         cat.add_file("sales/region=1/data.kore", rows=50000, size=512000)
@@ -2166,10 +2166,10 @@ class TableCatalog:
         self.files = [f for f in self.files if f['snapshot'] in snaps]
 
 
-# ── LZ4 Compression ───────────────────────────────────────────────────────────
+# -- LZ4 Compression -----------------------------------------------------------
 
 def lz4_compress(data: bytes) -> bytes:
-    """Compress bytes (simplified frame format — good for binary data)."""
+    """Compress bytes (simplified frame format � good for binary data)."""
     import struct, zlib
     # Use zlib deflate (available in stdlib) with length prefix
     compressed = zlib.compress(data, level=6)
@@ -2236,7 +2236,7 @@ def read_file_lz4(path: Union[str, 'Path']) -> 'DataBlock':
     return block
 
 
-# ── Nested Types ──────────────────────────────────────────────────────────────
+# -- Nested Types --------------------------------------------------------------
 
 class ArrayColumn:
     """A column where each cell is a variable-length array."""
@@ -2329,7 +2329,7 @@ def read_nested(path: Union[str, 'Path']) -> 'NestedBlock':
     return nb
 
 
-# ── Mini SQL Engine ───────────────────────────────────────────────────────────
+# -- Mini SQL Engine -----------------------------------------------------------
 
 def kore_sql(sql: str) -> dict:
     """Execute a simple SQL SELECT over a .kore file.
@@ -2412,7 +2412,7 @@ def kore_sql(sql: str) -> dict:
     return {"columns": col_names, "rows": rows, "row_count": len(rows)}
 
 
-# ── MVCC (Multi-Version Concurrency Control) ──────────────────────────────────
+# -- MVCC (Multi-Version Concurrency Control) ----------------------------------
 
 class MvccTransaction:
     """Snapshot isolation for concurrent readers.
@@ -2467,7 +2467,7 @@ def mvcc_write(path: Union[str, 'Path'], block: 'DataBlock') -> int:
     return new_ver
 
 
-# ── Cloud-Native S3/HTTP Reader ────────────────────────────────────────────────
+# -- Cloud-Native S3/HTTP Reader ------------------------------------------------
 
 def read_url(url: str) -> 'DataBlock':
     """Read a .kore file from an HTTP URL (S3 presigned, GCS signed, Azure SAS).
@@ -2502,7 +2502,7 @@ def write_url(url: str, block: 'DataBlock') -> None:
         raise IOError(f"Failed to write to URL: {e}")
 
 
-# ── Snappy Compression ────────────────────────────────────────────────────────
+# -- Snappy Compression --------------------------------------------------------
 
 def snappy_compress(data: bytes) -> bytes:
     """Compress bytes using Snappy-inspired format (zero deps)."""
@@ -2561,7 +2561,7 @@ def read_file_snappy(path: Union[str, 'Path']) -> 'DataBlock':
     return block
 
 
-# ── Zstd Compression ──────────────────────────────────────────────────────────
+# -- Zstd Compression ----------------------------------------------------------
 
 def zstd_compress(data: bytes) -> bytes:
     """Compress using Zstd-framed format (uses zlib level=9 internally).
@@ -2623,7 +2623,7 @@ def read_file_zstd(path: Union[str, 'Path']) -> 'DataBlock':
     return block
 
 
-# ── Extended Type System ──────────────────────────────────────────────────────
+# -- Extended Type System ------------------------------------------------------
 
 class ExtType:
     """Extended types matching Parquet/Arrow feature parity."""
@@ -2655,7 +2655,7 @@ class TypedColumn:
 
 
 class TypedBlock:
-    """Fully-typed DataBlock — 100% Parquet feature parity on types."""
+    """Fully-typed DataBlock � 100% Parquet feature parity on types."""
 
     def __init__(self, schema_name: str = "kore_schema"):
         self.schema_name = schema_name
@@ -2762,7 +2762,7 @@ def struct_col(name: str, structs: list) -> 'TypedColumn':
     return col
 
 
-# ── LZMA High-Compression ─────────────────────────────────────────────────────
+# -- LZMA High-Compression -----------------------------------------------------
 
 def write_file_lzma(path: Union[str, 'Path'], block: 'DataBlock') -> None:
     """Write DataBlock with LZMA compression (best compression ratio, stdlib).
@@ -2811,7 +2811,7 @@ def read_file_lzma(path: Union[str, 'Path']) -> 'DataBlock':
     return block
 
 
-# ── UUID & Binary Column Types ────────────────────────────────────────────────
+# -- UUID & Binary Column Types ------------------------------------------------
 
 def uuid_col(name: str, uuids: list) -> 'TypedColumn':
     """Create a UUID column (stored as string).
@@ -2844,10 +2844,10 @@ def binary_col(name: str, blobs: list) -> 'TypedColumn':
     return col
 
 
-# ── Row Groups (Parquet-style) ─────────────────────────────────────────────────
+# -- Row Groups (Parquet-style) -------------------------------------------------
 
 class RowGroup:
-    """A subset of rows — enables parallel reads and selective loading.
+    """A subset of rows � enables parallel reads and selective loading.
 
     Large files are split into row groups (default 64K rows each).
     Each row group is independently readable for parallel processing.
@@ -2953,7 +2953,7 @@ def read_row_group(path: Union[str, 'Path'], group_id: int) -> 'DataBlock':
     return read_row_groups(path, group_ids=[group_id])
 
 
-# ── File Metadata ──────────────────────────────────────────────────────────────
+# -- File Metadata --------------------------------------------------------------
 
 class FileMetadata:
     """Custom key-value metadata embedded in a .kore file header.
@@ -3042,7 +3042,7 @@ def read_file_with_metadata(path: Union[str, 'Path']) -> tuple:
     return block, meta
 
 
-# ── Parallel Read ──────────────────────────────────────────────────────────────
+# -- Parallel Read --------------------------------------------------------------
 
 def parallel_read(paths: list, max_workers: int = 4) -> 'DataBlock':
     """Read multiple .kore files in parallel and merge into one DataBlock.
@@ -3091,25 +3091,25 @@ _HKORE_RAW_MARKER    = b'\x00KORE_RAW_V2\x00'          # v2 raw IEEE-754
 #   for each col: 1B dtype(0=F64,1=I64) | 2B name_len | name_len B UTF-8
 #   for each col: nrows*8 B raw IEEE-754 (contiguous column store)
 #
-# First 24 bytes of file: "KORE2 offset=NNNNNNNNNN\n" — exact binary start offset.
-# Reader seeks directly to binary section: open → read(24) → seek(N) → read → done.
+# First 24 bytes of file: "KORE2 offset=NNNNNNNNNN\n" � exact binary start offset.
+# Reader seeks directly to binary section: open ? read(24) ? seek(N) ? read ? done.
 
 _HKORE_OFFSET_LINE = 24   # "KORE2 offset=0000000000\n" is always exactly 24 bytes
 
 
 def write_hybrid(path, block, preview_rows=5):
-    """Write .hkore v2 — O(1) seek offset in header, raw IEEE-754 binary columns."""
+    """Write .hkore v2 � O(1) seek offset in header, raw IEEE-754 binary columns."""
     import array as _arr, struct, datetime
 
     cols = block.columns
     nrows, ncols = block.num_rows, block.num_columns
 
-    # Pre-build column byte buffers (done before text header — known size needed for offset)
+    # Pre-build column byte buffers (done before text header � known size needed for offset)
     def _col_bytes(col):
         dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
         d = col.data
         if isinstance(d, _arr.array):
-            return d.tobytes()           # already array — memcpy only
+            return d.tobytes()           # already array � memcpy only
         return _arr.array('d' if dn in ('F64','FLOAT64','2') else 'q', d).tobytes()
 
     col_bufs = [_col_bytes(col) for col in cols]
@@ -3154,7 +3154,7 @@ def write_hybrid(path, block, preview_rows=5):
 
 
 def read_hybrid(path):
-    """Read .hkore — 29 ns/row via O(1) seek + array.fromfile (no intermediate buffer)."""
+    """Read .hkore � 29 ns/row via O(1) seek + array.fromfile (no intermediate buffer)."""
     import array as _arr, struct
 
     with open(str(path), 'rb') as f:
@@ -3169,7 +3169,7 @@ def read_hybrid(path):
             for _ in range(ncols):
                 dtype_byte, name_len = struct.unpack('<BH', f.read(3))
                 cols_meta.append((f.read(name_len).decode('utf-8'), dtype_byte == 0))
-            # array.fromfile: reads directly into array buffer — no intermediate bytes
+            # array.fromfile: reads directly into array buffer � no intermediate bytes
             block = DataBlock()
             for name, is_f64 in cols_meta:
                 a = _arr.array('d' if is_f64 else 'q')

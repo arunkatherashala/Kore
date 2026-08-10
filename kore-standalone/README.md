@@ -1,6 +1,6 @@
 # kore_fileformat
 
-**Version 1.6.38** | [crates.io](https://crates.io/crates/kore_fileformat) | [GitHub](https://github.com/arunkatherashala/Kore)
+**Version 1.7.0** | [crates.io](https://crates.io/crates/kore_fileformat) | [GitHub](https://github.com/arunkatherashala/Kore)
 
 Pure Rust, zero-dependency implementation of the KORE columnar binary format.
 
@@ -8,7 +8,7 @@ Pure Rust, zero-dependency implementation of the KORE columnar binary format.
 
 ```toml
 [dependencies]
-kore_fileformat = "1.6.38"
+kore_fileformat = "1.7.0"
 ```
 
 ## Quick Start

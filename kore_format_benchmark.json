@@ -2,47 +2,47 @@
   "rows": 100000,
   "benchmarks": {
     "KORE": {
-      "write_ms": 202.8977999871131,
-      "read_ms": 51.0239000141155,
+      "write_ms": 135.96649997634813,
+      "read_ms": 26.985399978002533,
       "size_kb": 1129.884765625
     },
     "KORE-RLE*": {
-      "write_ms": 116.49640000541694,
-      "read_ms": 25.319899985333905,
+      "write_ms": 47.41229998762719,
+      "read_ms": 9.865700005320832,
       "size_kb": 406.25
     },
     "CSV": {
-      "write_ms": 337.49349997378886,
-      "read_ms": 17.959699995117262,
+      "write_ms": 313.7447999906726,
+      "read_ms": 21.937200013780966,
       "size_kb": 2859.314453125
     },
     "JSON/NDJSON": {
-      "write_ms": 425.6625999987591,
-      "read_ms": 278.91490000183694,
+      "write_ms": 572.6674000034109,
+      "read_ms": 293.59469999326393,
       "size_kb": 8328.029296875
     },
     "Raw Binary": {
-      "write_ms": 64.78889999561943,
-      "read_ms": 14.386099996045232,
+      "write_ms": 49.72390001057647,
+      "read_ms": 9.063999983482063,
       "size_kb": 3906.2578125
     }
   },
   "kore_speedups": {
     "KORE-RLE*": {
-      "write_speedup": 0.57,
-      "read_speedup": 0.5
+      "write_speedup": 0.35,
+      "read_speedup": 0.37
     },
     "CSV": {
-      "write_speedup": 1.66,
-      "read_speedup": 0.35
+      "write_speedup": 2.31,
+      "read_speedup": 0.81
     },
     "JSON/NDJSON": {
-      "write_speedup": 2.1,
-      "read_speedup": 5.47
+      "write_speedup": 4.21,
+      "read_speedup": 10.88
     },
     "Raw Binary": {
-      "write_speedup": 0.32,
-      "read_speedup": 0.28
+      "write_speedup": 0.37,
+      "read_speedup": 0.34
     }
   }
 }
