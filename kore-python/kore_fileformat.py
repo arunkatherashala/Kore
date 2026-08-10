@@ -362,25 +362,25 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
     nrows, ncols = data_block.num_rows, data_block.num_columns
     n_prev = min(preview_rows, nrows)
 
-    # Dict-encode string columns → I64 ID columns; store dicts in header
-    str_dicts = {}   # original_name → list of unique strings
+    str_dicts = {}      # col_name → list of unique strings
+    null_positions = {} # col_name → sorted list of null row indices
     encode_block = DataBlock()
     for col in cols:
         dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
         d = col.data
         if dn in ('STR', 'STR_DICT'):
-            # Dict-encode: strings → integer IDs
             unique = list(dict.fromkeys('' if v is None else str(v) for v in d))
             vid = {v: i for i, v in enumerate(unique)}
             str_dicts[col.name] = unique
             encode_block.add_column(f'__str_{col.name}', DataType.I64,
                                     [vid['' if v is None else str(v)] for v in d])
         elif dn in ('F64', 'FLOAT64', '2'):
-            # Replace None → NaN
             encode_block.add_column(col.name, DataType.F64,
                                     [float('nan') if v is None else v for v in d])
         else:
-            # Replace None → 0 for integer-like types
+            nulls = [i for i, v in enumerate(d) if v is None]
+            if nulls:
+                null_positions[col.name] = nulls  # stored in header; 0 written to binary
             encode_block.add_column(col.name, col.dtype,
                                     [0 if v is None else v for v in d])
     encode_block.num_rows = nrows
@@ -397,10 +397,12 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
     for col in cols:
         dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
         text_lines.append(f"#   {col.name:<20} {dn}")
-    # Embed string dictionaries so read_file can reconstruct string columns
+    # Embed string dicts and null position maps in header
     for col_name, strings in str_dicts.items():
         escaped = ','.join(f'"{s}"' for s in strings)
         text_lines.append(f"# StringDict {col_name}: {escaped}")
+    for col_name, positions in null_positions.items():
+        text_lines.append(f"# NullRows {col_name}: {','.join(map(str, positions))}")
     text_lines.append(f"# Preview (first {n_prev} rows):")
     for i in range(n_prev):
         parts = [f"{col.name}={col.data[i]}" for col in cols]
@@ -434,17 +436,23 @@ def read_file(path: Union[str, Path]) -> DataBlock:
             f.seek(0)
             return _block_from_bytes_ffi(f.read())
 
-    # Parse string dicts and original schema from header
+    _I64_NULL = -(2**63)
+    import re as _re
     str_dicts = {}
-    schema_order = []   # [(orig_name, dtype_str)]
+    null_positions = {}  # col_name → list of null row indices
+    schema_order = []
     for line in header_bytes.decode('utf-8', errors='replace').split('\n'):
         if line.startswith('# StringDict '):
             rest = line[13:]
             col_name, vals_str = rest.split(': ', 1)
-            # Parse comma-separated quoted strings
-            import re as _re
-            strings = _re.findall(r'"((?:[^"\\]|\\.)*)"', vals_str)
-            str_dicts[col_name] = strings
+            str_dicts[col_name] = _re.findall(r'"((?:[^"\\]|\\.)*)"', vals_str)
+        elif line.startswith('# NullRows '):
+            rest = line[11:]
+            col_name, idxs = rest.split(': ', 1)
+            null_positions[col_name] = [int(x) for x in idxs.split(',') if x]
+        elif line.startswith('# NullableI64 '):
+            # legacy annotation — treat all as null_positions with no positions known
+            null_positions.setdefault(line[14:].strip(), [])
         elif line.startswith('#   ') and not line.startswith('#   [') and '  ' in line[4:]:
             parts = line[4:].split()
             if len(parts) >= 2:
@@ -468,7 +476,14 @@ def read_file(path: Union[str, Path]) -> DataBlock:
                 result.add_column(orig_name, DataType.STR, decoded)
         elif orig_name in raw_by_name:
             col = raw_by_name[orig_name]
-            result.add_column(orig_name, col.dtype, col.data)
+            if orig_name in null_positions and null_positions[orig_name]:
+                data = list(col.data)
+                for idx in null_positions[orig_name]:
+                    if 0 <= idx < len(data):
+                        data[idx] = None
+                result.add_column(orig_name, col.dtype, data)
+            else:
+                result.add_column(orig_name, col.dtype, col.data)
     result.num_rows = raw_block.num_rows
     return result if result.num_columns > 0 else raw_block
 
