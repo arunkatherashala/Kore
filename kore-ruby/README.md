@@ -1,20 +1,20 @@
 # KORE FileFormat — Ruby
 
-**Version 1.6.35** | [RubyGems](https://rubygems.org/gems/kore-fileformat) | [GitHub](https://github.com/arunkatherashala/Kore)
+**Version 1.6.36** | [RubyGems](https://rubygems.org/gems/kore-fileformat) | [GitHub](https://github.com/arunkatherashala/Kore)
 
 High-performance columnar format with 11 ACID features. Uses Ruby's built-in `Fiddle` to call Rust `kore_ffi.dll` — no native gem compilation required.
 
 ## Install
 
 ```bash
-gem install kore-fileformat -v 1.6.35
+gem install kore-fileformat -v 1.6.36
 ```
 
 Or from source:
 ```bash
 cargo build --release -p kore-ffi
 gem build kore-ruby/kore_fileformat.gemspec
-gem install kore-fileformat-1.6.35.gem
+gem install kore-fileformat-1.6.36.gem
 ```
 
 ## Quick Start
