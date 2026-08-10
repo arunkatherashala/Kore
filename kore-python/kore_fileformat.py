@@ -241,10 +241,10 @@ def crc32(data: bytes) -> int:
     return lib.kore_crc32(data, len(data))
 
 
-# -- Fast bulk read (internal — used by read_hybrid for .hkore files) ----------
+# -- Fast bulk read (internal -- used by read_hybrid for .hkore files) ----------
 
 def _read_bulk_fast(data: bytes, n_rows: int, cols_meta: list) -> 'DataBlock':
-    """Internal bulk read — array.frombytes for zero-loop column loading."""
+    """Internal bulk read -- array.frombytes for zero-loop column loading."""
     import struct, array as _arr
     block = DataBlock()
     pos = 0
@@ -351,7 +351,7 @@ _KORE_V3_MARKER = b'\x00KORE_V3\x00'
 
 
 def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int = 5) -> None:
-    """Write .kore v3 — KORE2 text header + Rust KORE binary (compressed + ACID).
+    """Write .kore v3 ï¿½ KORE2 text header + Rust KORE binary (compressed + ACID).
     Supports F64, I64, STR columns and None/null values."""
     import datetime, math
 
@@ -432,7 +432,7 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
 
 
 def read_file(path: Union[str, Path]) -> DataBlock:
-    """Read .kore — auto-detects v3 (text header) vs legacy (raw Rust KORE).
+    """Read .kore ï¿½ auto-detects v3 (text header) vs legacy (raw Rust KORE).
     Decodes string columns and restores column order from header."""
     with open(str(path), 'rb') as f:
         prefix = f.read(_HKORE_OFFSET_LINE)
@@ -793,7 +793,7 @@ __all__ = [
 ]
 
 
-# -- CLI — `kore inspect <file>` ---------------------------------------------
+# -- CLI ï¿½ `kore inspect <file>` ---------------------------------------------
 
 def _cli_inspect(path: str) -> None:
     """Print human-readable summary of a .kore or .hkore file."""
@@ -816,7 +816,7 @@ def _cli_inspect(path: str) -> None:
     block = read_file(path)
     file_size = os.path.getsize(path)
     print(f"\n{'='*58}")
-    print(f"  {os.path.basename(path)}  —  {block.num_rows:,} rows × {block.num_columns} cols  ({file_size/1024:.0f} KB)")
+    print(f"  {os.path.basename(path)}  ï¿½  {block.num_rows:,} rows ï¿½ {block.num_columns} cols  ({file_size/1024:.0f} KB)")
     print(f"{'='*58}")
     print(f"  {'Column':<20} {'Type':<8} {'Sample values'}")
     print(f"  {'-'*54}")
@@ -834,11 +834,11 @@ def _cli_main() -> None:
     def usage():
         print(f"kore-fileformat {__version__}")
         print("\nUsage:")
-        print("  kore inspect <file>          — show schema + preview (fast, no full read)")
-        print("  kore stats   <file>          — show file size breakdown")
-        print("  kore convert <src> <dst>     — convert .kore ? .hkore")
-        print("  kore bench                   — quick write/read benchmark")
-        print("  kore version                 — show version")
+        print("  kore inspect <file>          ï¿½ show schema + preview (fast, no full read)")
+        print("  kore stats   <file>          ï¿½ show file size breakdown")
+        print("  kore convert <src> <dst>     ï¿½ convert .kore ? .hkore")
+        print("  kore bench                   ï¿½ quick write/read benchmark")
+        print("  kore version                 ï¿½ show version")
 
     args = sys.argv[1:]
     if not args or args[0] in ('-h', '--help'):
@@ -905,7 +905,7 @@ def _cli_main() -> None:
         r = min(times)*1000
         _os.remove(tf)
         sz = _os.path.getsize(tf) if _os.path.exists(tf) else 0
-        print(f"  kore-fileformat {__version__}  ({N:,} rows × 2 cols)")
+        print(f"  kore-fileformat {__version__}  ({N:,} rows ï¿½ 2 cols)")
         print(f"  write : {w:.1f}ms  ({w*1e6/N:.0f} ns/row)")
         print(f"  read  : {r:.1f}ms  ({r*1e6/N:.0f} ns/row)")
 
@@ -1056,7 +1056,7 @@ def filter_range(block: 'DataBlock', col_name: str, lo, hi) -> 'DataBlock':
 
 
 def select_columns(block: 'DataBlock', names: list) -> 'DataBlock':
-    """Projection — return only specified columns."""
+    """Projection ï¿½ return only specified columns."""
     result = DataBlock()
     for c in block.columns:
         if c.name in names:
@@ -1186,13 +1186,13 @@ class FileLock:
 
 
 def write_file_locked(path: Union[str, 'Path'], block: 'DataBlock', timeout_ms: int = 5000) -> None:
-    """Write with ACID file lock — safe for concurrent writers."""
+    """Write with ACID file lock ï¿½ safe for concurrent writers."""
     with FileLock(str(path), timeout_ms):
         write_file(path, block)
 
 
 def append_file_locked(path: Union[str, 'Path'], block: 'DataBlock', timeout_ms: int = 5000) -> None:
-    """Append with ACID file lock — safe for concurrent appenders."""
+    """Append with ACID file lock ï¿½ safe for concurrent appenders."""
     with FileLock(str(path), timeout_ms):
         append_file(path, block)
 
@@ -1286,7 +1286,7 @@ def delete_rows(path: Union[str, 'Path'], key_col: str, delete_keys: list) -> No
 
 
 # -- Multi-Engine Connectors ---------------------------------------------------
-# Spark, Arrow, DuckDB, Polars — all through kore_fileformat
+# Spark, Arrow, DuckDB, Polars ï¿½ all through kore_fileformat
 
 def to_arrow(path_or_block: Union[str, 'Path', 'DataBlock']):
     """Convert .kore file or DataBlock to PyArrow Table.
@@ -1836,7 +1836,7 @@ def write_file_v3(path: Union[str, 'Path'], block: 'DataBlock') -> None:
 
 
 def read_footer_only(path: Union[str, 'Path']) -> list:
-    """Read ONLY column footers — fast, no data loaded.
+    """Read ONLY column footers ï¿½ fast, no data loaded.
 
         footers = kore.read_footer_only("data.kore")
         for f in footers:
@@ -1875,7 +1875,7 @@ def can_skip_file(footers: list, col_name: str, lo: float, hi: float) -> bool:
 
 
 def read_file_mmap(path: Union[str, Path]) -> DataBlock:
-    """Read .kore via mmap — OS page-cache zero-copy to Rust buffer."""
+    """Read .kore via mmap ï¿½ OS page-cache zero-copy to Rust buffer."""
     import mmap as _mmap
     with open(str(path), 'rb') as f:
         with _mmap.mmap(f.fileno(), 0, access=_mmap.ACCESS_READ) as mm:
@@ -2098,7 +2098,7 @@ def auto_select_codec(values: list) -> str:
     """
     if len(values) < 2: return "RAW"
     unique_ratio = len(set(values)) / len(values)
-    if unique_ratio < 0.2: return "RLE"       # low cardinality — check FIRST
+    if unique_ratio < 0.2: return "RLE"       # low cardinality ï¿½ check FIRST
     try:
         nums = [int(v) for v in values]
         sorted_check = all(nums[i] <= nums[i+1] for i in range(len(nums)-1))
@@ -2114,7 +2114,7 @@ def auto_select_codec(values: list) -> str:
 # -- Table Catalog --------------------------------------------------------------
 
 class TableCatalog:
-    """Multi-file table catalog — tracks all partition files of a logical table.
+    """Multi-file table catalog ï¿½ tracks all partition files of a logical table.
 
         cat = kore.TableCatalog("sales")
         cat.add_file("sales/region=1/data.kore", rows=50000, size=512000)
@@ -2169,7 +2169,7 @@ class TableCatalog:
 # -- LZ4 Compression -----------------------------------------------------------
 
 def lz4_compress(data: bytes) -> bytes:
-    """Compress bytes (simplified frame format — good for binary data)."""
+    """Compress bytes (simplified frame format ï¿½ good for binary data)."""
     import struct, zlib
     # Use zlib deflate (available in stdlib) with length prefix
     compressed = zlib.compress(data, level=6)
@@ -2655,7 +2655,7 @@ class TypedColumn:
 
 
 class TypedBlock:
-    """Fully-typed DataBlock — 100% Parquet feature parity on types."""
+    """Fully-typed DataBlock ï¿½ 100% Parquet feature parity on types."""
 
     def __init__(self, schema_name: str = "kore_schema"):
         self.schema_name = schema_name
@@ -2847,7 +2847,7 @@ def binary_col(name: str, blobs: list) -> 'TypedColumn':
 # -- Row Groups (Parquet-style) -------------------------------------------------
 
 class RowGroup:
-    """A subset of rows — enables parallel reads and selective loading.
+    """A subset of rows ï¿½ enables parallel reads and selective loading.
 
     Large files are split into row groups (default 64K rows each).
     Each row group is independently readable for parallel processing.
@@ -3091,25 +3091,25 @@ _HKORE_RAW_MARKER    = b'\x00KORE_RAW_V2\x00'          # v2 raw IEEE-754
 #   for each col: 1B dtype(0=F64,1=I64) | 2B name_len | name_len B UTF-8
 #   for each col: nrows*8 B raw IEEE-754 (contiguous column store)
 #
-# First 24 bytes of file: "KORE2 offset=NNNNNNNNNN\n" — exact binary start offset.
+# First 24 bytes of file: "KORE2 offset=NNNNNNNNNN\n" ï¿½ exact binary start offset.
 # Reader seeks directly to binary section: open ? read(24) ? seek(N) ? read ? done.
 
 _HKORE_OFFSET_LINE = 24   # "KORE2 offset=0000000000\n" is always exactly 24 bytes
 
 
 def write_hybrid(path, block, preview_rows=5):
-    """Write .hkore v2 — O(1) seek offset in header, raw IEEE-754 binary columns."""
+    """Write .hkore v2 ï¿½ O(1) seek offset in header, raw IEEE-754 binary columns."""
     import array as _arr, struct, datetime
 
     cols = block.columns
     nrows, ncols = block.num_rows, block.num_columns
 
-    # Pre-build column byte buffers (done before text header — known size needed for offset)
+    # Pre-build column byte buffers (done before text header ï¿½ known size needed for offset)
     def _col_bytes(col):
         dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
         d = col.data
         if isinstance(d, _arr.array):
-            return d.tobytes()           # already array — memcpy only
+            return d.tobytes()           # already array ï¿½ memcpy only
         return _arr.array('d' if dn in ('F64','FLOAT64','2') else 'q', d).tobytes()
 
     col_bufs = [_col_bytes(col) for col in cols]
@@ -3154,7 +3154,7 @@ def write_hybrid(path, block, preview_rows=5):
 
 
 def read_hybrid(path):
-    """Read .hkore — 29 ns/row via O(1) seek + array.fromfile (no intermediate buffer)."""
+    """Read .hkore ï¿½ 29 ns/row via O(1) seek + array.fromfile (no intermediate buffer)."""
     import array as _arr, struct
 
     with open(str(path), 'rb') as f:
@@ -3169,7 +3169,7 @@ def read_hybrid(path):
             for _ in range(ncols):
                 dtype_byte, name_len = struct.unpack('<BH', f.read(3))
                 cols_meta.append((f.read(name_len).decode('utf-8'), dtype_byte == 0))
-            # array.fromfile: reads directly into array buffer — no intermediate bytes
+            # array.fromfile: reads directly into array buffer ï¿½ no intermediate bytes
             block = DataBlock()
             for name, is_f64 in cols_meta:
                 a = _arr.array('d' if is_f64 else 'q')

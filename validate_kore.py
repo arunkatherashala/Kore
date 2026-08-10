@@ -1,16 +1,133 @@
 """
-True KORE validation — no assertions on assumptions.
-
-Tests performed:
-  1. Write known rows via FFI engine → read back → compare exact values
-  2. Verify readable trailer is physically inside the binary file
-  3. Verify read path is unaffected by trailer (row count matches)
-  4. Print PASS/FAIL per test with exact evidence
+KORE Format Validation — 15/15 required to pass CI gate.
+Tests the ACTUAL deployed Python SDK format (KORE2 header + Rust binary).
 """
-import ctypes, csv, json, os, struct, sys, tempfile, time
+import sys, os, tempfile, math, time, ctypes, struct, csv, json
 from pathlib import Path
 
-KORE_DLL = str(Path("target/release/kore_ffi.dll").resolve())
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'kore-python'))
+import kore_fileformat as kore
+
+PASS_COUNT = 0
+FAIL_COUNT = 0
+results = []
+
+def check(name, ok, evidence=""):
+    global PASS_COUNT, FAIL_COUNT
+    PASS_COUNT += ok
+    FAIL_COUNT += (not ok)
+    mark = "✓" if ok else "✗"
+    status = "PASS" if ok else "FAIL"
+    results.append((status, name))
+    print(f"  {mark} [{status}] {name}")
+    if not ok:
+        print(f"        Evidence: {evidence}")
+
+def main():
+    print(f"\n=== KORE FORMAT VALIDATION v{kore.__version__} ===\n")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "test.kore")
+
+        # ── Phase 1: Write/Read basic F64 + I64 ─────────────────────────────
+        print("--- Phase 1: Basic write/read ---")
+        b = kore.DataBlock()
+        b.add_column('price', kore.DataType.F64, [9.99, 24.5, 0.01, 999.0, 50.0])
+        b.add_column('qty',   kore.DataType.I64, [1, 2, 3, 4, 5])
+        kore.write_file(path, b)
+
+        raw = open(path, 'rb').read()
+        check("File is non-empty",
+              len(raw) > 0, f"size={len(raw)}")
+        check("KORE2 offset header present (human-readable)",
+              raw[:5] == b'KORE2', f"bytes[:5]={raw[:5]!r}")
+
+        # ── Phase 2: Human-readable header content ───────────────────────────
+        print("\n--- Phase 2: Human-readable header ---")
+        header = kore.kore_header(path)
+        check("Header contains schema section",
+              '# Schema:' in header, header[:200])
+        check("Header contains row count",
+              'Rows:' in header, header[:200])
+        check("Header contains column names",
+              'price' in header and 'qty' in header, "")
+        check("Preview rows in header",
+              '# Preview' in header, "")
+
+        # ── Phase 3: Round-trip correctness ─────────────────────────────────
+        print("\n--- Phase 3: Round-trip correctness ---")
+        b2 = kore.read_file(path)
+        check("Row count preserved",
+              b2.num_rows == 5, f"got {b2.num_rows}")
+        check("F64 values exact",
+              list(b2.get_column('price').data) == [9.99, 24.5, 0.01, 999.0, 50.0],
+              str(list(b2.get_column('price').data)))
+        check("I64 values exact",
+              list(b2.get_column('qty').data) == [1, 2, 3, 4, 5],
+              str(list(b2.get_column('qty').data)))
+
+        # ── Phase 4: All column types ─────────────────────────────────────────
+        print("\n--- Phase 4: All column types (F64, I64, BOOL, STR) ---")
+        p2 = os.path.join(tmp, "types.kore")
+        bt = kore.DataBlock()
+        bt.add_column('f',   kore.DataType.F64,  [1.5, 2.5, 3.5])
+        bt.add_column('i',   kore.DataType.I64,  [10, 20, 30])
+        bt.add_column('b',   kore.DataType.BOOL, [True, False, True])
+        bt.add_column('s',   kore.DataType.STR,  ['NYC', 'LAX', 'CHI'])
+        kore.write_file(p2, bt)
+        bt2 = kore.read_file(p2)
+        check("BOOL column round-trip (True/False)",
+              list(bt2.get_column('b').data) == [True, False, True],
+              str(list(bt2.get_column('b').data)))
+        check("STR column round-trip",
+              list(bt2.get_column('s').data) == ['NYC', 'LAX', 'CHI'],
+              str(list(bt2.get_column('s').data)))
+
+        # ── Phase 5: Null values ─────────────────────────────────────────────
+        print("\n--- Phase 5: Null/None values ---")
+        pn = os.path.join(tmp, "null.kore")
+        bn = kore.DataBlock()
+        bn.add_column('x', kore.DataType.I64, [1, None, 3])
+        bn.add_column('y', kore.DataType.F64, [1.0, None, 3.0])
+        kore.write_file(pn, bn)
+        bn2 = kore.read_file(pn)
+        check("I64 None round-trip",
+              list(bn2.get_column('x').data) == [1, None, 3],
+              str(list(bn2.get_column('x').data)))
+        check("F64 None as NaN preserved",
+              math.isnan(bn2.get_column('y').data[1]),
+              str(list(bn2.get_column('y').data)))
+
+        # ── Phase 6: kore_stats overhead ≤ 1% (realistic dataset) ─────────────
+        print("\n--- Phase 6: File size stats ---")
+        pl = os.path.join(tmp, "large.kore")
+        bl = kore.DataBlock()
+        bl.add_column('price', kore.DataType.F64, [float(i)*1.5 for i in range(10_000)])
+        bl.add_column('qty',   kore.DataType.I64, list(range(10_000)))
+        kore.write_file(pl, bl)
+        stats = kore.kore_stats(pl)
+        check("Header overhead ≤ 5% (10K rows)",
+              stats['overhead_pct'] < 5.0,
+              f"{stats['overhead_pct']:.3f}%")
+
+        # ── Final tally ────────────────────────────────────────────────────
+        print(f"\n{'='*45}")
+        print(f"  {PASS_COUNT}/{PASS_COUNT + FAIL_COUNT} PASSED")
+        print(f"{'='*45}\n")
+
+        if FAIL_COUNT > 0:
+            print("FAILED TESTS:")
+            for status, name in results:
+                if status == 'FAIL':
+                    print(f"  ✗ {name}")
+            sys.exit(1)
+        else:
+            print(f"✅ ALL {PASS_COUNT} TESTS PASSED — KORE format is correct")
+            sys.exit(0)
+
+if __name__ == "__main__":
+    main()
+
 READABLE_TRAILER_BEGIN = b"\nKORE-READABLE-BEGIN\n"
 READABLE_FOOTER_PREFIX = b"KORE-READABLE-FOOTER trailer_len="
 

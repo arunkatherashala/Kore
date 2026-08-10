@@ -39,20 +39,8 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Run 15/15 true validation
-        env:
-          KORE_READABLE_MODE: preview
-        run: |
-          python validate_kore.py
-          echo "EXIT_CODE=$?" >> $GITHUB_ENV
-
-      - name: Assert 15/15 passed
-        run: |
-          if [ "$EXIT_CODE" != "0" ]; then
-            echo "❌ KORE format validation FAILED — not safe to release"
-            exit 1
-          fi
-          echo "✅ 15/15 PASSED — format is correct"
+      - name: Run format validation (Python SDK tests)
+        run: python validate_kore.py
 
   # ════════════════════════════════════════════════════════════════════════════
   # JOB 2 — CROSS-PLATFORM BUILD + RUST TESTS
