@@ -2,6 +2,8 @@
 
 How to release a new version to all 6 package registries.
 
+> **Auto-deploy:** Every push to `fileformat` branch triggers the CI which auto-bumps the version, commits, tags, and deploys to all registries. Manual steps below are only needed when fixing a broken deploy.
+
 ---
 
 ## Step 1 — Bump Version Everywhere
@@ -66,23 +68,16 @@ git push origin "v$NEW"
 
 Pushing a `v*` tag automatically triggers these workflows:
 
-| Workflow | Registry | Secret Used |
+| Workflow | Registry | Auth Method |
 |----------|----------|-------------|
-| `publish-pypi.yml` | PyPI | `PYPI_AUG` |
-| `publish-nodejs.yml` | npm | `NPM_TOKEN` |
-| `publish-crates.yml` | crates.io | `CARGO_REGISTRY_TOKEN` |
-| `publish-rubygems.yml` | RubyGems | `RUBYGEMS_API_KEY` |
-| `publish-maven.yml` | Maven Central | `CENTRAL_PORTAL_TOKEN_USERNAME` + `CENTRAL_PORTAL_TOKEN_PASSWORD` |
+| `publish-pypi.yml` | PyPI | `PYPI_AUG` secret |
+| `publish-nodejs.yml` | npm | `NPM_TOKEN` secret |
+| `publish-crates.yml` | crates.io | `CARGO_REGISTRY_TOKEN` secret |
+| `publish-rubygems.yml` | RubyGems | `RUBYGEMS_API_KEY` secret |
+| `publish-maven.yml` | Maven Central | `CENTRAL_PORTAL_TOKEN_USERNAME` + `CENTRAL_PORTAL_TOKEN_PASSWORD` secrets |
+| `publish-nuget.yml` | NuGet | **Trusted Publishing (OIDC) — no secret needed** |
 
 Check all runs at: https://github.com/arunkatherashala/Kore/actions
-
----
-
-## Step 4 — NuGet (manual until secret is added)
-
-NuGet does NOT yet have a secret. After adding `NUGET_API_KEY`:
-1. Go to: https://github.com/arunkatherashala/Kore/actions/workflows/publish-nuget.yml
-2. Click **"Run workflow"** → select branch `fileformat` → **Run workflow**
 
 ---
 
@@ -98,7 +93,8 @@ Add/update these at: **https://github.com/arunkatherashala/Kore/settings/secrets
 | `RUBYGEMS_API_KEY` | RubyGems | rubygems.org → Edit Profile → API Keys |
 | `CENTRAL_PORTAL_TOKEN_USERNAME` | Maven | central.sonatype.com → Account → Generate Token (username part) |
 | `CENTRAL_PORTAL_TOKEN_PASSWORD` | Maven | central.sonatype.com → Account → Generate Token (password part) |
-| `NUGET_API_KEY` | NuGet | nuget.org → API Keys → Create |
+
+> **NuGet:** Uses Trusted Publishing (OIDC) — no secret needed. Already configured at nuget.org/account/packages with workflow `publish-nuget.yml`.
 
 ---
 
@@ -144,13 +140,64 @@ When publishing fails with `403 Forbidden` + "Two-factor authentication required
 
 ---
 
-## Current Status (as of 2026-08-08)
+## Current Status (as of 2026-08-10)
 
 | Registry | Version | Status |
 |----------|---------|--------|
-| PyPI | 1.6.6 | ✅ LIVE |
-| npm | 1.6.7 | ✅ LIVE |
-| crates.io | 1.6.7 | ✅ LIVE |
-| RubyGems | deployed | ✅ LIVE |
-| Maven Central | deployed | ✅ LIVE |
-| NuGet | — | ❌ Needs NUGET_API_KEY secret |
+| PyPI | 1.6.29 | ✅ LIVE |
+| npm | 1.6.29 | ✅ LIVE |
+| crates.io | 1.6.29 | ✅ LIVE |
+| RubyGems | 1.6.29 | ✅ LIVE |
+| Maven Central | 1.6.29 | ✅ LIVE |
+| NuGet | 1.6.29 | ✅ LIVE (Trusted Publishing) |
+
+---
+
+## Format Reference (.kore v3)
+
+Current `.kore` format (v3) — one format that does everything:
+
+```
+KORE2 offset=NNNNNNNNNN        ← 24 bytes, O(1) seek to binary
+# KORE Format v3.0
+# Created: 2026-08-10 00:14:50
+# Rows: 100,000  Columns: 4
+# Compressed: 305,000 bytes (Rust ZSTD/LZ4)
+# Schema:
+#   price                F64
+#   qty                  I64
+# Preview (first 5 rows):
+#   [price=1.5 | qty=100]
+[Rust KORE binary — compressed, ACID]
+```
+
+**Key API:**
+```python
+import kore_fileformat as kore
+
+kore.write_file('data.kore', block)      # write
+block = kore.read_file('data.kore')      # read
+kore.inspect_kore('data.kore')           # print header (no data load)
+kore.kore_header('data.kore')            # get header as string
+kore.kore_stats('data.kore')             # size breakdown dict
+```
+
+**CLI (installed with pip):**
+```bash
+kore inspect data.kore     # show schema + preview
+kore stats   data.kore     # file size breakdown
+kore convert src.kore dst.hkore  # convert formats
+kore bench                 # write/read speed test
+kore version               # version string
+```
+
+**Benchmark vs other formats (100K rows × 4 cols):**
+
+| Format | Write | Read | File Size |
+|--------|-------|------|----------|
+| **KORE .kore** | 255 ns/row | 79 ns/row | **305 KB** |
+| **KORE .hkore** | 154 ns/row | **28 ns/row** | 3,126 KB |
+| JSON | 9,576 ns/row | 1,096 ns/row | 6,786 KB |
+| CSV | 3,447 ns/row | 1,252 ns/row | 3,368 KB |
+| Pickle | 294 ns/row | 379 ns/row | 3,717 KB |
+| SQLite | 1,256 ns/row | 1,258 ns/row | 3,180 KB |
