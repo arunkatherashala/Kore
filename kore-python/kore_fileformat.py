@@ -407,6 +407,47 @@ def read_file(path: Union[str, Path]) -> DataBlock:
     return _block_from_bytes_ffi(kore_bytes)
 
 
+def kore_header(path: Union[str, Path]) -> str:
+    """Return the human-readable text header of a .kore v3 file."""
+    with open(str(path), 'rb') as f:
+        prefix = f.read(_HKORE_OFFSET_LINE)
+    if len(prefix) != _HKORE_OFFSET_LINE or prefix[:5] != b'KORE2':
+        raise ValueError("Not a .kore v3 file (no KORE2 header)")
+    binary_start = int(prefix[13:23])
+    with open(str(path), 'rb') as f:
+        text_bytes = f.read(binary_start)
+    pos = text_bytes.find(_KORE_V3_MARKER)
+    if pos == -1:
+        pos = len(text_bytes)
+    return text_bytes[:pos].decode('utf-8')
+
+
+def inspect_kore(path: Union[str, Path]) -> None:
+    """Print the human-readable header of a .kore v3 file."""
+    print(kore_header(path))
+
+
+def kore_stats(path: Union[str, Path]) -> dict:
+    """Return file stats for a .kore v3 file."""
+    import os as _os
+    total = _os.path.getsize(path)
+    with open(str(path), 'rb') as f:
+        prefix = f.read(_HKORE_OFFSET_LINE)
+    if len(prefix) == _HKORE_OFFSET_LINE and prefix[:5] == b'KORE2':
+        binary_start = int(prefix[13:23])
+    else:
+        binary_start = 0
+    hb = binary_start
+    bb = total - binary_start
+    return {
+        'header_bytes': hb, 'header_kb': round(hb / 1024, 2),
+        'binary_bytes': bb, 'binary_kb': round(bb / 1024, 2),
+        'total_kb': round(total / 1024, 2),
+        'overhead_pct': round(hb / total * 100, 3) if total else 0,
+        'format': 'kore-v3',
+    }
+
+
 def read_at_version(data: bytes, timestamp: int) -> DataBlock:
     """Read KORE data at specific version (time travel).
     
@@ -645,6 +686,9 @@ __all__ = [
     'read_metadata',
     'read_file_with_metadata',
     'parallel_read',
+    'inspect_kore',
+    'kore_header',
+    'kore_stats',
 ]
 
 
