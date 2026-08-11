@@ -1,6 +1,6 @@
 # KORE FileFormat — Node.js / TypeScript
 
-**Version 1.7.3** | [npm](https://www.npmjs.com/package/kore-fileformat) | [GitHub](https://github.com/arunkatherashala/Kore)
+**Version 1.7.4** | [npm](https://www.npmjs.com/package/kore-fileformat) | [GitHub](https://github.com/arunkatherashala/Kore)
 
 World's fastest human-readable columnar format. `.kore` v3 opens in any text editor AND reads 12x faster than CSV.
 
@@ -69,7 +69,7 @@ console.log(header);
 ## Install
 
 ```bash
-npm install kore-fileformat@1.7.3
+npm install kore-fileformat@1.7.4
 ```
 
 Requires `kore_ffi.dll` / `libkore_ffi.so` (included in npm package or build from source):
