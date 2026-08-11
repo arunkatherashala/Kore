@@ -9,7 +9,6 @@ on:
   workflow_dispatch:
 
 permissions:
-  id-token: write   # required for NuGet Trusted Publishing (OIDC)
   contents: read
 
 jobs:
@@ -48,21 +47,12 @@ jobs:
           --configuration Release \
           --output nupkg
 
-    - name: Get OIDC token for NuGet Trusted Publishing
-      id: oidc
-      run: |
-        OIDC_TOKEN=$(curl -sSfL \
-          -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=nuget.org" | jq -r .value)
-        echo "::add-mask::$OIDC_TOKEN"
-        echo "token=$OIDC_TOKEN" >> $GITHUB_OUTPUT
-
-    - name: Publish to NuGet (Trusted Publishing)
+    - name: Publish to NuGet
       run: |
         for file in nupkg/*.nupkg; do
           echo "Publishing: $file"
           dotnet nuget push "$file" \
-            --api-key "${{ steps.oidc.outputs.token }}" \
+            --api-key "${{ secrets.NUGET_API_KEY }}" \
             --source https://api.nuget.org/v3/index.json \
             --skip-duplicate
         done
