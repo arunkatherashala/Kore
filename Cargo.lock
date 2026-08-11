@@ -1091,6 +1091,8 @@ dependencies = [
 name = "kore-arrow"
 version = "0.1.0"
 dependencies = [
+ "arrow-array",
+ "arrow-schema",
  "kore-core",
  "serde",
  "serde_json",
@@ -1679,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "kore_fileformat"
-version = "1.6.38"
+version = "1.7.2"
 
 [[package]]
 name = "libc"

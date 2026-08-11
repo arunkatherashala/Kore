@@ -11,6 +11,7 @@
 //! Also provides zero-copy conversion to/from kore-core DataBlock.
 
 use kore_core::types::{Column, ColumnData, DataBlock};
+use kore_core::KoreError;
 
 // ─── Core Arrow types ─────────────────────────────────────────────────────────
 
@@ -262,4 +263,144 @@ mod tests {
             _ => panic!()
         }
     }
+
+    #[test]
+    fn test_apache_arrow_roundtrip() {
+        let block = DataBlock {
+            num_rows: 4,
+            columns: vec![
+                Column { name: "id".into(), data: ColumnData::Int64(vec![Some(1), None, Some(3), Some(4)]) },
+                Column { name: "score".into(), data: ColumnData::Float64(vec![Some(1.5), Some(2.5), None, Some(4.5)]) },
+                Column { name: "flag".into(), data: ColumnData::Bool(vec![Some(true), None, Some(false), Some(true)]) },
+                Column { name: "name".into(), data: ColumnData::Str(vec![Some("a".into()), Some("b".into()), None, Some("d".into())]) },
+            ],
+        };
+        let rb = datablock_to_record_batch(&block).unwrap();
+        assert_eq!(rb.num_rows(), 4);
+        assert_eq!(rb.num_columns(), 4);
+        let back = record_batch_to_datablock(&rb).unwrap();
+        assert_eq!(back.num_rows, 4);
+        match &back.columns[0].data {
+            ColumnData::Int64(v) => { assert_eq!(v[0], Some(1)); assert_eq!(v[1], None); assert_eq!(v[2], Some(3)); }
+            _ => panic!("expected Int64")
+        }
+        match &back.columns[3].data {
+            ColumnData::Str(v) => { assert_eq!(v[0], Some("a".into())); assert_eq!(v[2], None); }
+            _ => panic!("expected Str")
+        }
+    }
+
+    #[test]
+    fn test_strdict_to_arrow_dictionary() {
+        let block = DataBlock {
+            num_rows: 3,
+            columns: vec![
+                Column { name: "status".into(), data: ColumnData::StrDict {
+                    codes: vec![0, 1, u8::MAX],
+                    dict: vec!["active".into(), "inactive".into()],
+                }},
+            ],
+        };
+        let rb = datablock_to_record_batch(&block).unwrap();
+        assert_eq!(rb.num_rows(), 3);
+        let back = record_batch_to_datablock(&rb).unwrap();
+        match &back.columns[0].data {
+            ColumnData::Str(v) => {
+                assert_eq!(v[0], Some("active".into()));
+                assert_eq!(v[1], Some("inactive".into()));
+                assert_eq!(v[2], None);
+            }
+            _ => panic!("expected Str")
+        }
+    }
+}
+
+// ─── Apache Arrow interop ─────────────────────────────────────────────────────
+// Real RecordBatch ↔ DataBlock bridge — unlocks DuckDB, Polars, Spark, DataFusion
+
+use arrow_array::{
+    RecordBatch, ArrayRef, Int64Array, Float64Array, BooleanArray, StringArray,
+    Array,
+};
+use arrow_schema::{Schema, Field, DataType as ArrowDataType};
+use std::sync::Arc;
+
+/// Convert a Kore DataBlock → Apache Arrow RecordBatch (zero-copy where possible).
+pub fn datablock_to_record_batch(block: &DataBlock) -> Result<RecordBatch, KoreError> {
+    let mut fields = Vec::with_capacity(block.columns.len());
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(block.columns.len());
+
+    for col in &block.columns {
+        match &col.data {
+            ColumnData::Int64(v) => {
+                fields.push(Field::new(&col.name, ArrowDataType::Int64, true));
+                let arr: Int64Array = v.iter().copied().collect();
+                arrays.push(Arc::new(arr));
+            }
+            ColumnData::Float64(v) => {
+                fields.push(Field::new(&col.name, ArrowDataType::Float64, true));
+                let arr: Float64Array = v.iter().copied().collect();
+                arrays.push(Arc::new(arr));
+            }
+            ColumnData::Bool(v) => {
+                fields.push(Field::new(&col.name, ArrowDataType::Boolean, true));
+                let arr: BooleanArray = v.iter().copied().collect();
+                arrays.push(Arc::new(arr));
+            }
+            ColumnData::Str(v) => {
+                fields.push(Field::new(&col.name, ArrowDataType::Utf8, true));
+                let arr: StringArray = v.iter().map(|s| s.as_deref()).collect();
+                arrays.push(Arc::new(arr));
+            }
+            ColumnData::StrDict { codes, dict } => {
+                fields.push(Field::new(&col.name, ArrowDataType::Utf8, true));
+                let strs: Vec<Option<&str>> = codes.iter().map(|&c| {
+                    if c == u8::MAX { None } else { dict.get(c as usize).map(|s| s.as_str()) }
+                }).collect();
+                let arr: StringArray = strs.into_iter().collect();
+                arrays.push(Arc::new(arr));
+            }
+        }
+    }
+
+    let schema = Arc::new(Schema::new(fields));
+    RecordBatch::try_new(schema, arrays)
+        .map_err(|e| KoreError::InvalidArgument(e.to_string()))
+}
+
+/// Convert an Apache Arrow RecordBatch → Kore DataBlock.
+pub fn record_batch_to_datablock(batch: &RecordBatch) -> Result<DataBlock, KoreError> {
+    let mut columns = Vec::with_capacity(batch.num_columns());
+
+    for (i, field) in batch.schema().fields().iter().enumerate() {
+        let arr = batch.column(i);
+        let name = field.name().clone();
+
+        let data = match field.data_type() {
+            ArrowDataType::Int64 => {
+                let a = arr.as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| KoreError::InvalidArgument("expected Int64Array".into()))?;
+                ColumnData::Int64((0..a.len()).map(|j| if a.is_null(j) { None } else { Some(a.value(j)) }).collect())
+            }
+            ArrowDataType::Float64 => {
+                let a = arr.as_any().downcast_ref::<Float64Array>()
+                    .ok_or_else(|| KoreError::InvalidArgument("expected Float64Array".into()))?;
+                ColumnData::Float64((0..a.len()).map(|j| if a.is_null(j) { None } else { Some(a.value(j)) }).collect())
+            }
+            ArrowDataType::Boolean => {
+                let a = arr.as_any().downcast_ref::<BooleanArray>()
+                    .ok_or_else(|| KoreError::InvalidArgument("expected BooleanArray".into()))?;
+                ColumnData::Bool((0..a.len()).map(|j| if a.is_null(j) { None } else { Some(a.value(j)) }).collect())
+            }
+            ArrowDataType::Utf8 => {
+                let a = arr.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| KoreError::InvalidArgument("expected StringArray".into()))?;
+                ColumnData::Str((0..a.len()).map(|j| if a.is_null(j) { None } else { Some(a.value(j).to_string()) }).collect())
+            }
+            dt => return Err(KoreError::InvalidArgument(format!("unsupported Arrow type: {dt}"))),
+        };
+        columns.push(Column { name, data });
+    }
+
+    Ok(DataBlock { num_rows: batch.num_rows(), columns })
 }
