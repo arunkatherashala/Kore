@@ -29,34 +29,8 @@ import (
 )
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 1. TYPE DEFINITIONS
+// 1. TYPE DEFINITIONS (defined in kore_fileformat.go — use those)
 // ═══════════════════════════════════════════════════════════════════════════
-
-// DataType represents all 7 KORE data types
-type DataType uint8
-
-const (
-	I64      DataType = 1
-	F64      DataType = 2
-	BOOL     DataType = 3
-	STR      DataType = 4
-	STR_DICT DataType = 5
-	ARRAY    DataType = 6
-	STRUCT   DataType = 7
-)
-
-// CompressionCodec represents all 7 compression codecs
-type CompressionCodec uint8
-
-const (
-	RAW     CompressionCodec = 0
-	RLE     CompressionCodec = 1
-	DELTA   CompressionCodec = 2
-	DICT    CompressionCodec = 3
-	NAN_RAW CompressionCodec = 4
-	DEFLATE CompressionCodec = 5
-	ZSTD    CompressionCodec = 6
-)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 2. FEATURE 1: CRC32 CHECKSUMS
@@ -342,7 +316,7 @@ type I64Column struct {
 	name  string
 	data  []int64
 	stats *ColumnStats
-	codec CompressionCodec
+	codec Compression
 }
 
 func NewI64Column(name string, data []int64) *I64Column {
