@@ -51,7 +51,7 @@ func (c *Checksums) Verify(data []byte, expected uint32) bool {
 // 3. FEATURE 2: COLUMN STATISTICS
 // ═══════════════════════════════════════════════════════════════════════════
 
-type ColumnStats struct {
+type AcidStats struct {
 	MinValue   interface{} `json:"min"`
 	MaxValue   interface{} `json:"max"`
 	NullCount  int64       `json:"nulls"`
@@ -59,7 +59,7 @@ type ColumnStats struct {
 	CRC32      uint32      `json:"crc32"`
 }
 
-func (cs *ColumnStats) FromInt64(values []int64) *ColumnStats {
+func (cs *AcidStats) FromInt64(values []int64) *AcidStats {
 	if len(values) == 0 {
 		return cs
 	}
@@ -95,7 +95,7 @@ func (cs *ColumnStats) FromInt64(values []int64) *ColumnStats {
 	return cs
 }
 
-func (cs *ColumnStats) FromFloat64(values []float64) *ColumnStats {
+func (cs *AcidStats) FromFloat64(values []float64) *AcidStats {
 	if len(values) == 0 {
 		return cs
 	}
@@ -302,7 +302,7 @@ func (dv *DeleteVector) IsDeleted(rowID int) bool {
 // 10. MAIN DATA STRUCTURES
 // ═══════════════════════════════════════════════════════════════════════════
 
-type Column interface {
+type TypedColumn interface {
 	Name() string
 	Type() DataType
 	Len() int
@@ -315,7 +315,7 @@ type Column interface {
 type I64Column struct {
 	name  string
 	data  []int64
-	stats *ColumnStats
+	stats *AcidStats
 	codec Compression
 }
 
@@ -346,12 +346,12 @@ func (c *I64Column) GetBool(i int) (bool, error)  { return false, errors.New("ty
 func (c *I64Column) GetStr(i int) (string, error) { return "", errors.New("type mismatch") }
 
 func (c *I64Column) ComputeStats() {
-	c.stats = &ColumnStats{}
+	c.stats = &AcidStats{}
 	c.stats.FromInt64(c.data)
 }
 
-type DataBlock struct {
-	Columns      map[string]Column
+type AcidBlock struct {
+	Columns      map[string]TypedColumn
 	NumRows      int64
 	Schema       *Schema
 	Versions     []VersionSnapshot
@@ -359,25 +359,25 @@ type DataBlock struct {
 	DeleteVector *DeleteVector
 }
 
-func NewDataBlock() *DataBlock {
-	return &DataBlock{
-		Columns: make(map[string]Column),
+func NewAcidBlock() *AcidBlock {
+	return &AcidBlock{
+		Columns: make(map[string]TypedColumn),
 		Schema:  NewSchema(),
 		Versions: make([]VersionSnapshot, 0),
 	}
 }
 
-func (db *DataBlock) AddColumn(col Column) {
+func (db *AcidBlock) AddColumn(col TypedColumn) {
 	db.Columns[col.Name()] = col
 	db.NumRows = int64(col.Len())
 	db.Schema.AddColumn(col.Name(), col.Type(), len(db.Schema.Columns))
 }
 
-func (db *DataBlock) GetColumn(name string) Column {
+func (db *AcidBlock) GetColumn(name string) TypedColumn {
 	return db.Columns[name]
 }
 
-func (db *DataBlock) ToJSON() map[string]interface{} {
+func (db *AcidBlock) ToJSON() map[string]interface{} {
 	colStats := make([]map[string]interface{}, 0)
 	for _, col := range db.Columns {
 		colStats = append(colStats, map[string]interface{}{
@@ -417,12 +417,12 @@ const (
 
 type KoreWriter struct{}
 
-func (kw *KoreWriter) ToBuffer(block *DataBlock) ([]byte, error) {
+func (kw *KoreWriter) ToBuffer(block *AcidBlock) ([]byte, error) {
 	// Placeholder implementation
 	return nil, errors.New("not implemented")
 }
 
-func (kw *KoreWriter) ToFile(block *DataBlock, path string) error {
+func (kw *KoreWriter) ToFile(block *AcidBlock, path string) error {
 	buf, err := kw.ToBuffer(block)
 	if err != nil {
 		return err
@@ -432,12 +432,12 @@ func (kw *KoreWriter) ToFile(block *DataBlock, path string) error {
 
 type KoreReader struct{}
 
-func (kr *KoreReader) FromBuffer(data []byte) (*DataBlock, error) {
+func (kr *KoreReader) FromBuffer(data []byte) (*AcidBlock, error) {
 	// Placeholder implementation
 	return nil, errors.New("not implemented")
 }
 
-func (kr *KoreReader) FromFile(path string) (*DataBlock, error) {
+func (kr *KoreReader) FromFile(path string) (*AcidBlock, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -450,12 +450,12 @@ func (kr *KoreReader) FromFile(path string) (*DataBlock, error) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 type KoreFileFormat struct {
-	block *DataBlock
+	block *AcidBlock
 }
 
 func NewKoreFileFormat() *KoreFileFormat {
 	return &KoreFileFormat{
-		block: NewDataBlock(),
+		block: NewAcidBlock(),
 	}
 }
 
