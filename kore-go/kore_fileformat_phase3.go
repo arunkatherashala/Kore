@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"os"
 )
@@ -239,37 +238,8 @@ func (s *Schema) AddColumn(name string, dataType DataType, columnID int) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 7. FEATURE 9: MVCC + TIME TRAVEL
+// 7-9. MVCC, Partition, DeleteVector types defined in kore_fileformat.go
 // ═══════════════════════════════════════════════════════════════════════════
-
-type VersionSnapshot struct {
-	VersionID   int    `json:"version_id"`
-	Timestamp   int64  `json:"timestamp"`
-	BlockOffset int64  `json:"block_offset"`
-	RowCount    int64  `json:"row_count"`
-	PrevVersion *int   `json:"prev_version,omitempty"`
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 8. FEATURE 10: PARTITION EVOLUTION
-// ═══════════════════════════════════════════════════════════════════════════
-
-type PartitionSpec struct {
-	SpecID       int    `json:"spec_id"`
-	Columns      []int  `json:"columns"`
-	Transforms   []string `json:"transforms"`
-	ParentSpecID *int   `json:"parent_spec_id,omitempty"`
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 9. FEATURE 11: ROW-LEVEL DELETES
-// ═══════════════════════════════════════════════════════════════════════════
-
-type DeleteVector struct {
-	Bitmap      []byte `json:"bitmap"`
-	Cardinality int64  `json:"cardinality"`
-	Timestamp   int64  `json:"timestamp"`
-}
 
 func NewDeleteVector() *DeleteVector {
 	return &DeleteVector{
