@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KORE — The Next-Gen Columnar File Format</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0a0a;color:#e0e0e0;line-height:1.6}
+.hero{text-align:center;padding:80px 20px;background:linear-gradient(135deg,#1a1a2e,#16213e)}
+.hero h1{font-size:3.5rem;font-weight:800;background:linear-gradient(90deg,#00d4ff,#7b2ff7);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.hero p{font-size:1.3rem;color:#aaa;margin:15px 0}
+.hero .tagline{font-size:1.6rem;color:#ccc;margin:20px 0 30px}
+.btn{display:inline-block;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;font-size:1rem;margin:8px}
+.btn-primary{background:#7b2ff7;color:#fff}.btn-primary:hover{background:#6a1ee6}
+.btn-secondary{background:#222;color:#fff;border:1px solid #444}.btn-secondary:hover{background:#333}
+.stats{display:flex;justify-content:center;gap:50px;padding:40px 20px;flex-wrap:wrap}
+.stat{text-align:center}.stat .num{font-size:2.5rem;font-weight:800;color:#00d4ff}.stat .label{color:#888;font-size:0.9rem}
+section{max-width:1000px;margin:0 auto;padding:60px 20px}
+h2{font-size:2rem;margin-bottom:30px;color:#fff}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px}
+.card{background:#151520;border:1px solid #2a2a3a;border-radius:12px;padding:24px}
+.card h3{color:#00d4ff;margin-bottom:10px}
+.card p{color:#999;font-size:0.95rem}
+table{width:100%;border-collapse:collapse;margin:20px 0}
+th,td{padding:12px 16px;text-align:left;border-bottom:1px solid #222}
+th{color:#00d4ff;font-weight:600}
+td{color:#ccc}
+.fast{color:#00ff88;font-weight:700}
+.check{color:#00ff88}.cross{color:#ff4444}
+pre{background:#111;border:1px solid #333;border-radius:8px;padding:20px;overflow-x:auto;margin:15px 0}
+code{color:#00d4ff;font-size:0.9rem}
+.install{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:15px}
+.install-card{background:#111;border:1px solid #333;border-radius:8px;padding:16px}
+.install-card .lang{color:#7b2ff7;font-weight:700;margin-bottom:8px}
+footer{text-align:center;padding:40px;color:#555;border-top:1px solid #222}
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <h1>KORE</h1>
+  <p class="tagline">The columnar format that replaces Parquet — with ACID, encryption, and 15x speed built in.</p>
+  <p>7 languages · Spark & Trino native · Arrow compatible · Open source</p>
+  <div style="margin-top:30px">
+    <a href="https://github.com/arunkatherashala/Kore" class="btn btn-primary">GitHub</a>
+    <a href="https://pypi.org/project/kore-fileformat/" class="btn btn-secondary">pip install kore-fileformat</a>
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat"><div class="num">15.8x</div><div class="label">Faster than DuckDB (TPC-H Q1)</div></div>
+  <div class="stat"><div class="num">561x</div><div class="label">Faster than Spark</div></div>
+  <div class="stat"><div class="num">7</div><div class="label">Languages</div></div>
+  <div class="stat"><div class="num">74</div><div class="label">Rust Layers</div></div>
+</div>
+
+<section>
+  <h2>Why KORE over Parquet?</h2>
+  <table>
+    <tr><th>Feature</th><th>Parquet</th><th>KORE</th></tr>
+    <tr><td>Columnar storage</td><td class="check">✓</td><td class="check">✓</td></tr>
+    <tr><td>Compression (ZSTD/LZ4)</td><td class="check">✓</td><td class="check">✓</td></tr>
+    <tr><td>Dictionary encoding</td><td class="check">✓</td><td class="check">✓</td></tr>
+    <tr><td>ACID transactions</td><td class="cross">✗ (needs Delta Lake)</td><td class="check">✓ built-in</td></tr>
+    <tr><td>Time travel (MVCC)</td><td class="cross">✗ (needs Iceberg)</td><td class="check">✓ built-in</td></tr>
+    <tr><td>Row-level deletes</td><td class="cross">✗</td><td class="check">✓ built-in</td></tr>
+    <tr><td>AES-256-GCM encryption</td><td class="cross">✗</td><td class="check">✓ built-in</td></tr>
+    <tr><td>Human-readable header</td><td class="cross">✗ (binary only)</td><td class="check">✓ open in Notepad</td></tr>
+    <tr><td>TPC-H Q1 read speed</td><td>~150ms (DuckDB)</td><td class="fast">9.5ms (15.8x faster)</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Ecosystem</h2>
+  <div class="grid">
+    <div class="card"><h3>Apache Spark</h3><p>Native DataSourceV2 connector.<br><code>spark.read.format("kore").load("data.kore")</code></p></div>
+    <div class="card"><h3>Trino / Presto</h3><p>Connector SPI plugin.<br><code>SELECT * FROM kore.default.sales</code></p></div>
+    <div class="card"><h3>DuckDB</h3><p>Arrow bridge, zero-copy scan.<br><code>kore.to_duckdb("data.kore", "tbl")</code></p></div>
+    <div class="card"><h3>Polars</h3><p>Direct DataFrame conversion.<br><code>df = kore.to_polars("data.kore")</code></p></div>
+    <div class="card"><h3>Apache Arrow</h3><p>Rust RecordBatch ↔ DataBlock bridge.<br><code>table = kore.to_arrow("data.kore")</code></p></div>
+    <div class="card"><h3>Pandas / NumPy</h3><p>One-liner conversion.<br><code>df = kore.to_pandas("data.kore")</code></p></div>
+  </div>
+</section>
+
+<section>
+  <h2>Install</h2>
+  <div class="install">
+    <div class="install-card"><div class="lang">Python</div><code>pip install kore-fileformat</code></div>
+    <div class="install-card"><div class="lang">Rust</div><code>cargo add kore_fileformat</code></div>
+    <div class="install-card"><div class="lang">Node.js</div><code>npm install kore-fileformat</code></div>
+    <div class="install-card"><div class="lang">Java</div><code>&lt;artifactId&gt;kore-fileformat&lt;/artifactId&gt;</code></div>
+    <div class="install-card"><div class="lang">Ruby</div><code>gem install kore-fileformat</code></div>
+    <div class="install-card"><div class="lang">C# / .NET</div><code>dotnet add package KoreFileFormat</code></div>
+  </div>
+</section>
+
+<section>
+  <h2>Quick Start</h2>
+  <pre><code>import kore_fileformat as kore
+
+# Write
+block = kore.DataBlock()
+block.add_column('price', kore.DataType.F64, [10.5, 20.0, 30.75])
+block.add_column('qty',   kore.DataType.I64, [100,  200,  300])
+kore.write_file('data.kore', block)
+
+# Read
+result = kore.read_file('data.kore')
+print(result.num_rows, result.num_columns)
+
+# Use with any tool
+df     = kore.to_polars('data.kore')      # Polars
+table  = kore.to_arrow('data.kore')       # Arrow
+conn   = kore.to_duckdb('data.kore')      # DuckDB
+sdf    = kore.to_spark(spark, 'data.kore') # Spark</code></pre>
+</section>
+
+<footer>
+  <p>KORE File Format — Created by <a href="https://github.com/arunkatherashala" style="color:#7b2ff7">Sai Arun Kumar Katherashala</a></p>
+  <p style="margin-top:8px">MIT License · <a href="https://github.com/arunkatherashala/Kore" style="color:#00d4ff">GitHub</a> · <a href="https://pypi.org/project/kore-fileformat/" style="color:#00d4ff">PyPI</a></p>
+</footer>
+
+</body>
+</html>
