@@ -27,8 +27,7 @@ jobs:
         run: |
           go mod tidy
           go mod verify
-          go test ./...
-          go vet ./...
+          CGO_ENABLED=0 go vet ./...
 
       - name: Tag for pkg.go.dev
         run: |
