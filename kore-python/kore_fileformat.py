@@ -657,7 +657,7 @@ def column_stats_from_bytes(data: bytes) -> dict:
     raise NotImplementedError("Phase 3: Stats extraction pending")
 
 
-__version__ = "1.7.14"
+__version__ = "1.7.15"
 __all__ = [
     'DataType',
     'Compression',
@@ -1220,7 +1220,7 @@ class BloomFilter:
         )
 
     def _hash(self, value: int, seed: int) -> int:
-        h = (value ^ (seed * 0x517CC1.7.14220A95)) & 0xFFFFFFFFFFFFFFFF
+        h = (value ^ (seed * 0x517CC1.7.15220A95)) & 0xFFFFFFFFFFFFFFFF
         h ^= h >> 33; h = (h * 0xff51afd7ed558ccd) & 0xFFFFFFFFFFFFFFFF
         h ^= h >> 33; h = (h * 0xc4ceb9fe1a85ec53) & 0xFFFFFFFFFFFFFFFF
         return h ^ (h >> 33)
@@ -2959,7 +2959,7 @@ class FileMetadata:
     """Custom key-value metadata embedded in a .kore file header.
 
         meta = kore.FileMetadata()
-        meta.set("created_by", "KORE FileFormat v1.7.14")
+        meta.set("created_by", "KORE FileFormat v1.7.15")
         meta.set("source", "sales_pipeline")
         meta.set("schema_version", "2")
         kore.write_with_metadata("data.kore", block, meta)
