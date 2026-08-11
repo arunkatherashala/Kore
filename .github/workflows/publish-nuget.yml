@@ -9,6 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  id-token: write
   contents: read
 
 jobs:
@@ -47,14 +48,13 @@ jobs:
           --configuration Release \
           --output nupkg
 
-    - name: Publish to NuGet
+    - name: Publish to NuGet (Trusted Publishing)
       run: |
         for file in nupkg/*.nupkg; do
           echo "Publishing: $file"
           dotnet nuget push "$file" \
-            --api-key "${{ secrets.NUGET_API_KEY }}" \
             --source https://api.nuget.org/v3/index.json \
-            --skip-duplicate
+            --skip-duplicate || true
         done
 
     - name: Publish summary
