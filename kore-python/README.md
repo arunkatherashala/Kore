@@ -153,3 +153,144 @@ kore.DataType.BOOL      # Boolean
 python -m pytest test_kore_fileformat.py -v
 python test_phase3.py
 ```
+
+## Ecosystem Integration
+
+Kore works with every major data tool through built-in bridges. Install the optional dependency for the tool you need.
+
+### Apache Arrow
+
+```bash
+pip install kore-fileformat pyarrow
+```
+
+```python
+import kore_fileformat as kore
+
+# Kore → Arrow Table
+table = kore.to_arrow("data.kore")
+
+# Arrow Table → Kore
+import pyarrow as pa
+table = pa.table({"price": [10.5, 20.0], "qty": [100, 200]})
+kore.from_arrow("output.kore", table)
+```
+
+### Pandas
+
+```bash
+pip install kore-fileformat pandas
+```
+
+```python
+import kore_fileformat as kore
+
+df = kore.to_pandas("data.kore")           # Kore → DataFrame
+kore.from_pandas("output.kore", df)        # DataFrame → Kore
+```
+
+### Polars
+
+```bash
+pip install kore-fileformat polars pyarrow
+```
+
+```python
+import kore_fileformat as kore
+
+df = kore.to_polars("data.kore")           # Kore → Polars DataFrame
+kore.from_polars("output.kore", df)        # Polars → Kore
+```
+
+### DuckDB
+
+```bash
+pip install kore-fileformat duckdb pyarrow
+```
+
+```python
+import kore_fileformat as kore
+
+conn = kore.to_duckdb("data.kore", "sales")
+result = conn.execute("SELECT SUM(price) FROM sales").fetchall()
+```
+
+### Apache Spark
+
+```bash
+pip install kore-fileformat pyspark pyarrow
+```
+
+```python
+import kore_fileformat as kore
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.appName("kore").getOrCreate()
+df = kore.to_spark(spark, "data.kore")     # Kore → Spark DataFrame
+df.createOrReplaceTempView("sales")
+spark.sql("SELECT region, SUM(amount) FROM sales GROUP BY region").show()
+
+kore.from_spark("output.kore", df)         # Spark → Kore
+```
+
+### Parquet (import/export)
+
+```bash
+pip install kore-fileformat pyarrow
+```
+
+```python
+import kore_fileformat as kore
+
+kore.to_parquet("data.kore", "data.parquet")     # Kore → Parquet
+kore.from_parquet("output.kore", "data.parquet") # Parquet → Kore
+```
+
+### NumPy
+
+```python
+import kore_fileformat as kore
+
+arrays = kore.to_numpy(block)                    # Kore → dict of ndarrays
+kore.from_numpy("output.kore", {"x": np_arr})   # ndarrays → Kore
+```
+
+### Kafka Streaming
+
+```python
+import kore_fileformat as kore
+
+msg = kore.to_kafka_message(block)     # serialize for Kafka producer
+block = kore.from_kafka_message(msg)   # deserialize from Kafka consumer
+```
+
+### MongoDB
+
+```python
+import kore_fileformat as kore
+
+docs = kore.to_mongodb_docs(block)            # Kore → list of dicts
+block = kore.from_mongodb_docs(docs)          # list of dicts → Kore
+```
+
+## All Interop Functions
+
+| Function | Direction | Requires |
+|----------|-----------|----------|
+| `to_arrow(path_or_block)` | Kore → PyArrow Table | `pyarrow` |
+| `from_arrow(path, table)` | PyArrow Table → Kore | `pyarrow` |
+| `to_pandas(path)` | Kore → DataFrame | `pandas` |
+| `from_pandas(path, df)` | DataFrame → Kore | `pandas` |
+| `to_polars(path)` | Kore → Polars DF | `polars`, `pyarrow` |
+| `from_polars(path, df)` | Polars DF → Kore | `polars`, `pyarrow` |
+| `to_duckdb(path, table, conn)` | Kore → DuckDB table | `duckdb`, `pyarrow` |
+| `to_spark(spark, path)` | Kore → Spark DF | `pyspark`, `pyarrow` |
+| `from_spark(path, df)` | Spark DF → Kore | `pyspark` |
+| `to_parquet(path, out)` | Kore → Parquet | `pyarrow` |
+| `from_parquet(kore, parquet)` | Parquet → Kore | `pyarrow` |
+| `to_numpy(block)` | Kore → NumPy arrays | `numpy` |
+| `from_numpy(path, arrays)` | NumPy → Kore | `numpy` |
+| `to_kafka_message(block)` | Kore → bytes | — |
+| `from_kafka_message(msg)` | bytes → Kore | — |
+| `to_mongodb_docs(block)` | Kore → list[dict] | — |
+| `from_mongodb_docs(docs)` | list[dict] → Kore | — |
