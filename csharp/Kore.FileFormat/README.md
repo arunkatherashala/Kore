@@ -1,13 +1,13 @@
 # KORE FileFormat — C# / .NET
 
-**Version 1.7.21** | [NuGet](https://www.nuget.org/packages/KoreFileFormat/) | [GitHub](https://github.com/arunkatherashala/Kore)
+**Version 1.7.22** | [NuGet](https://www.nuget.org/packages/KoreFileFormat/) | [GitHub](https://github.com/arunkatherashala/Kore)
 
 World's fastest human-readable columnar format. `.kore` v3 files open in Notepad AND read 12x faster than CSV with 10x smaller file size.
 
 ## Install
 
 ```bash
-dotnet add package KoreFileFormat --version 1.7.21
+dotnet add package KoreFileFormat --version 1.7.22
 ```
 
 ## .kore v3 Format
