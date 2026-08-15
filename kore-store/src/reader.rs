@@ -120,8 +120,18 @@ impl KoreReader {
 
     /// Get delete vector (for row-level soft deletes).
     pub fn get_delete_vector(data: &[u8]) -> Option<crate::DeleteVector> {
-        // Extract delete vector from footer metadata
-        // For now: None (no deleted rows)
+        // Scan footer for delete vector marker b"KDEL"
+        let marker = b"KDEL";
+        if let Some(pos) = data.windows(4).rposition(|w| w == marker) {
+            let dv_data = &data[pos + 4..];
+            if dv_data.len() >= 12 {
+                let cardinality = u32::from_le_bytes(dv_data[0..4].try_into().unwrap());
+                let timestamp = u64::from_le_bytes(dv_data[4..12].try_into().unwrap());
+                let bitmap_len = dv_data.len().saturating_sub(12);
+                let bitmap = dv_data[12..12 + bitmap_len].to_vec();
+                return Some(crate::DeleteVector { bitmap, cardinality, timestamp });
+            }
+        }
         None
     }
 }

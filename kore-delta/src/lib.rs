@@ -114,12 +114,11 @@ impl DeltaTable {
 
     /// Append `data` to the table as a new commit.
     pub fn insert(&mut self, data: DataBlock) -> Result<u64, KoreError> {
-        let file_name = format!("data/part-{:020}.json", self.version() + 1);
+        let file_name = format!("data/part-{:020}.kore", self.version() + 1);
         let path = self.root.join(&file_name);
-        let json = serde_json::to_string(&data)
-            .map_err(|e| KoreError::InvalidArgument(e.to_string()))?;
-        let size = json.len();
-        std::fs::write(&path, json)
+        let bytes = kore_store::KoreWriter::to_bytes(&data);
+        let size = bytes.len();
+        std::fs::write(&path, &bytes)
             .map_err(|e| KoreError::InvalidArgument(e.to_string()))?;
 
         self.commit(vec![
@@ -153,12 +152,11 @@ impl DeltaTable {
             .collect();
 
         // Write the filtered result as a new file
-        let file_name = format!("data/part-{:020}.json", self.version() + 1);
+        let file_name = format!("data/part-{:020}.kore", self.version() + 1);
         let path = self.root.join(&file_name);
-        let json = serde_json::to_string(&filtered)
-            .map_err(|e| KoreError::InvalidArgument(e.to_string()))?;
-        let size = json.len();
-        std::fs::write(&path, json)
+        let bytes = kore_store::KoreWriter::to_bytes(&filtered);
+        let size = bytes.len();
+        std::fs::write(&path, &bytes)
             .map_err(|e| KoreError::InvalidArgument(e.to_string()))?;
 
         actions.push(TxnAction::CommitInfo {
@@ -190,10 +188,9 @@ impl DeltaTable {
         let mut parts: Vec<DataBlock> = Vec::new();
         for f in files {
             let p = self.root.join(&f);
-            let json = std::fs::read_to_string(&p)
+            let bytes = std::fs::read(&p)
                 .map_err(|e| KoreError::InvalidArgument(format!("{}: {}", f, e)))?;
-            let block: DataBlock = serde_json::from_str(&json)
-                .map_err(|e| KoreError::InvalidArgument(e.to_string()))?;
+            let block = kore_store::KoreReader::from_bytes(&bytes)?;
             parts.push(block);
         }
         DataBlock::concat(parts)
