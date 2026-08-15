@@ -3108,6 +3108,21 @@ def write_hybrid(path, block, preview_rows=5):
     def _col_bytes(col):
         dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
         d = col.data
+        if dn in ('LIST_I64', '4', 'LIST_F64', '5', 'LIST_STR', '6'):
+            # Nested list: write count + elements per row
+            buf = bytearray()
+            for row in d:
+                items = row if row is not None else []
+                buf += struct.pack('<I', len(items))
+                for item in items:
+                    if dn in ('LIST_STR', '6'):
+                        sb = str(item).encode('utf-8')
+                        buf += struct.pack('<I', len(sb)) + sb
+                    elif dn in ('LIST_F64', '5'):
+                        buf += struct.pack('<d', float(item))
+                    else:
+                        buf += struct.pack('<q', int(item))
+            return bytes(buf)
         if dn in ('STR', 'STRING', '3'):
             # length-prefixed UTF-8 strings
             buf = bytearray()
@@ -3126,7 +3141,7 @@ def write_hybrid(path, block, preview_rows=5):
     for col in cols:
         dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
         nb = col.name.encode('utf-8')
-        dtype_tag = 2 if dn in ('STR','STRING','3') else (0 if dn in ('F64','FLOAT64','2') else 1)
+        dtype_tag = 3 if dn in ('LIST_I64','4') else (4 if dn in ('LIST_F64','5') else (5 if dn in ('LIST_STR','6') else (2 if dn in ('STR','STRING','3') else (0 if dn in ('F64','FLOAT64','2') else 1))))
         bin_hdr += struct.pack('<BH', dtype_tag, len(nb)) + nb
 
     # Text body (everything after the 24-byte offset line)
@@ -3161,7 +3176,7 @@ def write_hybrid(path, block, preview_rows=5):
             f.write(cb)
 
 
-def read_hybrid(path):
+def read_hybrid(path, columns=None):
     """Read .hkore � 29 ns/row via O(1) seek + array.fromfile (no intermediate buffer)."""
     import array as _arr, struct
 
@@ -3177,20 +3192,55 @@ def read_hybrid(path):
             for _ in range(ncols):
                 dtype_byte, name_len = struct.unpack('<BH', f.read(3))
                 cols_meta.append((f.read(name_len).decode('utf-8'), dtype_byte))
+            want = set(columns) if columns else None
             block = DataBlock()
             for name, dtype_tag in cols_meta:
-                if dtype_tag == 2:
-                    # STR: length-prefixed UTF-8 strings
+                skip = want is not None and name not in want
+                if dtype_tag in (3, 4, 5):
+                    # LIST: read count + elements per row
+                    lists = []
+                    for _ in range(nrows):
+                        count = struct.unpack('<I', f.read(4))[0]
+                        if skip:
+                            if dtype_tag == 5:
+                                for __ in range(count):
+                                    slen = struct.unpack('<I', f.read(4))[0]
+                                    f.seek(slen, 1)
+                            else:
+                                f.seek(count * 8, 1)
+                        else:
+                            items = []
+                            for __ in range(count):
+                                if dtype_tag == 5:
+                                    slen = struct.unpack('<I', f.read(4))[0]
+                                    items.append(f.read(slen).decode('utf-8'))
+                                elif dtype_tag == 4:
+                                    items.append(struct.unpack('<d', f.read(8))[0])
+                                else:
+                                    items.append(struct.unpack('<q', f.read(8))[0])
+                            lists.append(items)
+                    if not skip:
+                        dt = DataType.I64  # LIST stored as nested
+                        block.add_column(name, dt, lists)
+                elif dtype_tag == 2:
                     strings = []
                     for _ in range(nrows):
                         slen = struct.unpack('<I', f.read(4))[0]
-                        strings.append(f.read(slen).decode('utf-8'))
-                    block.add_column(name, DataType.STR, strings)
+                        if skip:
+                            f.seek(slen, 1)
+                        else:
+                            strings.append(f.read(slen).decode('utf-8'))
+                    if not skip:
+                        block.add_column(name, DataType.STR, strings)
                 else:
-                    is_f64 = dtype_tag == 0
-                    a = _arr.array('d' if is_f64 else 'q')
-                    a.fromfile(f, nrows)
-                    block.add_column(name, DataType.F64 if is_f64 else DataType.I64, a)
+                    nbytes = nrows * 8
+                    if skip:
+                        f.seek(nbytes, 1)
+                    else:
+                        is_f64 = dtype_tag == 0
+                        a = _arr.array('d' if is_f64 else 'q')
+                        a.fromfile(f, nrows)
+                        block.add_column(name, DataType.F64 if is_f64 else DataType.I64, a)
             block.num_rows = nrows
             return block
 
