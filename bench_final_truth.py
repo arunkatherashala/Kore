@@ -210,8 +210,10 @@ pq_1col = bench(lambda: pq.read_table(f'{P}/num.parquet', columns=['price']))
 k_full = bench(lambda: kore.read_hybrid(f'{P}/num.hkore'))
 
 print(f"  Parquet full read: {pq_full:.1f}ms | 1-col read: {pq_1col:.1f}ms | savings: {(1-pq_1col/pq_full)*100:.0f}%")
-print(f"  KORE full read:    {k_full:.1f}ms  (no column pruning yet)")
-test("KORE column pruning: NOT YET (honest)", True, "TODO: implement selective column read")
+k_1col = bench(lambda: kore.read_hybrid(f'{P}/num.hkore', columns=['price']))
+print(f"  KORE full read:    {k_full:.1f}ms | 1-col: {k_1col:.1f}ms | savings: {(1-k_1col/k_full)*100:.0f}%")
+test("KORE column pruning works", k_1col < k_full, f"full={k_full:.1f}ms 1col={k_1col:.1f}ms")
+test("KORE pruning gives speedup", k_1col < k_full * 0.9)
 
 # ═══════════════════════════════════════════════════════════════════
 # TEST 7: FEATURE CHECKLIST — Iceberg Parity
@@ -232,8 +234,8 @@ features = {
     'Human readable':         True,   # .hkore header — UNIQUE
     'Zero dependencies':      True,   # no JVM/Spark needed — UNIQUE
     '8 language SDKs':        True,   # Python/Node/Rust/Ruby/Java/C#/Go/PHP
-    'Column pruning':         False,  # not in .hkore yet
-    'Nested types':           False,  # structs/lists not in .hkore
+    'Column pruning':         True,   # read_hybrid(columns=[...])
+    'Nested types (lists)':   True,   # LIST_I64, LIST_F64, LIST_STR
 }
 
 for feat, has in features.items():

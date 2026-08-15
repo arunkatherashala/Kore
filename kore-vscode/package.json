@@ -1,0 +1,33 @@
+{
+  "name": "kore-fileformat",
+  "displayName": "KORE FileFormat",
+  "description": "Preview and inspect .hkore and .kore files — the world's fastest human-readable columnar format",
+  "version": "0.1.0",
+  "publisher": "arunkatherashala",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Data Science", "Visualization"],
+  "activationEvents": ["onLanguage:kore"],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [{
+      "id": "kore",
+      "extensions": [".hkore", ".kore"],
+      "aliases": ["KORE", "kore"]
+    }],
+    "commands": [{
+      "command": "kore.preview",
+      "title": "KORE: Preview File"
+    }, {
+      "command": "kore.inspect",
+      "title": "KORE: Inspect Schema"
+    }, {
+      "command": "kore.convert",
+      "title": "KORE: Convert to CSV/JSON"
+    }]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/arunkatherashala/Kore"
+  },
+  "license": "MIT"
+}
