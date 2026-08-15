@@ -1220,7 +1220,7 @@ class BloomFilter:
         )
 
     def _hash(self, value: int, seed: int) -> int:
-        h = (value ^ (seed * 0x517CC1.7.18220A95)) & 0xFFFFFFFFFFFFFFFF
+        h = (value ^ (seed * 0x517CC1B727220A95)) & 0xFFFFFFFFFFFFFFFF
         h ^= h >> 33; h = (h * 0xff51afd7ed558ccd) & 0xFFFFFFFFFFFFFFFF
         h ^= h >> 33; h = (h * 0xc4ceb9fe1a85ec53) & 0xFFFFFFFFFFFFFFFF
         return h ^ (h >> 33)
@@ -3108,8 +3108,15 @@ def write_hybrid(path, block, preview_rows=5):
     def _col_bytes(col):
         dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
         d = col.data
+        if dn in ('STR', 'STRING', '3'):
+            # length-prefixed UTF-8 strings
+            buf = bytearray()
+            for s in d:
+                sb = str(s).encode('utf-8')
+                buf += struct.pack('<I', len(sb)) + sb
+            return bytes(buf)
         if isinstance(d, _arr.array):
-            return d.tobytes()           # already array � memcpy only
+            return d.tobytes()
         return _arr.array('d' if dn in ('F64','FLOAT64','2') else 'q', d).tobytes()
 
     col_bufs = [_col_bytes(col) for col in cols]
@@ -3119,7 +3126,8 @@ def write_hybrid(path, block, preview_rows=5):
     for col in cols:
         dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
         nb = col.name.encode('utf-8')
-        bin_hdr += struct.pack('<BH', 0 if dn in ('F64','FLOAT64','2') else 1, len(nb)) + nb
+        dtype_tag = 2 if dn in ('STR','STRING','3') else (0 if dn in ('F64','FLOAT64','2') else 1)
+        bin_hdr += struct.pack('<BH', dtype_tag, len(nb)) + nb
 
     # Text body (everything after the 24-byte offset line)
     n_prev = min(preview_rows, nrows)
@@ -3168,13 +3176,21 @@ def read_hybrid(path):
             cols_meta = []
             for _ in range(ncols):
                 dtype_byte, name_len = struct.unpack('<BH', f.read(3))
-                cols_meta.append((f.read(name_len).decode('utf-8'), dtype_byte == 0))
-            # array.fromfile: reads directly into array buffer � no intermediate bytes
+                cols_meta.append((f.read(name_len).decode('utf-8'), dtype_byte))
             block = DataBlock()
-            for name, is_f64 in cols_meta:
-                a = _arr.array('d' if is_f64 else 'q')
-                a.fromfile(f, nrows)
-                block.add_column(name, DataType.F64 if is_f64 else DataType.I64, a)
+            for name, dtype_tag in cols_meta:
+                if dtype_tag == 2:
+                    # STR: length-prefixed UTF-8 strings
+                    strings = []
+                    for _ in range(nrows):
+                        slen = struct.unpack('<I', f.read(4))[0]
+                        strings.append(f.read(slen).decode('utf-8'))
+                    block.add_column(name, DataType.STR, strings)
+                else:
+                    is_f64 = dtype_tag == 0
+                    a = _arr.array('d' if is_f64 else 'q')
+                    a.fromfile(f, nrows)
+                    block.add_column(name, DataType.F64 if is_f64 else DataType.I64, a)
             block.num_rows = nrows
             return block
 
