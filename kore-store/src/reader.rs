@@ -12,7 +12,61 @@ pub struct KoreReader;
 impl KoreReader {
     /// Parse a DataBlock from a byte slice with zero-copy metadata parsing.
     pub fn from_bytes(data: &[u8]) -> Result<DataBlock, KoreError> {
+        // Check for encryption marker
+        if data.len() >= 4 && &data[0..4] == b"KENC" {
+            return Err(KoreError::InvalidArgument(
+                "encrypted .kore file — use from_bytes_decrypt(data, password)".into()));
+        }
         let binary_data = strip_readable_trailer(data);
+        Self::parse_binary(binary_data)
+    }
+
+    /// Parse an encrypted .kore file.
+    pub fn from_bytes_decrypt(data: &[u8], password: &[u8]) -> Result<DataBlock, KoreError> {
+        if data.len() < 8 || &data[0..4] != b"KENC" {
+            return Self::from_bytes(data);
+        }
+        let mut pos = 4;
+        let salt_len = u16::from_le_bytes(data[pos..pos+2].try_into().unwrap()) as usize;
+        pos += 2;
+        let salt = data[pos..pos+salt_len].to_vec();
+        pos += salt_len;
+        let nonce_len = u16::from_le_bytes(data[pos..pos+2].try_into().unwrap()) as usize;
+        pos += 2;
+        let nonce = data[pos..pos+nonce_len].to_vec();
+        pos += nonce_len;
+        let ciphertext = &data[pos..];
+
+        let meta = crate::EncryptionMetadata {
+            encrypted_cols: vec![],
+            algorithm: "AES-256-GCM".into(),
+            kdf: "PBKDF2".into(),
+            salt, nonce,
+        };
+        let plaintext = crate::writer::decrypt_column(ciphertext, password, &meta)
+            .map_err(|e| KoreError::InvalidArgument(format!("decrypt failed: {e}")))?;
+        Self::from_bytes(&plaintext)
+    }
+
+    /// Read a version snapshot from the KVER footer marker.
+    pub fn read_version_snapshot(data: &[u8]) -> Option<crate::VersionSnapshot> {
+        let marker = b"KVER";
+        if let Some(pos) = data.windows(4).rposition(|w| w == marker) {
+            let vd = &data[pos + 4..];
+            if vd.len() >= 28 {
+                return Some(crate::VersionSnapshot {
+                    version_id:   u32::from_le_bytes(vd[0..4].try_into().unwrap()),
+                    timestamp:    u64::from_le_bytes(vd[4..12].try_into().unwrap()),
+                    row_count:    u64::from_le_bytes(vd[12..20].try_into().unwrap()),
+                    block_offset: u64::from_le_bytes(vd[20..28].try_into().unwrap()),
+                    prev_version: None,
+                });
+            }
+        }
+        None
+    }
+
+    fn parse_binary(binary_data: &[u8]) -> Result<DataBlock, KoreError> {
         if binary_data.len() < 18 { // 4+2+4+8
             return Err(KoreError::InvalidArgument("file too small".into()));
         }
