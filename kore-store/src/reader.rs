@@ -276,7 +276,15 @@ fn decode_column(raw: &[u8], dtype: DType, comp: Compression, n: usize) -> Resul
             _                   => compress::raw_decode_f64(raw, n),
         }),
         DType::Bool    => ColumnData::Bool(compress::raw_decode_bool(raw, n)),
-        DType::Str     => ColumnData::Str(compress::decode_strs(raw)),
+        DType::Str     => {
+            // If inner compression was Dict, it's strdict-encoded data
+            if comp == Compression::Dict {
+                let (codes, dict) = compress::decode_strdict(raw, n);
+                ColumnData::StrDict { codes, dict }
+            } else {
+                ColumnData::Str(compress::decode_strs(raw))
+            }
+        }
         DType::StrDict => {
             let (codes, dict) = compress::decode_strdict(raw, n);
             ColumnData::StrDict { codes, dict }

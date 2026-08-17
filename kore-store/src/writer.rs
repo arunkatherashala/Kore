@@ -274,6 +274,7 @@ impl KoreWriter {
         
         // ── Column data with inline checksums ──────────────────────────────
         for (final_comp, final_data, _) in encoded_cols {
+            eprintln!("[WRITER] col comp={:?} data_len={}", final_comp, final_data.len());
             w.write_all(&[final_comp as u8])?;
             w.write_all(&(final_data.len() as u64).to_le_bytes())?;
             w.write_all(&final_data)?;
@@ -462,7 +463,7 @@ fn encode_column(data: &ColumnData) -> (Compression, Vec<u8>) {
                     }
                 }
                 if ok {
-                    return (Compression::Raw, compress::encode_strdict(&codes, &dict));
+                    return (Compression::Dict, compress::encode_strdict(&codes, &dict));
                 }
             }
             (Compression::Raw, compress::encode_strs(v))
