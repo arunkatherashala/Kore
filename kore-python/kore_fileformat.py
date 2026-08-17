@@ -657,7 +657,7 @@ def column_stats_from_bytes(data: bytes) -> dict:
     raise NotImplementedError("Phase 3: Stats extraction pending")
 
 
-__version__ = "1.7.24"
+__version__ = "1.7.25"
 __all__ = [
     'DataType',
     'Compression',
@@ -2959,7 +2959,7 @@ class FileMetadata:
     """Custom key-value metadata embedded in a .kore file header.
 
         meta = kore.FileMetadata()
-        meta.set("created_by", "KORE FileFormat v1.7.24")
+        meta.set("created_by", "KORE FileFormat v1.7.25")
         meta.set("source", "sales_pipeline")
         meta.set("schema_version", "2")
         kore.write_with_metadata("data.kore", block, meta)
