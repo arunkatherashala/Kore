@@ -3245,9 +3245,9 @@ def write_hybrid(path, block, preview_rows=5):
         bin_hdr += struct.pack('<BH', dtype_tag, len(nb)) + nb
 
     # Text body (everything after the 24-byte offset line)
-    n_prev = min(preview_rows, nrows)
+    n_prev = nrows if preview_rows is None else min(preview_rows, nrows)
     text_lines = [
-        "# KORE Hybrid Format v2.0",
+        "# KORE Hybrid Format v3.0" if preview_rows is None else "# KORE Hybrid Format v2.0",
         f"# Created: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"# Rows: {nrows:,}  Columns: {ncols}",
         "# Schema:",
@@ -3255,7 +3255,10 @@ def write_hybrid(path, block, preview_rows=5):
     for col in cols:
         dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
         text_lines.append(f"#   {col.name:<20} {dn}")
-    text_lines.append(f"# Preview (first {n_prev} rows):")
+    if preview_rows is None:
+        text_lines.append("# Data (ALL rows):")
+    else:
+        text_lines.append(f"# Preview (first {n_prev} rows):")
     for i in range(n_prev):
         parts = [f"{col.name}={col.data[i]}" for col in cols]
         text_lines.append(f"#   [{' | '.join(parts)}]")
