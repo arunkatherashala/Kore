@@ -1,6 +1,6 @@
 Gem::Specification.new do |spec|
   spec.name          = "kore-fileformat"
-  spec.version       = "1.7.25"
+  spec.version       = "1.7.26"
   spec.authors       = ["Sai Arun Kumar Katherashala"]
   spec.email         = ["arunkatherashala@gmail.com"]
 

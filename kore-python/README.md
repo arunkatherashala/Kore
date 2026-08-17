@@ -1,6 +1,6 @@
 # KORE FileFormat — Python
 
-**Version 1.7.25** | [PyPI](https://pypi.org/project/kore-fileformat/) | [GitHub](https://github.com/arunkatherashala/Kore)
+**Version 1.7.26** | [PyPI](https://pypi.org/project/kore-fileformat/) | [GitHub](https://github.com/arunkatherashala/Kore)
 
 World's fastest human-readable columnar format. `.kore` v3 opens in Notepad AND reads 12x faster than CSV.
 
@@ -95,7 +95,7 @@ kore.DataType.BOOL  # Boolean
 ## Install
 
 ```bash
-pip install kore-fileformat==1.7.25
+pip install kore-fileformat==1.7.26
 ```
 
 Or from source (requires Rust):
