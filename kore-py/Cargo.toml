@@ -1,0 +1,13 @@
+[package]
+name = "kore-py"
+version = "2.0.0"
+edition = "2024"
+
+[lib]
+name = "kore_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module"] }
+kore-core = { path = "../kore-core" }
+kore-store = { path = "../kore-store" }

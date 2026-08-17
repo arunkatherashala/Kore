@@ -134,16 +134,19 @@ pub fn encode_strs(vals: &[Option<String>]) -> Vec<u8> {
 pub fn decode_strs(data: &[u8]) -> Vec<Option<String>> {
     if data.len() < 4 { return vec![]; }
     let n = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
-    if data.len() < 4 + n + (n + 1) * 4 { return vec![]; }
-    let null_flags = &data[4..4 + n];
-    let off_start  = 4 + n;
-    let data_start = off_start + (n + 1) * 4;
+    if n == 0 { return vec![]; }
+    let null_end = 4 + n;
+    let off_end = null_end + (n + 1) * 4;
+    if data.len() < off_end { return vec![None; n]; }
+    let null_flags = &data[4..null_end];
+    let off_start  = null_end;
+    let data_start = off_end;
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         let is_null = null_flags[i] == 1;
         let o1 = u32::from_le_bytes(data[off_start + i*4..off_start + i*4 + 4].try_into().unwrap()) as usize;
         let o2 = u32::from_le_bytes(data[off_start + (i+1)*4..off_start + (i+1)*4 + 4].try_into().unwrap()) as usize;
-        if is_null {
+        if is_null || data_start + o2 > data.len() {
             out.push(None);
         } else {
             let bytes = &data[data_start + o1..data_start + o2];
