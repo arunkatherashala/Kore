@@ -84,6 +84,76 @@ fn read_kore(path: &str) -> PyResult<PyDataBlock> {
     Ok(PyDataBlock { inner })
 }
 
+/// Write .hkore v3 — full human-readable text + binary fast (Rust speed).
+#[pyfunction]
+fn write_hkore(path: &str, block: &PyDataBlock, preview_rows: Option<usize>) -> PyResult<()> {
+    use std::io::{BufWriter, Write};
+    let b = &block.inner;
+    let nrows = b.num_rows;
+    let ncols = b.columns.len();
+    let n_prev = preview_rows.unwrap_or(nrows).min(nrows);
+
+    // Build text section in memory
+    let mut text = Vec::with_capacity(nrows * 30);
+    let version = if preview_rows.is_none() { "v3.0" } else { "v2.0" };
+    writeln!(text, "# KORE Hybrid Format {version}").unwrap();
+    writeln!(text, "# Rows: {nrows}  Columns: {ncols}").unwrap();
+    writeln!(text, "# Schema:").unwrap();
+    for col in &b.columns {
+        let dt = match &col.data {
+            ColumnData::Float64(_) => "F64",
+            ColumnData::Int64(_) => "I64",
+            ColumnData::Bool(_) => "Bool",
+            ColumnData::Str(_) => "STR",
+            ColumnData::StrDict { .. } => "STR",
+        };
+        writeln!(text, "#   {:<20} {dt}", col.name).unwrap();
+    }
+    if preview_rows.is_none() {
+        writeln!(text, "# Data (ALL {nrows} rows):").unwrap();
+    } else {
+        writeln!(text, "# Preview (first {n_prev} rows):").unwrap();
+    }
+    for i in 0..n_prev {
+        write!(text, "#   [").unwrap();
+        for (j, col) in b.columns.iter().enumerate() {
+            if j > 0 { write!(text, " | ").unwrap(); }
+            write!(text, "{}=", col.name).unwrap();
+            match &col.data {
+                ColumnData::Float64(v) => write!(text, "{}", v[i].unwrap_or(f64::NAN)).unwrap(),
+                ColumnData::Int64(v) => write!(text, "{}", v[i].unwrap_or(0)).unwrap(),
+                ColumnData::Bool(v) => write!(text, "{}", v[i].unwrap_or(false)).unwrap(),
+                ColumnData::Str(v) => write!(text, "{}", v[i].as_deref().unwrap_or("NULL")).unwrap(),
+                ColumnData::StrDict { codes, dict } => {
+                    let c = codes[i];
+                    if c == u8::MAX { write!(text, "NULL").unwrap(); }
+                    else { write!(text, "{}", dict.get(c as usize).map(|s| s.as_str()).unwrap_or("?")).unwrap(); }
+                }
+            }
+        }
+        writeln!(text, "]").unwrap();
+    }
+    writeln!(text).unwrap();
+
+    // Build binary section
+    let bin_data = KoreWriter::to_bytes(b);
+
+    // Compute offset and write file
+    let marker = b"\x00KORE_RAW_V2\x00";
+    let offset_line_len = 24; // "KORE2 offset=OOOOOOOOOO\n"
+    let binary_start = offset_line_len + text.len() + marker.len();
+
+    let file = std::fs::File::create(path)
+        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+    let mut w = BufWriter::new(file);
+    write!(w, "KORE2 offset={:010}\n", binary_start).unwrap();
+    w.write_all(&text).unwrap();
+    w.write_all(marker).unwrap();
+    w.write_all(&bin_data).unwrap();
+    w.flush().unwrap();
+    Ok(())
+}
+
 /// Write DataBlock to bytes in memory.
 #[pyfunction]
 fn to_bytes(block: &PyDataBlock) -> Vec<u8> {
@@ -102,6 +172,7 @@ fn from_bytes(data: &[u8]) -> PyResult<PyDataBlock> {
 fn kore_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDataBlock>()?;
     m.add_function(wrap_pyfunction!(write_kore, m)?)?;
+    m.add_function(wrap_pyfunction!(write_hkore, m)?)?;
     m.add_function(wrap_pyfunction!(read_kore, m)?)?;
     m.add_function(wrap_pyfunction!(to_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(from_bytes, m)?)?;

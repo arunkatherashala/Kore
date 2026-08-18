@@ -3245,22 +3245,35 @@ def write_hybrid(path, block, preview_rows=5):
         bin_hdr += struct.pack('<BH', dtype_tag, len(nb)) + nb
 
     # Text body (everything after the 24-byte offset line)
-    n_prev = min(preview_rows, nrows)
-    text_lines = [
-        "# KORE Hybrid Format v2.0",
-        f"# Created: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"# Rows: {nrows:,}  Columns: {ncols}",
-        "# Schema:",
-    ]
+    n_prev = nrows if preview_rows is None else min(preview_rows, nrows)
+
+    # Build text body efficiently
+    import io
+    buf = io.BytesIO()
+    ver = "v3.0" if preview_rows is None else "v2.0"
+    buf.write(f"# KORE Hybrid Format {ver}\n".encode())
+    buf.write(f"# Created: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n".encode())
+    buf.write(f"# Rows: {nrows:,}  Columns: {ncols}\n# Schema:\n".encode())
     for col in cols:
         dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
-        text_lines.append(f"#   {col.name:<20} {dn}")
-    text_lines.append(f"# Preview (first {n_prev} rows):")
-    for i in range(n_prev):
-        parts = [f"{col.name}={col.data[i]}" for col in cols]
-        text_lines.append(f"#   [{' | '.join(parts)}]")
-    text_lines.append("")
-    text_body = '\n'.join(text_lines).encode('utf-8')
+        buf.write(f"#   {col.name:<20} {dn}\n".encode())
+    if preview_rows is None:
+        buf.write(b"# Data (ALL rows):\n")
+        # Fast path: pre-build column string arrays, then zip
+        col_strs = []
+        for col in cols:
+            col_strs.append([str(col.data[i]) for i in range(nrows)])
+        names = [col.name for col in cols]
+        for i in range(nrows):
+            row = '|'.join(f"{names[j]}={col_strs[j][i]}" for j in range(ncols))
+            buf.write(f"# {row}\n".encode())
+    else:
+        buf.write(f"# Preview (first {n_prev} rows):\n".encode())
+        for i in range(n_prev):
+            parts = [f"{col.name}={col.data[i]}" for col in cols]
+            buf.write(f"#   [{' | '.join(parts)}]\n".encode())
+    buf.write(b"\n")
+    text_body = buf.getvalue()
 
     # Compute exact binary start (after offset-line + text + marker)
     binary_start = _HKORE_OFFSET_LINE + len(text_body) + len(_HKORE_RAW_MARKER)
