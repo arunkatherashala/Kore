@@ -1,4 +1,4 @@
-﻿name: KORE v1.0.0 - COMPLETE CI/CD DEPLOYMENT
+name: KORE v1.0.0 - COMPLETE CI/CD DEPLOYMENT
 
 on:
   release:
@@ -135,7 +135,7 @@ jobs:
       - name: Extract version
         id: version
         run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-      - uses: docker/build-push-action@v5
+      - uses: docker/build-push-action@v7
         with:
           context: .
           push: true
