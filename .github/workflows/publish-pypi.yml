@@ -11,26 +11,42 @@ permissions:
 
 jobs:
   build-and-publish:
-    name: Build pure-Python wheel and publish
-    runs-on: ubuntu-latest
+    name: Build maturin wheel (PyO3) and publish
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.12"
+            target: x86_64
+          - os: macos-latest
+            python-version: "3.12"
+            target: x86_64
+          - os: windows-latest
+            python-version: "3.12"
+            target: x86_64
 
     steps:
     - uses: actions/checkout@v4
 
     - uses: actions/setup-python@v5
       with:
-        python-version: "3.12"
+        python-version: ${{ matrix.python-version }}
 
-    - name: Install build tools
-      run: pip install --upgrade build twine
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
 
-    - name: Build wheel + sdist from root pyproject.toml
-      run: python -m build --wheel --sdist
+    - name: Install maturin
+      run: pip install maturin twine
+
+    - name: Build wheels with maturin
+      run: maturin build --release
+      working-directory: ./kore-python
 
     - name: Publish to PyPI
       env:
         TWINE_USERNAME: __token__
         TWINE_PASSWORD: ${{ secrets.PYPI_AUG }}
       run: |
-        twine check dist/*
-        twine upload dist/*
+        twine check kore-python/target/wheels/*
+        twine upload kore-python/target/wheels/*
