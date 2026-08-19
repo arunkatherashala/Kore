@@ -1,6 +1,10 @@
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
-build-backend = "maturin"
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["kore_fileformat"]
+package-dir = {"" = "kore-python"}
 
 [project]
 name = "kore-fileformat"
@@ -31,8 +35,3 @@ Issues = "https://github.com/arunkatherashala/Kore/issues"
 
 [project.scripts]
 kore = "kore_fileformat:_cli_main"
-
-[tool.maturin]
-module-name = "kore_fileformat"
-manifest-path = "kore-python/Cargo.toml"
-features = ["pyo3/extension-module"]
