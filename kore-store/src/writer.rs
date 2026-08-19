@@ -5,6 +5,51 @@ use std::io::{self, Write};
 use kore_core::{ColumnData, DataBlock};
 use crate::{Compression, DType, MAGIC, VERSION, compress};
 
+/// AES-256-GCM encryption marker in kore binary footer.
+const KORE_ENC_MARKER: &[u8] = b"KENC";
+
+/// Encrypt column data with AES-256-GCM using a password-derived key.
+pub fn encrypt_column(data: &[u8], password: &[u8]) -> Result<(Vec<u8>, crate::EncryptionMetadata), String> {
+    use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+    use aes_gcm::Nonce;
+    use sha2::Sha256;
+    use pbkdf2::pbkdf2_hmac;
+
+    let mut salt = [0u8; 16];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut salt);
+    let mut key = [0u8; 32];
+    pbkdf2_hmac::<Sha256>(password, &salt, 100_000, &mut key);
+
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| e.to_string())?;
+    let nonce_bytes = generate_nonce();
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher.encrypt(nonce, data).map_err(|e| e.to_string())?;
+
+    let meta = crate::EncryptionMetadata {
+        encrypted_cols: vec![],
+        algorithm: "AES-256-GCM".into(),
+        kdf: "PBKDF2".into(),
+        salt: salt.to_vec(),
+        nonce: nonce_bytes.to_vec(),
+    };
+    Ok((ciphertext, meta))
+}
+
+/// Decrypt column data with AES-256-GCM.
+pub fn decrypt_column(ciphertext: &[u8], password: &[u8], meta: &crate::EncryptionMetadata) -> Result<Vec<u8>, String> {
+    use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+    use aes_gcm::Nonce;
+    use sha2::Sha256;
+    use pbkdf2::pbkdf2_hmac;
+
+    let mut key = [0u8; 32];
+    pbkdf2_hmac::<Sha256>(password, &meta.salt, 100_000, &mut key);
+
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| e.to_string())?;
+    let nonce = Nonce::from_slice(&meta.nonce);
+    cipher.decrypt(nonce, ciphertext).map_err(|e| e.to_string())
+}
+
 const READABLE_TRAILER_BEGIN: &str = "\nKORE-READABLE-BEGIN\n";
 const READABLE_TRAILER_END: &str = "KORE-READABLE-END\n";
 const READABLE_FOOTER_PREFIX: &str = "KORE-READABLE-FOOTER trailer_len=";
@@ -136,6 +181,35 @@ impl KoreWriter {
     pub fn to_bytes(block: &DataBlock) -> Vec<u8> {
         let mut buf = Vec::new();
         KoreWriter::write_to(&mut buf, block).expect("in-memory write never fails");
+        buf
+    }
+
+    /// Serialize with AES-256-GCM encryption on all column data.
+    pub fn to_bytes_encrypted(block: &DataBlock, password: &[u8]) -> Result<Vec<u8>, String> {
+        let plain = Self::to_bytes(block);
+        let (ciphertext, meta) = encrypt_column(&plain, password)?;
+        let mut out = Vec::new();
+        out.extend_from_slice(KORE_ENC_MARKER);
+        let salt_len = meta.salt.len() as u16;
+        let nonce_len = meta.nonce.len() as u16;
+        out.extend_from_slice(&salt_len.to_le_bytes());
+        out.extend_from_slice(&meta.salt);
+        out.extend_from_slice(&nonce_len.to_le_bytes());
+        out.extend_from_slice(&meta.nonce);
+        out.extend_from_slice(&ciphertext);
+        Ok(out)
+    }
+
+    /// Serialize with MVCC version snapshot appended to footer.
+    pub fn to_bytes_versioned(block: &DataBlock, version_id: u32) -> Vec<u8> {
+        let mut buf = Self::to_bytes(block);
+        let snapshot = create_version_snapshot(version_id, block.num_rows as u64, 0);
+        // Append version snapshot marker + data
+        buf.extend_from_slice(b"KVER");
+        buf.extend_from_slice(&snapshot.version_id.to_le_bytes());
+        buf.extend_from_slice(&snapshot.timestamp.to_le_bytes());
+        buf.extend_from_slice(&snapshot.row_count.to_le_bytes());
+        buf.extend_from_slice(&snapshot.block_offset.to_le_bytes());
         buf
     }
 
@@ -388,7 +462,7 @@ fn encode_column(data: &ColumnData) -> (Compression, Vec<u8>) {
                     }
                 }
                 if ok {
-                    return (Compression::Raw, compress::encode_strdict(&codes, &dict));
+                    return (Compression::Dict, compress::encode_strdict(&codes, &dict));
                 }
             }
             (Compression::Raw, compress::encode_strs(v))

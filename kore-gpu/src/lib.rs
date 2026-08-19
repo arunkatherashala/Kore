@@ -1,12 +1,15 @@
-//! kore-gpu — Layer 64: GPU compute acceleration
+//! kore-gpu — Layer 64: GPU compute acceleration (EXPERIMENTAL)
+//!
+//! Status: CPU SIMD fallback is fully functional. GPU backends (CUDA/wgpu)
+//! require hardware and will be wired when CUDA/wgpu targets are available.
 //!
 //! Dispatches GROUP BY, sort, filter, and aggregation to GPU.
 //! Falls back to CPU SIMD when no GPU is available.
 //!
 //! Backend selection (compile-time features):
 //!   default  → CPU SIMD (always works, no special hardware)
-//!   wgpu     → WebGPU cross-platform (NVIDIA/AMD/Apple/Intel GPU)
-//!   cuda     → NVIDIA CUDA (via cudarc, requires CUDA toolkit)
+//!   wgpu     → WebGPU cross-platform (NVIDIA/AMD/Apple/Intel GPU) [planned]
+//!   cuda     → NVIDIA CUDA (via cudarc, requires CUDA toolkit) [planned]
 //!
 //! Expected speedups vs CPU:
 //!   GROUP BY  (low cardinality): 50-200× (massively parallel hash table)

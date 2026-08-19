@@ -108,6 +108,27 @@ pub unsafe extern "C" fn kore_block_add_i64(
     0
 }
 
+/// Add a string column. `data` is an array of C string pointers (NULL = null).
+#[no_mangle]
+pub unsafe extern "C" fn kore_block_add_str(
+    ptr:  *mut KoreBlock,
+    name: *const c_char,
+    data: *const *const c_char,
+    len:  u64,
+) -> c_int {
+    if ptr.is_null() || name.is_null() || data.is_null() { return -1; }
+    let name = match CStr::from_ptr(name).to_str() { Ok(s) => s.to_string(), Err(_) => return -1 };
+    let ptrs = std::slice::from_raw_parts(data, len as usize);
+    let vals: Vec<Option<String>> = ptrs.iter().map(|&p| {
+        if p.is_null() { None }
+        else { CStr::from_ptr(p).to_str().ok().map(|s| s.to_string()) }
+    }).collect();
+    let num_rows = vals.len();
+    (*ptr).inner.columns.push(Column { name, data: ColumnData::Str(vals) });
+    (*ptr).inner.num_rows = num_rows;
+    0
+}
+
 /// Read f64 column values into a caller-provided buffer.  Returns number of values written.
 #[no_mangle]
 pub unsafe extern "C" fn kore_block_get_f64(
@@ -132,6 +153,31 @@ pub unsafe extern "C" fn kore_block_get_f64(
             n as i64
         }
         _ => { set_error("column is not f64"); -1 }
+    }
+}
+
+/// Read a string column value at index. Returns a C string (caller must free with kore_free_string).
+#[no_mangle]
+pub unsafe extern "C" fn kore_block_get_str(
+    ptr: *const KoreBlock,
+    col: *const c_char,
+    idx: u64,
+) -> *mut c_char {
+    if ptr.is_null() || col.is_null() { return std::ptr::null_mut(); }
+    let col_name = match CStr::from_ptr(col).to_str() { Ok(s) => s, Err(_) => return std::ptr::null_mut() };
+    let block = &(*ptr).inner;
+    let column = match block.columns.iter().find(|c| c.name == col_name) {
+        Some(c) => c, None => return std::ptr::null_mut(),
+    };
+    let i = idx as usize;
+    let s = match &column.data {
+        ColumnData::Str(v) => v.get(i).and_then(|o| o.as_ref()),
+        ColumnData::StrDict { codes, dict } => codes.get(i).and_then(|&c| if c == u8::MAX { None } else { dict.get(c as usize) }),
+        _ => None,
+    };
+    match s {
+        Some(val) => CString::new(val.as_str()).map(|cs| cs.into_raw()).unwrap_or(std::ptr::null_mut()),
+        None => std::ptr::null_mut(),
     }
 }
 

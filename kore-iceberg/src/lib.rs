@@ -319,9 +319,20 @@ impl IcebergTable {
     fn read_at_snapshot(&self, snapshot_id: Option<i64>) -> Result<DataBlock, KoreError> {
         if self.files.is_empty() { return Ok(DataBlock::empty()); }
 
-        // Filter files based on snapshot (simplified: use all current files)
+        // Determine which snapshots contribute files up to the target
+        let target_seq = match snapshot_id {
+            Some(sid) => self.metadata.snapshots.iter()
+                .find(|s| s.snapshot_id == sid)
+                .map(|s| s.sequence_number)
+                .unwrap_or(i64::MAX),
+            None => i64::MAX,
+        };
+
+        // Only read files written at or before the target snapshot sequence
         let blocks: Vec<DataBlock> = self.files.iter()
-            .map(|f| {
+            .enumerate()
+            .filter(|(i, _)| (*i as i64 + 1) <= target_seq)
+            .map(|(_, f)| {
                 let path = self.root.join(&f.file_path);
                 let bytes = std::fs::read(&path)
                     .map_err(|e| KoreError::InvalidArgument(e.to_string()))?;
@@ -346,11 +357,27 @@ impl IcebergTable {
 
     /// Return only the data files added since `since_snapshot_id`.
     pub fn incremental_read(&self, since_snapshot_id: Option<i64>) -> Result<DataBlock, KoreError> {
-        // In full implementation: compare manifests between snapshots
-        // Simplified: return all data if since is None, empty if up to date
         match since_snapshot_id {
             None => self.read(),
-            Some(_) => Ok(DataBlock::empty()),  // placeholder
+            Some(sid) => {
+                let since_seq = self.metadata.snapshots.iter()
+                    .find(|s| s.snapshot_id == sid)
+                    .map(|s| s.sequence_number)
+                    .unwrap_or(0);
+                // Read only files added after the given snapshot
+                let blocks: Vec<DataBlock> = self.files.iter()
+                    .enumerate()
+                    .filter(|(i, _)| (*i as i64 + 1) > since_seq)
+                    .map(|(_, f)| {
+                        let path = self.root.join(&f.file_path);
+                        let bytes = std::fs::read(&path)
+                            .map_err(|e| KoreError::InvalidArgument(e.to_string()))?;
+                        kore_store::KoreReader::from_bytes(&bytes)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if blocks.is_empty() { return Ok(DataBlock::empty()); }
+                DataBlock::concat(blocks)
+            }
         }
     }
 

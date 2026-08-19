@@ -70,13 +70,12 @@ jobs:
       - name: Build workspace
         run: cargo build --release --workspace
 
-      - name: Run Rust unit tests (kore-store + kore-sql + kore-ffi)
+      - name: Run Rust unit tests (core crates)
         run: |
-          cargo test --release -p kore-store -p kore-sql -p kore-ffi
+          cargo test --release -p kore-store -p kore-sql -p kore-ffi -p kore-iceberg -p kore-delta -p kore-prune -p kore-compress
 
       - name: Run all workspace tests
         run: cargo test --release --workspace
-        continue-on-error: true   # other crates may have test infrastructure gaps
 
   # ════════════════════════════════════════════════════════════════════════════
   # JOB 3 — BENCHMARK (informational — tracks performance, non-blocking)

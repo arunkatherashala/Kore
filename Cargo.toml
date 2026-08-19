@@ -1,4 +1,5 @@
 [workspace]
+exclude = ["kore-py"]
 members = [
     "kore-standalone","kore-core",
     "kore-join",

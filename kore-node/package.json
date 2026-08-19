@@ -1,6 +1,6 @@
 {
   "name": "kore-fileformat",
-  "version": "1.7.15",
+  "version": "1.7.29",
   "description": "KORE Binary Format — high-performance columnar file format with 11 ACID features, 8-language FFI",
   "main": "kore_ffi.js",
   "types": "kore_fileformat.ts",

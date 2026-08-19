@@ -657,7 +657,7 @@ def column_stats_from_bytes(data: bytes) -> dict:
     raise NotImplementedError("Phase 3: Stats extraction pending")
 
 
-__version__ = "1.7.15"
+__version__ = "1.7.29"
 __all__ = [
     'DataType',
     'Compression',
@@ -1220,7 +1220,7 @@ class BloomFilter:
         )
 
     def _hash(self, value: int, seed: int) -> int:
-        h = (value ^ (seed * 0x517CC1.7.15220A95)) & 0xFFFFFFFFFFFFFFFF
+        h = (value ^ (seed * 0x517CC1B727220A95)) & 0xFFFFFFFFFFFFFFFF
         h ^= h >> 33; h = (h * 0xff51afd7ed558ccd) & 0xFFFFFFFFFFFFFFFF
         h ^= h >> 33; h = (h * 0xc4ceb9fe1a85ec53) & 0xFFFFFFFFFFFFFFFF
         return h ^ (h >> 33)
@@ -2959,7 +2959,7 @@ class FileMetadata:
     """Custom key-value metadata embedded in a .kore file header.
 
         meta = kore.FileMetadata()
-        meta.set("created_by", "KORE FileFormat v1.7.15")
+        meta.set("created_by", "KORE FileFormat v1.7.29")
         meta.set("source", "sales_pipeline")
         meta.set("schema_version", "2")
         kore.write_with_metadata("data.kore", block, meta)
@@ -3081,6 +3081,106 @@ def parallel_read(paths: list, max_workers: int = 4) -> 'DataBlock':
     return merged
 
 
+
+
+# -- Direct .kore binary write/read (no CSV, no FFI overhead) ------------------
+
+def write_kore(path, block, compression='zstd'):
+    """Write .kore binary file — supports zstd/zlib/none compression."""
+    import struct, array as _arr
+    def _compress(data, comp):
+        if comp == 'zstd':
+            try:
+                import zstandard as zstd
+                return 6, zstd.ZstdCompressor(level=3).compress(data)
+            except ImportError:
+                pass
+        if comp == 'zlib':
+            import zlib
+            return 5, zlib.compress(data, 6)
+        return 0, data  # Raw
+    with open(str(path), 'wb') as f:
+        ncols = block.num_columns
+        nrows = block.num_rows
+        f.write(b'KORE')
+        f.write(struct.pack('<HIQ', 2, ncols, nrows))
+        for col in block.columns:
+            dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
+            nb = col.name.encode('utf-8')
+            f.write(struct.pack('<H', len(nb)))
+            f.write(nb)
+            dt = 2 if dn in ('F64','FLOAT64','2') else (4 if dn in ('STR','STRING','3') else 1)
+            f.write(struct.pack('<B', dt))
+        for col in block.columns:
+            dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
+            if dn in ('STR','STRING','3'):
+                buf = bytearray()
+                for s in col.data:
+                    sb = str(s).encode('utf-8')
+                    buf += struct.pack('<I', len(sb)) + sb
+                raw = bytes(buf)
+            else:
+                tc = 'd' if dn in ('F64','FLOAT64','2') else 'q'
+                if isinstance(col.data, _arr.array):
+                    raw = col.data.tobytes()
+                else:
+                    raw = _arr.array(tc, col.data).tobytes()
+            comp_id, compressed = _compress(raw, compression)
+            f.write(struct.pack('<B', comp_id))
+            f.write(struct.pack('<Q', len(raw)))      # original size
+            f.write(struct.pack('<Q', len(compressed))) # compressed size
+            f.write(compressed)
+
+
+def read_kore(path, columns=None):
+    """Read .kore binary file with zstd/zlib decompression support."""
+    import struct, array as _arr
+    def _decompress(data, comp_id, orig_len):
+        if comp_id == 6:
+            import zstandard as zstd
+            return zstd.ZstdDecompressor().decompress(data, max_output_size=orig_len)
+        if comp_id == 5:
+            import zlib
+            return zlib.decompress(data)
+        return data
+    want = set(columns) if columns else None
+    with open(str(path), 'rb') as f:
+        magic = f.read(4)
+        if magic != b'KORE':
+            raise ValueError('Not a .kore file')
+        ver, ncols, nrows = struct.unpack('<HIQ', f.read(14))
+        schema = []
+        for _ in range(ncols):
+            nl = struct.unpack('<H', f.read(2))[0]
+            name = f.read(nl).decode('utf-8')
+            dtype = struct.unpack('<B', f.read(1))[0]
+            schema.append((name, dtype))
+        block = DataBlock()
+        for name, dtype in schema:
+            skip = want is not None and name not in want
+            comp_id = struct.unpack('<B', f.read(1))[0]
+            orig_len = struct.unpack('<Q', f.read(8))[0]
+            comp_len = struct.unpack('<Q', f.read(8))[0]
+            if skip:
+                f.seek(comp_len, 1)
+                continue
+            compressed = f.read(comp_len)
+            raw = _decompress(compressed, comp_id, orig_len)
+            if dtype == 4:
+                strings, pos = [], 0
+                for _ in range(nrows):
+                    sl = struct.unpack_from('<I', raw, pos)[0]; pos += 4
+                    strings.append(raw[pos:pos+sl].decode('utf-8')); pos += sl
+                block.add_column(name, DataType.STR, strings)
+            else:
+                tc = 'd' if dtype == 2 else 'q'
+                a = _arr.array(tc)
+                a.frombytes(raw)
+                dt = DataType.F64 if dtype == 2 else DataType.I64
+                block.add_column(name, dt, a)
+        block.num_rows = nrows
+        return block
+
 # -- HKORE: World-First Hybrid Format (Human Readable + Binary Fast) -----------
 
 _HKORE_BINARY_MARKER = b'\x00KORE_BINARY_START\x00'   # v1 legacy (Rust FFI)
@@ -3108,8 +3208,30 @@ def write_hybrid(path, block, preview_rows=5):
     def _col_bytes(col):
         dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
         d = col.data
+        if dn in ('LIST_I64', '4', 'LIST_F64', '5', 'LIST_STR', '6'):
+            # Nested list: write count + elements per row
+            buf = bytearray()
+            for row in d:
+                items = row if row is not None else []
+                buf += struct.pack('<I', len(items))
+                for item in items:
+                    if dn in ('LIST_STR', '6'):
+                        sb = str(item).encode('utf-8')
+                        buf += struct.pack('<I', len(sb)) + sb
+                    elif dn in ('LIST_F64', '5'):
+                        buf += struct.pack('<d', float(item))
+                    else:
+                        buf += struct.pack('<q', int(item))
+            return bytes(buf)
+        if dn in ('STR', 'STRING', '3'):
+            # length-prefixed UTF-8 strings
+            buf = bytearray()
+            for s in d:
+                sb = str(s).encode('utf-8')
+                buf += struct.pack('<I', len(sb)) + sb
+            return bytes(buf)
         if isinstance(d, _arr.array):
-            return d.tobytes()           # already array � memcpy only
+            return d.tobytes()
         return _arr.array('d' if dn in ('F64','FLOAT64','2') else 'q', d).tobytes()
 
     col_bufs = [_col_bytes(col) for col in cols]
@@ -3119,25 +3241,39 @@ def write_hybrid(path, block, preview_rows=5):
     for col in cols:
         dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
         nb = col.name.encode('utf-8')
-        bin_hdr += struct.pack('<BH', 0 if dn in ('F64','FLOAT64','2') else 1, len(nb)) + nb
+        dtype_tag = 3 if dn in ('LIST_I64','4') else (4 if dn in ('LIST_F64','5') else (5 if dn in ('LIST_STR','6') else (2 if dn in ('STR','STRING','3') else (0 if dn in ('F64','FLOAT64','2') else 1))))
+        bin_hdr += struct.pack('<BH', dtype_tag, len(nb)) + nb
 
     # Text body (everything after the 24-byte offset line)
-    n_prev = min(preview_rows, nrows)
-    text_lines = [
-        "# KORE Hybrid Format v2.0",
-        f"# Created: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"# Rows: {nrows:,}  Columns: {ncols}",
-        "# Schema:",
-    ]
+    n_prev = nrows if preview_rows is None else min(preview_rows, nrows)
+
+    # Build text body efficiently
+    import io
+    buf = io.BytesIO()
+    ver = "v3.0" if preview_rows is None else "v2.0"
+    buf.write(f"# KORE Hybrid Format {ver}\n".encode())
+    buf.write(f"# Created: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n".encode())
+    buf.write(f"# Rows: {nrows:,}  Columns: {ncols}\n# Schema:\n".encode())
     for col in cols:
         dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
-        text_lines.append(f"#   {col.name:<20} {dn}")
-    text_lines.append(f"# Preview (first {n_prev} rows):")
-    for i in range(n_prev):
-        parts = [f"{col.name}={col.data[i]}" for col in cols]
-        text_lines.append(f"#   [{' | '.join(parts)}]")
-    text_lines.append("")
-    text_body = '\n'.join(text_lines).encode('utf-8')
+        buf.write(f"#   {col.name:<20} {dn}\n".encode())
+    if preview_rows is None:
+        buf.write(b"# Data (ALL rows):\n")
+        # Fast path: pre-build column string arrays, then zip
+        col_strs = []
+        for col in cols:
+            col_strs.append([str(col.data[i]) for i in range(nrows)])
+        names = [col.name for col in cols]
+        for i in range(nrows):
+            row = '|'.join(f"{names[j]}={col_strs[j][i]}" for j in range(ncols))
+            buf.write(f"# {row}\n".encode())
+    else:
+        buf.write(f"# Preview (first {n_prev} rows):\n".encode())
+        for i in range(n_prev):
+            parts = [f"{col.name}={col.data[i]}" for col in cols]
+            buf.write(f"#   [{' | '.join(parts)}]\n".encode())
+    buf.write(b"\n")
+    text_body = buf.getvalue()
 
     # Compute exact binary start (after offset-line + text + marker)
     binary_start = _HKORE_OFFSET_LINE + len(text_body) + len(_HKORE_RAW_MARKER)
@@ -3153,7 +3289,7 @@ def write_hybrid(path, block, preview_rows=5):
             f.write(cb)
 
 
-def read_hybrid(path):
+def read_hybrid(path, columns=None):
     """Read .hkore � 29 ns/row via O(1) seek + array.fromfile (no intermediate buffer)."""
     import array as _arr, struct
 
@@ -3168,13 +3304,56 @@ def read_hybrid(path):
             cols_meta = []
             for _ in range(ncols):
                 dtype_byte, name_len = struct.unpack('<BH', f.read(3))
-                cols_meta.append((f.read(name_len).decode('utf-8'), dtype_byte == 0))
-            # array.fromfile: reads directly into array buffer � no intermediate bytes
+                cols_meta.append((f.read(name_len).decode('utf-8'), dtype_byte))
+            want = set(columns) if columns else None
             block = DataBlock()
-            for name, is_f64 in cols_meta:
-                a = _arr.array('d' if is_f64 else 'q')
-                a.fromfile(f, nrows)
-                block.add_column(name, DataType.F64 if is_f64 else DataType.I64, a)
+            for name, dtype_tag in cols_meta:
+                skip = want is not None and name not in want
+                if dtype_tag in (3, 4, 5):
+                    # LIST: read count + elements per row
+                    lists = []
+                    for _ in range(nrows):
+                        count = struct.unpack('<I', f.read(4))[0]
+                        if skip:
+                            if dtype_tag == 5:
+                                for __ in range(count):
+                                    slen = struct.unpack('<I', f.read(4))[0]
+                                    f.seek(slen, 1)
+                            else:
+                                f.seek(count * 8, 1)
+                        else:
+                            items = []
+                            for __ in range(count):
+                                if dtype_tag == 5:
+                                    slen = struct.unpack('<I', f.read(4))[0]
+                                    items.append(f.read(slen).decode('utf-8'))
+                                elif dtype_tag == 4:
+                                    items.append(struct.unpack('<d', f.read(8))[0])
+                                else:
+                                    items.append(struct.unpack('<q', f.read(8))[0])
+                            lists.append(items)
+                    if not skip:
+                        dt = DataType.I64  # LIST stored as nested
+                        block.add_column(name, dt, lists)
+                elif dtype_tag == 2:
+                    strings = []
+                    for _ in range(nrows):
+                        slen = struct.unpack('<I', f.read(4))[0]
+                        if skip:
+                            f.seek(slen, 1)
+                        else:
+                            strings.append(f.read(slen).decode('utf-8'))
+                    if not skip:
+                        block.add_column(name, DataType.STR, strings)
+                else:
+                    nbytes = nrows * 8
+                    if skip:
+                        f.seek(nbytes, 1)
+                    else:
+                        is_f64 = dtype_tag == 0
+                        a = _arr.array('d' if is_f64 else 'q')
+                        a.fromfile(f, nrows)
+                        block.add_column(name, DataType.F64 if is_f64 else DataType.I64, a)
             block.num_rows = nrows
             return block
 
