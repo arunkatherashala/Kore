@@ -11,36 +11,21 @@ permissions:
 
 jobs:
   build-and-publish:
-    name: Build maturin wheel (PyO3) and publish
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            python-version: "3.12"
-            target: x86_64
-          - os: macos-latest
-            python-version: "3.12"
-            target: x86_64
-          - os: windows-latest
-            python-version: "3.12"
-            target: x86_64
+    name: Build and publish Python wheel
+    runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
 
     - uses: actions/setup-python@v5
       with:
-        python-version: ${{ matrix.python-version }}
+        python-version: "3.12"
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+    - name: Install build tools
+      run: pip install --upgrade build twine
 
-    - name: Install maturin
-      run: pip install maturin twine
-
-    - name: Build wheels with maturin
-      run: maturin build --release --out dist
+    - name: Build wheel + sdist
+      run: python -m build --wheel --sdist
 
     - name: Publish to PyPI
       env:
