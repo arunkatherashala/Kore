@@ -40,13 +40,12 @@ jobs:
       run: pip install maturin twine
 
     - name: Build wheels with maturin
-      run: maturin build --release
-      working-directory: ./kore-python
+      run: maturin build --release --out dist
 
     - name: Publish to PyPI
       env:
         TWINE_USERNAME: __token__
         TWINE_PASSWORD: ${{ secrets.PYPI_AUG }}
       run: |
-        twine check kore-python/target/wheels/*
-        twine upload kore-python/target/wheels/*
+        twine check dist/*
+        twine upload dist/*
