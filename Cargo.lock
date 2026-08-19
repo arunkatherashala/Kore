@@ -146,9 +146,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-schema"
-version = "59.0.0"
+version = "59.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80b3e786a0dd9103acd583a6fb486dbf2f3268466cc0bd571dcf34cef231c1f1"
+checksum = "e6fed2ca0d1eade57e811cbe73b98ad50cc08a1183e13b2d2aa43a7df593f40e"
 
 [[package]]
 name = "arrow-select"
@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "kore_fileformat"
-version = "1.7.24"
+version = "1.7.26"
 
 [[package]]
 name = "libc"
