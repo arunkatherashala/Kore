@@ -5,8 +5,8 @@ build-backend = "maturin"
 [project]
 name = "kore-fileformat"
 version = "1.8.0"
-description = "KORE Binary Format - High-performance columnar compression with 5-8x compression ratio"
-readme = "kore-python/README.md"
+description = "KORE Binary Format - High-performance columnar compression (PyO3 native module)"
+readme = "../README.md"
 requires-python = ">=3.9"
 authors = [
   { name = "Sai Arun Kumar Ktherashala", email = "arunkatherashala@gmail.com" }
@@ -29,10 +29,6 @@ Homepage = "https://github.com/arunkatherashala/Kore"
 Repository = "https://github.com/arunkatherashala/Kore"
 Issues = "https://github.com/arunkatherashala/Kore/issues"
 
-[project.scripts]
-kore = "kore_fileformat:_cli_main"
-
 [tool.maturin]
 module-name = "kore_fileformat"
-manifest-path = "kore-python/Cargo.toml"
 features = ["pyo3/extension-module"]
