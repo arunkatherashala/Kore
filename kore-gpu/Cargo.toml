@@ -9,7 +9,7 @@ edition = "2021"
 #   wgpu     → WebGPU cross-platform (any GPU: NVIDIA/AMD/Apple/Intel)
 [features]
 default = []
-wgpu    = ["dep:wgpu"]
+wgpu    = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 cuda    = []  # reserved — wire up cudarc here
 
 [dependencies]
@@ -18,3 +18,5 @@ rayon     = { workspace = true }
 serde     = { workspace = true }
 serde_json = { workspace = true }
 wgpu      = { version = "0.20", optional = true }
+pollster  = { version = "0.3", optional = true }
+bytemuck  = { version = "1", optional = true, features = ["derive"] }

@@ -34,18 +34,26 @@ pub struct GpuDevice {
 
 /// Auto-detect the best available GPU backend.
 pub fn detect_gpu() -> GpuDevice {
-    // Try CUDA first (fastest for data processing)
+    // Try CUDA first (fastest for data processing). CUDA kernels are not wired
+    // yet, so this feature currently falls through to WebGPU or CPU.
     #[cfg(feature = "cuda")]
     {
         // cudarc device discovery would go here
         // if let Ok(device) = cudarc::driver::CudaDevice::new(0) { ... }
     }
 
-    // Try wgpu (cross-platform GPU)
+    // Try WebGPU for Intel/AMD/Apple/NVIDIA devices.
     #[cfg(feature = "wgpu")]
     {
-        // wgpu adapter enumeration would go here
-        // if let Some(adapter) = find_wgpu_adapter() { ... }
+        let instance = wgpu::Instance::default();
+        if let Some(adapter) = instance.enumerate_adapters(wgpu::Backends::all()).first() {
+            let info = adapter.get_info();
+            return GpuDevice {
+                backend: GpuBackend::Wgpu,
+                name: format!("{} ({:?})", info.name, info.backend),
+                vram_mb: adapter.limits().max_buffer_size / (1024 * 1024),
+            };
+        }
     }
 
     // CPU SIMD fallback
@@ -83,7 +91,221 @@ pub fn gpu_filter_sum(
     device: &GpuDevice,
 ) -> f64 {
     match device.backend {
-        _ => cpu_filter_sum_simd(block, filter_col, threshold, agg_col),
+        GpuBackend::Wgpu => {
+            #[cfg(feature = "wgpu")]
+            if let Some(sum) = wgpu_filter_sum(block, filter_col, threshold, agg_col) {
+                return sum;
+            }
+            cpu_filter_sum_simd(block, filter_col, threshold, agg_col)
+        }
+        GpuBackend::CpuSimd | GpuBackend::Cuda => {
+            cpu_filter_sum_simd(block, filter_col, threshold, agg_col)
+        }
+    }
+}
+
+#[cfg(feature = "wgpu")]
+fn wgpu_filter_sum(
+    block: &DataBlock,
+    filter_col: &str,
+    threshold: f64,
+    agg_col: &str,
+) -> Option<f64> {
+    use bytemuck::{Pod, Zeroable};
+    use wgpu::util::DeviceExt;
+
+    let filter = block.columns.iter().find(|c| c.name == filter_col)?;
+    let aggregate = block.columns.iter().find(|c| c.name == agg_col)?;
+    let (ColumnData::Float64(filter), ColumnData::Float64(aggregate)) =
+        (&filter.data, &aggregate.data) else {
+        return None;
+    };
+    let count = block.num_rows.min(filter.len()).min(aggregate.len());
+    if count == 0 {
+        return Some(0.0);
+    }
+
+    let filters: Vec<f32> = filter.iter()
+        .take(count)
+        .map(|value| value.unwrap_or(f64::NAN) as f32)
+        .collect();
+    let values: Vec<f32> = aggregate.iter()
+        .take(count)
+        .map(|value| value.unwrap_or(0.0) as f32)
+        .collect();
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Pod, Zeroable)]
+    struct Params {
+        threshold: f32,
+        count: u32,
+    }
+
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    }))?;
+    let (device, queue) = pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            label: Some("kore-filter-sum"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults(),
+        },
+        None,
+    )).ok()?;
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("kore-filter-sum-shader"),
+        source: wgpu::ShaderSource::Wgsl(
+            r#"
+struct Params { threshold: f32, count: u32 };
+@group(0) @binding(0) var<storage, read> filters: array<f32>;
+@group(0) @binding(1) var<storage, read> values: array<f32>;
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let index = id.x;
+    if (index < params.count) {
+        output[index] = select(0.0, values[index], filters[index] < params.threshold);
+    }
+}
+"#.into(),
+        ),
+    });
+
+    let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+    let filter_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("kore-filter-input"),
+        contents: bytemuck::cast_slice(&filters),
+        usage,
+    });
+    let value_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("kore-value-input"),
+        contents: bytemuck::cast_slice(&values),
+        usage,
+    });
+    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("kore-filter-output"),
+        size: (count * std::mem::size_of::<f32>()) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("kore-filter-staging"),
+        size: (count * std::mem::size_of::<f32>()) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("kore-filter-params"),
+        contents: bytemuck::bytes_of(&Params {
+            threshold: threshold as f32,
+            count: count as u32,
+        }),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("kore-filter-bind-layout"),
+        entries: &[
+            storage_entry(0, wgpu::ShaderStages::COMPUTE, true),  // filter input: read-only
+            storage_entry(1, wgpu::ShaderStages::COMPUTE, true),  // value input: read-only
+            storage_entry(2, wgpu::ShaderStages::COMPUTE, false), // output: read-write
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("kore-filter-bind-group"),
+        layout: &bind_group_layout,
+        entries: &[
+            buffer_entry(0, &filter_buffer),
+            buffer_entry(1, &value_buffer),
+            buffer_entry(2, &output_buffer),
+            buffer_entry(3, &params_buffer),
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("kore-filter-pipeline-layout"),
+        bind_group_layouts: &[&bind_group_layout],
+        push_constant_ranges: &[],
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("kore-filter-pipeline"),
+        layout: Some(&pipeline_layout),
+        module: &shader,
+        entry_point: "main",
+        compilation_options: Default::default(),
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("kore-filter-encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("kore-filter-pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(((count as u32) + 63) / 64, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(
+        &output_buffer,
+        0,
+        &staging_buffer,
+        0,
+        (count * std::mem::size_of::<f32>()) as u64,
+    );
+    queue.submit(std::iter::once(encoder.finish()));
+
+    let slice = staging_buffer.slice(..);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+    let _ = device.poll(wgpu::Maintain::Wait);
+    receiver.recv().ok()?.ok()?;
+    let mapped = slice.get_mapped_range();
+    let result = bytemuck::cast_slice::<u8, f32>(&mapped)
+        .iter()
+        .map(|value| *value as f64)
+        .sum();
+    drop(mapped);
+    staging_buffer.unmap();
+    Some(result)
+}
+
+#[cfg(feature = "wgpu")]
+fn storage_entry(binding: u32, visibility: wgpu::ShaderStages, read_only: bool) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+#[cfg(feature = "wgpu")]
+fn buffer_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+    wgpu::BindGroupEntry {
+        binding,
+        resource: buffer.as_entire_binding(),
     }
 }
 
@@ -152,6 +374,9 @@ fn cpu_group_by_simd(block: &DataBlock, group_cols: &[String], agg_col: &str) ->
                 None => 0.0,
             };
             let e = local.entry(k).or_insert((0.0, 0, row));
+            if e.1 == 0 {
+                order.push(k);
+            }
             e.0 += agg_val; e.1 += 1;
         }
         order.into_iter().map(|k| local.remove(&k).map(|(s, c, r)| (k, s, c, r)).unwrap_or((k, 0.0, 0, 0))).collect()
@@ -275,5 +500,36 @@ mod tests {
         // discount < 0.05 means discount in {0.00, 0.01, 0.02, 0.03, 0.04} = 50% of rows
         assert!(sum > 0.0, "Expected positive sum, got {sum}");
         println!("GPU filter_sum result: {sum}");
+    }
+
+    #[test]
+    fn test_cpu_group_by_returns_groups() {
+        let block = DataBlock {
+            num_rows: 4,
+            columns: vec![
+                Column {
+                    name: "category".into(),
+                    data: ColumnData::Str(vec![
+                        Some("a".into()), Some("b".into()),
+                        Some("a".into()), Some("b".into()),
+                    ]),
+                },
+                Column {
+                    name: "value".into(),
+                    data: ColumnData::Float64(vec![
+                        Some(1.0), Some(2.0), Some(3.0), Some(4.0),
+                    ]),
+                },
+            ],
+        };
+        let result = GpuPipeline::new().group_by_sum(
+            &block,
+            &["category".into()],
+            "value",
+        );
+
+        assert_eq!(result.num_rows, 2);
+        assert_eq!(result.columns[0].data.get_value(0), kore_core::Value::Float(4.0));
+        assert_eq!(result.columns[0].data.get_value(1), kore_core::Value::Float(6.0));
     }
 }
