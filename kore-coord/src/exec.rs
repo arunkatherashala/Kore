@@ -65,7 +65,7 @@ impl Coordinator {
         small_table:      &str,
         small_data:       DataBlock,
     ) -> Result<DataBlock, kore_core::KoreError> {
-        let workers = self.workers.lock().unwrap().clone();
+        let workers = self.workers.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if workers.is_empty() {
             return Err(kore_core::KoreError::InvalidArgument(
                 "no workers registered".into(),
@@ -165,7 +165,7 @@ impl Coordinator {
         data:       DataBlock,
         keys:       &[String],
     ) -> Result<DataBlock, kore_core::KoreError> {
-        let workers = self.workers.lock().unwrap().clone();
+        let workers = self.workers.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if workers.is_empty() {
             return Err(kore_core::KoreError::InvalidArgument(
                 "no workers registered".into(),
@@ -252,7 +252,7 @@ impl Coordinator {
         data: DataBlock,
         reduce_sql: Option<&str>,
     ) -> Result<DataBlock, kore_core::KoreError> {
-        let workers = self.workers.lock().unwrap().clone();
+        let workers = self.workers.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if workers.is_empty() {
             return Err(kore_core::KoreError::InvalidArgument(
                 "no workers registered".into(),

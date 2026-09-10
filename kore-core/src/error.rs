@@ -31,4 +31,37 @@ pub enum KoreError {
 
     #[error("serialization error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("parse error: {0}")]
+    ParseError(String),
+
+    #[error("network error: {0}")]
+    NetworkError(String),
+
+    #[error("operation timed out: {0}")]
+    Timeout(String),
+
+    #[error("worker unavailable: {0}")]
+    WorkerUnavailable(String),
+
+    #[error("out of memory: {0}")]
+    OutOfMemory(String),
+
+    #[error("operation cancelled: {0}")]
+    Cancelled(String),
+
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
+
+    #[error("table not found: {0}")]
+    TableNotFound(String),
+
+    #[error("duplicate table: {0}")]
+    DuplicateTable(String),
+
+    #[error("parquet error: {0}")]
+    ParquetError(String),
+
+    #[error("arrow error: {0}")]
+    ArrowError(String),
 }

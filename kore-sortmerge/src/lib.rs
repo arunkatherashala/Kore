@@ -1,7 +1,7 @@
 //! KORE Layer 71 — Sort-merge join + broadcast join with auto strategy selection.
 
 use std::collections::HashMap;
-use kore_core::{Column, ColumnData, DataBlock, JoinKey, Value, compare_join_keys};
+use kore_core::{Column, DataBlock, JoinKey, compare_join_keys};
 use rayon::prelude::*;
 
 // ─── Join strategy ────────────────────────────────────────────────────────────
@@ -39,6 +39,7 @@ fn col_key(col: &Column, row: usize) -> JoinKey {
     JoinKey::from(&col.data.get_value(row))
 }
 
+#[allow(dead_code)]
 fn collect_keys(block: &DataBlock, key_col: &str) -> Vec<JoinKey> {
     let col = block.column(key_col).expect("key column not found");
     (0..block.num_rows).map(|r| col_key(col, r)).collect()

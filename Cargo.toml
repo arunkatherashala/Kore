@@ -56,10 +56,17 @@ members = [
     "kore-jit",          # Layer 68 — JIT/compiled execution (low-cardinality GROUP BY, compiled filters)
     "kore-tpch",         # TPC-H benchmark suite (real timing vs Spark)
     "kore-python",       # Layer 70 — Python ctypes bindings (C ABI bridge)
+    "kore-pyo3",         # Layer 70B — PyO3 native Python bindings (pip install)
     "kore-sortmerge",    # Layer 71 — Sort-merge join + broadcast join strategy
     "kore-kafka",        # Layer 72 — Kafka-compatible streaming source/sink
     "kore-mlx",          # Layer 73 — Expanded ML: RandomForest, LogReg, KMeans
     "kore-node",         # Layer 74 — True multi-node cluster (TCP gRPC-style)
+    "kore-deploy",       # Phase 3B — Kubernetes/standalone deployment
+    "kore-flight",       # Phase 4A — Arrow IPC serialization & Flight service
+    "kore-server",       # Phase 4C — PostgreSQL wire protocol server
+    "kore-submit",       # CLI — spark-submit-style job submission
+    "kore-demo",         # End-to-end demo binary
+    "kore-hdfs",         # Layer 75 — HDFS connector (WebHDFS REST)
 ]
 resolver = "2"
 
@@ -98,3 +105,4 @@ kore-sortmerge = { path = "kore-sortmerge" }
 kore-kafka     = { path = "kore-kafka" }
 kore-mlx       = { path = "kore-mlx" }
 kore-node      = { path = "kore-node" }
+kore-deploy    = { path = "kore-deploy" }

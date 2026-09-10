@@ -1,0 +1,17 @@
+[package]
+name = "kore-submit"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "kore-submit"
+path = "src/main.rs"
+
+[dependencies]
+kore-core = { path = "../kore-core" }
+kore-net  = { path = "../kore-net" }
+kore-sql  = { path = "../kore-sql" }
+kore-parquet = { path = "../kore-parquet" }
+kore-io   = { path = "../kore-io" }
+tokio = { workspace = true }
+serde_json = { workspace = true }

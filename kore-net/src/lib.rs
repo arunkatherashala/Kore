@@ -13,7 +13,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use kore_core::DataBlock;
 
 mod codec;
+pub mod arrow_transport;
 pub use codec::{WireCodec, WireFormat, BINARY_MAGIC};
+pub use arrow_transport::{arrow_encode_block, arrow_decode_block};
 
 /// Internal: encode any `KoreMsg` with the fast binary format (bincode+LZ4).
 /// Used by kore-worker's shuffle spill so on-disk and on-wire representations
@@ -41,9 +43,11 @@ pub enum KoreMsg {
     /// Worker → Coordinator: announce presence.
     RegisterWorker {
         id:         String,
-        task_addr:  String,   // TCP address where coordinator sends tasks
+        task_addr:  String,
         cores:      usize,
         memory_mb:  usize,
+        #[serde(default)]
+        auth_token: Option<String>,
     },
     /// Coordinator → Worker: registration confirmed.
     RegisterAck { worker_id: String },
@@ -175,9 +179,10 @@ pub enum KoreMsg {
         table_name:   String,
         data:         DataBlock,
         reduce_sql:   Option<String>,
-        /// When true, coordinator registers partitions on workers then sends SQL-only tasks.
         #[serde(default)]
         local_tables: bool,
+        #[serde(default)]
+        auth_token:   Option<String>,
     },
     /// Coordinator → Client: query succeeded.
     QueryResult {
@@ -194,6 +199,23 @@ pub enum KoreMsg {
     Shutdown,
     Ping,
     Pong,
+
+    // ── Arrow IPC shuffle (Phase 20 — 50% smaller wire format) ───────────────
+    /// Worker → peer worker: shuffle push using Arrow IPC encoding instead of
+    /// MsgPack-serialized DataBlock.  The `ipc_payload` field is the raw KRA1
+    /// bytes from `kore_arrow::ipc::encode`.  Receivers call `ipc_decode` to
+    /// reconstruct the ArrowBlock, then convert back to DataBlock if needed.
+    ArrowShufflePush {
+        shuffle_id:  String,
+        src_worker:  String,
+        partition:   usize,
+        ipc_payload: Vec<u8>,
+    },
+    /// Peer worker → sending worker: Arrow shuffle partition accepted.
+    ArrowShufflePushAck {
+        shuffle_id: String,
+        partition:  usize,
+    },
 
     // ── Data locality (100K-node scale) ──────────────────────────────────────
     /// Coordinator → Worker: load a data shard from a path (S3/local/parquet/kore).
@@ -437,5 +459,136 @@ mod tests {
             data: block_clone,
         }).await.unwrap();
         let _ = KoreFrame::read(&mut client).await.unwrap();
+    }
+
+    // ─── Network failure / resilience tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_corrupted_frame_invalid_length() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let result = KoreFrame::read(&mut stream).await;
+            assert!(result.is_err(), "corrupted frame should return an error");
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        // Write a length prefix claiming 100 bytes, then send garbage
+        let fake_len: u32 = 100;
+        client.write_all(&fake_len.to_be_bytes()).await.unwrap();
+        client.write_all(&[0xDE, 0xAD, 0xBE, 0xEF]).await.unwrap();
+        drop(client); // close connection — reader sees unexpected EOF
+    }
+
+    #[tokio::test]
+    async fn test_empty_message_roundtrip() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let msg = KoreFrame::read(&mut stream).await.unwrap();
+            KoreFrame::write(&mut stream, &msg).await.unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        // Ping is the simplest "empty" message (no payload fields)
+        KoreFrame::write(&mut client, &KoreMsg::Ping).await.unwrap();
+        let reply = KoreFrame::read(&mut client).await.unwrap();
+        assert!(matches!(reply, KoreMsg::Ping));
+    }
+
+    #[tokio::test]
+    async fn test_large_payload_1mb_roundtrip() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let big_block = DataBlock {
+            num_rows: 50_000,
+            columns: vec![
+                Column { name: "id".into(),
+                    data: ColumnData::Int64((0..50_000).map(|i| Some(i as i64)).collect()) },
+                Column { name: "payload".into(),
+                    data: ColumnData::Float64((0..50_000).map(|i| Some(i as f64 * 3.14)).collect()) },
+            ],
+        };
+        let expected_rows = big_block.num_rows;
+        let big_clone = big_block.clone();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let msg = KoreFrame::read(&mut stream).await.unwrap();
+            KoreFrame::write(&mut stream, &msg).await.unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        KoreFrame::write(&mut client, &KoreMsg::AssignTask {
+            task_id: "big".into(), stage_id: 0, partition_id: 0,
+            sql: "SELECT *".into(), table_name: "t".into(),
+            data: big_clone,
+        }).await.unwrap();
+
+        let reply = KoreFrame::read(&mut client).await.unwrap();
+        if let KoreMsg::AssignTask { data, .. } = reply {
+            assert_eq!(data.num_rows, expected_rows);
+        } else {
+            panic!("expected AssignTask back, got {:?}", reply);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_truncated_frame_returns_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let result = KoreFrame::read(&mut stream).await;
+            assert!(result.is_err(), "truncated frame should return an error");
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        // Encode a real message, then send only half of it
+        let payload = codec::encode(&KoreMsg::Ping, WireFormat::from_env()).unwrap();
+        let len = (payload.len() as u32).to_be_bytes();
+        client.write_all(&len).await.unwrap();
+        let half = payload.len() / 2;
+        client.write_all(&payload[..half]).await.unwrap();
+        drop(client); // EOF before full frame received
+    }
+
+    #[tokio::test]
+    async fn test_rapid_encode_decode_1000_messages() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let count = 1000usize;
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            for _ in 0..count {
+                let msg = KoreFrame::read(&mut stream).await.unwrap();
+                KoreFrame::write(&mut stream, &msg).await.unwrap();
+            }
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        for i in 0..count {
+            let msg = KoreMsg::Heartbeat {
+                worker_id: format!("w-{i}"),
+                timestamp_ms: i as u64,
+                active_tasks: i % 10,
+                free_mem_mb: 1024,
+            };
+            KoreFrame::write(&mut client, &msg).await.unwrap();
+            let reply = KoreFrame::read(&mut client).await.unwrap();
+            if let KoreMsg::Heartbeat { worker_id, timestamp_ms, .. } = reply {
+                assert_eq!(worker_id, format!("w-{i}"));
+                assert_eq!(timestamp_ms, i as u64);
+            } else {
+                panic!("message {i}: expected Heartbeat back");
+            }
+        }
     }
 }

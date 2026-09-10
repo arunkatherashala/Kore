@@ -10,8 +10,7 @@
 //! All mutations go through the kore-delta transaction log, giving
 //! every DML statement ACID semantics and time-travel for free.
 
-use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
+use std::path::Path;
 use kore_core::{Column, ColumnData, DataBlock, KoreError};
 use kore_delta::{DeltaTable, SchemaField};
 use kore_sql::executor::KqlContext;
@@ -25,12 +24,17 @@ pub struct DmlResult {
     pub new_version:   u64,
 }
 
+fn version_u64(version: i64) -> Result<u64, KoreError> {
+    u64::try_from(version)
+        .map_err(|_| KoreError::InvalidArgument("delta version is negative".into()))
+}
+
 // ─── INSERT INTO ──────────────────────────────────────────────────────────────
 
 /// Insert rows from a DataBlock into a DeltaTable.
 pub fn insert_into(table: &mut DeltaTable, data: DataBlock) -> Result<DmlResult, KoreError> {
     let rows = data.num_rows;
-    let version = table.insert(data)?;
+    let version = version_u64(table.insert(&data).map_err(|e| e.into_kore())?)?;
     Ok(DmlResult { operation: "INSERT".into(), rows_affected: rows, new_version: version })
 }
 
@@ -50,9 +54,15 @@ pub fn insert_values(
     schema:  &[SchemaField],
     values:  Vec<Vec<serde_json::Value>>,
 ) -> Result<DmlResult, KoreError> {
-    if values.is_empty() { return Ok(DmlResult { operation: "INSERT".into(), rows_affected: 0, new_version: table.version() }); }
+    if values.is_empty() {
+        return Ok(DmlResult {
+            operation: "INSERT".into(),
+            rows_affected: 0,
+            new_version: version_u64(table.version())?,
+        });
+    }
     let n = values.len();
-    let mut columns: Vec<Column> = schema.iter().enumerate().map(|(ci, f)| {
+    let columns: Vec<Column> = schema.iter().enumerate().map(|(ci, f)| {
         let data = match f.dtype.to_uppercase().as_str() {
             "INT64" | "INT" | "INTEGER" | "BIGINT" => ColumnData::Int64(
                 values.iter().map(|row| row.get(ci).and_then(|v| v.as_i64())).collect()
@@ -87,7 +97,7 @@ pub fn update(
     where_sql:   Option<&str>,
 ) -> Result<DmlResult, KoreError> {
     // 1. Read current data
-    let current = table.read()?;
+    let current = table.read().map_err(|e| e.into_kore())?;
     let n = current.num_rows;
 
     // 2. Determine which rows match the WHERE clause
@@ -163,8 +173,8 @@ pub fn update(
 
     // 4. Delete all + re-insert updated block via Delta
     let updated = DataBlock { columns: new_cols, num_rows: n };
-    table.delete(|_, _| true)?;   // erase all current data
-    let ver = table.insert(updated)?;;
+    table.delete_all().map_err(|e| e.into_kore())?;
+    let ver = version_u64(table.insert(&updated).map_err(|e| e.into_kore())?)?;
     Ok(DmlResult { operation: format!("UPDATE ({updated_count} rows)"), rows_affected: updated_count, new_version: ver })
 }
 
@@ -178,7 +188,7 @@ pub fn delete(
     where_sql:  &str,
 ) -> Result<DmlResult, KoreError> {
     let mut ctx2 = ctx.clone();
-    let current = table.read()?;
+    let current = table.read().map_err(|e| e.into_kore())?;
     ctx2.register(table_name, current.clone());
 
     // Get rows to KEEP (inverse of WHERE)
@@ -186,8 +196,8 @@ pub fn delete(
     let kept = ctx2.query(&keep_sql)?;
     let removed = current.num_rows - kept.num_rows;
 
-    table.delete(|_, _| true)?;   // erase all current data
-    let ver = table.insert(kept)?;;
+    table.delete_all().map_err(|e| e.into_kore())?;
+    let ver = version_u64(table.insert(&kept).map_err(|e| e.into_kore())?)?;
     Ok(DmlResult { operation: format!("DELETE ({removed} rows)"), rows_affected: removed, new_version: ver })
 }
 
@@ -215,8 +225,9 @@ pub fn create_table_as_select(
         nullable: true,
     }).collect();
 
-    let mut table = DeltaTable::create(path, schema)?;
-    let version   = table.insert(result)?;
+    let mut table = DeltaTable::create(path.as_ref(), kore_delta::DeltaSchema { fields: schema })
+        .map_err(|e| e.into_kore())?;
+    let version   = version_u64(table.insert(&result).map_err(|e| e.into_kore())?)?;
     let dml       = DmlResult { operation: "CTAS".into(), rows_affected: rows, new_version: version };
     Ok((table, dml))
 }
@@ -232,7 +243,7 @@ pub fn merge_into(
     source:     &DataBlock,
     join_key:   &str,
 ) -> Result<DmlResult, KoreError> {
-    let current = target.read()?;
+    let current = target.read().map_err(|e| e.into_kore())?;
 
     // Build key → row index in current (target)
     let mut target_keys: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -293,8 +304,8 @@ pub fn merge_into(
 
     let new_n = current.num_rows + inserted;
     let merged = DataBlock { columns: result_cols, num_rows: new_n };
-    target.delete(|_, _| true)?;   // erase all current data
-    let ver = target.insert(merged)?;
+    target.delete_all().map_err(|e| e.into_kore())?;
+    let ver = version_u64(target.insert(&merged).map_err(|e| e.into_kore())?)?;
     Ok(DmlResult {
         operation: format!("MERGE (updated={updated}, inserted={inserted})"),
         rows_affected: updated + inserted,
@@ -353,7 +364,7 @@ mod tests {
     #[test]
     fn test_insert_into() {
         let dir = tmp("ins");
-        let mut t = DeltaTable::create(&dir, schema()).unwrap();
+        let mut t = DeltaTable::create(&dir, kore_delta::DeltaSchema { fields: schema() }).unwrap();
         let r = insert_into(&mut t, sample()).unwrap();
         assert_eq!(r.rows_affected, 3);
         std::fs::remove_dir_all(&dir).ok();
@@ -362,7 +373,7 @@ mod tests {
     #[test]
     fn test_insert_select() {
         let dir = tmp("isel");
-        let mut t = DeltaTable::create(&dir, schema()).unwrap();
+        let mut t = DeltaTable::create(&dir, kore_delta::DeltaSchema { fields: schema() }).unwrap();
         let mut ctx = KqlContext::new();
         ctx.register("src", sample());
         let r = insert_select(&mut t, &ctx, "SELECT * FROM src WHERE score > 15").unwrap();
@@ -375,7 +386,7 @@ mod tests {
     #[test]
     fn test_delete() {
         let dir = tmp("del");
-        let mut t = DeltaTable::create(&dir, schema()).unwrap();
+        let mut t = DeltaTable::create(&dir, kore_delta::DeltaSchema { fields: schema() }).unwrap();
         insert_into(&mut t, sample()).unwrap();
         let ctx = KqlContext::new();
         let r = delete(&mut t, &ctx, "tbl", "score > 15").unwrap();
@@ -399,7 +410,7 @@ mod tests {
     #[test]
     fn test_merge_into() {
         let dir = tmp("merge");
-        let mut t = DeltaTable::create(&dir, schema()).unwrap();
+        let mut t = DeltaTable::create(&dir, kore_delta::DeltaSchema { fields: schema() }).unwrap();
         insert_into(&mut t, sample()).unwrap();
 
         // Source: update id=1 (score→99), insert id=4 (new)

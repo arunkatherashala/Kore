@@ -123,17 +123,21 @@ pub enum Value {
     Float(f64),
     Bool(bool),
     Str(String),
+    Array(Vec<Value>),
+    Map(Vec<(Value, Value)>),
     Null,
 }
 
 impl Value {
     pub fn type_name(&self) -> &'static str {
         match self {
-            Value::Int(_)   => "Int64",
-            Value::Float(_) => "Float64",
-            Value::Bool(_)  => "Bool",
-            Value::Str(_)   => "Str",
-            Value::Null     => "Null",
+            Value::Int(_)     => "Int64",
+            Value::Float(_)   => "Float64",
+            Value::Bool(_)    => "Bool",
+            Value::Str(_)     => "Str",
+            Value::Array(_)   => "Array",
+            Value::Map(_)     => "Map",
+            Value::Null       => "Null",
         }
     }
 
@@ -162,6 +166,8 @@ impl From<&Value> for JoinKey {
             Value::Int(i)  => JoinKey::Int(*i),
             Value::Bool(b) => JoinKey::Bool(*b),
             Value::Str(s)  => JoinKey::Str(s.clone()),
+            Value::Array(a) => JoinKey::Str(format!("{:?}", a)),
+            Value::Map(m)   => JoinKey::Str(format!("{:?}", m)),
             _              => JoinKey::Null,
         }
     }
@@ -362,7 +368,7 @@ impl DataBlock {
                 DataType::Bool    => ColumnData::Bool(vec![]),
                 DataType::Str     => {
                     // Check if first block has StrDict — preserve variant
-                    let first_col = blocks[0].columns.iter().find(|(c)| c.data.dtype() == DataType::Str);
+                    let first_col = blocks[0].columns.iter().find(|c | c.data.dtype() == DataType::Str);
                     if let Some(c) = first_col {
                         if let ColumnData::StrDict { dict, .. } = &c.data {
                             return ColumnData::StrDict { codes: vec![], dict: dict.clone() };
@@ -391,7 +397,7 @@ impl DataBlock {
                             dc.extend_from_slice(sc);
                         } else {
                             // Remap codes to shared dict
-                            let base = dd.len();
+                            let _base = dd.len();
                             for s in sd.iter() {
                                 if !dd.contains(s) { dd.push(s.clone()); }
                             }
@@ -442,6 +448,7 @@ impl DataBlock {
     }
 }
 
+#[allow(dead_code)]
 fn compare_values(a: &Value, b: &Value) -> Ordering {
     match (a, b) {
         (Value::Int(x),   Value::Int(y))   => x.cmp(y),

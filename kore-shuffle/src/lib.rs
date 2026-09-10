@@ -13,6 +13,8 @@
 //! Spark shuffle: repartition → local sort/agg → network transfer → final merge
 //! KORE shuffle:  partition()  → local_agg()  → merge_partitions() (in-memory)
 
+pub mod external;
+
 use kore_core::{Column, ColumnData, DataBlock, KoreError};
 use std::collections::HashMap;
 
@@ -293,8 +295,8 @@ pub fn distributed_join(
     right_key:  &str,
     n_workers:  usize,
 ) -> Result<DataBlock, KoreError> {
-    use kore_core::JoinType;
-    use std::collections::HashMap;
+    
+    
 
     let lp = HashPartitioner::new(n_workers, vec![left_key.into()]);
     let rp = HashPartitioner::new(n_workers, vec![right_key.into()]);

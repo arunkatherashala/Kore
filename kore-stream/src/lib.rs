@@ -409,7 +409,7 @@ mod tests {
         let mut source = MemorySource::new();
         source.push(events_block(&[1, 2, 3, 4, 5]));
         let mut sink   = MemorySink::new();
-        let     engine = &mut MicroBatchEngine::new(
+        let     _engine = &mut MicroBatchEngine::new(
             100,
             Box::new(MemorySource::new()),  // dummy; we'll use source directly
             Box::new(MemorySink::new()),

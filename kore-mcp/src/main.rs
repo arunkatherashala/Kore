@@ -15,7 +15,6 @@
 //!   kore_sample(table, n)        — Return first N rows
 //!   kore_benchmark(sql, iters)   — Time a query N times, return stats
 
-use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;

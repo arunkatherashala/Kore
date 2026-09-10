@@ -11,7 +11,7 @@
 //! The `CompressedBlock` wrapper stores each column with its chosen codec.
 //! `decompress()` reconstructs a full `DataBlock` transparently.
 
-use kore_core::{Column, ColumnData, DataBlock, KoreError};
+use kore_core::{Column, ColumnData, DataBlock};
 
 // ─── Dictionary encoding ──────────────────────────────────────────────────────
 
@@ -51,7 +51,7 @@ impl DictEncoded {
     pub fn compress_ratio(&self) -> f64 {
         if self.codes.is_empty() { return 1.0; }
         let orig_bytes: usize = self.codes.iter().enumerate()
-            .map(|(i, x)| x.as_ref()
+            .map(|(_i, x)| x.as_ref()
                 .and_then(|&c| self.dict.get(c as usize))
                 .map(|s| s.len() + 8)
                 .unwrap_or(8))
@@ -171,6 +171,7 @@ pub enum CompressedCol {
 
 /// Wrapper to make f64 PartialEq by bit representation (NaN-safe for our use).
 #[derive(Clone, Debug, PartialEq)]
+#[allow(non_camel_case_types)]
 pub struct f64_wrap(pub u64);
 impl f64_wrap {
     pub fn from(f: f64)  -> Self { Self(f.to_bits()) }

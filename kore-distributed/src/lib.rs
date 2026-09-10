@@ -335,7 +335,7 @@ impl DistributedContext {
     /// Partitions the main table across workers, merges results.
     pub fn query(&self, sql: &str) -> Result<DataBlock, String> {
         // Find the referenced table in the SQL
-        let (table_name, data) = self.tables.iter()
+        let (_table_name, data) = self.tables.iter()
             .find(|(name, _)| {
                 let sql_lower = sql.to_lowercase();
                 sql_lower.contains(&format!(" {} ", name.to_lowercase())) ||
@@ -405,7 +405,7 @@ pub(crate) fn build_merge_sql(original_sql: &str) -> String {
     }
 
     // Rebuild: keep FROM data, WHERE (removed for merge), GROUP BY, ORDER BY, LIMIT
-    let after_from = &original_sql[from_pos..];
+    let _after_from = &original_sql[from_pos..];
     let group_pos = lower.rfind(" group by ").map(|p| p + 1);
     let order_pos = lower.rfind(" order by ").map(|p| p + 1);
     let limit_pos = lower.rfind(" limit ").map(|p| p + 1);
@@ -454,7 +454,7 @@ fn extract_agg_and_alias(proj: &str) -> Option<(String, Option<String>)> {
     let proj_lower = proj.to_lowercase();
     let funcs = ["sum(", "count(", "avg(", "min(", "max("];
     for f in &funcs {
-        if let Some(pos) = proj_lower.find(f) {
+        if let Some(_pos) = proj_lower.find(f) {
             let func = f.trim_end_matches('(').to_uppercase();
             // Find alias after AS or at end
             let alias = if let Some(as_pos) = proj_lower.rfind(" as ") {
@@ -486,6 +486,7 @@ fn rewrite_table_name(sql: &str, new_name: &str) -> String {
 }
 
 /// Merge partial aggregation results by summing Float64 columns.
+#[allow(dead_code)]
 fn merge_partial_aggs(parts: Vec<DataBlock>) -> Result<DataBlock, String> {
     if parts.is_empty() { return Ok(DataBlock::empty()); }
     if parts.len() == 1 { return Ok(parts.into_iter().next().unwrap()); }

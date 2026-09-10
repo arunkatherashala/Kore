@@ -99,7 +99,7 @@ impl CsvReader {
         let n_rows = lines.len();
 
         // Parse all rows
-        let mut raw: Vec<Vec<String>> = lines.iter()
+        let raw: Vec<Vec<String>> = lines.iter()
             .map(|line| {
                 let mut fields: Vec<String> = line.split(delimiter)
                     .map(|s| s.trim().trim_matches('"').to_string())
@@ -208,7 +208,7 @@ impl NdJsonReader {
 
         // Collect all keys
         let keys: Vec<String> = {
-            let mut seen = indexmap_like(&records);
+            let seen = indexmap_like(&records);
             seen
         };
 
@@ -315,7 +315,6 @@ mod tests {
 
     #[test]
     fn test_csv_roundtrip() {
-        use std::io::Write;
         let block = simple_block();
         let csv = CsvWriter::to_string(&block);
         assert!(csv.contains("id,val,name"));

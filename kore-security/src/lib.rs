@@ -9,7 +9,7 @@
 //! - **Token rotation** — issue/revoke tokens without restart
 //! - **IP allowlisting** — restrict worker registration to trusted IPs
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 

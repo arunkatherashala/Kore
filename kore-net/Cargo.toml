@@ -13,6 +13,7 @@ lz4_flex     = { workspace = true }
 tokio-rustls = { version = "0.26", optional = true }
 rustls-pemfile = { version = "2", optional = true }
 kore-core  = { workspace = true }
+kore-arrow = { path = "../kore-arrow" }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 tokio      = { workspace = true }

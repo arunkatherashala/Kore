@@ -27,15 +27,26 @@ pub fn parse_query(sql: &str) -> Result<Query, KoreError> {
     let body = Some(p.parse_select()?);
 
     // UNION ALL / UNION / INTERSECT / EXCEPT
-    let mut union_all = vec![];
+    let mut set_ops = vec![];
     while matches!(p.peek(), Token::Union | Token::Intersect | Token::Except) {
-        p.pos += 1;
-        p.consume_if(&Token::All);   // UNION ALL or UNION (dedup not implemented)
-        p.consume_if(&Token::Distinct);
-        union_all.push(p.parse_select()?);
+        let kind = match p.peek() {
+            Token::Union => {
+                p.pos += 1;
+                if p.consume_if(&Token::All) {
+                    SetOpKind::UnionAll
+                } else {
+                    p.consume_if(&Token::Distinct);
+                    SetOpKind::Union
+                }
+            }
+            Token::Intersect => { p.pos += 1; p.consume_if(&Token::All); SetOpKind::Intersect }
+            Token::Except    => { p.pos += 1; p.consume_if(&Token::All); SetOpKind::Except }
+            _ => unreachable!(),
+        };
+        set_ops.push((kind, p.parse_select()?));
     }
 
-    Ok(Query { ctes, body, union_all })
+    Ok(Query { ctes, body, set_ops })
 }
 
 struct Parser {
@@ -84,7 +95,6 @@ impl Parser {
     fn expect_alias(&mut self) -> Result<String, KoreError> {
         match self.advance() {
             Token::Ident(s) => Ok(s),
-            // Allow common keywords used as alias names
             Token::Avg       => Ok("avg".to_string()),
             Token::Count     => Ok("count".to_string()),
             Token::Sum       => Ok("sum".to_string()),
@@ -104,6 +114,13 @@ impl Parser {
             Token::Join      => Ok("join".to_string()),
             Token::On        => Ok("on".to_string()),
             Token::By        => Ok("by".to_string()),
+            Token::Array     => Ok("array".to_string()),
+            Token::Map       => Ok("map".to_string()),
+            Token::Explode   => Ok("explode".to_string()),
+            Token::Pivot     => Ok("pivot".to_string()),
+            Token::Unpivot   => Ok("unpivot".to_string()),
+            Token::Lateral   => Ok("lateral".to_string()),
+            Token::For       => Ok("for".to_string()),
             other => Err(KoreError::InvalidArgument(format!("expected alias name, got {:?}", other))),
         }
     }
@@ -115,6 +132,15 @@ impl Parser {
 
     fn parse_select(&mut self) -> Result<SelectStmt, KoreError> {
         self.expect(&Token::Select)?;
+
+        // Parse query hints: /*+ BROADCAST(t) */ or /*+ REPARTITION(n) */
+        let hints = if let Token::Hint(_) = self.peek() {
+            match self.advance() {
+                Token::Hint(h) => parse_hints(&h),
+                _ => vec![],
+            }
+        } else { vec![] };
+
         let distinct = self.consume_if(&Token::Distinct);
 
         // projections
@@ -125,8 +151,22 @@ impl Parser {
             self.pos += 1;
             self.parse_table_expr()?
         } else {
-            TableExpr { name: "__dual__".to_string(), alias: None, subquery: None, values: None }
+            TableExpr { name: "__dual__".to_string(), alias: None, subquery: None, values: None, push_filter: None }
         };
+
+        // PIVOT / UNPIVOT (after FROM, before JOINs)
+        let pivot = if self.peek() == &Token::Pivot {
+            Some(self.parse_pivot()?)
+        } else { None };
+        let unpivot = if self.peek() == &Token::Unpivot {
+            Some(self.parse_unpivot()?)
+        } else { None };
+
+        // LATERAL VIEW EXPLODE(col) alias AS col_alias
+        let mut lateral_views = Vec::new();
+        while self.peek() == &Token::Lateral {
+            lateral_views.push(self.parse_lateral_view()?);
+        }
 
         // JOINs
         let mut joins = Vec::new();
@@ -223,7 +263,8 @@ impl Parser {
         };
 
         Ok(SelectStmt { distinct, projections, from, joins, where_clause,
-                         group_by, having, qualify, order_by, limit, offset })
+                         group_by, having, qualify, order_by, limit, offset, scan_limit: None,
+                         lateral_views, pivot, unpivot, hints })
     }
 
     // ── Window spec helpers ────────────────────────────────────────────────
@@ -329,7 +370,85 @@ impl Parser {
 
     fn is_join_keyword(&self) -> bool {
         matches!(self.peek(),
-            Token::Join | Token::Inner | Token::Left | Token::Right | Token::Full)
+            Token::Join | Token::Inner | Token::Left | Token::Right | Token::Full | Token::Cross)
+    }
+
+    // ─── LATERAL VIEW ──────────────────────────────────────────────────────
+    fn parse_lateral_view(&mut self) -> Result<LateralView, KoreError> {
+        self.expect(&Token::Lateral)?;
+        // Consume VIEW (as Ident since it might be Token::View or an ident)
+        match self.peek() {
+            Token::View => { self.pos += 1; }
+            Token::Ident(s) if s.eq_ignore_ascii_case("VIEW") => { self.pos += 1; }
+            _ => return Err(KoreError::InvalidArgument("expected VIEW after LATERAL".into())),
+        }
+        // EXPLODE(expr)
+        self.expect(&Token::Explode)?;
+        self.expect(&Token::LParen)?;
+        let expr = self.parse_expr(0)?;
+        self.expect(&Token::RParen)?;
+        // table_alias
+        let table_alias = self.expect_ident()?;
+        // AS col_alias
+        self.expect(&Token::As)?;
+        let col_alias = self.expect_alias()?;
+        Ok(LateralView { expr: Expr::Explode(Box::new(expr)), table_alias, col_alias })
+    }
+
+    // ─── PIVOT ─────────────────────────────────────────────────────────────
+    fn parse_pivot(&mut self) -> Result<PivotClause, KoreError> {
+        self.expect(&Token::Pivot)?;
+        self.expect(&Token::LParen)?;
+        // agg_func(agg_col)
+        let agg_func = self.parse_agg_func_name()?;
+        self.expect(&Token::LParen)?;
+        let agg_col = self.expect_ident()?;
+        self.expect(&Token::RParen)?;
+        // FOR for_col
+        self.expect(&Token::For)?;
+        let for_col = self.expect_ident()?;
+        // IN (val1, val2, ...)
+        self.expect(&Token::In)?;
+        self.expect(&Token::LParen)?;
+        let in_values = self.parse_expr_list()?;
+        self.expect(&Token::RParen)?;
+        self.expect(&Token::RParen)?;
+        Ok(PivotClause { agg_func, agg_col, for_col, in_values })
+    }
+
+    fn parse_agg_func_name(&mut self) -> Result<AggFunc, KoreError> {
+        match self.advance() {
+            Token::Sum   => Ok(AggFunc::Sum),
+            Token::Avg   => Ok(AggFunc::Avg),
+            Token::Count => Ok(AggFunc::Count),
+            Token::Min   => Ok(AggFunc::Min),
+            Token::Max   => Ok(AggFunc::Max),
+            Token::Ident(s) => match s.to_ascii_uppercase().as_str() {
+                "SUM"   => Ok(AggFunc::Sum),
+                "AVG"   => Ok(AggFunc::Avg),
+                "COUNT" => Ok(AggFunc::Count),
+                "MIN"   => Ok(AggFunc::Min),
+                "MAX"   => Ok(AggFunc::Max),
+                other => Err(KoreError::InvalidArgument(format!("unsupported PIVOT aggregate: {other}"))),
+            },
+            other => Err(KoreError::InvalidArgument(format!("expected aggregate function, got {:?}", other))),
+        }
+    }
+
+    // ─── UNPIVOT ───────────────────────────────────────────────────────────
+    fn parse_unpivot(&mut self) -> Result<UnpivotClause, KoreError> {
+        self.expect(&Token::Unpivot)?;
+        self.expect(&Token::LParen)?;
+        // value_col FOR key_col IN (col1, col2, ...)
+        let value_col = self.expect_ident()?;
+        self.expect(&Token::For)?;
+        let key_col = self.expect_ident()?;
+        self.expect(&Token::In)?;
+        self.expect(&Token::LParen)?;
+        let in_cols = self.parse_ident_list()?;
+        self.expect(&Token::RParen)?;
+        self.expect(&Token::RParen)?;
+        Ok(UnpivotClause { value_col, key_col, in_cols })
     }
 
     // ─── Projections ───────────────────────────────────────────────────────
@@ -392,7 +511,7 @@ impl Parser {
                         else if matches!(self.peek(), Token::Ident(_)) { Some(self.expect_alias()?) }
                         else { Some("_values".to_string()) };
             let name = alias.clone().unwrap_or_else(|| "_values".to_string());
-            return Ok(TableExpr { name, alias, subquery: None, values: Some(rows) });
+            return Ok(TableExpr { name, alias, subquery: None, values: Some(rows), push_filter: None });
         }
 
         // Handle FROM (SELECT ...) alias — subquery as FROM table
@@ -409,10 +528,15 @@ impl Parser {
                 Some("_subq".to_string())
             };
             let name = alias.clone().unwrap_or_else(|| "_subq".to_string());
-            return Ok(TableExpr { name, alias, subquery: Some(Box::new(subq)), values: None });
+            return Ok(TableExpr { name, alias, subquery: Some(Box::new(subq)), values: None, push_filter: None });
         }
 
-        let name = self.expect_ident()?;
+        // Accept a string literal as table name (e.g. FROM 'data/file.parquet')
+        let name = if matches!(self.peek(), Token::Str(_)) {
+            match self.advance() { Token::Str(s) => s, _ => unreachable!() }
+        } else {
+            self.expect_ident()?
+        };
         let alias = if self.consume_if(&Token::As) {
             Some(self.expect_ident()?)
         } else if matches!(self.peek(), Token::Ident(s) if !["WHERE","ORDER","GROUP","LIMIT","HAVING","QUALIFY","UNION","INTERSECT","EXCEPT","FETCH","OFFSET","ON","SET","INTO"].contains(&s.to_ascii_uppercase().as_str()))
@@ -420,12 +544,15 @@ impl Parser {
                && self.peek() != &Token::Where
                && self.peek() != &Token::Order
                && self.peek() != &Token::Group
-               && self.peek() != &Token::Limit {
+               && self.peek() != &Token::Limit
+               && self.peek() != &Token::Pivot
+               && self.peek() != &Token::Unpivot
+               && self.peek() != &Token::Lateral {
             Some(self.expect_ident()?)
         } else {
             None
         };
-        Ok(TableExpr { name, alias, subquery: None, values: None })
+        Ok(TableExpr { name, alias, subquery: None, values: None, push_filter: None })
     }
 
     // ─── JOIN clause ───────────────────────────────────────────────────────
@@ -451,19 +578,49 @@ impl Parser {
                 self.expect(&Token::Join)?;
                 JoinKind::Full
             }
+            Token::Cross => {
+                self.pos += 1;
+                self.expect(&Token::Join)?;
+                JoinKind::Cross
+            }
             Token::Join  => { self.pos += 1; JoinKind::Inner }
             _ => return Err(KoreError::InvalidArgument("expected JOIN keyword".into())),
         };
 
         let table = self.parse_table_expr()?;
+
+        // CROSS JOIN has no ON clause
+        if join_type == JoinKind::Cross {
+            return Ok(JoinClause {
+                join_type,
+                table,
+                on: JoinOn { left_col: String::new(), right_col: String::new(), expr: None },
+                push_filter: None,
+            });
+        }
+
         self.expect(&Token::On)?;
 
-        // Parse equi-join: col = col  (may be qualified)
-        let left_col  = self.parse_qualified_col()?;
-        self.expect(&Token::Eq)?;
-        let right_col = self.parse_qualified_col()?;
+        // Parse the ON expression (supports non-equi joins)
+        let on_expr = self.parse_expr(0)?;
 
-        Ok(JoinClause { join_type, table, on: JoinOn { left_col, right_col } })
+        // Try to extract equi-join columns for hash join optimization
+        let (left_col, right_col) = match &on_expr {
+            Expr::BinOp { op: BinOpKind::Eq, left, right } => {
+                let lc = expr_to_col_name(left);
+                let rc = expr_to_col_name(right);
+                (lc.unwrap_or_default(), rc.unwrap_or_default())
+            }
+            _ => (String::new(), String::new()),
+        };
+
+        let expr = if left_col.is_empty() || right_col.is_empty() {
+            Some(on_expr)
+        } else {
+            None
+        };
+
+        Ok(JoinClause { join_type, table, on: JoinOn { left_col, right_col, expr }, push_filter: None })
     }
 
     fn parse_qualified_col(&mut self) -> Result<String, KoreError> {
@@ -483,6 +640,17 @@ impl Parser {
     fn parse_expr(&mut self, min_prec: u8) -> Result<Expr, KoreError> {
         let mut lhs = self.parse_unary()?;
         loop {
+            // array[index] → ELEMENT_AT(array, index)
+            if self.peek() == &Token::LBracket {
+                self.pos += 1;
+                let idx = self.parse_expr(0)?;
+                self.expect(&Token::RBracket)?;
+                lhs = Expr::FuncCall {
+                    name: "ELEMENT_AT".to_string(),
+                    args: vec![lhs, idx],
+                };
+                continue;
+            }
             // IS NULL / IS NOT NULL
             if self.peek() == &Token::Is {
                 self.pos += 1;
@@ -502,6 +670,13 @@ impl Parser {
                 lhs = Expr::Like { expr: Box::new(lhs), pattern: Box::new(pat), negated: false };
                 continue;
             }
+            // ILIKE (case-insensitive LIKE)
+            if self.peek() == &Token::ILike {
+                self.pos += 1;
+                let pat = self.parse_unary()?;
+                lhs = Expr::ILike { expr: Box::new(lhs), pattern: Box::new(pat), negated: false };
+                continue;
+            }
             // IN (...) or IN (SELECT ...)
             if self.peek() == &Token::In {
                 self.pos += 1;
@@ -518,7 +693,7 @@ impl Parser {
                 }
                 continue;
             }
-            // NOT IN / NOT LIKE / NOT IN (SELECT ...)
+            // NOT IN / NOT LIKE / NOT ILIKE / NOT BETWEEN / NOT IN (SELECT ...)
             if self.peek() == &Token::Not {
                 let next = self.tokens.get(self.pos + 1).cloned().unwrap_or(Token::Eof);
                 match next {
@@ -540,6 +715,20 @@ impl Parser {
                         self.pos += 2;
                         let pat = self.parse_unary()?;
                         lhs = Expr::Like { expr: Box::new(lhs), pattern: Box::new(pat), negated: true };
+                        continue;
+                    }
+                    Token::ILike => {
+                        self.pos += 2;
+                        let pat = self.parse_unary()?;
+                        lhs = Expr::ILike { expr: Box::new(lhs), pattern: Box::new(pat), negated: true };
+                        continue;
+                    }
+                    Token::Between => {
+                        self.pos += 2;
+                        let low  = self.parse_expr(5)?;
+                        self.expect(&Token::And)?;
+                        let high = self.parse_expr(5)?;
+                        lhs = Expr::Between { expr: Box::new(lhs), low: Box::new(low), high: Box::new(high), negated: true };
                         continue;
                     }
                     _ => {}
@@ -617,6 +806,39 @@ impl Parser {
 
     fn parse_primary(&mut self) -> Result<Expr, KoreError> {
         match self.advance() {
+            // [1, 2, 3] → Array literal
+            Token::LBracket => {
+                let elements = if self.peek() != &Token::RBracket {
+                    self.parse_expr_list()?
+                } else { vec![] };
+                self.expect(&Token::RBracket)?;
+                return Ok(Expr::Array(elements));
+            }
+            // ARRAY(1, 2, 3) → Array literal
+            Token::Array => {
+                self.expect(&Token::LParen)?;
+                let elements = if self.peek() != &Token::RParen {
+                    self.parse_expr_list()?
+                } else { vec![] };
+                self.expect(&Token::RParen)?;
+                return Ok(Expr::Array(elements));
+            }
+            // MAP('a', 1, 'b', 2) → FuncCall("MAP", ...)
+            Token::Map => {
+                self.expect(&Token::LParen)?;
+                let args = if self.peek() != &Token::RParen {
+                    self.parse_expr_list()?
+                } else { vec![] };
+                self.expect(&Token::RParen)?;
+                return Ok(Expr::FuncCall { name: "MAP".to_string(), args });
+            }
+            // EXPLODE(expr)
+            Token::Explode => {
+                self.expect(&Token::LParen)?;
+                let inner = self.parse_expr(0)?;
+                self.expect(&Token::RParen)?;
+                return Ok(Expr::Explode(Box::new(inner)));
+            }
             Token::LParen => {
                 // If next token is SELECT → scalar subquery: (SELECT ...)
                 if self.peek() == &Token::Select {
@@ -841,7 +1063,12 @@ impl Parser {
     fn parse_order_by_list(&mut self) -> Result<Vec<OrderByItem>, KoreError> {
         let mut list = Vec::new();
         loop {
-            let col = self.parse_qualified_col()?;
+            let expr = self.parse_expr(0)?;
+            let col = match &expr {
+                Expr::Col(c) => c.clone(),
+                Expr::QualCol(t, c) => format!("{}.{}", t, c),
+                _ => String::new(),
+            };
             let desc = if self.consume_if(&Token::Desc) { true }
                        else { self.consume_if(&Token::Asc); false };
             // NULLS FIRST / NULLS LAST
@@ -851,11 +1078,32 @@ impl Parser {
                 self.pos += 1; // consume FIRST or LAST
                 Some(first)
             } else { None };
-            list.push(OrderByItem { col, desc, nulls_first });
+            list.push(OrderByItem { expr, col, desc, nulls_first });
             if !self.consume_if(&Token::Comma) { break; }
         }
         Ok(list)
     }
+}
+
+// ─── Hint parser ──────────────────────────────────────────────────────────────
+
+fn parse_hints(hint_text: &str) -> Vec<QueryHint> {
+    let mut hints = Vec::new();
+    for part in hint_text.split(',') {
+        let part = part.trim();
+        if let Some(name) = part.strip_prefix("BROADCAST(").or_else(|| part.strip_prefix("broadcast(")) {
+            if let Some(table) = name.strip_suffix(')') {
+                hints.push(QueryHint::Broadcast(table.trim().to_string()));
+            }
+        } else if let Some(n_str) = part.strip_prefix("REPARTITION(").or_else(|| part.strip_prefix("repartition(")) {
+            if let Some(n) = n_str.strip_suffix(')') {
+                if let Ok(n) = n.trim().parse::<usize>() {
+                    hints.push(QueryHint::Repartition(n));
+                }
+            }
+        }
+    }
+    hints
 }
 
 // ─── Operator helpers ─────────────────────────────────────────────────────────
@@ -867,7 +1115,7 @@ fn infix_precedence(tok: &Token) -> u8 {
         Token::Eq | Token::Ne  => 3,
         Token::Lt | Token::Le
         | Token::Gt | Token::Ge => 4,
-        Token::Plus | Token::Minus => 5,
+        Token::Plus | Token::Minus | Token::Concat => 5,
         Token::Star | Token::Slash | Token::Percent => 6,
         _ => 0,
     }
@@ -888,8 +1136,17 @@ fn tok_to_binop(tok: &Token) -> Result<BinOpKind, KoreError> {
         Token::Star   => BinOpKind::Mul,
         Token::Slash  => BinOpKind::Div,
         Token::Percent => BinOpKind::Mod,
+        Token::Concat => BinOpKind::Concat,
         other => return Err(KoreError::InvalidArgument(format!("not a binary op: {:?}", other))),
     })
+}
+
+fn expr_to_col_name(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Col(c) => Some(c.clone()),
+        Expr::QualCol(t, c) => Some(format!("{}.{}", t, c)),
+        _ => None,
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -924,6 +1181,128 @@ mod tests {
         assert_eq!(stmt.order_by.len(), 1);
         assert!(stmt.order_by[0].desc);
         assert_eq!(stmt.limit, Some(10));
+    }
+
+    // ── LATERAL VIEW ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_lateral_view_explode() {
+        let stmt = parse(
+            "SELECT id, val FROM test LATERAL VIEW EXPLODE(tags) t AS val"
+        ).unwrap();
+        assert_eq!(stmt.lateral_views.len(), 1);
+        assert_eq!(stmt.lateral_views[0].table_alias, "t");
+        assert_eq!(stmt.lateral_views[0].col_alias, "val");
+    }
+
+    #[test]
+    fn parse_lateral_view_with_array() {
+        let stmt = parse(
+            "SELECT id, v FROM t LATERAL VIEW EXPLODE(ARRAY(1, 2, 3)) ex AS v"
+        ).unwrap();
+        assert_eq!(stmt.lateral_views.len(), 1);
+    }
+
+    // ── PIVOT / UNPIVOT ──────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_pivot() {
+        let stmt = parse(
+            "SELECT * FROM sales PIVOT (SUM(amount) FOR product IN ('A', 'B', 'C'))"
+        ).unwrap();
+        assert!(stmt.pivot.is_some());
+        let p = stmt.pivot.unwrap();
+        assert_eq!(p.agg_col, "amount");
+        assert_eq!(p.for_col, "product");
+        assert_eq!(p.in_values.len(), 3);
+    }
+
+    #[test]
+    fn parse_unpivot() {
+        let stmt = parse(
+            "SELECT * FROM wide UNPIVOT (value FOR key IN (col1, col2, col3))"
+        ).unwrap();
+        assert!(stmt.unpivot.is_some());
+        let u = stmt.unpivot.unwrap();
+        assert_eq!(u.value_col, "value");
+        assert_eq!(u.key_col, "key");
+        assert_eq!(u.in_cols.len(), 3);
+    }
+
+    // ── Complex types ────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_array_literal() {
+        let stmt = parse("SELECT ARRAY(1, 2, 3) AS arr FROM t").unwrap();
+        if let Projection::Expr { expr: Expr::Array(elems), .. } = &stmt.projections[0] {
+            assert_eq!(elems.len(), 3);
+        } else {
+            panic!("expected Expr::Array");
+        }
+    }
+
+    #[test]
+    fn parse_bracket_array() {
+        let stmt = parse("SELECT [1, 2, 3] AS arr FROM t").unwrap();
+        if let Projection::Expr { expr: Expr::Array(elems), .. } = &stmt.projections[0] {
+            assert_eq!(elems.len(), 3);
+        } else {
+            panic!("expected Expr::Array");
+        }
+    }
+
+    #[test]
+    fn parse_map_function() {
+        let stmt = parse("SELECT MAP('a', 1, 'b', 2) AS m FROM t").unwrap();
+        if let Projection::Expr { expr: Expr::FuncCall { name, args }, .. } = &stmt.projections[0] {
+            assert_eq!(name, "MAP");
+            assert_eq!(args.len(), 4);
+        } else {
+            panic!("expected Expr::FuncCall MAP");
+        }
+    }
+
+    #[test]
+    fn parse_explode_function() {
+        let stmt = parse("SELECT EXPLODE(tags) AS val FROM t").unwrap();
+        if let Projection::Expr { expr: Expr::Explode(_), .. } = &stmt.projections[0] {
+            // OK
+        } else {
+            panic!("expected Expr::Explode");
+        }
+    }
+
+    #[test]
+    fn parse_element_at_bracket_syntax() {
+        let stmt = parse("SELECT arr[1] AS elem FROM t").unwrap();
+        if let Projection::Expr { expr: Expr::FuncCall { name, args }, .. } = &stmt.projections[0] {
+            assert_eq!(name, "ELEMENT_AT");
+            assert_eq!(args.len(), 2);
+        } else {
+            panic!("expected ELEMENT_AT function from bracket syntax");
+        }
+    }
+
+    // ── Query hints ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_broadcast_hint() {
+        let stmt = parse("SELECT /*+ BROADCAST(orders) */ * FROM orders").unwrap();
+        assert_eq!(stmt.hints.len(), 1);
+        assert!(matches!(&stmt.hints[0], QueryHint::Broadcast(t) if t == "orders"));
+    }
+
+    #[test]
+    fn parse_repartition_hint() {
+        let stmt = parse("SELECT /*+ REPARTITION(16) */ * FROM orders").unwrap();
+        assert_eq!(stmt.hints.len(), 1);
+        assert!(matches!(&stmt.hints[0], QueryHint::Repartition(16)));
+    }
+
+    #[test]
+    fn parse_no_hint() {
+        let stmt = parse("SELECT * FROM orders").unwrap();
+        assert!(stmt.hints.is_empty());
     }
 }
 

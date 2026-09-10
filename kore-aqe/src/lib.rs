@@ -175,7 +175,7 @@ impl AqeOptimizer {
     }
 
     /// Detect skewed partitions (returns indices of skewed ones).
-    pub fn skewed_partitions(&self, stage_id: &str, partition_rows: &[usize]) -> Vec<usize> {
+    pub fn skewed_partitions(&self, _stage_id: &str, partition_rows: &[usize]) -> Vec<usize> {
         if partition_rows.is_empty() { return vec![]; }
         let mut sorted = partition_rows.to_vec();
         sorted.sort_unstable();

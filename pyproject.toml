@@ -1,0 +1,73 @@
+[build-system]
+requires = ["maturin>=0.15,<0.16"]
+build-backend = "maturin"
+
+[project]
+name = "kore-fileformat"
+version = "1.8.0"
+description = "KORE v1.8.0 - 339x Faster SQL Engine. Distributed columnar database with Python bindings."
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "Apache-2.0"}
+authors = [
+  { name = "KORE Team", email = "team@kore.dev" }
+]
+keywords = [
+    "sql",
+    "database",
+    "columnar",
+    "distributed",
+    "analytics",
+    "performance",
+    "spark-alternative",
+    "duckdb-alternative"
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage = "https://kore.dev"
+Documentation = "https://docs.kore.dev"
+Repository = "https://github.com/kore-engine/kore"
+Issues = "https://github.com/kore-engine/kore/issues"
+Changelog = "https://github.com/kore-engine/kore/releases"
+Discord = "https://discord.gg/kore"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "black>=22.0", "ruff>=0.1"]
+docs = ["sphinx>=5.0", "sphinx-rtd-theme>=1.0"]
+
+[project.scripts]
+kore = "kore_fileformat.cli:main"
+
+[tool.maturin]
+python-packages = ["kore_fileformat"]
+module-name = "kore_fileformat._kore"
+features = ["pyo3/extension-module"]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+
+[tool.ruff]
+line-length = 88
+target-version = "py38"
+select = ["E", "F", "W"]
+ignore = ["E501"]

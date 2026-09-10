@@ -1,0 +1,35 @@
+coordinator:
+  replicas: 1
+  image:
+    repository: kore
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 9876
+  resources:
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+    limits:
+      cpu: "4"
+      memory: "8Gi"
+
+worker:
+  replicas: 3
+  image:
+    repository: kore
+    tag: latest
+    pullPolicy: IfNotPresent
+  port: 9877
+  resources:
+    requests:
+      cpu: "2"
+      memory: "4Gi"
+    limits:
+      cpu: "8"
+      memory: "16Gi"
+  storage:
+    enabled: true
+    size: 50Gi
+    storageClass: ""

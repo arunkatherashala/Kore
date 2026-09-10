@@ -1,0 +1,11 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run kore-gpu wgpu library tests",
+			"type": "shell",
+			"command": "cargo test -p kore-gpu --lib --features wgpu",
+			"isBackground": false
+		}
+	]
+}

@@ -16,25 +16,25 @@ impl TableStore {
     }
 
     pub fn register(&self, name: &str, data: DataBlock) {
-        self.inner.lock().unwrap().insert(name.to_string(), data);
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).insert(name.to_string(), data);
     }
 
     pub fn get(&self, name: &str) -> Option<DataBlock> {
-        self.inner.lock().unwrap().get(name).cloned()
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).get(name).cloned()
     }
 
     /// Snapshot every registered `(name, block)` pair — used by task runners
     /// that need multi-table access (e.g. broadcast join: fact + dim on the
     /// same worker).
     pub fn snapshot_all(&self) -> Vec<(String, DataBlock)> {
-        self.inner.lock().unwrap()
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
 
     pub fn table_count(&self) -> usize {
-        self.inner.lock().unwrap().len()
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 }
 

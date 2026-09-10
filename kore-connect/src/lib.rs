@@ -10,8 +10,7 @@
 //! | InMemory      | ✅   | ✅    | DataBlock clone  |
 //! | MultiFile     | ✅   | ❌    | Glob of CSV files|
 
-use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::Path;
+use std::io::{BufReader, Read, Write};
 use kore_core::{Column, ColumnData, DataBlock, KoreError};
 
 // ─── Connector traits ─────────────────────────────────────────────────────────
@@ -210,7 +209,7 @@ fn csv_to_block(csv: &str) -> Result<DataBlock, KoreError> {
     let headers: Vec<&str> = lines.remove(0).split(',').map(|s| s.trim()).collect();
     let n = lines.len();
     let nc = headers.len();
-    let mut raw: Vec<Vec<String>> = lines.iter().map(|l| {
+    let raw: Vec<Vec<String>> = lines.iter().map(|l| {
         let mut fields: Vec<String> = l.split(',').map(|s| s.trim().to_string()).collect();
         fields.resize(nc, String::new());
         fields

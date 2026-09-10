@@ -20,6 +20,7 @@ kore-arrow      = { path = "../kore-arrow" }
 kore-gpu        = { path = "../kore-gpu" }
 kore-distributed = { path = "../kore-distributed" }
 kore-jit         = { path = "../kore-jit" }
+kore-parquet     = { path = "../kore-parquet" }
 serde           = { workspace = true }
 serde_json      = { workspace = true }
 rayon           = { workspace = true }

@@ -24,6 +24,7 @@ pub enum Expr {
     In      { expr: Box<Expr>, values: Vec<Expr>, negated: bool },
     Between { expr: Box<Expr>, low: Box<Expr>, high: Box<Expr>, negated: bool },
     Like    { expr: Box<Expr>, pattern: Box<Expr>, negated: bool },
+    ILike   { expr: Box<Expr>, pattern: Box<Expr>, negated: bool },
     Star,  // SELECT *  (used in COUNT(*))
     /// Scalar function call: UPPER(x), LOWER(x), ROUND(x,2), COALESCE(a,b), …
     FuncCall { name: String, args: Vec<Expr> },
@@ -34,6 +35,11 @@ pub enum Expr {
     InSubquery { expr: Box<Expr>, subquery: Box<SelectStmt>, negated: bool },
     /// EXISTS (SELECT ...): true if subquery returns ≥1 row
     Exists { subquery: Box<SelectStmt>, negated: bool },
+    // ── Spark SQL extensions ────────────────────────────────────────────────
+    /// Array literal: ARRAY(1, 2, 3) or [1, 2, 3]
+    Array(Vec<Expr>),
+    /// EXPLODE(expr) — flatten array/map into rows
+    Explode(Box<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -96,21 +102,64 @@ pub enum FrameBound {
     UnboundedFollowing,
 }
 
+// ── Query hints ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum QueryHint {
+    Broadcast(String),
+    Repartition(usize),
+}
+
+// ── LATERAL VIEW ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LateralView {
+    pub expr:        Expr,
+    pub table_alias: String,
+    pub col_alias:   String,
+}
+
+// ── PIVOT / UNPIVOT ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PivotClause {
+    pub agg_func:  AggFunc,
+    pub agg_col:   String,
+    pub for_col:   String,
+    pub in_values: Vec<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnpivotClause {
+    pub value_col: String,
+    pub key_col:   String,
+    pub in_cols:   Vec<String>,
+}
+
 // ── SELECT statement ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectStmt {
-    pub distinct:     bool,
-    pub projections:  Vec<Projection>,
-    pub from:         TableExpr,
-    pub joins:        Vec<JoinClause>,
-    pub where_clause: Option<Expr>,
-    pub group_by:     Vec<String>,
-    pub having:       Option<Expr>,
-    pub qualify:      Option<Expr>,  // QUALIFY (window filter)
-    pub order_by:     Vec<OrderByItem>,
-    pub limit:        Option<u64>,
-    pub offset:       Option<u64>,
+    pub distinct:      bool,
+    pub projections:   Vec<Projection>,
+    pub from:          TableExpr,
+    pub joins:         Vec<JoinClause>,
+    pub where_clause:  Option<Expr>,
+    pub group_by:      Vec<String>,
+    pub having:        Option<Expr>,
+    pub qualify:       Option<Expr>,  // QUALIFY (window filter)
+    pub order_by:      Vec<OrderByItem>,
+    pub limit:         Option<u64>,
+    pub offset:        Option<u64>,
+    /// Set by LimitPushdownRule: propagate limit into scan stage for early termination.
+    pub scan_limit:    Option<u64>,
+    /// LATERAL VIEW EXPLODE(col) alias AS col_alias
+    pub lateral_views: Vec<LateralView>,
+    /// PIVOT/UNPIVOT after FROM
+    pub pivot:         Option<PivotClause>,
+    pub unpivot:       Option<UnpivotClause>,
+    /// Query hints: /*+ BROADCAST(t) */ etc.
+    pub hints:         Vec<QueryHint>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -127,6 +176,8 @@ pub struct TableExpr {
     pub subquery: Option<Box<SelectStmt>>,
     /// For FROM (VALUES (...), (...)) AS t(cols)
     pub values:   Option<Vec<Vec<Expr>>>,
+    /// Set by PredicatePushdownRule: filter pushed down to this table's scan.
+    pub push_filter: Option<Box<Expr>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -134,32 +185,40 @@ pub struct JoinClause {
     pub join_type: JoinKind,
     pub table:     TableExpr,
     pub on:        JoinOn,
+    /// Set by PredicatePushdownRule: filter pushed down to the join's table scan.
+    pub push_filter: Option<Box<Expr>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct JoinOn {
     pub left_col:  String,
     pub right_col: String,
+    pub expr:      Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum JoinKind { Inner, Left, Right, Full }
+pub enum JoinKind { Inner, Left, Right, Full, Cross }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderByItem {
+    pub expr:        Expr,
     pub col:        String,
     pub desc:       bool,
-    pub nulls_first: Option<bool>,  // None = default (NULLs last for ASC, first for DESC)
+    pub nulls_first: Option<bool>,
 }
 
-// ── Top-level query (CTEs + UNION ALL) ───────────────────────────────────────
+// ── Top-level query (CTEs + set operations) ──────────────────────────────────
 
-/// Full query: `[WITH cte, ...] SELECT ... [UNION ALL SELECT ...]`
+/// Set operation kinds: UNION ALL, UNION (dedup), INTERSECT, EXCEPT
+#[derive(Debug, Clone, PartialEq)]
+pub enum SetOpKind { UnionAll, Union, Intersect, Except }
+
+/// Full query: `[WITH cte, ...] SELECT ... [UNION/INTERSECT/EXCEPT SELECT ...]`
 #[derive(Debug, Clone, Default)]
 pub struct Query {
     pub ctes:      Vec<CteClause>,
     pub body:      Option<SelectStmt>,
-    pub union_all: Vec<SelectStmt>,
+    pub set_ops:   Vec<(SetOpKind, SelectStmt)>,
 }
 
 #[derive(Debug, Clone)]

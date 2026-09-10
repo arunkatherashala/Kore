@@ -7,3 +7,4 @@ edition = "2021"
 kore-core    = { workspace = true }
 kore-sql     = { path = "../kore-sql" }
 kore-catalog = { path = "../kore-catalog" }
+kore-bloom   = { path = "../kore-bloom" }

@@ -8,7 +8,7 @@
 //! - Parallel map (apply a closure to every column element)
 
 use rayon::prelude::*;
-use kore_core::{Column, ColumnData, DataBlock, KoreError, Value};
+use kore_core::{Column, ColumnData, DataBlock, KoreError};
 
 // ─── Parallel filter ──────────────────────────────────────────────────────────
 
@@ -116,7 +116,7 @@ where
 /// Uses a concurrent thread-local approach: split rows across Rayon threads,
 /// each thread builds a local map, then merge.
 pub fn par_group_by(block: &DataBlock, key_col: &str) -> Vec<(String, Vec<usize>)> {
-    use std::collections::HashMap;
+    
     let col = block.columns.iter().find(|c| {
         c.name == key_col || c.name.ends_with(&format!(".{}", key_col))
     });
@@ -171,6 +171,7 @@ fn cell_to_str(data: &ColumnData, row: usize) -> String {
 
 // ─── ColumnData len helper ────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 trait ColLen { fn len(&self) -> usize; }
 impl ColLen for ColumnData {
     fn len(&self) -> usize {

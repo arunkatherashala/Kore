@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
-use kore_core::{Column, ColumnData, DataBlock, KoreError};
+use kore_core::{ColumnData, DataBlock, KoreError};
 
 // ─── Iceberg schema ───────────────────────────────────────────────────────────
 
@@ -223,7 +223,7 @@ impl IcebergTable {
             properties:           HashMap::new(),
         };
 
-        let mut table = IcebergTable { root, metadata, files: vec![] };
+        let table = IcebergTable { root, metadata, files: vec![] };
         table.write_metadata()?;
         Ok(table)
     }
@@ -316,7 +316,7 @@ impl IcebergTable {
         Ok(DataBlock::empty())
     }
 
-    fn read_at_snapshot(&self, snapshot_id: Option<i64>) -> Result<DataBlock, KoreError> {
+    fn read_at_snapshot(&self, _snapshot_id: Option<i64>) -> Result<DataBlock, KoreError> {
         if self.files.is_empty() { return Ok(DataBlock::empty()); }
 
         // Filter files based on snapshot (simplified: use all current files)
@@ -377,7 +377,7 @@ impl IcebergTable {
     }
 }
 
-fn load_files_from_metadata(root: &Path, meta: &IcebergTableMeta) -> Vec<DataFile> {
+fn load_files_from_metadata(root: &Path, _meta: &IcebergTableMeta) -> Vec<DataFile> {
     // Walk the data directory and reconstruct file list
     let data_dir = root.join("data");
     if !data_dir.exists() { return vec![]; }

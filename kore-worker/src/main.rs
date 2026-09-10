@@ -1,5 +1,5 @@
 fn main() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     let coord_addr = std::env::args().nth(1)
         .unwrap_or_else(|| kore_net::coord_bind_addr());
     let worker_id  = std::env::args().nth(2).unwrap_or_else(|| "worker-1".into());

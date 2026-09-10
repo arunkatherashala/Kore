@@ -18,10 +18,12 @@ impl Worker {
     }
 
     /// Bind and start serving; returns a JoinHandle so the caller can await it.
-    pub fn start(self) -> JoinHandle<()> {
+    pub fn start(self) -> JoinHandle<Result<(), KoreError>> {
         tokio::spawn(async move {
             let listener = TcpListener::bind(&self.addr).await
-                .unwrap_or_else(|e| panic!("Worker {} bind failed: {}", self.id, e));
+                .map_err(|e| KoreError::Cluster(
+                    format!("Worker {} bind failed: {}", self.id, e)
+                ))?;
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {

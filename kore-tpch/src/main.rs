@@ -18,15 +18,12 @@
 ///   - Spark 3.5 on m5.4xlarge (16 vCPU, 64GB) from Databricks blog
 ///   - DatabricksIQ benchmark, Nov 2024
 
-use std::time::{Duration, Instant};
+use std::collections::HashMap;
+use std::time::Instant;
 use kore_core::{Column, ColumnData, DataBlock};
 use kore_sql::executor::KqlContext;
-use kore_join::{HashJoin, JoinConfig};
-use kore_window::{WindowFn, WinOrder, apply_window, apply_windows};
+use kore_window::{WindowFn, WinOrder, apply_windows};
 use kore_simd::vectorized_agg;
-use kore_vectorized::{CmpOp, ColCondition, VecFilter, VecAgg, AggSpec, GroupBySpec,
-                      execute_vectorized, vectorized_filter, vectorized_agg as vec_agg,
-                      vectorized_group_by};
 use kore_arrow::memory_report;
 use kore_distributed::DistributedContext;
 use kore_jit::{q1_jit, q6_jit};
@@ -59,6 +56,29 @@ static SPARK_NUMBERS: &[SparkBaseline] = &[
 
 // ─── Data generation ──────────────────────────────────────────────────────────
 
+fn day_offset_to_yyyymmdd(offset: usize) -> i64 {
+    static DAYS_IN_MONTH: [u32; 12] = [31,28,31,30,31,30,31,31,30,31,30,31];
+    let base_year = 1992;
+    let mut remaining = offset as u32;
+    let mut y = base_year;
+    loop {
+        let yday = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+        if remaining < yday { break; }
+        remaining -= yday;
+        y += 1;
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let mut m = 0u32;
+    loop {
+        let md = if m == 1 && leap { 29 } else { DAYS_IN_MONTH[m as usize] };
+        if remaining < md { break; }
+        remaining -= md;
+        m += 1;
+        if m >= 12 { m = 11; break; }
+    }
+    (y as i64) * 10000 + (m as i64 + 1) * 100 + (remaining as i64 + 1)
+}
+
 fn gen_lineitem(n: usize) -> DataBlock {
     let mut rng = SimpleRng::new(42);
     DataBlock {
@@ -79,8 +99,8 @@ fn gen_lineitem(n: usize) -> DataBlock {
                 codes: (0..n).map(|i| (i % 2) as u8).collect(),
                 dict:  vec!["O".to_string(), "F".to_string()],
             }},
-            Column { name: "l_shipdate".into(),    data: ColumnData::Int64((0..n).map(|i| Some(19940101 + (i%3650) as i64)).collect()) },
-            Column { name: "l_commitdate".into(),  data: ColumnData::Int64((0..n).map(|i| Some(19940101 + (i%3650) as i64)).collect()) },
+            Column { name: "l_shipdate".into(),    data: ColumnData::Int64((0..n).map(|i| Some(day_offset_to_yyyymmdd(i % 2192))).collect()) },
+            Column { name: "l_commitdate".into(),  data: ColumnData::Int64((0..n).map(|i| Some(day_offset_to_yyyymmdd(i % 2192))).collect()) },
         ],
     }
 }
@@ -152,6 +172,69 @@ fn gen_nation() -> DataBlock {
             Column { name: "n_regionkey".into(), data: ColumnData::Int64((0..n).map(|i| Some((i % 5) as i64)).collect()) },
         ],
     }
+}
+
+fn gen_partsupp(n: usize) -> DataBlock {
+    let mut rng = SimpleRng::new(31);
+    DataBlock {
+        num_rows: n,
+        columns: vec![
+            Column { name: "ps_partkey".into(),  data: ColumnData::Int64((0..n).map(|_| Some(rng.next_i64(200_000))).collect()) },
+            Column { name: "ps_suppkey".into(),  data: ColumnData::Int64((0..n).map(|_| Some(rng.next_i64(10_000))).collect()) },
+            Column { name: "ps_availqty".into(), data: ColumnData::Int64((0..n).map(|_| Some(rng.next_i64(9999) + 1)).collect()) },
+            Column { name: "ps_supplycost".into(), data: ColumnData::Float64((0..n).map(|_| Some(rng.next_f64() * 1000.0 + 1.0)).collect()) },
+        ],
+    }
+}
+
+fn gen_region() -> DataBlock {
+    let regions = ["AFRICA", "AMERICA", "ASIA", "EUROPE", "MIDDLE EAST"];
+    let n = regions.len();
+    DataBlock {
+        num_rows: n,
+        columns: vec![
+            Column { name: "r_regionkey".into(), data: ColumnData::Int64((0..n).map(|i| Some(i as i64)).collect()) },
+            Column { name: "r_name".into(), data: ColumnData::Str(regions.iter().map(|s| Some(s.to_string())).collect()) },
+        ],
+    }
+}
+
+// ─── Parquet benchmark functions ──────────────────────────────────────────────
+
+fn write_tpch_parquet(scale: usize, dir: &str) -> std::io::Result<Vec<(String, u64)>> {
+    std::fs::create_dir_all(dir)?;
+    let mut files = Vec::new();
+
+    let tables: Vec<(&str, DataBlock)> = vec![
+        ("lineitem", gen_lineitem(scale * 6_000)),
+        ("orders", gen_orders(scale * 1_500)),
+        ("part", gen_part(scale * 200)),
+        ("supplier", gen_supplier(scale * 10)),
+        ("partsupp", gen_partsupp(scale * 800)),
+        ("customer", gen_customer(scale * 150)),
+        ("nation", gen_nation()),
+        ("region", gen_region()),
+    ];
+
+    for (name, block) in &tables {
+        let path = format!("{dir}/{name}.parquet");
+        kore_parquet::ParquetWriter::write_file(block, &path)
+            .expect(&format!("write {name}.parquet"));
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        files.push((name.to_string(), size));
+    }
+    Ok(files)
+}
+
+fn read_tpch_parquet(dir: &str) -> HashMap<String, DataBlock> {
+    let mut tables = HashMap::new();
+    for name in &["lineitem", "orders", "part", "supplier", "partsupp", "customer", "nation", "region"] {
+        let path = format!("{dir}/{name}.parquet");
+        if let Ok(block) = kore_parquet::ParquetReader::new(&path).read() {
+            tables.insert(name.to_string(), block);
+        }
+    }
+    tables
 }
 
 // ─── Benchmark runner ─────────────────────────────────────────────────────────
@@ -334,7 +417,7 @@ fn q4(orders: &DataBlock, lineitem: &DataBlock) -> usize {
     };
     // Group by o_orderpriority — synthetic: use orderkey mod 5 as priority
     let mut groups: std::collections::HashMap<i64, u64> = std::collections::HashMap::new();
-    for (i, ok) in o_key.iter().enumerate() {
+    for (_i, ok) in o_key.iter().enumerate() {
         if let Some(key) = ok {
             if late_keys.contains(key) {
                 *groups.entry(key % 5).or_insert(0) += 1;
@@ -344,10 +427,8 @@ fn q4(orders: &DataBlock, lineitem: &DataBlock) -> usize {
     groups.len()
 }
 
-fn q7(orders: &DataBlock, lineitem: &DataBlock, customer: &DataBlock, supplier: &DataBlock, nation: &DataBlock) -> usize {
-    // Q7: Volume Shipping — 5-table join, GROUP BY year + supplier/customer nation
+fn q7(_orders: &DataBlock, lineitem: &DataBlock, _customer: &DataBlock, supplier: &DataBlock, nation: &DataBlock) -> usize {
     use std::collections::HashMap;
-    // Build nation lookup: nationkey → name
     let n_key = match nation.columns.iter().find(|c| c.name == "n_nationkey") {
         Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
     };
@@ -360,43 +441,45 @@ fn q7(orders: &DataBlock, lineitem: &DataBlock, customer: &DataBlock, supplier: 
             nation_map.insert(k, name.as_str());
         }
     }
-    // supplier nationkey → nation name
     let s_key = match supplier.columns.iter().find(|c| c.name == "s_suppkey") {
         Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
     };
     let s_nat = match supplier.columns.iter().find(|c| c.name == "s_nationkey") {
         Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
     };
-    let mut supp_nation: HashMap<i64, &str> = HashMap::new();
+    let mut supp_nation: HashMap<i64, i64> = HashMap::new();
     for i in 0..supplier.num_rows {
         if let (Some(sk), Some(nk)) = (s_key[i], s_nat[i]) {
-            if let Some(nn) = nation_map.get(&nk) { supp_nation.insert(sk, nn); }
+            supp_nation.insert(sk, nk);
         }
     }
-    // Join lineitem × orders on orderkey, then group by (year, supp_nation) — simplified
-    let l_ok  = match lineitem.columns.iter().find(|c| c.name == "l_orderkey") {
-        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
-    };
     let l_ship = match lineitem.columns.iter().find(|c| c.name == "l_shipdate") {
         Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
     };
-    let mut groups: HashMap<(i64, u8), f64> = HashMap::new();
+    let l_supp = match lineitem.columns.iter().find(|c| c.name == "l_suppkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let l_price = match lineitem.columns.iter().find(|c| c.name == "l_extprice") {
+        Some(c) => match &c.data { ColumnData::Float64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let l_disc = match lineitem.columns.iter().find(|c| c.name == "l_discount") {
+        Some(c) => match &c.data { ColumnData::Float64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let mut groups: HashMap<(i64, i64), f64> = HashMap::new();
     for i in 0..lineitem.num_rows {
         let ship = l_ship[i].unwrap_or(0);
         if ship < 19950101 || ship > 19961231 { continue; }
-        let year = ((ship / 10000) - 1995) as i64;
-        let sn_idx = (l_ok[i].unwrap_or(0) % supplier.num_rows as i64).unsigned_abs() as usize;
-        let sn_idx = sn_idx.min(supplier.num_rows - 1);
-        let bucket = (sn_idx % 4) as u8;
-        *groups.entry((year, bucket)).or_insert(0.0) += 1.0;
+        let year = ship / 10000;
+        let sk = l_supp[i].unwrap_or(-1);
+        let nat_key = supp_nation.get(&sk).copied().unwrap_or(-1);
+        let rev = l_price[i].unwrap_or(0.0) * (1.0 - l_disc[i].unwrap_or(0.0));
+        *groups.entry((year, nat_key)).or_insert(0.0) += rev;
     }
     groups.len()
 }
 
-fn q8(orders: &DataBlock, lineitem: &DataBlock, customer: &DataBlock, supplier: &DataBlock, part: &DataBlock, nation: &DataBlock) -> usize {
-    // Q8: National Market Share — 7-table join, GROUP BY year + market share
+fn q8(_orders: &DataBlock, lineitem: &DataBlock, _customer: &DataBlock, supplier: &DataBlock, part: &DataBlock, nation: &DataBlock) -> usize {
     use std::collections::HashMap;
-    // Simplified: filter ECONOMY ANODIZED STEEL parts, sum by year
     let p_key = match part.columns.iter().find(|c| c.name == "p_partkey") {
         Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
     };
@@ -407,6 +490,31 @@ fn q8(orders: &DataBlock, lineitem: &DataBlock, customer: &DataBlock, supplier: 
         .filter_map(|(k, t)| {
             if t.as_deref() == Some("ECONOMY ANODIZED STEEL") { k.map(|v| v) } else { None }
         }).collect();
+    let s_key = match supplier.columns.iter().find(|c| c.name == "s_suppkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let s_nat = match supplier.columns.iter().find(|c| c.name == "s_nationkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let mut supp_nation: HashMap<i64, i64> = HashMap::new();
+    for i in 0..supplier.num_rows {
+        if let (Some(sk), Some(nk)) = (s_key[i], s_nat[i]) {
+            supp_nation.insert(sk, nk);
+        }
+    }
+    let brazil_key: i64 = {
+        let n_name = match nation.columns.iter().find(|c| c.name == "n_name") {
+            Some(c) => match &c.data { ColumnData::Str(v) => v, _ => &vec![] as &Vec<Option<String>> },
+            None => &vec![] as &Vec<Option<String>>,
+        };
+        let n_key = match nation.columns.iter().find(|c| c.name == "n_nationkey") {
+            Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => &vec![] as &Vec<Option<i64>> },
+            None => &vec![] as &Vec<Option<i64>>,
+        };
+        n_key.iter().zip(n_name.iter())
+            .find_map(|(k, n)| if n.as_deref() == Some("BRAZIL") { *k } else { None })
+            .unwrap_or(2)
+    };
     let l_pkey  = match lineitem.columns.iter().find(|c| c.name == "l_partkey") {
         Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
     };
@@ -416,7 +524,10 @@ fn q8(orders: &DataBlock, lineitem: &DataBlock, customer: &DataBlock, supplier: 
     let l_price = match lineitem.columns.iter().find(|c| c.name == "l_extprice") {
         Some(c) => match &c.data { ColumnData::Float64(v) => v, _ => return 0 }, None => return 0,
     };
-    let mut yearly: HashMap<i64, (f64, f64)> = HashMap::new(); // (total, brazil)
+    let l_supp  = match lineitem.columns.iter().find(|c| c.name == "l_suppkey") {
+        Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
+    };
+    let mut yearly: HashMap<i64, (f64, f64)> = HashMap::new();
     for i in 0..lineitem.num_rows {
         let ship = l_ship[i].unwrap_or(0);
         if ship < 19950101 || ship > 19961231 { continue; }
@@ -425,19 +536,22 @@ fn q8(orders: &DataBlock, lineitem: &DataBlock, customer: &DataBlock, supplier: 
             let price = l_price[i].unwrap_or(0.0);
             let e = yearly.entry(year).or_insert((0.0, 0.0));
             e.0 += price;
-            if i % 10 == 0 { e.1 += price; } // synthetic "Brazil" supplier fraction
+            let sk = l_supp[i].unwrap_or(-1);
+            if supp_nation.get(&sk).copied() == Some(brazil_key) {
+                e.1 += price;
+            }
         }
     }
     yearly.len()
 }
 
-fn q9(orders: &DataBlock, lineitem: &DataBlock, supplier: &DataBlock, part: &DataBlock, nation: &DataBlock) -> usize {
+fn q9(_orders: &DataBlock, lineitem: &DataBlock, _supplier: &DataBlock, part: &DataBlock, nation: &DataBlock) -> usize {
     // Q9: Product Type Profit Measure — GROUP BY nation + year
     use std::collections::HashMap;
     let p_key = match part.columns.iter().find(|c| c.name == "p_partkey") {
         Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
     };
-    let p_type = match part.columns.iter().find(|c| c.name == "p_type") {
+    let _p_type = match part.columns.iter().find(|c| c.name == "p_type") {
         Some(c) => match &c.data { ColumnData::Str(v) => v, _ => return 0 }, None => return 0,
     };
     // Filter parts containing "green" in name (simplified: use brand mod)
@@ -463,7 +577,7 @@ fn q9(orders: &DataBlock, lineitem: &DataBlock, supplier: &DataBlock, part: &Dat
     groups.len()
 }
 
-fn q12(orders: &DataBlock, lineitem: &DataBlock) -> usize {
+fn q12(_orders: &DataBlock, lineitem: &DataBlock) -> usize {
     // Q12: Shipping Modes and Order Priority — GROUP BY l_shipmode
     use std::collections::HashMap;
     let l_ok   = match lineitem.columns.iter().find(|c| c.name == "l_orderkey") {
@@ -548,36 +662,59 @@ fn q14(lineitem: &DataBlock, part: &DataBlock) -> usize {
         total_rev += rev;
         if l_pkey[i].map_or(false, |pk| promo_keys.contains(&pk)) { promo_rev += rev; }
     }
-    // Returns 1 row (the percentage)
+    let _pct = if total_rev > 0.0 { 100.0 * promo_rev / total_rev } else { 0.0 };
     if total_rev > 0.0 { 1 } else { 0 }
 }
 
-fn q18(customer: &DataBlock, orders: &DataBlock, lineitem: &DataBlock) -> usize {
+fn q18(_customer: &DataBlock, orders: &DataBlock, lineitem: &DataBlock) -> usize {
     // Q18: Large Volume Customer — 3-way join, top 100 by quantity
+    //
+    // Optimization: parallel chunked aggregation over 60M lineitem rows.
+    // Each thread accumulates into a local HashMap, then merge. Avoids
+    // contention on a single HashMap and uses all 8 cores for phase 1.
     use std::collections::HashMap;
+
     let l_ok  = match lineitem.columns.iter().find(|c| c.name == "l_orderkey") {
         Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
     };
     let l_qty = match lineitem.columns.iter().find(|c| c.name == "l_quantity") {
         Some(c) => match &c.data { ColumnData::Float64(v) => v, _ => return 0 }, None => return 0,
     };
-    // Find orderkeys with total qty > 300
-    let mut order_qty: HashMap<i64, f64> = HashMap::new();
-    for i in 0..lineitem.num_rows {
-        if let Some(ok) = l_ok[i] {
-            *order_qty.entry(ok).or_insert(0.0) += l_qty[i].unwrap_or(0.0);
+
+    let n = lineitem.num_rows;
+    let n_threads = rayon::current_num_threads().max(1);
+    let chunk = (n + n_threads - 1) / n_threads;
+
+    let partial_maps: Vec<HashMap<i64, f64>> = (0..n_threads).into_par_iter().map(|t| {
+        let start = t * chunk;
+        let end = (start + chunk).min(n);
+        let mut local: HashMap<i64, f64> = HashMap::with_capacity(end - start / 4);
+        for i in start..end {
+            if let Some(ok) = l_ok[i] {
+                *local.entry(ok).or_insert(0.0) += l_qty[i].unwrap_or(0.0);
+            }
+        }
+        local
+    }).collect();
+
+    let mut order_qty: HashMap<i64, f64> = HashMap::with_capacity(n / 4);
+    for m in partial_maps {
+        for (k, v) in m {
+            *order_qty.entry(k).or_insert(0.0) += v;
         }
     }
+
     let heavy_orders: std::collections::HashSet<i64> = order_qty.iter()
         .filter_map(|(k, &v)| if v > 300.0 { Some(*k) } else { None }).collect();
-    // Join orders → filter → join customer
+
     let o_ok   = match orders.columns.iter().find(|c| c.name == "o_orderkey") {
         Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
     };
     let o_cust = match orders.columns.iter().find(|c| c.name == "o_custkey") {
         Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
     };
-    let mut result: HashMap<(i64, i64), f64> = HashMap::new(); // (custkey, orderkey) → qty
+
+    let mut result: HashMap<(i64, i64), f64> = HashMap::new();
     for i in 0..orders.num_rows {
         if let Some(ok) = o_ok[i] {
             if heavy_orders.contains(&ok) {
@@ -594,23 +731,33 @@ fn q18(customer: &DataBlock, orders: &DataBlock, lineitem: &DataBlock) -> usize 
 
 fn q19(lineitem: &DataBlock, part: &DataBlock) -> usize {
     // Q19: Discounted Revenue — lineitem×part, nested OR filter, SUM discount revenue
+    //
+    // Optimization: instead of a HashMap lookup per lineitem row (60M random accesses),
+    // pre-split parts into 3 brand-specific HashSets. The lineitem scan then does at
+    // most 3 HashSet::contains() checks (cache-friendly u64 probes) per row.
+    use std::collections::HashSet;
+
     let p_key   = match part.columns.iter().find(|c| c.name == "p_partkey") {
         Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
     };
     let p_brand = match part.columns.iter().find(|c| c.name == "p_brand") {
         Some(c) => match &c.data { ColumnData::Str(v) => v, _ => return 0 }, None => return 0,
     };
-    let p_price = match part.columns.iter().find(|c| c.name == "p_retailprice") {
-        Some(c) => match &c.data { ColumnData::Float64(v) => v, _ => return 0 }, None => return 0,
-    };
-    let mut part_ht: std::collections::HashMap<i64, (&str, f64)> = std::collections::HashMap::new();
+
+    let mut brand12_keys: HashSet<i64> = HashSet::new();
+    let mut brand23_keys: HashSet<i64> = HashSet::new();
+    let mut brand34_keys: HashSet<i64> = HashSet::new();
     for i in 0..part.num_rows {
         if let Some(pk) = p_key[i] {
-            let brand = p_brand[i].as_deref().unwrap_or("");
-            let price = p_price[i].unwrap_or(0.0);
-            part_ht.insert(pk, (brand, price));
+            match p_brand[i].as_deref().unwrap_or("") {
+                "Brand#12" => { brand12_keys.insert(pk); }
+                "Brand#23" => { brand23_keys.insert(pk); }
+                "Brand#34" => { brand34_keys.insert(pk); }
+                _ => {}
+            }
         }
     }
+
     let l_pkey  = match lineitem.columns.iter().find(|c| c.name == "l_partkey") {
         Some(c) => match &c.data { ColumnData::Int64(v) => v, _ => return 0 }, None => return 0,
     };
@@ -623,22 +770,31 @@ fn q19(lineitem: &DataBlock, part: &DataBlock) -> usize {
     let l_qty   = match lineitem.columns.iter().find(|c| c.name == "l_quantity") {
         Some(c) => match &c.data { ColumnData::Float64(v) => v, _ => return 0 }, None => return 0,
     };
-    let mut total_rev = 0.0f64;
-    for i in 0..lineitem.num_rows {
-        let pk  = l_pkey[i].unwrap_or(-1);
-        let qty = l_qty[i].unwrap_or(0.0);
-        let disc= l_disc[i].unwrap_or(0.0);
-        if disc > 0.1 { continue; }
-        if let Some(&(brand, _)) = part_ht.get(&pk) {
-            // 3 OR branches (Brand#12/Brand#23/Brand#34) with qty and container filters
-            let matches = (brand == "Brand#12" && qty >= 1.0 && qty <= 11.0)
-                       || (brand == "Brand#23" && qty >= 10.0 && qty <= 20.0)
-                       || (brand == "Brand#34" && qty >= 20.0 && qty <= 30.0);
-            if matches {
-                total_rev += l_price[i].unwrap_or(0.0) * (1.0 - disc);
+
+    let n = lineitem.num_rows;
+    let n_threads = rayon::current_num_threads().max(1);
+    let chunk = (n + n_threads - 1) / n_threads;
+    let total_rev: f64 = (0..n_threads).into_par_iter()
+        .map(|t| {
+            let start = t * chunk;
+            let end = (start + chunk).min(n);
+            let mut local_sum = 0.0f64;
+            for i in start..end {
+                let disc = l_disc[i].unwrap_or(0.0);
+                if disc > 0.1 { continue; }
+                let pk  = l_pkey[i].unwrap_or(-1);
+                let qty = l_qty[i].unwrap_or(0.0);
+                let matches = (qty >= 1.0  && qty <= 11.0 && brand12_keys.contains(&pk))
+                           || (qty >= 10.0 && qty <= 20.0 && brand23_keys.contains(&pk))
+                           || (qty >= 20.0 && qty <= 30.0 && brand34_keys.contains(&pk));
+                if matches {
+                    local_sum += l_price[i].unwrap_or(0.0) * (1.0 - disc);
+                }
             }
-        }
-    }
+            local_sum
+        })
+        .sum();
+
     if total_rev > 0.0 { 1 } else { 0 }
 }
 
@@ -807,6 +963,7 @@ fn q_distributed_groupby(lineitem: &DataBlock) -> usize {
 
 // ─── Distributed SQL benchmarks (Layer 66) ────────────────────────────────────
 
+#[allow(dead_code)]
 fn dq1(lineitem: &DataBlock) -> usize {
     // Q1 through kore-distributed — real SQL, automatically partitioned
     let mut ctx = DistributedContext::with_workers(rayon::current_num_threads());
@@ -820,6 +977,7 @@ fn dq1(lineitem: &DataBlock) -> usize {
     ).map(|r| r.num_rows).unwrap_or(0)
 }
 
+#[allow(dead_code)]
 fn dq6(lineitem: &DataBlock) -> usize {
     // Q6 through kore-distributed — parallel filter + SUM
     let mut ctx = DistributedContext::with_workers(rayon::current_num_threads());
@@ -833,11 +991,83 @@ fn dq6(lineitem: &DataBlock) -> usize {
 }
 
 fn main() {
-    let scale: usize = std::env::args()
-        .skip_while(|a| a != "--scale")
-        .nth(1)
+    let args: Vec<String> = std::env::args().collect();
+    let scale: usize = args.iter().position(|a| a == "--scale")
+        .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(1);
+    let run_sql = args.iter().any(|a| a == "--sql");
+    let run_parquet = args.iter().any(|a| a == "--parquet");
+    let run_sql_vs_native = args.iter().any(|a| a == "--sql-vs-native");
+
+    if run_parquet {
+        let parquet_dir = format!("tpch_parquet_sf{scale}");
+        println!();
+        println!("╔══════════════════════════════════════════════════════════════════╗");
+        println!("║     KORE TPC-H Parquet Benchmark  (Scale Factor = {scale})       ");
+        println!("╚══════════════════════════════════════════════════════════════════╝");
+        println!();
+
+        // Write TPC-H data to Parquet
+        println!("  Writing TPC-H tables to Parquet ({parquet_dir}/)...");
+        let t_write = Instant::now();
+        let files = write_tpch_parquet(scale, &parquet_dir)
+            .expect("write parquet");
+        let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
+        let total_bytes: u64 = files.iter().map(|(_, s)| *s).sum();
+        println!("  Written in {write_ms:.1}ms ({} files, {:.1}MB total)",
+            files.len(), total_bytes as f64 / 1_048_576.0);
+        for (name, size) in &files {
+            println!("    {:<12} {:>8.1} KB", name, *size as f64 / 1024.0);
+        }
+
+        // Read Parquet back
+        println!();
+        println!("  Reading TPC-H tables from Parquet...");
+        let t_read = Instant::now();
+        let tables = read_tpch_parquet(&parquet_dir);
+        let read_ms = t_read.elapsed().as_secs_f64() * 1000.0;
+        let total_rows: usize = tables.values().map(|b| b.num_rows).sum();
+        println!("  Read in {read_ms:.1}ms ({} tables, {} total rows)", tables.len(), total_rows);
+
+        // Run queries on parquet-loaded data
+        if let (Some(li), Some(od)) = (tables.get("lineitem"), tables.get("orders")) {
+            println!();
+            println!("  Running queries on Parquet-loaded data...");
+            println!("  {:<8} {:>10} {:>10}", "Query", "Time (ms)", "Rows");
+            println!("  {}", "─".repeat(32));
+
+            let t = Instant::now();
+            let r = q1(li);
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            println!("  {:<8} {:>10.1} {:>10}", "Q1", ms, r);
+
+            let t = Instant::now();
+            let r = q6(li);
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            println!("  {:<8} {:>10.1} {:>10}", "Q6", ms, r);
+
+            let t = Instant::now();
+            let r = q12(od, li);
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            println!("  {:<8} {:>10.1} {:>10}", "Q12", ms, r);
+
+            println!("  {}", "─".repeat(32));
+        }
+
+        println!();
+        println!("  ┌─ PARQUET SUMMARY ─────────────────────────────────────────────");
+        println!("  │  Write time     : {write_ms:.1}ms");
+        println!("  │  Read time      : {read_ms:.1}ms");
+        println!("  │  Total file size: {:.2}MB", total_bytes as f64 / 1_048_576.0);
+        println!("  │  Tables loaded  : {}", tables.len());
+        println!("  └────────────────────────────────────────────────────────────────");
+        println!();
+
+        // Clean up
+        std::fs::remove_dir_all(&parquet_dir).ok();
+        return;
+    }
 
     let lineitem_n = 6_000_000 * scale;
     let orders_n   = 1_500_000 * scale;
@@ -862,14 +1092,93 @@ fn main() {
     println!("  Generated in {:.1}s ({} tables, {} total rows)",
         t_gen.elapsed().as_secs_f64(), 6,
         lineitem_n + orders_n + customer_n + supplier_n + part_n + nation.num_rows);
+
+    if run_sql {
+        println!();
+        println!("── SQL Executor Path (via KqlContext) ──────────────────────────────");
+        println!("   KORE runs through full SQL parser/optimizer path");
+        println!();
+        let mut ctx = KqlContext::new();
+        ctx.register("lineitem", lineitem.clone());
+        ctx.register("orders", orders.clone());
+        ctx.register("customer", customer.clone());
+        ctx.register("supplier", supplier.clone());
+        ctx.register("part", part.clone());
+        ctx.register("nation", nation.clone());
+        ctx.register("partsupp", gen_partsupp(800_000 * scale));
+        ctx.register("region", gen_region());
+
+        let sql_queries: Vec<(&str, &str, &str)> = vec![
+            ("Q1-SQL",  "Scan + GROUP BY + aggregates",
+             "SELECT l_returnflag, l_linestatus, SUM(l_quantity), SUM(l_extprice), COUNT(l_orderkey) FROM lineitem WHERE l_shipdate <= 19980902 GROUP BY l_returnflag, l_linestatus"),
+            ("Q3-SQL",  "JOIN + GROUP BY + ORDER BY + LIMIT",
+             "SELECT l_orderkey, SUM(l_extprice * (1 - l_discount)) AS revenue, o_orderdate, o_shippriority FROM lineitem JOIN orders ON l_orderkey = o_orderkey WHERE o_orderstatus = 'F' GROUP BY l_orderkey, o_orderdate, o_shippriority ORDER BY revenue DESC LIMIT 10"),
+            ("Q4-SQL",  "Subquery IN + GROUP BY",
+             "SELECT o_orderkey % 5 AS priority, COUNT(*) AS cnt FROM orders WHERE o_orderkey IN (SELECT l_orderkey FROM lineitem WHERE l_commitdate < 19980901) GROUP BY o_orderkey % 5"),
+            ("Q6-SQL",  "Filter + SUM (no join)",
+             "SELECT SUM(l_extprice * (1 - l_discount)) AS revenue FROM lineitem WHERE l_shipdate >= 19940101 AND l_shipdate < 19950101 AND l_discount >= 0.05 AND l_discount <= 0.07 AND l_quantity < 24"),
+            ("Q12-SQL", "Filter + GROUP BY modulo",
+             "SELECT l_orderkey % 7 AS shipmode, COUNT(*) AS cnt FROM lineitem WHERE l_shipdate >= 19940101 AND l_shipdate <= 19941231 GROUP BY l_orderkey % 7"),
+            ("Q13-SQL", "LEFT JOIN + nested GROUP BY",
+             "WITH c_orders_tbl AS (SELECT c_custkey, COUNT(o_orderkey) AS c_orders FROM customer LEFT JOIN orders ON c_custkey = o_custkey GROUP BY c_custkey) SELECT c_orders, COUNT(*) AS custdist FROM c_orders_tbl GROUP BY c_orders ORDER BY custdist DESC"),
+            ("Q14-SQL", "JOIN + CASE WHEN + promo ratio",
+             "SELECT SUM(CASE WHEN p_type LIKE 'PROMO%' THEN l_extprice * (1 - l_discount) ELSE 0 END) / SUM(l_extprice * (1 - l_discount)) * 100 AS promo_revenue FROM lineitem JOIN part ON l_partkey = p_partkey WHERE l_shipdate >= 19950901 AND l_shipdate <= 19951001"),
+            ("Q19-SQL", "JOIN + OR filter conditions",
+             "SELECT SUM(l_extprice * (1 - l_discount)) AS revenue FROM lineitem JOIN part ON l_partkey = p_partkey WHERE (p_brand = 'Brand#12' AND l_quantity >= 1 AND l_quantity <= 11) OR (p_brand = 'Brand#23' AND l_quantity >= 10 AND l_quantity <= 20) OR (p_brand = 'Brand#34' AND l_quantity >= 20 AND l_quantity <= 30)"),
+            ("Q22-SQL", "Subquery NOT IN + GROUP BY",
+             "SELECT c_nationkey % 7 AS cntrycode, COUNT(*) AS numcust, SUM(c_acctbal) AS totacctbal FROM customer WHERE c_acctbal > 0 AND c_custkey NOT IN (SELECT o_custkey FROM orders) GROUP BY c_nationkey % 7 ORDER BY cntrycode"),
+        ];
+
+        let width = 82;
+        println!("  {:<10} {:<38} {:>10} {:>10} {:>8}",
+            "Query", "Description", "Time (ms)", "Rows", "Status");
+        println!("  {}", "─".repeat(width));
+
+        let mut sql_results: Vec<(&str, f64, usize, bool)> = Vec::new();
+        for (name, desc, sql) in &sql_queries {
+            let t = Instant::now();
+            match ctx.query(sql) {
+                Ok(result) => {
+                    let ms = t.elapsed().as_secs_f64() * 1000.0;
+                    let status = if result.num_rows > 0 { "✓ OK" } else { "⚠ 0rows" };
+                    println!("  {:<10} {:<38} {:>10.1} {:>10} {:>8}", name, desc, ms, result.num_rows, status);
+                    sql_results.push((name, ms, result.num_rows, true));
+                }
+                Err(e) => {
+                    let ms = t.elapsed().as_secs_f64() * 1000.0;
+                    println!("  {:<10} {:<38} {:>10.1} {:>10} {:>8}", name, desc, ms, "ERROR", "✗ FAIL");
+                    eprintln!("    └─ {}", e);
+                    sql_results.push((name, ms, 0, false));
+                }
+            }
+        }
+
+        println!("  {}", "─".repeat(width));
+        let passed = sql_results.iter().filter(|r| r.3).count();
+        let total_ms: f64 = sql_results.iter().map(|r| r.1).sum();
+        println!();
+        println!("  ┌─ SQL PATH SUMMARY ─────────────────────────────────────────────");
+        println!("  │  Queries executed : {}/{} passed", passed, sql_results.len());
+        println!("  │  Total SQL time   : {:.1}ms ({:.2}s)", total_ms, total_ms / 1000.0);
+        println!("  │  Tables registered: 8 (lineitem, orders, customer, supplier, part, nation, partsupp, region)");
+        println!("  │  Path             : Full SQL parser → optimizer → executor");
+        println!("  └────────────────────────────────────────────────────────────────");
+        println!();
+
+        if !run_sql_vs_native {
+            return;
+        }
+    }
+
     println!();
     println!("Running benchmarks (3 iterations each, reporting median)...");
     println!();
 
-    let spark = |q: &str| SPARK_NUMBERS.iter().find(|b| b.q == q).map(|b| b.spark_s).unwrap_or(10.0);
+    let sf = scale as f64;
+    let spark = |q: &str| SPARK_NUMBERS.iter().find(|b| b.q == q).map(|b| b.spark_s * sf).unwrap_or(10.0 * sf);
     let sdesc = |q: &str| SPARK_NUMBERS.iter().find(|b| b.q == q).map(|b| b.description).unwrap_or("");
 
-    let mut results: Vec<BenchResult> = vec![
+    let results: Vec<BenchResult> = vec![
         run_bench("Q1",  sdesc("Q1"),  || q1(&lineitem),                                        spark("Q1")),
         run_bench("Q3",  sdesc("Q3"),  || q3(&orders, &lineitem),                               spark("Q3")),
         run_bench("Q4",  sdesc("Q4"),  || q4(&orders, &lineitem),                               spark("Q4")),
@@ -886,7 +1195,7 @@ fn main() {
         run_bench("W1",  sdesc("W1"),  || q_window(&lineitem),                                  spark("W1")),
         run_bench("S1",  sdesc("S1"),  || q_sort(&lineitem),                                    spark("S1")),
         run_bench("SIMD","SIMD vectorized aggregation (AVX2)",
-                              || q_simd_agg(&lineitem),            100.0),
+                              || q_simd_agg(&lineitem),            100.0 * sf),
         run_bench("D1",  sdesc("D1"),  || q_distributed_groupby(&lineitem),spark("D1")),
     ];
 
@@ -909,8 +1218,12 @@ fn main() {
 
     println!("  {}", "─".repeat(width));
 
-    let avg_speedup = results.iter().filter(|r| r.spark_ms < 50_000.0)
-        .map(|r| r.speedup).sum::<f64>() / results.len() as f64;
+    let valid_results: Vec<&BenchResult> = results.iter()
+        .filter(|r| r.kore_rows > 0 && r.spark_ms < 500_000.0)
+        .collect();
+    let avg_speedup = if valid_results.is_empty() { 0.0 } else {
+        valid_results.iter().map(|r| r.speedup).sum::<f64>() / valid_results.len() as f64
+    };
     let total_kore_ms: f64 = results.iter().map(|r| r.kore_ms).sum();
     let total_spark_ms: f64 = results.iter().map(|r| r.spark_ms).sum();
 
@@ -931,9 +1244,16 @@ fn main() {
     println!("  └────────────────────────────────────────────────────────────────");
 
     println!();
-    println!("  Note: Spark numbers from published TPC-H SF1 on AWS m5.4xlarge");
-    println!("        (16 vCPU, 64GB) — Databricks benchmark blog, Spark 3.5");
-    println!("        KORE runs on the same machine as this process (single-node).");
+    println!("  Methodology:");
+    println!("    Spark baseline: published TPC-H SF-1 on AWS m5.4xlarge (16 vCPU, 64GB),");
+    println!("    Databricks blog, Spark 3.5. Scaled linearly by SF (SF-{scale} = {sf}x).");
+    println!("    Average excludes queries returning 0 rows ({} of {} valid).",
+        valid_results.len(), results.len());
+    if run_sql_vs_native {
+        println!("    KORE native: hand-coded Rust (JIT, SIMD, rayon). SQL: full parser/optimizer path.");
+    } else {
+        println!("    KORE runs on this machine (single-node, hand-coded Rust, not SQL path).");
+    }
     println!();
 
     // ── Save results ──────────────────────────────────────────────────────────
@@ -953,6 +1273,121 @@ fn main() {
         println!("  Results saved → kore_tpch_results.json");
     }
     println!();
+
+    // ── SQL vs Native comparison mode ────────────────────────────────────────
+    if run_sql_vs_native {
+        println!();
+        println!("╔══════════════════════════════════════════════════════════════════╗");
+        println!("║     SQL vs Native Comparison (same queries, both paths)         ║");
+        println!("╚══════════════════════════════════════════════════════════════════╝");
+        println!();
+
+        let mut ctx = KqlContext::new();
+        ctx.register("lineitem", lineitem.clone());
+        ctx.register("orders", orders.clone());
+        ctx.register("customer", customer.clone());
+        ctx.register("supplier", supplier.clone());
+        ctx.register("part", part.clone());
+        ctx.register("nation", nation.clone());
+        ctx.register("partsupp", gen_partsupp(800_000 * scale));
+        ctx.register("region", gen_region());
+
+        struct CompareResult {
+            query: String,
+            native_ms: f64,
+            sql_ms: f64,
+            overhead: f64,
+            spark_ms: f64,
+            sql_vs_spark: f64,
+        }
+
+        let compare_queries: Vec<(&str, &str, Box<dyn Fn() -> usize>)> = vec![
+            ("Q1", "SELECT l_returnflag, l_linestatus, SUM(l_quantity), SUM(l_extprice), COUNT(l_orderkey) FROM lineitem WHERE l_shipdate <= 19980902 GROUP BY l_returnflag, l_linestatus",
+             Box::new(|| q1(&lineitem))),
+            ("Q3", "SELECT l_orderkey, SUM(l_extprice * (1 - l_discount)) AS revenue, o_orderdate, o_shippriority FROM lineitem JOIN orders ON l_orderkey = o_orderkey WHERE o_orderstatus = 'F' GROUP BY l_orderkey, o_orderdate, o_shippriority ORDER BY revenue DESC LIMIT 10",
+             Box::new(|| q3(&orders, &lineitem))),
+            ("Q4", "SELECT o_orderkey % 5 AS priority, COUNT(*) AS cnt FROM orders WHERE o_orderkey IN (SELECT l_orderkey FROM lineitem WHERE l_commitdate < 19980901) GROUP BY o_orderkey % 5",
+             Box::new(|| q4(&orders, &lineitem))),
+            ("Q6", "SELECT SUM(l_extprice * (1 - l_discount)) AS revenue FROM lineitem WHERE l_shipdate >= 19940101 AND l_shipdate < 19950101 AND l_discount >= 0.05 AND l_discount <= 0.07 AND l_quantity < 24",
+             Box::new(|| q6(&lineitem))),
+            ("Q12", "SELECT l_orderkey % 7 AS shipmode, COUNT(*) AS cnt FROM lineitem WHERE l_shipdate >= 19940101 AND l_shipdate <= 19941231 GROUP BY l_orderkey % 7",
+             Box::new(|| q12(&orders, &lineitem))),
+            ("Q13", "WITH c_orders_tbl AS (SELECT c_custkey, COUNT(o_orderkey) AS c_orders FROM customer LEFT JOIN orders ON c_custkey = o_custkey GROUP BY c_custkey) SELECT c_orders, COUNT(*) AS custdist FROM c_orders_tbl GROUP BY c_orders ORDER BY custdist DESC",
+             Box::new(|| q13(&customer, &orders))),
+            ("Q14", "SELECT SUM(CASE WHEN p_type LIKE 'PROMO%' THEN l_extprice * (1 - l_discount) ELSE 0 END) / SUM(l_extprice * (1 - l_discount)) * 100 AS promo_revenue FROM lineitem JOIN part ON l_partkey = p_partkey WHERE l_shipdate >= 19950901 AND l_shipdate <= 19951001",
+             Box::new(|| q14(&lineitem, &part))),
+            ("Q19", "SELECT SUM(l_extprice * (1 - l_discount)) AS revenue FROM lineitem JOIN part ON l_partkey = p_partkey WHERE (p_brand = 'Brand#12' AND l_quantity >= 1 AND l_quantity <= 11) OR (p_brand = 'Brand#23' AND l_quantity >= 10 AND l_quantity <= 20) OR (p_brand = 'Brand#34' AND l_quantity >= 20 AND l_quantity <= 30)",
+             Box::new(|| q19(&lineitem, &part))),
+            ("Q22", "SELECT c_nationkey % 7 AS cntrycode, COUNT(*) AS numcust, SUM(c_acctbal) AS totacctbal FROM customer WHERE c_acctbal > 0 AND c_custkey NOT IN (SELECT o_custkey FROM orders) GROUP BY c_nationkey % 7 ORDER BY cntrycode",
+             Box::new(|| q22(&customer, &orders))),
+        ];
+
+        let mut cmp_results: Vec<CompareResult> = Vec::new();
+
+        for (name, sql, native_fn) in &compare_queries {
+            // Run native (3 iterations, median)
+            let mut native_times = Vec::new();
+            for _ in 0..3 {
+                let t = Instant::now();
+                let _ = native_fn();
+                native_times.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            native_times.sort_by(|a,b| a.partial_cmp(b).unwrap());
+            let native_ms = native_times[1];
+
+            // Run SQL (3 iterations, median)
+            let mut sql_times = Vec::new();
+            for _ in 0..3 {
+                let t = Instant::now();
+                let _ = ctx.query(sql);
+                sql_times.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            sql_times.sort_by(|a,b| a.partial_cmp(b).unwrap());
+            let sql_ms = sql_times[1];
+
+            let overhead = if native_ms > 0.0 { sql_ms / native_ms } else { 0.0 };
+            let spark_ms_val = spark(name) * 1000.0;
+            let sql_vs_spark = if sql_ms > 0.0 { spark_ms_val / sql_ms } else { 0.0 };
+
+            cmp_results.push(CompareResult {
+                query: name.to_string(),
+                native_ms,
+                sql_ms,
+                overhead,
+                spark_ms: spark_ms_val,
+                sql_vs_spark,
+            });
+        }
+
+        // Print comparison table
+        let cw = 95;
+        println!("  {:<6} {:>12} {:>12} {:>12} {:>12} {:>12}",
+            "Query", "Native (ms)", "SQL (ms)", "Overhead", "Spark (ms)", "SQL vs Spark");
+        println!("  {}", "─".repeat(cw));
+
+        for r in &cmp_results {
+            println!("  {:<6} {:>12.1} {:>12.1} {:>11.1}× {:>12.1} {:>11.1}×",
+                r.query, r.native_ms, r.sql_ms, r.overhead, r.spark_ms, r.sql_vs_spark);
+        }
+
+        println!("  {}", "─".repeat(cw));
+
+        let avg_overhead = if cmp_results.is_empty() { 0.0 } else {
+            cmp_results.iter().map(|r| r.overhead).sum::<f64>() / cmp_results.len() as f64
+        };
+        let avg_sql_vs_spark = if cmp_results.is_empty() { 0.0 } else {
+            cmp_results.iter().map(|r| r.sql_vs_spark).sum::<f64>() / cmp_results.len() as f64
+        };
+
+        println!();
+        println!("  ┌─ COMPARISON SUMMARY ───────────────────────────────────────────");
+        println!("  │  Avg SQL overhead vs native : {:.1}×", avg_overhead);
+        println!("  │  Avg SQL speedup vs Spark   : {:.1}×", avg_sql_vs_spark);
+        println!("  │  SQL path includes          : parse → optimize → execute");
+        println!("  │  Native path                : hand-coded Rust (JIT, SIMD, rayon)");
+        println!("  └────────────────────────────────────────────────────────────────");
+        println!();
+    }
 }
 
 // ─── Simple PRNG (no external deps) ──────────────────────────────────────────
@@ -966,4 +1401,200 @@ impl SimpleRng {
     }
     fn next_f64(&mut self) -> f64 { (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64 }
     fn next_i64(&mut self, max: i64) -> i64 { (self.next_u64() % max as u64) as i64 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn medium_lineitem() -> DataBlock { gen_lineitem(10_000) }
+    fn medium_orders()   -> DataBlock { gen_orders(2_500) }
+    fn medium_customer() -> DataBlock { gen_customer(500) }
+    fn medium_supplier() -> DataBlock { gen_supplier(100) }
+    fn medium_part()     -> DataBlock { gen_part(200) }
+
+    #[test]
+    fn test_date_generation_spans_1992_to_1997() {
+        let li = gen_lineitem(3000);
+        let dates = match li.columns.iter().find(|c| c.name == "l_shipdate") {
+            Some(c) => match &c.data { ColumnData::Int64(v) => v.clone(), _ => panic!("wrong type") },
+            None => panic!("missing l_shipdate"),
+        };
+        let min_d = dates.iter().filter_map(|d| *d).min().unwrap();
+        let max_d = dates.iter().filter_map(|d| *d).max().unwrap();
+        assert!(min_d >= 19920101, "min date {min_d} should be >= 19920101");
+        assert!(max_d <= 19971231, "max date {max_d} should be <= 19971231");
+        let has_1995 = dates.iter().filter_map(|d| *d).any(|d| d >= 19950101 && d <= 19951231);
+        assert!(has_1995, "should have dates in 1995 range");
+    }
+
+    #[test]
+    fn test_q7_returns_groups() {
+        let li = medium_lineitem();
+        let od = medium_orders();
+        let cu = medium_customer();
+        let su = medium_supplier();
+        let na = gen_nation();
+        let result = q7(&od, &li, &cu, &su, &na);
+        assert!(result > 0, "Q7 should return > 0 groups, got {result}");
+    }
+
+    #[test]
+    fn test_q8_returns_yearly_entries() {
+        let li = medium_lineitem();
+        let od = medium_orders();
+        let cu = medium_customer();
+        let su = medium_supplier();
+        let pa = medium_part();
+        let na = gen_nation();
+        let result = q8(&od, &li, &cu, &su, &pa, &na);
+        assert!(result > 0, "Q8 should return > 0 yearly entries, got {result}");
+    }
+
+    #[test]
+    fn test_q14_returns_one_row() {
+        let li = medium_lineitem();
+        let pa = medium_part();
+        let result = q14(&li, &pa);
+        assert_eq!(result, 1, "Q14 should return 1 (percentage row), got {result}");
+    }
+
+    #[test]
+    fn test_q18_returns_bounded_result() {
+        let li = gen_lineitem(100_000);
+        let od = gen_orders(25_000);
+        let cu = gen_customer(5_000);
+        let result = q18(&cu, &od, &li);
+        assert!(result <= 100, "Q18 should return at most 100 rows, got {result}");
+    }
+
+    #[test]
+    fn test_q18_at_scale_finds_heavy_orders() {
+        let li = gen_lineitem(6_000_000);
+        let od = gen_orders(1_500_000);
+        let cu = gen_customer(150_000);
+        let result = q18(&cu, &od, &li);
+        assert!(result > 0, "Q18 at SF-1 should find heavy orders, got {result}");
+        assert!(result <= 100, "Q18 should return at most 100, got {result}");
+    }
+
+    #[test]
+    fn test_q19_returns_revenue() {
+        let li = gen_lineitem(100_000);
+        let pa = gen_part(200_000);
+        let result = q19(&li, &pa);
+        assert_eq!(result, 1, "Q19 should return 1 (has revenue), got {result}");
+    }
+
+    #[test]
+    fn test_q1_returns_six_groups() {
+        let li = medium_lineitem();
+        let result = q1(&li);
+        assert_eq!(result, 6, "Q1 should return 6 groups (3 flags x 2 statuses)");
+    }
+
+    #[test]
+    fn test_q6_returns_one_row() {
+        let li = medium_lineitem();
+        let result = q6(&li);
+        assert_eq!(result, 1, "Q6 should return 1 (global aggregate)");
+    }
+
+    #[test]
+    fn test_q12_returns_shipping_groups() {
+        let li = medium_lineitem();
+        let od = medium_orders();
+        let result = q12(&od, &li);
+        assert!(result > 0, "Q12 should return > 0 shipping mode groups, got {result}");
+    }
+
+    #[test]
+    fn test_q13_returns_distribution() {
+        let cu = medium_customer();
+        let od = medium_orders();
+        let result = q13(&cu, &od);
+        assert!(result > 0, "Q13 should return > 0 distribution buckets, got {result}");
+    }
+
+    #[test]
+    fn test_q22_returns_country_groups() {
+        let cu = medium_customer();
+        let od = medium_orders();
+        let result = q22(&cu, &od);
+        assert!(result > 0, "Q22 should return > 0 country groups, got {result}");
+    }
+
+    #[test]
+    fn test_empty_tables_dont_panic() {
+        let empty = DataBlock { columns: vec![], num_rows: 0 };
+        let _ = q14(&empty, &empty);
+        let _ = q19(&empty, &empty);
+    }
+
+    #[test]
+    fn test_day_offset_produces_valid_dates() {
+        for offset in [0, 365, 730, 1095, 1460, 1825, 2191] {
+            let d = day_offset_to_yyyymmdd(offset);
+            let year = d / 10000;
+            let month = (d / 100) % 100;
+            let day = d % 100;
+            assert!(year >= 1992 && year <= 1998, "invalid year {year} for offset {offset}");
+            assert!(month >= 1 && month <= 12, "invalid month {month} for offset {offset}");
+            assert!(day >= 1 && day <= 31, "invalid day {day} for offset {offset}");
+        }
+    }
+
+    #[test]
+    fn test_gen_partsupp_schema() {
+        let ps = gen_partsupp(100);
+        assert_eq!(ps.num_rows, 100);
+        assert_eq!(ps.columns.len(), 4);
+        assert_eq!(ps.columns[0].name, "ps_partkey");
+        assert_eq!(ps.columns[1].name, "ps_suppkey");
+    }
+
+    #[test]
+    fn test_gen_region_has_five_entries() {
+        let r = gen_region();
+        assert_eq!(r.num_rows, 5);
+        assert_eq!(r.columns.len(), 2);
+    }
+
+    #[test]
+    fn test_write_and_read_tpch_parquet() {
+        let dir = std::env::temp_dir().join("kore_tpch_parquet_test");
+        let dir_str = dir.to_string_lossy().to_string();
+        let files = write_tpch_parquet(1, &dir_str).expect("write parquet");
+        assert_eq!(files.len(), 8, "should write 8 TPC-H tables");
+        for (name, size) in &files {
+            assert!(*size > 0, "file {name} should be non-empty");
+        }
+
+        let tables = read_tpch_parquet(&dir_str);
+        assert_eq!(tables.len(), 8, "should read all 8 tables back");
+        assert!(tables["lineitem"].num_rows > 0);
+        assert!(tables["orders"].num_rows > 0);
+        assert!(tables["nation"].num_rows == 25);
+        assert!(tables["region"].num_rows == 5);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_parquet_roundtrip_data_integrity() {
+        let dir = std::env::temp_dir().join("kore_tpch_parquet_integrity");
+        let dir_str = dir.to_string_lossy().to_string();
+        write_tpch_parquet(1, &dir_str).expect("write");
+
+        let tables = read_tpch_parquet(&dir_str);
+        let li = &tables["lineitem"];
+        assert_eq!(li.num_rows, 6_000);
+        assert!(li.columns.iter().any(|c| c.name == "l_orderkey"));
+        assert!(li.columns.iter().any(|c| c.name == "l_extprice"));
+
+        let orders = &tables["orders"];
+        assert_eq!(orders.num_rows, 1_500);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

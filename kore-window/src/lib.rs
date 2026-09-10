@@ -18,6 +18,23 @@
 use kore_core::{Column, ColumnData, DataBlock, KoreError};
 use std::collections::HashMap;
 
+// ── Window frame types ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct WindowFrame {
+    pub start: FrameBound,
+    pub end: FrameBound,
+}
+
+#[derive(Debug, Clone)]
+pub enum FrameBound {
+    UnboundedPreceding,
+    Preceding(usize),
+    CurrentRow,
+    Following(usize),
+    UnboundedFollowing,
+}
+
 // ── Window function variants ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -75,7 +92,7 @@ pub fn apply_window(
         .par_iter()
         .map(|(_key, sorted_indices)| {
             // Compact: only m values, sequential writes, cache-friendly
-            let values = compute_fn_values(block, sorted_indices, func)?;
+            let values = compute_fn_values_framed(block, sorted_indices, func, None, order_by)?;
             Ok((sorted_indices.clone(), values))
         })
         .collect();
@@ -109,6 +126,47 @@ pub fn apply_windows(
         cur = apply_window(&cur, part, ord, func, name)?;
     }
     Ok(cur)
+}
+
+/// Compute a window function with an optional frame clause.
+/// When `frame` is `Some`, aggregate functions (SUM, AVG, COUNT, MIN, MAX)
+/// compute over only the frame range for each row within its partition.
+pub fn apply_window_framed(
+    block:        &DataBlock,
+    partition_by: &[String],
+    order_by:     &[WinOrder],
+    func:         &WindowFn,
+    frame:        Option<&WindowFrame>,
+    output_col:   &str,
+) -> Result<DataBlock, KoreError> {
+    use rayon::prelude::*;
+
+    let n = block.num_rows;
+    let partitions = build_partitions(block, partition_by, order_by, n)?;
+
+    let partial: Vec<Result<(Vec<usize>, Vec<f64>), KoreError>> = partitions
+        .par_iter()
+        .map(|(_key, sorted_indices)| {
+            let values = compute_fn_values_framed(block, sorted_indices, func, frame, order_by)?;
+            Ok((sorted_indices.clone(), values))
+        })
+        .collect();
+
+    let mut result: Vec<f64> = vec![0.0; n];
+    for p in partial {
+        let (indices, vals) = p?;
+        for (&idx, &val) in indices.iter().zip(vals.iter()) {
+            result[idx] = val;
+        }
+    }
+
+    let new_col = Column {
+        name: output_col.to_string(),
+        data: ColumnData::Float64(result.into_iter().map(Some).collect()),
+    };
+    let mut cols = block.columns.clone();
+    cols.push(new_col);
+    Ok(DataBlock { columns: cols, num_rows: n })
 }
 
 // ── Partition builder ─────────────────────────────────────────────────────────
@@ -173,7 +231,7 @@ fn build_partitions(
     }
 
     // Sort each partition by order_by and return (readable_key, sorted_indices)
-    let mut result: Vec<(String, Vec<usize>)> = groups.into_iter()
+    let result: Vec<(String, Vec<usize>)> = groups.into_iter()
         .map(|(k, mut idxs)| {
             if !order_by.is_empty() { sort_indices(block, &mut idxs, order_by); }
             (key_to_str.remove(&k).unwrap_or_default(), idxs)
@@ -288,17 +346,55 @@ fn sort_indices(block: &DataBlock, indices: &mut Vec<usize>, order_by: &[WinOrde
 
 /// Compute window function values into a COMPACT Vec<f64> of length m.
 /// No n-sized scratch buffer — sequential writes, cache-friendly.
+#[allow(dead_code)]
 fn compute_fn_values(
     block:  &DataBlock,
     sorted: &[usize],
     func:   &WindowFn,
 ) -> Result<Vec<f64>, KoreError> {
+    compute_fn_values_framed(block, sorted, func, None, &[])
+}
+
+/// Compute window function values with optional frame and order-by context.
+fn compute_fn_values_framed(
+    block:    &DataBlock,
+    sorted:   &[usize],
+    func:     &WindowFn,
+    frame:    Option<&WindowFrame>,
+    order_by: &[WinOrder],
+) -> Result<Vec<f64>, KoreError> {
     let m = sorted.len();
     let mut values = vec![0.0f64; m];
 
     match func {
-        WindowFn::RowNumber | WindowFn::Rank | WindowFn::DenseRank
-        | WindowFn::PercentRank | WindowFn::CumeDist => {
+        WindowFn::RowNumber => {
+            for i in 0..m { values[i] = (i + 1) as f64; }
+        }
+        WindowFn::Rank => {
+            if m > 0 {
+                values[0] = 1.0;
+                for i in 1..m {
+                    if rows_equal_on_order(block, sorted[i], sorted[i - 1], order_by) {
+                        values[i] = values[i - 1];
+                    } else {
+                        values[i] = (i + 1) as f64;
+                    }
+                }
+            }
+        }
+        WindowFn::DenseRank => {
+            if m > 0 {
+                values[0] = 1.0;
+                let mut dense = 1.0;
+                for i in 1..m {
+                    if !rows_equal_on_order(block, sorted[i], sorted[i - 1], order_by) {
+                        dense += 1.0;
+                    }
+                    values[i] = dense;
+                }
+            }
+        }
+        WindowFn::PercentRank | WindowFn::CumeDist => {
             for i in 0..m { values[i] = (i + 1) as f64; }
         }
         WindowFn::Ntile(buckets) => {
@@ -321,30 +417,66 @@ fn compute_fn_values(
         }
         WindowFn::Sum(col) => {
             let vals = extract_f64(block, col, sorted);
-            let total: f64 = vals.iter().filter(|v| !v.is_nan()).sum();
-            for i in 0..m { values[i] = total; }
+            if let Some(fr) = frame {
+                for i in 0..m {
+                    let (lo, hi) = frame_bounds(fr, i, m);
+                    values[i] = vals[lo..=hi].iter().filter(|v| !v.is_nan()).sum();
+                }
+            } else {
+                let total: f64 = vals.iter().filter(|v| !v.is_nan()).sum();
+                for i in 0..m { values[i] = total; }
+            }
         }
         WindowFn::Avg(col) => {
             let vals = extract_f64(block, col, sorted);
-            let good: Vec<f64> = vals.iter().copied().filter(|v| !v.is_nan()).collect();
-            let avg = if good.is_empty() { f64::NAN }
-                      else { good.iter().sum::<f64>() / good.len() as f64 };
-            for i in 0..m { values[i] = avg; }
+            if let Some(fr) = frame {
+                for i in 0..m {
+                    let (lo, hi) = frame_bounds(fr, i, m);
+                    let slice: Vec<f64> = vals[lo..=hi].iter().copied().filter(|v| !v.is_nan()).collect();
+                    values[i] = if slice.is_empty() { f64::NAN } else { slice.iter().sum::<f64>() / slice.len() as f64 };
+                }
+            } else {
+                let good: Vec<f64> = vals.iter().copied().filter(|v| !v.is_nan()).collect();
+                let avg = if good.is_empty() { f64::NAN }
+                          else { good.iter().sum::<f64>() / good.len() as f64 };
+                for i in 0..m { values[i] = avg; }
+            }
         }
         WindowFn::Count(col) => {
             let vals = extract_f64(block, col, sorted);
-            let cnt = vals.iter().filter(|v| !v.is_nan()).count() as f64;
-            for i in 0..m { values[i] = cnt; }
+            if let Some(fr) = frame {
+                for i in 0..m {
+                    let (lo, hi) = frame_bounds(fr, i, m);
+                    values[i] = vals[lo..=hi].iter().filter(|v| !v.is_nan()).count() as f64;
+                }
+            } else {
+                let cnt = vals.iter().filter(|v| !v.is_nan()).count() as f64;
+                for i in 0..m { values[i] = cnt; }
+            }
         }
         WindowFn::Min(col) => {
             let vals = extract_f64(block, col, sorted);
-            let min = vals.iter().copied().filter(|v| !v.is_nan()).fold(f64::INFINITY, f64::min);
-            for i in 0..m { values[i] = min; }
+            if let Some(fr) = frame {
+                for i in 0..m {
+                    let (lo, hi) = frame_bounds(fr, i, m);
+                    values[i] = vals[lo..=hi].iter().copied().filter(|v| !v.is_nan()).fold(f64::INFINITY, f64::min);
+                }
+            } else {
+                let min = vals.iter().copied().filter(|v| !v.is_nan()).fold(f64::INFINITY, f64::min);
+                for i in 0..m { values[i] = min; }
+            }
         }
         WindowFn::Max(col) => {
             let vals = extract_f64(block, col, sorted);
-            let max = vals.iter().copied().filter(|v| !v.is_nan()).fold(f64::NEG_INFINITY, f64::max);
-            for i in 0..m { values[i] = max; }
+            if let Some(fr) = frame {
+                for i in 0..m {
+                    let (lo, hi) = frame_bounds(fr, i, m);
+                    values[i] = vals[lo..=hi].iter().copied().filter(|v| !v.is_nan()).fold(f64::NEG_INFINITY, f64::max);
+                }
+            } else {
+                let max = vals.iter().copied().filter(|v| !v.is_nan()).fold(f64::NEG_INFINITY, f64::max);
+                for i in 0..m { values[i] = max; }
+            }
         }
         WindowFn::CumSum(col) => {
             let vals = extract_f64(block, col, sorted);
@@ -479,6 +611,58 @@ fn compute_fn_for_partition(
     Ok(())
 }
 
+/// Resolve frame bounds to inclusive (lo, hi) indices within a partition of size `m`.
+fn frame_bounds(frame: &WindowFrame, current: usize, m: usize) -> (usize, usize) {
+    let lo = match frame.start {
+        FrameBound::UnboundedPreceding => 0,
+        FrameBound::Preceding(n) => current.saturating_sub(n),
+        FrameBound::CurrentRow => current,
+        FrameBound::Following(n) => (current + n).min(m - 1),
+        FrameBound::UnboundedFollowing => m - 1,
+    };
+    let hi = match frame.end {
+        FrameBound::UnboundedPreceding => 0,
+        FrameBound::Preceding(n) => current.saturating_sub(n),
+        FrameBound::CurrentRow => current,
+        FrameBound::Following(n) => (current + n).min(m - 1),
+        FrameBound::UnboundedFollowing => m - 1,
+    };
+    (lo, hi)
+}
+
+/// Compare two rows on ORDER BY columns; returns true if they have equal values.
+fn rows_equal_on_order(block: &DataBlock, row_a: usize, row_b: usize, order_by: &[WinOrder]) -> bool {
+    for ord in order_by {
+        if let Some(col) = col_lookup(block, &ord.col) {
+            let equal = match &col.data {
+                ColumnData::Int64(v) => {
+                    v.get(row_a).and_then(|x| *x) == v.get(row_b).and_then(|x| *x)
+                }
+                ColumnData::Float64(v) => {
+                    let a = v.get(row_a).and_then(|x| *x);
+                    let b = v.get(row_b).and_then(|x| *x);
+                    match (a, b) {
+                        (Some(a), Some(b)) => a.to_bits() == b.to_bits(),
+                        (None, None) => true,
+                        _ => false,
+                    }
+                }
+                ColumnData::Str(v) => {
+                    v.get(row_a).and_then(|x| x.as_deref()) == v.get(row_b).and_then(|x| x.as_deref())
+                }
+                ColumnData::StrDict { codes, .. } => {
+                    codes.get(row_a) == codes.get(row_b)
+                }
+                ColumnData::Bool(v) => {
+                    v.get(row_a).and_then(|x| *x) == v.get(row_b).and_then(|x| *x)
+                }
+            };
+            if !equal { return false; }
+        }
+    }
+    true
+}
+
 fn extract_f64(block: &DataBlock, col: &str, sorted_indices: &[usize]) -> Vec<f64> {
     match col_lookup(block, col).map(|c| &c.data) {
         Some(ColumnData::Float64(v)) =>
@@ -592,5 +776,139 @@ mod tests {
         assert_eq!(tot[4], 600.0);
         assert_eq!(tot[2], 200.0); // West 150+50
         assert_eq!(tot[3], 200.0);
+    }
+
+    // ── Task 1E: Window Frame Tests ──────────────────────────────────────────
+
+    fn sequential_block() -> DataBlock {
+        DataBlock::new(vec![
+            Column::float64("val", vec![Some(10.0), Some(20.0), Some(30.0), Some(40.0), Some(50.0)]),
+        ]).unwrap()
+    }
+
+    #[test]
+    fn test_rolling_sum_1_preceding_1_following() {
+        let b = sequential_block();
+        let frame = WindowFrame {
+            start: FrameBound::Preceding(1),
+            end: FrameBound::Following(1),
+        };
+        let out = apply_window_framed(&b,
+            &[],
+            &[WinOrder { col: "val".into(), desc: false }],
+            &WindowFn::Sum("val".into()),
+            Some(&frame),
+            "rolling_sum",
+        ).unwrap();
+        let rs = get_f64_col(&out, "rolling_sum");
+        // row 0: vals[0..=1] = 10+20 = 30
+        // row 1: vals[0..=2] = 10+20+30 = 60
+        // row 2: vals[1..=3] = 20+30+40 = 90
+        // row 3: vals[2..=4] = 30+40+50 = 120
+        // row 4: vals[3..=4] = 40+50 = 90
+        assert_eq!(rs[0], 30.0);
+        assert_eq!(rs[1], 60.0);
+        assert_eq!(rs[2], 90.0);
+        assert_eq!(rs[3], 120.0);
+        assert_eq!(rs[4], 90.0);
+    }
+
+    #[test]
+    fn test_rolling_avg_2_preceding_current_row() {
+        let b = sequential_block();
+        let frame = WindowFrame {
+            start: FrameBound::Preceding(2),
+            end: FrameBound::CurrentRow,
+        };
+        let out = apply_window_framed(&b,
+            &[],
+            &[WinOrder { col: "val".into(), desc: false }],
+            &WindowFn::Avg("val".into()),
+            Some(&frame),
+            "rolling_avg",
+        ).unwrap();
+        let ra = get_f64_col(&out, "rolling_avg");
+        // row 0: avg(10) = 10
+        // row 1: avg(10,20) = 15
+        // row 2: avg(10,20,30) = 20
+        // row 3: avg(20,30,40) = 30
+        // row 4: avg(30,40,50) = 40
+        assert_eq!(ra[0], 10.0);
+        assert_eq!(ra[1], 15.0);
+        assert_eq!(ra[2], 20.0);
+        assert_eq!(ra[3], 30.0);
+        assert_eq!(ra[4], 40.0);
+    }
+
+    #[test]
+    fn test_framed_full_partition_default() {
+        let b = sequential_block();
+        let out = apply_window_framed(&b,
+            &[],
+            &[WinOrder { col: "val".into(), desc: false }],
+            &WindowFn::Sum("val".into()),
+            None,
+            "full_sum",
+        ).unwrap();
+        let fs = get_f64_col(&out, "full_sum");
+        // No frame → full partition sum = 10+20+30+40+50 = 150
+        for v in &fs { assert_eq!(*v, 150.0); }
+    }
+
+    // ── Task 1I: RANK / DENSE_RANK Tie Tests ─────────────────────────────────
+
+    fn ties_block() -> DataBlock {
+        // values: [10, 20, 20, 30] — second and third rows are ties
+        DataBlock::new(vec![
+            Column::float64("score", vec![Some(10.0), Some(20.0), Some(20.0), Some(30.0)]),
+        ]).unwrap()
+    }
+
+    #[test]
+    fn test_rank_with_ties() {
+        let b = ties_block();
+        let out = apply_window(&b,
+            &[],
+            &[WinOrder { col: "score".into(), desc: false }],
+            &WindowFn::Rank, "rnk",
+        ).unwrap();
+        let rnk = get_f64_col(&out, "rnk");
+        // sorted asc: [10, 20, 20, 30] → ranks [1, 2, 2, 4]
+        assert_eq!(rnk[0], 1.0);
+        assert_eq!(rnk[1], 2.0);
+        assert_eq!(rnk[2], 2.0);
+        assert_eq!(rnk[3], 4.0);
+    }
+
+    #[test]
+    fn test_dense_rank_with_ties() {
+        let b = ties_block();
+        let out = apply_window(&b,
+            &[],
+            &[WinOrder { col: "score".into(), desc: false }],
+            &WindowFn::DenseRank, "drnk",
+        ).unwrap();
+        let drnk = get_f64_col(&out, "drnk");
+        // sorted asc: [10, 20, 20, 30] → dense_ranks [1, 2, 2, 3]
+        assert_eq!(drnk[0], 1.0);
+        assert_eq!(drnk[1], 2.0);
+        assert_eq!(drnk[2], 2.0);
+        assert_eq!(drnk[3], 3.0);
+    }
+
+    #[test]
+    fn test_row_number_no_ties() {
+        let b = ties_block();
+        let out = apply_window(&b,
+            &[],
+            &[WinOrder { col: "score".into(), desc: false }],
+            &WindowFn::RowNumber, "rn",
+        ).unwrap();
+        let rn = get_f64_col(&out, "rn");
+        // ROW_NUMBER always sequential: [1, 2, 3, 4]
+        assert_eq!(rn[0], 1.0);
+        assert_eq!(rn[1], 2.0);
+        assert_eq!(rn[2], 3.0);
+        assert_eq!(rn[3], 4.0);
     }
 }

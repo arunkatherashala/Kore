@@ -14,7 +14,7 @@
 //!   other workers (unlike Spark's in-memory shuffle).
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use kore_core::{DataBlock, KoreError};

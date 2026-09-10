@@ -14,8 +14,7 @@
 //!
 //! This mirrors Apache Spark's DynamicBroadcastHashJoin strategy.
 
-use kore_core::{Column, ColumnData, DataBlock, KoreError, JoinType};
-use kore_core::Value;
+use kore_core::{Column, ColumnData, DataBlock, KoreError};
 
 // ─── Bloom filter ─────────────────────────────────────────────────────────────
 

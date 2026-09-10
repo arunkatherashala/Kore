@@ -4,7 +4,7 @@
 //! DataBlock integration helpers convert columnar data to/from that format.
 
 use std::collections::HashMap;
-use kore_core::{Column, ColumnData, DataBlock, Value};
+use kore_core::{Column, DataBlock, Value};
 use rayon::prelude::*;
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
@@ -164,7 +164,7 @@ impl RandomForest {
         self.feature_subset = ((n_feats as f64).sqrt() as usize).max(1);
 
         // Generate bootstrap indices per tree (deterministic via simple LCG)
-        let mut seeds: Vec<u64> = (0..self.n_trees as u64)
+        let seeds: Vec<u64> = (0..self.n_trees as u64)
             .map(|i| 6364136223846793005u64.wrapping_mul(i).wrapping_add(1442695040888963407))
             .collect();
 

@@ -64,6 +64,7 @@ pub enum JoinStrategy {
     ShuffleHash,
     SortMerge,
     NestedLoop,
+    SkewedHash,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -118,6 +119,10 @@ pub enum PhysicalPlan {
     Union {
         inputs: Vec<PhysicalPlan>,
     },
+    RuntimeFiltered {
+        input: Box<PhysicalPlan>,
+        build_keys: Vec<i64>,
+    },
 }
 
 impl PhysicalPlan {
@@ -137,6 +142,7 @@ impl PhysicalPlan {
                 _ => left.est_rows().saturating_add(right.est_rows()),
             },
             Self::Union { inputs } => inputs.iter().map(|i| i.est_rows()).sum(),
+            Self::RuntimeFiltered { input, .. } => (input.est_rows() as f64 * 0.5) as usize,
         }
     }
 
@@ -196,6 +202,10 @@ impl PhysicalPlan {
                 out.push_str(&format!("{pad}Union[{}]\n", inputs.len()));
                 for i in inputs { i.explain_indent(depth + 1, out); }
             }
+            Self::RuntimeFiltered { input, build_keys } => {
+                out.push_str(&format!("{pad}RuntimeFiltered[{} keys]\n", build_keys.len()));
+                input.explain_indent(depth + 1, out);
+            }
         }
     }
 }
@@ -229,15 +239,89 @@ fn shuffle_partitions() -> usize {
 
 /// Pick a join strategy given left/right cardinalities.
 pub fn choose_join_strategy(left_rows: usize, right_rows: usize) -> JoinStrategy {
+    choose_join_strategy_with_stats(left_rows, right_rows, None, None, None)
+}
+
+/// Statistics-aware join strategy selection.
+///
+/// Uses table stats from the catalog to pick the optimal join strategy:
+/// - Build side < 10MB estimated -> BroadcastHashJoin
+/// - Both sides sorted on join key -> SortMergeJoin
+/// - High NDV join key -> ShuffleHashJoin
+/// - Build side has skew (max bucket > 3x avg) -> SkewedHashJoin
+pub fn choose_join_strategy_with_stats(
+    left_rows: usize,
+    right_rows: usize,
+    left_meta: Option<&kore_catalog::TableMeta>,
+    right_meta: Option<&kore_catalog::TableMeta>,
+    join_key: Option<&str>,
+) -> JoinStrategy {
     let smaller = left_rows.min(right_rows);
     let larger  = left_rows.max(right_rows);
-    if smaller <= broadcast_row_threshold() {
-        JoinStrategy::BroadcastHash
-    } else if larger > 10_000_000 {
+
+    let build_meta = if left_rows <= right_rows { left_meta } else { right_meta };
+
+    if let Some(meta) = build_meta {
+        if smaller <= 1_000 && meta.size_bytes < 10 * 1024 * 1024 {
+            return JoinStrategy::BroadcastHash;
+        }
+    } else if smaller <= broadcast_row_threshold() {
+        return JoinStrategy::BroadcastHash;
+    }
+
+    if let Some(key) = join_key {
+        let left_sorted = left_meta.and_then(|m| m.col(key))
+            .and_then(|cs| cs.histogram.as_ref())
+            .map(|h| is_sorted_histogram(h))
+            .unwrap_or(false);
+        let right_sorted = right_meta.and_then(|m| m.col(key))
+            .and_then(|cs| cs.histogram.as_ref())
+            .map(|h| is_sorted_histogram(h))
+            .unwrap_or(false);
+        if larger > 10_000_000 && left_sorted && right_sorted {
+            return JoinStrategy::SortMerge;
+        }
+    }
+
+    if let Some(key) = join_key {
+        if let Some(meta) = build_meta {
+            if let Some(cs) = meta.col(key) {
+                if cs.ndv > 0 && cs.ndv < smaller / 4 {
+                    return JoinStrategy::SkewedHash;
+                }
+                if let Some(hist) = &cs.histogram {
+                    if has_skew(hist) { return JoinStrategy::SkewedHash; }
+                }
+                if cs.ndv > smaller / 2 {
+                    return JoinStrategy::ShuffleHash;
+                }
+            }
+        }
+    }
+
+    if let Some(meta) = build_meta {
+        if smaller <= broadcast_row_threshold() && meta.size_bytes < 10 * 1024 * 1024 {
+            return JoinStrategy::BroadcastHash;
+        }
+    }
+
+    if larger > 10_000_000 {
         JoinStrategy::SortMerge
     } else {
         JoinStrategy::ShuffleHash
     }
+}
+
+fn is_sorted_histogram(hist: &kore_catalog::Histogram) -> bool {
+    if hist.buckets.len() < 2 { return true; }
+    hist.buckets.windows(2).all(|w| w[0].hi <= w[1].lo)
+}
+
+fn has_skew(hist: &kore_catalog::Histogram) -> bool {
+    if hist.buckets.is_empty() { return false; }
+    let avg = hist.total as f64 / hist.buckets.len() as f64;
+    let max_count = hist.buckets.iter().map(|b| b.count).max().unwrap_or(0);
+    max_count as f64 > 3.0 * avg
 }
 
 /// Translate a logical `Query` into a physical plan.
@@ -269,7 +353,12 @@ fn plan_select(stmt: &SelectStmt, catalog: &Catalog) -> PhysicalPlan {
     let mut left_rows = base_rows;
     for j in &stmt.joins {
         let right_rows = catalog.get(&j.table.name).map(|m| m.row_count).unwrap_or(1_000);
-        let strategy = choose_join_strategy(left_rows, right_rows);
+        let left_meta = catalog.get(&stmt.from.name);
+        let right_meta = catalog.get(&j.table.name);
+        let join_key_name = j.on.right_col.split('.').last().unwrap_or(&j.on.right_col);
+        let strategy = choose_join_strategy_with_stats(
+            left_rows, right_rows, left_meta, right_meta, Some(join_key_name),
+        );
 
         let right_scan = PhysicalPlan::Scan {
             table:          j.table.name.clone(),
@@ -293,7 +382,7 @@ fn plan_select(stmt: &SelectStmt, catalog: &Catalog) -> PhysicalPlan {
                     }, right_scan)
                 }
             }
-            JoinStrategy::ShuffleHash | JoinStrategy::SortMerge => {
+            JoinStrategy::ShuffleHash | JoinStrategy::SortMerge | JoinStrategy::SkewedHash => {
                 let n = shuffle_partitions();
                 let l = PhysicalPlan::Exchange {
                     partitioning: Partitioning::HashBy {

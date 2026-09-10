@@ -18,7 +18,7 @@ pub mod executor;
 pub mod vec_path;
 
 pub use ast::*;
-pub use executor::{KqlContext, execute, execute_query};
+pub use executor::{KqlContext, ExprVal, execute, execute_query};
 pub use parser::{parse, parse_query};
 
 use kore_core::KoreError;

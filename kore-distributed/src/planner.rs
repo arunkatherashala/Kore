@@ -16,6 +16,7 @@ pub enum DistributedStrategy {
 ///
 /// This mirrors Spark's `spark.sql.autoBroadcastJoinThreshold` (default 10 MB
 /// there — we use row count as a first-order proxy).
+#[allow(dead_code)]
 pub fn broadcast_row_threshold() -> usize {
     std::env::var("KORE_BROADCAST_ROWS")
         .ok()
@@ -26,6 +27,7 @@ pub fn broadcast_row_threshold() -> usize {
 /// Decide broadcast vs shuffle join given the sizes of both sides.
 /// Returns `BroadcastJoin` when the smaller side fits under the threshold,
 /// otherwise `ShuffleJoin`.
+#[allow(dead_code)]
 pub fn plan_join(left_rows: usize, right_rows: usize) -> DistributedStrategy {
     let smaller = left_rows.min(right_rows);
     if smaller <= broadcast_row_threshold() {

@@ -9,9 +9,12 @@
 //! All I/O uses KORE's native binary format, so DataBlocks can be written
 //! to cloud storage and read back transparently.
 //!
-//! The S3 implementation uses raw HTTP (AWS Signature V4) without external SDKs.
+//! When the `s3` feature is enabled, the `S3Store` uses the official `aws-sdk-s3`
+//! crate with proper credential resolution. Without the feature, a raw-HTTP stub
+//! is compiled instead (suitable only for unauthenticated / development use).
 
-use std::io::{self, Read, Write};
+#[cfg(not(feature = "s3"))]
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use kore_core::{DataBlock, KoreError};
@@ -115,18 +118,145 @@ impl ObjectStore for LocalStore {
     }
 }
 
-// ─── S3-compatible store ──────────────────────────────────────────────────────
+// ─── S3-compatible store (real AWS SDK) ──────────────────────────────────────
 
-/// S3 / MinIO / compatible object store using raw HTTP.
-/// Supports presigned URLs and anonymous access to public buckets.
+#[cfg(feature = "s3")]
 pub struct S3Store {
-    pub endpoint:   String,   // e.g. "https://s3.amazonaws.com" or "http://localhost:9000"
+    client: aws_sdk_s3::Client,
+    pub bucket: String,
+}
+
+#[cfg(feature = "s3")]
+impl S3Store {
+    /// Create from an existing `aws_sdk_s3::Client`.
+    pub fn new(client: aws_sdk_s3::Client, bucket: impl Into<String>) -> Self {
+        Self { client, bucket: bucket.into() }
+    }
+
+    /// Load credentials from the environment / IAM role / `~/.aws/` profile.
+    pub async fn from_env(bucket: impl Into<String>) -> Self {
+        let cfg = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+        let client = aws_sdk_s3::Client::new(&cfg);
+        Self { client, bucket: bucket.into() }
+    }
+
+    /// Point at a custom endpoint (MinIO, LocalStack, etc.).
+    pub async fn with_endpoint(
+        bucket: impl Into<String>,
+        endpoint: impl Into<String>,
+        region: impl Into<String>,
+    ) -> Self {
+        let cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .endpoint_url(endpoint)
+            .region(aws_config::Region::new(region.into()))
+            .load()
+            .await;
+        let client = aws_sdk_s3::Client::new(&cfg);
+        Self { client, bucket: bucket.into() }
+    }
+
+    /// Convenience constructor matching the old raw-HTTP signature (for `from_url`).
+    pub async fn from_parts(
+        endpoint: &str,
+        bucket: &str,
+        region: &str,
+        _access_key: &str,
+        _secret_key: &str,
+    ) -> Self {
+        if endpoint == "https://s3.amazonaws.com" {
+            Self::from_env(bucket).await
+        } else {
+            Self::with_endpoint(bucket, endpoint, region).await
+        }
+    }
+
+    fn rt() -> tokio::runtime::Handle {
+        tokio::runtime::Handle::current()
+    }
+}
+
+#[cfg(feature = "s3")]
+impl ObjectStore for S3Store {
+    fn store_name(&self) -> &str { "s3" }
+
+    fn put(&self, path: &str, data: &[u8]) -> Result<(), KoreError> {
+        let body = aws_sdk_s3::primitives::ByteStream::from(data.to_vec());
+        Self::rt().block_on(async {
+            self.client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(path)
+                .body(body)
+                .send()
+                .await
+                .map_err(|e| KoreError::InvalidArgument(format!("S3 put: {e}")))?;
+            Ok(())
+        })
+    }
+
+    fn get(&self, path: &str) -> Result<Vec<u8>, KoreError> {
+        Self::rt().block_on(async {
+            let resp = self.client
+                .get_object()
+                .bucket(&self.bucket)
+                .key(path)
+                .send()
+                .await
+                .map_err(|e| KoreError::InvalidArgument(format!("S3 get: {e}")))?;
+            let bytes = resp.body.collect().await
+                .map_err(|e| KoreError::InvalidArgument(format!("S3 read body: {e}")))?;
+            Ok(bytes.into_bytes().to_vec())
+        })
+    }
+
+    fn delete(&self, path: &str) -> Result<(), KoreError> {
+        Self::rt().block_on(async {
+            self.client
+                .delete_object()
+                .bucket(&self.bucket)
+                .key(path)
+                .send()
+                .await
+                .map_err(|e| KoreError::InvalidArgument(format!("S3 delete: {e}")))?;
+            Ok(())
+        })
+    }
+
+    fn list(&self, prefix: &str) -> Result<Vec<ObjectMeta>, KoreError> {
+        Self::rt().block_on(async {
+            let resp = self.client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(prefix)
+                .send()
+                .await
+                .map_err(|e| KoreError::InvalidArgument(format!("S3 list: {e}")))?;
+
+            let items = resp.contents().iter().map(|obj| {
+                ObjectMeta {
+                    path: obj.key().unwrap_or("").to_string(),
+                    size_bytes: obj.size().unwrap_or(0) as usize,
+                    modified: obj.last_modified()
+                        .and_then(|t| t.secs().try_into().ok()),
+                }
+            }).collect();
+            Ok(items)
+        })
+    }
+}
+
+// ─── S3-compatible store (raw-HTTP stub, no SDK) ─────────────────────────────
+
+#[cfg(not(feature = "s3"))]
+pub struct S3Store {
+    pub endpoint:   String,
     pub bucket:     String,
     pub region:     String,
     pub access_key: String,
     pub secret_key: String,
 }
 
+#[cfg(not(feature = "s3"))]
 impl S3Store {
     pub fn new(endpoint: &str, bucket: &str, region: &str, access_key: &str, secret_key: &str) -> Self {
         Self {
@@ -138,7 +268,6 @@ impl S3Store {
         }
     }
 
-    /// Create a MinIO/local S3 store (for development).
     pub fn minio(endpoint: &str, bucket: &str, access: &str, secret: &str) -> Self {
         Self::new(endpoint, bucket, "us-east-1", access, secret)
     }
@@ -147,15 +276,9 @@ impl S3Store {
         let clean = key.trim_start_matches('/');
         format!("{}/{}/{}", self.endpoint, self.bucket, clean)
     }
-
-    /// AWS Signature V4 HMAC-SHA256 (simplified — no date expiry for internal use).
-    fn sign_request(&self, method: &str, key: &str, payload_hash: &str) -> String {
-        // Return a simplified authorization header
-        // In production: implement full AWS Signature V4
-        format!("AWS4-HMAC-SHA256 Credential={}/{}/aws4_request", self.access_key, self.region)
-    }
 }
 
+#[cfg(not(feature = "s3"))]
 impl ObjectStore for S3Store {
     fn store_name(&self) -> &str { "s3" }
 
@@ -186,7 +309,6 @@ impl ObjectStore for S3Store {
         stream.write_all(req.as_bytes()).ok();
         let mut raw = Vec::new();
         stream.read_to_end(&mut raw).ok();
-        // Strip HTTP headers
         let body_start = raw.windows(4).position(|w| w == b"\r\n\r\n")
             .map(|i| i + 4)
             .unwrap_or(0);
@@ -205,9 +327,8 @@ impl ObjectStore for S3Store {
         Ok(())
     }
 
-    fn list(&self, prefix: &str) -> Result<Vec<ObjectMeta>, KoreError> {
-        // S3 ListObjects V2 (simplified)
-        Ok(vec![]) // Full implementation requires XML parsing
+    fn list(&self, _prefix: &str) -> Result<Vec<ObjectMeta>, KoreError> {
+        Ok(vec![])
     }
 }
 
@@ -261,23 +382,41 @@ pub fn from_url(url: &str) -> Result<Box<dyn ObjectStore>, KoreError> {
         let path = url.trim_start_matches("local://");
         Ok(Box::new(LocalStore::new(path)))
     } else if url.starts_with("s3://") {
-        // Parse s3://bucket/prefix?endpoint=...&access=...&secret=...
         let rest = url.trim_start_matches("s3://");
         let (bucket_path, params) = rest.split_once('?').unwrap_or((rest, ""));
         let bucket = bucket_path.split('/').next().unwrap_or("default");
-        let endpoint = extract_param(params, "endpoint").unwrap_or_else(|| "https://s3.amazonaws.com".into());
-        let access   = extract_param(params, "access").unwrap_or_default();
-        let secret   = extract_param(params, "secret").unwrap_or_default();
-        let region   = extract_param(params, "region").unwrap_or_else(|| "us-east-1".into());
-        Ok(Box::new(S3Store::new(&endpoint, bucket, &region, &access, &secret)))
+
+        #[cfg(feature = "s3")]
+        {
+            let endpoint = extract_param(params, "endpoint")
+                .unwrap_or_else(|| "https://s3.amazonaws.com".into());
+            let region = extract_param(params, "region")
+                .unwrap_or_else(|| "us-east-1".into());
+            let access = extract_param(params, "access").unwrap_or_default();
+            let secret = extract_param(params, "secret").unwrap_or_default();
+            let store = tokio::runtime::Handle::current()
+                .block_on(S3Store::from_parts(&endpoint, bucket, &region, &access, &secret));
+            Ok(Box::new(store))
+        }
+
+        #[cfg(not(feature = "s3"))]
+        {
+            let endpoint = extract_param(params, "endpoint")
+                .unwrap_or_else(|| "https://s3.amazonaws.com".into());
+            let access = extract_param(params, "access").unwrap_or_default();
+            let secret = extract_param(params, "secret").unwrap_or_default();
+            let region = extract_param(params, "region")
+                .unwrap_or_else(|| "us-east-1".into());
+            Ok(Box::new(S3Store::new(&endpoint, bucket, &region, &access, &secret)))
+        }
     } else {
-        // Default: treat as local path
         Ok(Box::new(LocalStore::new(url)))
     }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+#[cfg(not(feature = "s3"))]
 fn parse_http_url(url: &str) -> Result<(String, String), KoreError> {
     let url = url.trim_start_matches("http://").trim_start_matches("https://");
     let (host_part, path_part) = url.split_once('/').unwrap_or((url, ""));
@@ -355,5 +494,61 @@ mod tests {
         let back = read_block(store.as_ref(), "b.kore").unwrap();
         assert_eq!(back.num_rows, 5);
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_memory_store_exists() {
+        let store = MemoryStore::new();
+        assert!(!store.exists("nope"));
+        store.put("yep", b"1").unwrap();
+        assert!(store.exists("yep"));
+    }
+
+    #[test]
+    fn test_memory_store_delete() {
+        let store = MemoryStore::new();
+        store.put("del_me", b"x").unwrap();
+        assert!(store.exists("del_me"));
+        store.delete("del_me").unwrap();
+        assert!(!store.exists("del_me"));
+    }
+
+    #[test]
+    fn test_write_and_read_block_memory() {
+        let store = MemoryStore::new();
+        let blk = sample();
+        write_block(&store, "blocks/b1.kore", &blk).unwrap();
+        write_block(&store, "blocks/b2.kore", &blk).unwrap();
+        let listed = store.list("blocks/").unwrap();
+        assert_eq!(listed.len(), 2);
+        let back = read_block(&store, "blocks/b1.kore").unwrap();
+        assert_eq!(back.num_rows, blk.num_rows);
+    }
+
+    #[cfg(feature = "s3")]
+    mod s3_tests {
+        use super::*;
+
+        #[test]
+        #[ignore] // requires a live S3/MinIO endpoint
+        fn test_s3_store_roundtrip() {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let store = rt.block_on(S3Store::with_endpoint(
+                "kore-test",
+                "http://localhost:9000",
+                "us-east-1",
+            ));
+            let _guard = rt.enter();
+
+            store.put("test/hello.txt", b"world").unwrap();
+            let got = store.get("test/hello.txt").unwrap();
+            assert_eq!(got, b"world");
+
+            let items = store.list("test/").unwrap();
+            assert!(items.iter().any(|m| m.path == "test/hello.txt"));
+
+            store.delete("test/hello.txt").unwrap();
+            assert!(store.get("test/hello.txt").is_err());
+        }
     }
 }

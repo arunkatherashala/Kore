@@ -8,7 +8,6 @@
 //! - **Distributed K-Means** — centroid update via two-phase reduce
 //! - **Distributed Gradient Boosting** — feature-parallel tree building
 
-use kore_core::{Column, ColumnData, DataBlock, KoreError};
 use serde::{Deserialize, Serialize};
 
 // ─── Distributed Linear Regression ───────────────────────────────────────────
@@ -263,7 +262,7 @@ impl DistributedGBM {
     }
 
     fn find_best_split(
-        &self, x: &[Vec<f64>], r: &[f64], cols: usize, seed: usize, n_workers: usize
+        &self, x: &[Vec<f64>], r: &[f64], cols: usize, _seed: usize, n_workers: usize
     ) -> SimpleTree {
         let n_feats = x.first().map(|r| r.len()).unwrap_or(1);
         let mut best_gain = f64::NEG_INFINITY;

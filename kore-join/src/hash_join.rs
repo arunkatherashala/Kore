@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use rayon::prelude::*;
-use kore_core::{Column, DataBlock, JoinKey, JoinType, KoreError, Value};
+use kore_core::{Column, DataBlock, JoinKey, JoinType, KoreError};
 
 use crate::JoinConfig;
 

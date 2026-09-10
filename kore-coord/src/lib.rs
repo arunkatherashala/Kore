@@ -10,24 +10,29 @@
 //! This mirrors Apache Spark's Driver + ClusterManager roles.
 
 mod analyze;
+pub mod cloud;
+pub mod dag;
 mod exec;
 mod plan;
 
 pub use plan::Dispatch;
+pub use dag::{StageDAG, Stage, compile_dag};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::net::{TcpListener, TcpStream};
 use kore_catalog::Catalog;
-use kore_core::{Column, ColumnData, DataBlock, KoreError};
+use kore_core::{DataBlock, KoreError};
 use kore_fault::TaskLineage;
 use kore_metrics::MetricsRegistry;
-use kore_net::{KoreFrame, KoreMsg, TaskStats, partition_block, now_ms};
-use kore_sql::executor::{KqlContext, execute};
+use kore_net::{KoreFrame, KoreMsg, partition_block, now_ms};
+use kore_security::SecurityManager;
+use kore_sql::executor::KqlContext;
 
 // ─── Worker registry ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct WorkerInfo {
     id:           String,
     task_addr:    String,
@@ -67,6 +72,8 @@ pub struct Coordinator {
     /// (job.latency_ms), and job records feed EXPLAIN ANALYZE and the
     /// Prometheus exposition endpoint.
     pub metrics: Arc<MetricsRegistry>,
+    /// Security manager — token authentication, RBAC, audit logging.
+    pub security: Arc<SecurityManager>,
 }
 
 impl Coordinator {
@@ -77,12 +84,50 @@ impl Coordinator {
             registered: Arc::new(Mutex::new(HashMap::new())),
             lineage:    TaskLineage::new(),
             metrics:    MetricsRegistry::new(),
+            security:   SecurityManager::new(),
         }
     }
 
     /// Number of currently registered workers.
     pub fn worker_count(&self) -> usize {
-        self.workers.lock().unwrap().len()
+        self.workers.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Check auth — returns None if allowed, Some(reason) if denied.
+    /// Security is opt-in: only enforced when `KORE_AUTH_REQUIRED=1` is set.
+    fn check_auth(
+        &self,
+        token: Option<&str>,
+        permission: &kore_security::Permission,
+        source_ip: &str,
+        resource: &str,
+    ) -> Option<String> {
+        if std::env::var("KORE_AUTH_REQUIRED").unwrap_or_default() != "1" {
+            return None;
+        }
+        let secret = match token {
+            Some(t) => t,
+            None => return Some("auth required but no token provided".into()),
+        };
+        let result = self.security.authenticate(secret, permission, source_ip, resource);
+        match result {
+            kore_security::AuthResult::Allowed { .. } => None,
+            kore_security::AuthResult::Denied { reason } => Some(reason),
+        }
+    }
+
+    /// Issue a cluster token for a worker or client.
+    pub fn issue_token(
+        &self,
+        owner: &str,
+        roles: Vec<kore_security::Role>,
+    ) -> kore_security::Token {
+        self.security.issue_token(owner, roles, None, vec![])
+    }
+
+    /// Get recent audit log entries.
+    pub fn audit_tail(&self, n: usize) -> Vec<kore_security::AuditEntry> {
+        self.security.audit_tail(n)
     }
 
     /// Register a table for plan-driven dispatch: stores the block in the
@@ -92,8 +137,16 @@ impl Coordinator {
     /// This is the counterpart of Spark's `df.createOrReplaceTempView` +
     /// `ANALYZE TABLE ... COMPUTE STATISTICS` in a single call.
     pub fn register_table_for_planning(&self, name: &str, block: DataBlock) {
-        self.catalog.lock().unwrap().analyze(name, &block);
-        self.registered.lock().unwrap().insert(name.to_string(), block);
+        self.catalog.lock().unwrap_or_else(|e| e.into_inner()).analyze(name, &block);
+        self.registered.lock().unwrap_or_else(|e| e.into_inner()).insert(name.to_string(), block);
+    }
+
+    /// Register a cloud-backed table by loading it from a path (Parquet, KORE binary, or S3).
+    /// The loaded block is then registered for planning just like a local table.
+    pub fn register_cloud_table(&self, name: &str, path: &str) -> Result<(), KoreError> {
+        let block = cloud::load_from_path(path)?;
+        self.register_table_for_planning(name, block);
+        Ok(())
     }
 
     /// Row counts of every table analyzed by `register_table_for_planning`,
@@ -102,7 +155,7 @@ impl Coordinator {
     pub fn catalog_sizes(&self) -> Vec<(String, usize)> {
         self.catalog
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .tables_by_size()
             .into_iter()
             .map(|(n, r)| (n.to_string(), r))
@@ -110,12 +163,13 @@ impl Coordinator {
     }
 
     /// Access the registered block for a table (returns `None` if not staged).
+    #[allow(dead_code)]
     pub(crate) fn take_registered(&self, name: &str) -> Option<DataBlock> {
-        self.registered.lock().unwrap().remove(name)
+        self.registered.lock().unwrap_or_else(|e| e.into_inner()).remove(name)
     }
 
     pub(crate) fn peek_registered(&self, name: &str) -> Option<DataBlock> {
-        self.registered.lock().unwrap().get(name).cloned()
+        self.registered.lock().unwrap_or_else(|e| e.into_inner()).get(name).cloned()
     }
 
     /// Run the coordinator: listen for worker registrations, heartbeats, and client queries.
@@ -135,7 +189,19 @@ impl Coordinator {
                 let c = self.clone();
                 tokio::spawn(async move {
                     match KoreFrame::read(&mut stream).await {
-                        Ok(KoreMsg::RegisterWorker { id, task_addr, cores, memory_mb }) => {
+                        Ok(KoreMsg::RegisterWorker { id, task_addr, cores, memory_mb, auth_token }) => {
+                            if let Some(reason) = c.check_auth(
+                                auth_token.as_deref(),
+                                &kore_security::Permission::RegisterWorker,
+                                &peer.to_string(),
+                                "cluster",
+                            ) {
+                                eprintln!("[coord] DENIED worker registration from {peer}: {reason}");
+                                let _ = KoreFrame::write(&mut stream, &KoreMsg::QueryError {
+                                    query_id: "auth".into(), message: reason,
+                                }).await;
+                                return;
+                            }
                             eprintln!("[coord] worker registered: {id}  addr={task_addr} peer={peer}");
                             let info = WorkerInfo {
                                 id: id.clone(),
@@ -145,7 +211,7 @@ impl Coordinator {
                                 last_seen: now_ms(),
                                 active_tasks: 0,
                             };
-                            w.lock().unwrap().push(info);
+                            w.lock().unwrap_or_else(|e| e.into_inner()).push(info);
                             let _ = KoreFrame::write(&mut stream, &KoreMsg::RegisterAck { worker_id: id }).await;
                         }
                         Ok(KoreMsg::Heartbeat {
@@ -154,7 +220,7 @@ impl Coordinator {
                             active_tasks,
                             ..
                         }) => {
-                            let mut ws = w.lock().unwrap();
+                            let mut ws = w.lock().unwrap_or_else(|e| e.into_inner());
                             if let Some(info) = ws.iter_mut().find(|wi| wi.id == worker_id) {
                                 info.last_seen = timestamp_ms;
                                 info.active_tasks = active_tasks;
@@ -167,7 +233,20 @@ impl Coordinator {
                             data,
                             reduce_sql,
                             local_tables,
+                            auth_token,
                         }) => {
+                            if let Some(reason) = c.check_auth(
+                                auth_token.as_deref(),
+                                &kore_security::Permission::SubmitJob,
+                                &peer.to_string(),
+                                &sql,
+                            ) {
+                                eprintln!("[coord] DENIED query from {peer}: {reason}");
+                                let _ = KoreFrame::write(&mut stream, &KoreMsg::QueryError {
+                                    query_id, message: reason,
+                                }).await;
+                                return;
+                            }
                             eprintln!("[coord] query {query_id} from {peer} local={local_tables}");
                             let reduce = reduce_sql.as_deref();
                             let use_local =
@@ -226,6 +305,7 @@ impl Coordinator {
             data,
             reduce_sql: reduce_sql.map(|s| s.to_string()),
             local_tables: kore_net::cluster_local_tables(),
+            auth_token: std::env::var("KORE_CLIENT_TOKEN").ok(),
         }).await
             .map_err(|e| KoreError::InvalidArgument(format!("write query: {e}")))?;
         match KoreFrame::read(&mut stream).await
@@ -251,7 +331,7 @@ impl Coordinator {
         data: DataBlock,
         reduce_sql: Option<&str>,  // e.g. "SELECT region, SUM(total) AS total FROM merged GROUP BY region"
     ) -> Result<DataBlock, KoreError> {
-        let workers = self.workers.lock().unwrap().clone();
+        let workers = self.workers.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if workers.is_empty() {
             return Err(KoreError::InvalidArgument("no workers registered".into()));
         }
@@ -297,7 +377,7 @@ impl Coordinator {
     /// Remove workers that haven't sent a heartbeat in `timeout_ms`.
     pub fn evict_stale_workers(&self, timeout_ms: u64) {
         let now = now_ms();
-        let mut ws = self.workers.lock().unwrap();
+        let mut ws = self.workers.lock().unwrap_or_else(|e| e.into_inner());
         ws.retain(|w| now.saturating_sub(w.last_seen) < timeout_ms);
     }
 }
@@ -686,5 +766,105 @@ mod tests {
             .unwrap();
 
         assert!(result.num_rows >= 3, "expected ≥3 rows, got {}", result.num_rows);
+    }
+
+    #[tokio::test]
+    async fn test_register_cloud_table_parquet() {
+        let dir = std::env::temp_dir().join("kore_coord_cloud_test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let block = DataBlock {
+            num_rows: 5,
+            columns: vec![
+                Column { name: "id".into(), data: ColumnData::Int64((0..5).map(|i| Some(i as i64)).collect()) },
+                Column { name: "value".into(), data: ColumnData::Float64((0..5).map(|i| Some(i as f64 * 10.0)).collect()) },
+            ],
+        };
+
+        let path = dir.join("test_cloud.parquet");
+        kore_parquet::ParquetWriter::write_file(&block, &path).unwrap();
+
+        let coord = Coordinator::new();
+        coord.register_cloud_table("cloud_test", path.to_str().unwrap()).unwrap();
+
+        let sizes = coord.catalog_sizes();
+        assert!(sizes.iter().any(|(n, _)| n == "cloud_test"));
+        let (_, rows) = sizes.iter().find(|(n, _)| n == "cloud_test").unwrap();
+        assert_eq!(*rows, 5);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_register_cloud_table_kore_format() {
+        let dir = std::env::temp_dir().join("kore_coord_cloud_kore_test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let block = DataBlock {
+            num_rows: 3,
+            columns: vec![
+                Column { name: "x".into(), data: ColumnData::Int64(vec![Some(1), Some(2), Some(3)]) },
+            ],
+        };
+
+        let path = dir.join("test.kore");
+        let bytes = kore_store::KoreWriter::to_bytes(&block);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let coord = Coordinator::new();
+        coord.register_cloud_table("kore_tbl", path.to_str().unwrap()).unwrap();
+
+        let sizes = coord.catalog_sizes();
+        let (_, rows) = sizes.iter().find(|(n, _)| n == "kore_tbl").unwrap();
+        assert_eq!(*rows, 3);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_register_cloud_table_missing_file() {
+        let coord = Coordinator::new();
+        let result = coord.register_cloud_table("missing", "/nonexistent/path.parquet");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_security_auth_check() {
+        let coord = Coordinator::new();
+
+        // Without KORE_AUTH_REQUIRED, everything is allowed
+        assert!(coord.check_auth(None, &kore_security::Permission::SubmitJob, "127.0.0.1", "q1").is_none());
+
+        // Enable auth
+        std::env::set_var("KORE_AUTH_REQUIRED", "1");
+
+        // No token → denied
+        let denied = coord.check_auth(None, &kore_security::Permission::SubmitJob, "127.0.0.1", "q1");
+        assert!(denied.is_some());
+
+        // Issue a token and authenticate
+        let token = coord.issue_token("test-client", vec![kore_security::Role::JobSubmitter]);
+        let allowed = coord.check_auth(
+            Some(&token.secret),
+            &kore_security::Permission::SubmitJob,
+            "127.0.0.1",
+            "SELECT 1",
+        );
+        assert!(allowed.is_none());
+
+        // Wrong permission → denied
+        let denied = coord.check_auth(
+            Some(&token.secret),
+            &kore_security::Permission::Admin,
+            "127.0.0.1",
+            "DROP TABLE",
+        );
+        assert!(denied.is_some());
+
+        // Check audit log recorded the events
+        let audit = coord.audit_tail(10);
+        assert!(audit.len() >= 2);
+
+        std::env::remove_var("KORE_AUTH_REQUIRED");
     }
 }

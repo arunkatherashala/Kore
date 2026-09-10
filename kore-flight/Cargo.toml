@@ -1,0 +1,11 @@
+[package]
+name = "kore-flight"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kore-core = { workspace = true }
+kore-net = { path = "../kore-net" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }

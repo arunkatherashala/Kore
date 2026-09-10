@@ -11,7 +11,7 @@
 //! - Null masking : compact (remove nulls), fill_null
 //! - String hashing: for group-by key building
 
-use kore_core::{Column, ColumnData, DataBlock, KoreError};
+use kore_core::{ColumnData, DataBlock, KoreError};
 
 // ─── SIMD-friendly aggregations ──────────────────────────────────────────────
 
@@ -243,8 +243,6 @@ pub fn apply_mask(block: &DataBlock, mask: &[bool]) -> Result<DataBlock, KoreErr
 mod tests {
     use super::*;
     use kore_core::{Column, ColumnData, DataBlock};
-
-    fn make_f64(data: Vec<Option<f64>>) -> Vec<Option<f64>> { data }
 
     #[test]
     fn test_simd_sum() {

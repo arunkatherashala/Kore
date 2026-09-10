@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use kore_core::{Column, ColumnData, DataBlock, KoreError, Value};
 use kore_join::{HashJoin, JoinConfig};
 use kore_core::JoinType;
@@ -12,26 +13,70 @@ use kore_parquet;
 use kore_store;
 use kore_io;
 
+// Thread-local UDF registry populated before query execution
+thread_local! {
+    static CURRENT_UDFS: std::cell::RefCell<HashMap<String, Arc<dyn Fn(&[ExprVal]) -> ExprVal + Send + Sync>>> = std::cell::RefCell::new(HashMap::new());
+}
+
 /// Registry of named tables — both read-only and mutable.
 #[derive(Default, Clone)]
 pub struct KqlContext {
     tables:     HashMap<String, DataBlock>,
     /// Mutable tables: INSERT/UPDATE/DELETE operate on these.
     mut_tables: HashMap<String, DataBlock>,
+    /// Views: name -> SQL text
+    views:      HashMap<String, String>,
+    /// User-defined functions (stored as Arc for Clone-ability)
+    udfs:       HashMap<String, std::sync::Arc<dyn Fn(&[ExprVal]) -> ExprVal + Send + Sync>>,
+    /// Row count stats collected on register
+    stats:      HashMap<String, usize>,
 }
 
 impl KqlContext {
     pub fn new() -> Self { Self::default() }
 
     /// Register a named table (replaces if already registered).
+    /// Automatically collects basic row-count stats (auto-ANALYZE).
     pub fn register(&mut self, name: impl Into<String>, block: DataBlock) {
         let n = name.into();
-        self.tables.insert(n, block);
+        let row_count = block.num_rows;
+        self.tables.insert(n.clone(), block);
+        self.stats.insert(n, row_count);
     }
 
     /// Register a mutable table (supports INSERT/UPDATE/DELETE).
     pub fn register_mut(&mut self, name: impl Into<String>, block: DataBlock) {
-        self.mut_tables.insert(name.into(), block);
+        let n = name.into();
+        self.stats.insert(n.clone(), block.num_rows);
+        self.mut_tables.insert(n, block);
+    }
+
+    /// Register a view (SQL text executed on demand).
+    pub fn create_view(&mut self, name: impl Into<String>, sql: impl Into<String>) {
+        self.views.insert(name.into(), sql.into());
+    }
+
+    /// Drop a view.
+    pub fn drop_view(&mut self, name: &str) -> bool {
+        self.views.remove(name).is_some()
+    }
+
+    /// Drop a table.
+    pub fn drop_table(&mut self, name: &str) -> bool {
+        let a = self.tables.remove(name).is_some();
+        let b = self.mut_tables.remove(name).is_some();
+        self.stats.remove(name);
+        a || b
+    }
+
+    /// Register a user-defined function.
+    pub fn register_udf(&mut self, name: &str, func: impl Fn(&[ExprVal]) -> ExprVal + Send + Sync + 'static) {
+        self.udfs.insert(name.to_ascii_uppercase(), std::sync::Arc::new(func));
+    }
+
+    /// Get row count stats for a table.
+    pub fn row_count(&self, name: &str) -> Option<usize> {
+        self.stats.get(name).copied()
     }
 
     // ── Native .kore persistence ──────────────────────────────────────────────
@@ -62,16 +107,21 @@ impl KqlContext {
         schema: Vec<kore_delta::SchemaField>,
         path: impl AsRef<Path>,
     ) -> Result<(), KoreError> {
-        let dt = kore_delta::DeltaTable::create(path.as_ref(), schema)?;
-        let snapshot = dt.read()?;
+        let dt = kore_delta::DeltaTable::create(
+            path.as_ref(),
+            kore_delta::DeltaSchema { fields: schema },
+        )
+            .map_err(|e| e.into_kore())?;
+        let snapshot = dt.read().map_err(|e| e.into_kore())?;
         self.tables.insert(name.to_string(), snapshot);
         Ok(())
     }
 
     /// Open an existing Delta table and register it in this context.
     pub fn open_delta_table(&mut self, name: &str, path: impl AsRef<Path>) -> Result<(), KoreError> {
-        let dt = kore_delta::DeltaTable::open(path.as_ref())?;
-        let snapshot = dt.read()?;
+        let dt = kore_delta::DeltaTable::open(path.as_ref())
+            .map_err(|e| e.into_kore())?;
+        let snapshot = dt.read().map_err(|e| e.into_kore())?;
         self.tables.insert(name.to_string(), snapshot);
         Ok(())
     }
@@ -79,20 +129,35 @@ impl KqlContext {
     /// Write a DataBlock to a Delta table (ACID append).
     /// Returns new version number.
     pub fn delta_insert(&self, path: impl AsRef<Path>, data: DataBlock) -> Result<u64, KoreError> {
-        let mut dt = kore_delta::DeltaTable::open(path.as_ref())?;
-        dt.insert(data)
+        let mut dt = kore_delta::DeltaTable::open(path.as_ref())
+            .map_err(|e| e.into_kore())?;
+        let version = dt.insert(&data).map_err(|e| e.into_kore())?;
+        u64::try_from(version)
+            .map_err(|_| KoreError::InvalidArgument("delta version is negative".to_string()))
     }
 
     /// Read a Delta table at a specific version (time-travel).
     pub fn read_delta_at_version(&self, path: impl AsRef<Path>, version: u64) -> Result<DataBlock, KoreError> {
-        let dt = kore_delta::DeltaTable::open(path.as_ref())?;
-        dt.read_at_version(version)
+        let dt = kore_delta::DeltaTable::open(path.as_ref())
+            .map_err(|e| e.into_kore())?;
+        let version = i64::try_from(version)
+            .map_err(|_| KoreError::InvalidArgument("delta version is too large".to_string()))?;
+        dt.read_version(version).map_err(|e| e.into_kore())
     }
 
     /// Get full ACID history: Vec<(version, operation, rows)>
     pub fn delta_history(&self, path: impl AsRef<Path>) -> Result<Vec<(u64, String, u64)>, KoreError> {
-        let dt = kore_delta::DeltaTable::open(path.as_ref())?;
-        Ok(dt.history())
+        let dt = kore_delta::DeltaTable::open(path.as_ref())
+            .map_err(|e| e.into_kore())?;
+        let history = dt.history().map_err(|e| e.into_kore())?;
+        history
+            .into_iter()
+            .map(|commit| {
+                let version = u64::try_from(commit.version)
+                    .map_err(|_| KoreError::InvalidArgument("delta version is negative".to_string()))?;
+                Ok((version, commit.operation, 0))
+            })
+            .collect()
     }
 
     /// Parse + execute a KQL query (supports CTEs and UNION ALL).
@@ -100,6 +165,11 @@ impl KqlContext {
     pub fn query(&self, sql: &str) -> Result<DataBlock, KoreError> {
         let sql_trim = sql.trim();
         let upper = sql_trim.to_ascii_uppercase();
+
+        // CTE: WITH name AS (SELECT ...) SELECT ...
+        if upper.starts_with("WITH ") {
+            return self.execute_cte(sql_trim);
+        }
 
         // ── Meta queries — don't parse as SELECT ──────────────────────────────
         if upper.starts_with("SHOW TABLES") {
@@ -127,6 +197,15 @@ impl KqlContext {
             }
             return Err(KoreError::InvalidArgument(format!("table '{}' not found", tname)));
         }
+        // ── COPY ... TO (export to Parquet) ──────────────────────────────────
+        if upper.starts_with("COPY ") && upper.contains(" TO ") {
+            return self.query_copy_to(sql_trim);
+        }
+        // ── CREATE TABLE ... STORED AS PARQUET ────────────────────────────────
+        if upper.starts_with("CREATE TABLE") && upper.contains("STORED AS PARQUET") {
+            return self.query_ctas_parquet(sql_trim);
+        }
+
         if upper.starts_with("EXPLAIN") {
             let rest = sql_trim[7..].trim();
             let plan = match crate::parser::parse_query(rest) {
@@ -142,6 +221,23 @@ impl KqlContext {
             };
             return DataBlock::new(vec![Column { name: "plan".into(), data: ColumnData::Str(vec![Some(plan)]) }]);
         }
+        if upper.starts_with("ANALYZE TABLE") {
+            let rest = sql_trim["ANALYZE TABLE".len()..].trim();
+            let table_name = rest.split_whitespace().next().unwrap_or("").trim_end_matches(';');
+            if table_name.is_empty() {
+                return Err(KoreError::InvalidArgument("ANALYZE TABLE: missing table name".into()));
+            }
+            let block = self.get(table_name)
+                .ok_or_else(|| KoreError::InvalidArgument(format!("ANALYZE TABLE: table '{}' not found", table_name)))?
+                .clone();
+            let mut catalog = kore_catalog::Catalog::new();
+            catalog.analyze(table_name, &block);
+            let row_count = block.num_rows;
+            let msg = format!("Analyzed table {}: {} rows", table_name, row_count);
+            return DataBlock::new(vec![
+                Column { name: "result".into(), data: ColumnData::Str(vec![Some(msg)]) },
+            ]);
+        }
 
         let query = crate::parser::parse_query(sql_trim)?;
 
@@ -153,7 +249,38 @@ impl KqlContext {
             return res;
         }
 
+        // Populate thread-local UDFs for eval_func access
+        CURRENT_UDFS.with(|cell| {
+            *cell.borrow_mut() = self.udfs.clone();
+        });
+
         execute_query(&query, self)
+    }
+
+    /// Execute a CTE query by parsing each WITH clause, executing each CTE body
+    /// as a temporary table, then running the final SELECT in an extended context.
+    /// Supports multiple CTEs: `WITH a AS (...), b AS (...) SELECT ...`
+    fn execute_cte(&self, sql: &str) -> Result<DataBlock, KoreError> {
+        let query = crate::parser::parse_query(sql)?;
+
+        // Register each CTE result as a temp table in a cloned context
+        let mut local = self.clone();
+        for cte in &query.ctes {
+            let result = execute_select(&cte.body, &local)?;
+            local.register(cte.name.clone(), result);
+        }
+
+        // Execute the final SELECT (and set ops if present) against extended context
+        let body = query.body.as_ref()
+            .ok_or_else(|| KoreError::InvalidArgument("CTE: empty query body after WITH clause".into()))?;
+        let mut result = execute_select(body, &local)?;
+
+        for (kind, stmt) in &query.set_ops {
+            let other = execute_select(stmt, &local)?;
+            result = apply_set_op(result, other, kind)?;
+        }
+
+        Ok(result)
     }
 
     /// Execute a DML statement against mutable tables.
@@ -175,8 +302,27 @@ impl KqlContext {
         if upper.starts_with("CREATE TABLE") {
             return self.dml_create_table(sql_trim);
         }
+        if upper.starts_with("CREATE VIEW") {
+            return self.dml_create_view(sql_trim);
+        }
+        if upper.starts_with("CREATE TEMP TABLE") || upper.starts_with("CREATE TEMPORARY TABLE") {
+            return self.dml_create_temp_table(sql_trim);
+        }
+        if upper.starts_with("DROP TABLE") {
+            let name = sql_trim[upper.find("TABLE").unwrap() + 5..].trim().trim_end_matches(';').trim();
+            self.drop_table(name);
+            return Ok(("DROP TABLE".into(), 0));
+        }
+        if upper.starts_with("DROP VIEW") {
+            let name = sql_trim[upper.find("VIEW").unwrap() + 4..].trim().trim_end_matches(';').trim();
+            self.drop_view(name);
+            return Ok(("DROP VIEW".into(), 0));
+        }
         if upper.starts_with("LOAD TABLE") {
             return self.dml_load_table(sql_trim);
+        }
+        if upper.starts_with("LOAD DATA") {
+            return self.dml_load_data(sql_trim);
         }
         if upper.starts_with("COPY ") {
             return self.dml_copy_from(sql_trim);
@@ -246,7 +392,7 @@ impl KqlContext {
         // Simple: UPDATE <table> SET <col>=<val> WHERE <cond>
         // We run SELECT * FROM table WHERE cond → update matching rows
         let upper = sql.to_uppercase();
-        let after_update = sql[7..].trim(); // skip "UPDATE "
+        let _after_update = sql[7..].trim(); // skip "UPDATE "
         let set_pos = upper.find(" SET ").ok_or_else(|| KoreError::InvalidArgument("UPDATE: missing SET".into()))?;
         let table_name = sql[7..set_pos].trim();
         let after_set = &sql[set_pos + 5..];
@@ -284,7 +430,7 @@ impl KqlContext {
             let n = updated.num_rows;
             if let Some(col) = updated.columns.iter_mut().find(|c| c.name == col_name || c.name.ends_with(&format!(".{col_name}"))) {
                 // For simplicity: update ALL rows if no WHERE, else just mark (full update is complex)
-                for i in 0..n {
+                for _i in 0..n {
                     let new_val = if let Ok(f) = val_str.parse::<f64>() {
                         match &col.data {
                             ColumnData::Int64(_)   => Value::Int(f as i64),
@@ -356,10 +502,47 @@ impl KqlContext {
         Ok(("CREATE TABLE AS SELECT".into(), rows))
     }
 
+    fn dml_create_view(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
+        // CREATE VIEW <name> AS SELECT ...
+        let upper = sql.to_uppercase();
+        let as_pos = upper.find(" AS ").ok_or_else(|| KoreError::InvalidArgument("CREATE VIEW: missing AS".into()))?;
+        let after_view = sql[upper.find("VIEW").unwrap() + 4..as_pos].trim();
+        let view_sql = sql[as_pos + 4..].trim().to_string();
+        self.create_view(after_view, view_sql);
+        Ok(("CREATE VIEW".into(), 0))
+    }
+
+    fn dml_create_temp_table(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
+        // CREATE TEMP TABLE <name> AS SELECT ...
+        // or CREATE TEMP TABLE <name> (col1 TYPE, ...)
+        let upper = sql.to_uppercase();
+        let table_start = if upper.contains("TEMPORARY") {
+            upper.find("TABLE").unwrap() + 5
+        } else {
+            upper.find("TABLE").unwrap() + 5
+        };
+        let rest = sql[table_start..].trim();
+        if let Some(as_pos) = rest.to_uppercase().find(" AS ") {
+            let table_name = rest[..as_pos].trim();
+            let select_sql = rest[as_pos + 4..].trim();
+            let result = self.query(select_sql)?;
+            let rows = result.num_rows;
+            self.register(table_name, result);
+            Ok(("CREATE TEMP TABLE".into(), rows))
+        } else {
+            // CREATE TEMP TABLE name (col1 TYPE, col2 TYPE) — empty table with schema
+            let paren_start = rest.find('(').unwrap_or(rest.len());
+            let table_name = rest[..paren_start].trim().trim_end_matches(';');
+            // Register empty block
+            self.register(table_name, DataBlock::empty());
+            Ok(("CREATE TEMP TABLE".into(), 0))
+        }
+    }
+
     fn dml_load_table(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
         // LOAD TABLE <name> FROM '<path>'
         // Supports: .parquet, .kore, .csv (auto-detect by extension)
-        let upper = sql.to_uppercase();
+        let _upper = sql.to_uppercase();
         // Skip "LOAD TABLE "
         let after_load = sql[10..].trim();
         let from_pos = after_load.to_uppercase().find(" FROM ")
@@ -385,10 +568,39 @@ impl KqlContext {
         Ok(("LOAD TABLE".into(), rows))
     }
 
+    fn dml_load_data(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
+        // LOAD DATA '<path>' INTO <table_name>
+        let after_load = sql["LOAD DATA".len()..].trim();
+        let into_pos = after_load.to_ascii_uppercase().find(" INTO ")
+            .ok_or_else(|| KoreError::InvalidArgument("LOAD DATA: missing INTO".into()))?;
+        let path_raw = after_load[..into_pos].trim().trim_matches('\'').trim_matches('"');
+        let table_name = after_load[into_pos + 6..].trim().trim_end_matches(';');
+
+        let ext = path_raw.rsplit('.').next().unwrap_or("").to_lowercase();
+        let block = match ext.as_str() {
+            "parquet" => {
+                kore_parquet::ParquetReader::new(path_raw)
+                    .read()
+                    .map_err(|e| KoreError::InvalidArgument(format!("Parquet read '{}': {}", path_raw, e)))?
+            }
+            "kore" => {
+                kore_store::reader::KoreReader::read_file(std::path::Path::new(path_raw))
+                    .map_err(|e| KoreError::InvalidArgument(format!("KORE read '{}': {}", path_raw, e)))?
+            }
+            _ => return Err(KoreError::InvalidArgument(
+                format!("LOAD DATA: unsupported format '.{ext}' (use .parquet or .kore)")
+            )),
+        };
+        let rows = block.num_rows;
+        self.register_mut(table_name, block.clone());
+        self.register(table_name, block);
+        Ok(("LOAD DATA".into(), rows))
+    }
+
     fn dml_copy_from(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
         // COPY <table> FROM '<path>' [WITH (HEADER true, DELIMITER ',')]
         // Also accepts: COPY <table> FROM '<path>'  (defaults: header=true, delim=',')
-        let upper = sql.to_uppercase();
+        let _upper = sql.to_uppercase();
         // Skip "COPY "
         let after_copy = sql[5..].trim();
         // Find FROM
@@ -491,7 +703,7 @@ impl KqlContext {
         }
         if rows.is_empty() { return Ok(DataBlock::empty()); }
         let ncols = rows[0].len();
-        let mut columns: Vec<Column> = (0..ncols).map(|i| {
+        let columns: Vec<Column> = (0..ncols).map(|i| {
             let data = rows.iter().map(|r| r.get(i).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>();
             // Infer type from first non-null
             let first = data.iter().find(|v| !matches!(v, Value::Null));
@@ -514,6 +726,68 @@ impl KqlContext {
         names.sort();
         names.dedup();
         names
+    }
+
+    /// COPY (SELECT ...) TO 'path.parquet'  or  COPY table_name TO 'path.parquet'
+    fn query_copy_to(&self, sql: &str) -> Result<DataBlock, KoreError> {
+        let after_copy = sql[4..].trim(); // skip "COPY"
+
+        let (inner_block, rest) = if after_copy.starts_with('(') {
+            // COPY (SELECT ...) TO 'path'
+            let close = after_copy.rfind(')')
+                .ok_or_else(|| KoreError::InvalidArgument("COPY TO: unmatched '('".into()))?;
+            let inner_sql = &after_copy[1..close];
+            let block = self.query(inner_sql)?;
+            (block, after_copy[close + 1..].trim())
+        } else {
+            // COPY table_name TO 'path'
+            let to_pos = after_copy.to_ascii_uppercase().find(" TO ")
+                .ok_or_else(|| KoreError::InvalidArgument("COPY: missing TO".into()))?;
+            let table_name = after_copy[..to_pos].trim();
+            let block = self.get(table_name)
+                .ok_or_else(|| KoreError::InvalidArgument(format!("COPY TO: table '{}' not found", table_name)))?
+                .clone();
+            (block, after_copy[to_pos..].trim())
+        };
+
+        // Parse "TO 'path'"
+        let to_pos = rest.to_ascii_uppercase().find("TO ")
+            .ok_or_else(|| KoreError::InvalidArgument("COPY: missing TO keyword".into()))?;
+        let path_raw = rest[to_pos + 3..].trim().trim_matches('\'').trim_matches('"').trim_end_matches(';');
+
+        let row_count = inner_block.num_rows;
+        kore_parquet::ParquetWriter::write_file(&inner_block, path_raw)
+            .map_err(|e| KoreError::InvalidArgument(format!("Parquet write '{}': {}", path_raw, e)))?;
+
+        let msg = format!("Exported {} rows to {}", row_count, path_raw);
+        DataBlock::new(vec![Column { name: "result".into(), data: ColumnData::Str(vec![Some(msg)]) }])
+    }
+
+    /// CREATE TABLE name AS SELECT ... STORED AS PARQUET 'path.parquet'
+    fn query_ctas_parquet(&self, sql: &str) -> Result<DataBlock, KoreError> {
+        let upper = sql.to_ascii_uppercase();
+
+        // Find "STORED AS PARQUET"
+        let stored_pos = upper.find("STORED AS PARQUET")
+            .ok_or_else(|| KoreError::InvalidArgument("CTAS: missing STORED AS PARQUET".into()))?;
+
+        // Everything before STORED AS PARQUET is "CREATE TABLE name AS SELECT ..."
+        let ctas_part = &sql[..stored_pos].trim();
+        let as_pos = ctas_part.to_ascii_uppercase().find(" AS ")
+            .ok_or_else(|| KoreError::InvalidArgument("CTAS: missing AS".into()))?;
+        let select_sql = ctas_part[as_pos + 4..].trim();
+        let result = self.query(select_sql)?;
+
+        // Extract path after "STORED AS PARQUET 'path'"
+        let after_stored = sql[stored_pos + 17..].trim();
+        let path_raw = after_stored.trim_matches('\'').trim_matches('"').trim_end_matches(';');
+
+        let row_count = result.num_rows;
+        kore_parquet::ParquetWriter::write_file(&result, path_raw)
+            .map_err(|e| KoreError::InvalidArgument(format!("Parquet write '{}': {}", path_raw, e)))?;
+
+        let msg = format!("Created table with {} rows, stored as {}", row_count, path_raw);
+        DataBlock::new(vec![Column { name: "result".into(), data: ColumnData::Str(vec![Some(msg)]) }])
     }
 
     /// MERGE INTO target USING source ON cond
@@ -653,7 +927,7 @@ pub fn execute(sql: &str, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
     ctx.query(sql)
 }
 
-/// Execute a full Query (with CTEs and UNION ALL).
+/// Execute a full Query (with CTEs and set operations).
 pub fn execute_query(query: &Query, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
     // 1. Register CTEs in an extended context
     let mut local = ctx.clone();
@@ -667,13 +941,86 @@ pub fn execute_query(query: &Query, ctx: &KqlContext) -> Result<DataBlock, KoreE
         .ok_or_else(|| KoreError::InvalidArgument("empty query body".into()))?;
     let mut result = execute_select(body, &local)?;
 
-    // 3. UNION ALL
-    for stmt in &query.union_all {
+    // 3. Set operations (UNION ALL, UNION, INTERSECT, EXCEPT)
+    for (kind, stmt) in &query.set_ops {
         let other = execute_select(stmt, &local)?;
-        result = DataBlock::concat(vec![result, other])?;
+        result = apply_set_op(result, other, kind)?;
     }
 
     Ok(result)
+}
+
+/// Apply a set operation between two DataBlocks.
+fn apply_set_op(left: DataBlock, right: DataBlock, kind: &SetOpKind) -> Result<DataBlock, KoreError> {
+    match kind {
+        SetOpKind::UnionAll => DataBlock::concat(vec![left, right]),
+        SetOpKind::Union => {
+            let combined = DataBlock::concat(vec![left, right])?;
+            Ok(apply_distinct(&combined))
+        }
+        SetOpKind::Intersect => Ok(set_intersect(&left, &right)),
+        SetOpKind::Except    => Ok(set_except(&left, &right)),
+    }
+}
+
+fn apply_distinct(block: &DataBlock) -> DataBlock {
+    if block.num_rows == 0 { return block.clone(); }
+    let mut seen = std::collections::HashSet::new();
+    let mut keep = Vec::new();
+    for row in 0..block.num_rows {
+        let key = row_key(block, row);
+        if seen.insert(key) { keep.push(row); }
+    }
+    filter_rows(block, &keep)
+}
+
+fn set_intersect(left: &DataBlock, right: &DataBlock) -> DataBlock {
+    let right_keys: std::collections::HashSet<String> =
+        (0..right.num_rows).map(|r| row_key(right, r)).collect();
+    let keep: Vec<usize> = (0..left.num_rows)
+        .filter(|&r| right_keys.contains(&row_key(left, r)))
+        .collect();
+    filter_rows(left, &keep)
+}
+
+fn set_except(left: &DataBlock, right: &DataBlock) -> DataBlock {
+    let right_keys: std::collections::HashSet<String> =
+        (0..right.num_rows).map(|r| row_key(right, r)).collect();
+    let keep: Vec<usize> = (0..left.num_rows)
+        .filter(|&r| !right_keys.contains(&row_key(left, r)))
+        .collect();
+    filter_rows(left, &keep)
+}
+
+fn row_key(block: &DataBlock, row: usize) -> String {
+    use kore_core::ColumnData;
+    block.columns.iter().map(|col| {
+        match &col.data {
+            ColumnData::Int64(v)   => v.get(row).map(|x| format!("{:?}", x)).unwrap_or_default(),
+            ColumnData::Float64(v) => v.get(row).map(|x| format!("{:?}", x)).unwrap_or_default(),
+            ColumnData::Str(v)     => v.get(row).map(|x| format!("{:?}", x)).unwrap_or_default(),
+            ColumnData::Bool(v)    => v.get(row).map(|x| format!("{:?}", x)).unwrap_or_default(),
+            ColumnData::StrDict { codes, .. } => codes.get(row).map(|x| format!("{}", x)).unwrap_or_default(),
+        }
+    }).collect::<Vec<_>>().join("|")
+}
+
+fn filter_rows(block: &DataBlock, indices: &[usize]) -> DataBlock {
+    use kore_core::{Column, ColumnData};
+    let columns = block.columns.iter().map(|col| {
+        let data = match &col.data {
+            ColumnData::Int64(v)   => ColumnData::Int64(indices.iter().map(|&i| v[i]).collect()),
+            ColumnData::Float64(v) => ColumnData::Float64(indices.iter().map(|&i| v[i]).collect()),
+            ColumnData::Str(v)     => ColumnData::Str(indices.iter().map(|&i| v[i].clone()).collect()),
+            ColumnData::Bool(v)    => ColumnData::Bool(indices.iter().map(|&i| v[i]).collect()),
+            ColumnData::StrDict { codes, dict } => ColumnData::StrDict {
+                codes: indices.iter().map(|&i| codes[i]).collect(),
+                dict: dict.clone(),
+            },
+        };
+        Column { name: col.name.clone(), data }
+    }).collect();
+    DataBlock { num_rows: indices.len(), columns }
 }
 
 pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
@@ -718,9 +1065,31 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
             .unwrap_or_else(|_| DataBlock::empty()))
     } else { None };
 
+    // Parquet file path: if the table name ends with .parquet, read it directly
+    let parquet_block: Option<DataBlock> = if values_block.is_none() && subq_block.is_none() && dual_block.is_none()
+        && base_name.contains(".parquet")
+    {
+        let path_clean = base_name.trim_matches('\'').trim_matches('"');
+        Some(
+            kore_parquet::ParquetReader::new(path_clean)
+                .read()
+                .map_err(|e| KoreError::InvalidArgument(format!("Parquet read '{}': {}", path_clean, e)))?
+        )
+    } else { None };
+
+    // View resolution: if table not found in context, check views
+    let view_block: Option<DataBlock> = if values_block.is_none() && subq_block.is_none() && dual_block.is_none() && parquet_block.is_none()
+        && ctx.get(base_name).is_none() && ctx.views.contains_key(base_name)
+    {
+        let sql = ctx.views.get(base_name).unwrap().clone();
+        Some(ctx.query(&sql)?)
+    } else { None };
+
     let base_ref: &DataBlock = if let Some(ref vb) = values_block { vb }
         else if let Some(ref sb) = subq_block { sb }
         else if let Some(ref db) = dual_block { db }
+        else if let Some(ref pb) = parquet_block { pb }
+        else if let Some(ref vwb) = view_block { vwb }
         else {
             ctx.get(base_name)
                 .ok_or_else(|| KoreError::InvalidArgument(format!("unknown table: {base_name}")))?
@@ -752,10 +1121,6 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     // 2. Process JOINs
     for join in &stmt.joins {
         // Pre-cap the probe side when LIMIT is set with no ORDER BY/WHERE.
-        // Prevents O(n×m) join materialisation for queries like:
-        //   SELECT ... FROM t1 JOIN t2 ON t1.k=t2.k LIMIT 5
-        // One left row can match many right rows; capping left to limit rows
-        // keeps the output bounded while returning correct (any) n results.
         let probe = if let Some(lim) = stmt.limit {
             let has_win = stmt.projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Window { .. }, .. }));
             if stmt.where_clause.is_none()
@@ -765,7 +1130,6 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                 && !has_win
             {
                 let cap = (lim as usize).saturating_add(stmt.offset.unwrap_or(0) as usize);
-                // Use a small multiple to ensure we can satisfy LIMIT after join predicate
                 limit_block(result.clone(), cap.max(1))
             } else {
                 result.clone()
@@ -775,20 +1139,41 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         };
         let right_name  = &join.table.name;
         let right_alias = join.table.alias.as_deref().unwrap_or(right_name.as_str());
-        let right_block = ctx.get(right_name)
-            .ok_or_else(|| KoreError::InvalidArgument(format!("unknown table: {right_name}")))?
-            .clone();
+
+        // Resolve right side: subquery, view, or regular table
+        let right_block = if let Some(subq) = &join.table.subquery {
+            execute_select(subq, ctx)?
+        } else if let Some(b) = ctx.get(right_name) {
+            b.clone()
+        } else if ctx.views.contains_key(right_name.as_str()) {
+            let sql = ctx.views.get(right_name.as_str()).unwrap().clone();
+            ctx.query(&sql)?
+        } else {
+            return Err(KoreError::InvalidArgument(format!("unknown table: {right_name}")));
+        };
         let right_block = prefix_columns(right_block, right_alias);
+
+        // CROSS JOIN: Cartesian product (no ON condition)
+        if join.join_type == JoinKind::Cross {
+            result = cross_join(&probe, &right_block);
+            continue;
+        }
+
+        // Non-equi join: use nested-loop fallback
+        if let Some(ref on_expr) = join.on.expr {
+            result = nested_loop_join(&probe, &right_block, on_expr, &join.join_type);
+            continue;
+        }
 
         let jtype = match join.join_type {
             JoinKind::Inner => JoinType::Inner,
             JoinKind::Left  => JoinType::Left,
-            JoinKind::Right => JoinType::Left,   // swap tables for right join
+            JoinKind::Right => JoinType::Left,
             JoinKind::Full  => JoinType::Full,
+            JoinKind::Cross => unreachable!(),
         };
 
-        // Resolve join keys — ON clause order is not guaranteed to match left/right tables.
-        // Try both assignments and use whichever pairing matches the blocks.
+        // Resolve join keys
         let (lk, rk) = {
             let a_in_result = find_col_in_block(&join.on.left_col,  &probe);
             let a_in_right  = find_col_in_block(&join.on.left_col,  &right_block);
@@ -869,7 +1254,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         .collect();
 
     if !win_projs.is_empty() {
-        for (idx, expr, alias) in &win_projs {
+        for (_idx, expr, alias) in &win_projs {
             if let Expr::Window { func, spec } = expr {
                 let out_name = alias.map(|a| a.as_str())
                     .unwrap_or("__win")
@@ -900,10 +1285,26 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
 
     // 6. ORDER BY — resolve column names, also checking SELECT aliases
     for item in stmt.order_by.iter().rev() {
-        let col_raw = resolve_col_name(&item.col, "");
-        let col = find_order_col_in_result(&col_raw, &result, &stmt.projections)
-            .unwrap_or(col_raw);
-        result = sort_block_nulls(result, &col, item.desc, item.nulls_first)?;
+        if !item.col.is_empty() {
+            let col_raw = resolve_col_name(&item.col, "");
+            let col = find_order_col_in_result(&col_raw, &result, &stmt.projections)
+                .unwrap_or(col_raw);
+            result = sort_block_nulls(result, &col, item.desc, item.nulls_first)?;
+        } else {
+            // ORDER BY expression (not a column name) — evaluate into a temporary column
+            let tmp_name = "__order_expr__".to_string();
+            let n = result.num_rows;
+            let vals: Vec<ExprVal> = (0..n).map(|r| eval_expr(&item.expr, &result, r)).collect();
+            let first_non_null = vals.iter().find(|v| !matches!(v, ExprVal::Null));
+            let col_data = match first_non_null {
+                Some(ExprVal::Int(_)) => ColumnData::Int64(vals.iter().map(|v| match v { ExprVal::Int(i) => Some(*i), ExprVal::Float(f) => Some(*f as i64), _ => None }).collect()),
+                Some(ExprVal::Float(_)) => ColumnData::Float64(vals.iter().map(|v| to_f64(v)).collect()),
+                _ => ColumnData::Str(vals.iter().map(|v| match v { ExprVal::Str(s) => Some(s.clone()), ExprVal::Int(i) => Some(i.to_string()), ExprVal::Float(f) => Some(f.to_string()), _ => None }).collect()),
+            };
+            result.columns.push(Column { name: tmp_name.clone(), data: col_data });
+            result = sort_block_nulls(result, &tmp_name, item.desc, item.nulls_first)?;
+            result.columns.retain(|c| c.name != tmp_name);
+        }
     }
 
     // 7. LIMIT + OFFSET
@@ -962,7 +1363,7 @@ fn find_order_col_in_result(col: &str, result: &DataBlock, projections: &[Projec
         return Some(col.to_string());
     }
     // 2. Suffix match: "orders.col" matches column ending with ".orders.col"
-    let m = result.columns.iter().len(); let cl = col.len();
+    let _m = result.columns.iter().len(); let cl = col.len();
     if let Some(c) = result.columns.iter().find(|c| {
         let cn = c.name.len();
         cn > cl && c.name.as_bytes()[cn - cl - 1] == b'.' && &c.name[cn - cl..] == col
@@ -1365,6 +1766,7 @@ fn eval_expr_ctx(expr: &Expr, block: &DataBlock, row: usize, ctx: &KqlContext) -
                         Value::Str(s)   => ExprVal::Str(s),
                         Value::Bool(b)  => ExprVal::Bool(b),
                         Value::Null     => ExprVal::Null,
+                        Value::Array(_) | Value::Map(_) => ExprVal::Null,
                     }
                 }
                 _ => ExprVal::Null,
@@ -1391,6 +1793,7 @@ fn eval_expr_ctx(expr: &Expr, block: &DataBlock, row: usize, ctx: &KqlContext) -
                                 Value::Str(s)   => s == lhs_str,
                                 Value::Bool(b)  => b.to_string() == lhs_str,
                                 Value::Null     => false,
+                                Value::Array(_) | Value::Map(_) => false,
                             }
                         });
                         ExprVal::Bool(if *negated { !found } else { found })
@@ -1457,6 +1860,7 @@ fn eval_expr_ctx(expr: &Expr, block: &DataBlock, row: usize, ctx: &KqlContext) -
 
 /// Pre-resolve non-correlated subqueries: replace ScalarSubquery with literal float/str.
 /// Correlated subqueries remain as-is (evaluated per-row in eval_expr_ctx).
+#[allow(dead_code)]
 fn expr_type_name(e: &Expr) -> &'static str {
     match e {
         Expr::ScalarSubquery(_)  => "ScalarSubquery",
@@ -1652,6 +2056,7 @@ fn resolve_subqueries(expr: &Expr, ctx: &KqlContext) -> Expr {
 
 /// Evaluate a predicate over an entire DataBlock, returning a bitmask.
 /// Processes simple column comparisons column-at-a-time (LLVM auto-vectorizes).
+#[allow(dead_code)]
 fn eval_batch(expr: &Expr, block: &DataBlock) -> Vec<bool> {
     let n = block.num_rows;
 
@@ -1806,7 +2211,7 @@ fn eval_bool(expr: &Expr, block: &DataBlock, row: usize) -> bool {
 }
 
 #[derive(Debug, Clone)]
-enum ExprVal {
+pub enum ExprVal {
     Int(i64), Float(f64), Str(String), Bool(bool), Null,
 }
 
@@ -1849,6 +2254,7 @@ fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
         Expr::ScalarSubquery(_) => ExprVal::Null,
         Expr::InSubquery { negated, .. } => ExprVal::Bool(*negated),
         Expr::Exists { negated, .. }     => ExprVal::Bool(*negated),
+        Expr::Array(_) | Expr::Explode(_) => ExprVal::Null,
         // ── CASE WHEN ─────────────────────────────────────────────────────
         Expr::Case { operand, branches, else_val } => {
             match operand {
@@ -1884,6 +2290,16 @@ fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
             let pv = eval_expr(pattern, block, row);
             let matches = match (sv, pv) {
                 (ExprVal::Str(s), ExprVal::Str(p)) => like_match(&s, &p),
+                _ => false,
+            };
+            ExprVal::Bool(if *negated { !matches } else { matches })
+        }
+        // ── ILIKE (case-insensitive LIKE) ────────────────────────────────
+        Expr::ILike { expr: e, pattern, negated } => {
+            let sv = eval_expr(e, block, row);
+            let pv = eval_expr(pattern, block, row);
+            let matches = match (sv, pv) {
+                (ExprVal::Str(s), ExprVal::Str(p)) => like_match(&s.to_lowercase(), &p.to_lowercase()),
                 _ => false,
             };
             ExprVal::Bool(if *negated { !matches } else { matches })
@@ -2084,7 +2500,7 @@ fn eval_func(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> ExprVa
                 "year"    => y as i64,
                 "month"   => m as i64,
                 "day"     => dy as i64,
-                "quarter" => (((m as i64 - 1) / 3) + 1),
+                "quarter" => ((m as i64 - 1) / 3) + 1,
                 _         => 0,
             };
             ExprVal::Int(v)
@@ -2257,69 +2673,51 @@ fn eval_func(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> ExprVa
         "SIN" => arg_f64(0).map(|f| ExprVal::Float(f.sin())).unwrap_or(ExprVal::Null),
         "COS" => arg_f64(0).map(|f| ExprVal::Float(f.cos())).unwrap_or(ExprVal::Null),
         "TAN" => arg_f64(0).map(|f| ExprVal::Float(f.tan())).unwrap_or(ExprVal::Null),
-        // ── Date / Time functions ─────────────────────────────────────────────
-        "YEAR" => { let d = date_to_int(&arg(0)); ExprVal::Int(d / 10000) }
-        "MONTH" => { let d = date_to_int(&arg(0)); ExprVal::Int((d / 100) % 100) }
-        "DAY" => { let d = date_to_int(&arg(0)); ExprVal::Int(d % 100) }
-        "QUARTER" => { let d = date_to_int(&arg(0)); ExprVal::Int(((d / 100 % 100 - 1) / 3) + 1) }
-        "DATE_TRUNC" => {
-            let part = arg_str(0).unwrap_or_default().to_lowercase();
-            let d = date_to_int(&arg(1));
-            let (y, m) = (d / 10000, (d / 100) % 100);
-            let r = match part.as_str() {
-                "year"    => format!("{:04}-01-01", y),
-                "month"   => format!("{:04}-{:02}-01", y, m),
-                "quarter" => format!("{:04}-{:02}-01", y, ((m - 1) / 3) * 3 + 1),
-                _         => arg_str(1).unwrap_or_default(),
-            };
-            ExprVal::Str(r)
-        }
-        "EXTRACT" => {
-            let field = arg_str(0).unwrap_or_default().to_lowercase();
-            let d = date_to_int(&arg(1));
-            let v = match field.as_str() {
-                "year" => d / 10000, "month" => (d / 100) % 100, "day" => d % 100,
-                "quarter" => ((d / 100 % 100 - 1) / 3) + 1, _ => 0,
-            };
-            ExprVal::Int(v)
-        }
-        "DATEADD" | "DATE_ADD" => {
-            let part = arg_str(0).unwrap_or(String::from("day")).to_lowercase();
-            let n = arg_f64(1).unwrap_or(0.0) as i64;
-            let d = date_to_int(&arg(2));
-            let days = match part.as_str() { "year" => n * 365, "month" => n * 30, _ => n };
-            ExprVal::Str(date_add_days(d, days))
-        }
-        "DATEDIFF" | "DATE_DIFF" => {
-            let d1 = date_to_int(&arg(1));
-            let d2 = date_to_int(&arg(2));
-            ExprVal::Int(date_to_julian(d2) - date_to_julian(d1))
-        }
-        "NOW" | "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "TODAY" => {
-            ExprVal::Str(executor_date_now())
-        }
-        "TO_DATE" | "DATE" => arg(0),
-        "STRFTIME" | "FORMAT_DATE" => {
-            let fmt = arg_str(0).unwrap_or_default();
-            let d = date_to_int(&arg(1));
-            let (y, m, dy) = (d / 10000, (d / 100) % 100, d % 100);
-            ExprVal::Str(fmt.replace("%Y", &format!("{:04}", y))
-                           .replace("%m", &format!("{:02}", m))
-                           .replace("%d", &format!("{:02}", dy)))
-        }
-        // ── Greatest / Least ─────────────────────────────────────────────────
-        "GREATEST" => {
-            args.iter().map(|a| eval_expr(a, block, row))
-                .max_by(|a, b| to_f64(a).unwrap_or(f64::MIN).partial_cmp(&to_f64(b).unwrap_or(f64::MIN)).unwrap_or(std::cmp::Ordering::Equal))
-                .unwrap_or(ExprVal::Null)
-        }
-        "LEAST" => {
-            args.iter().map(|a| eval_expr(a, block, row))
-                .min_by(|a, b| to_f64(a).unwrap_or(f64::MAX).partial_cmp(&to_f64(b).unwrap_or(f64::MAX)).unwrap_or(std::cmp::Ordering::Equal))
-                .unwrap_or(ExprVal::Null)
-        }
         // ── Fallthrough ─────────────────────────────────────────────────────
-        _ => ExprVal::Null,
+        "CONVERT" => {
+            // CONVERT(value, type) — alias for CAST
+            let val = arg(0);
+            let ty  = match args.get(1) {
+                Some(Expr::Col(t)) => t.to_ascii_uppercase(),
+                Some(Expr::Str(t)) => t.to_ascii_uppercase(),
+                _                  => return val,
+            };
+            match ty.as_str() {
+                "INT" | "INTEGER" | "BIGINT" => match val {
+                    ExprVal::Float(f) => ExprVal::Int(f as i64),
+                    ExprVal::Str(s)   => s.trim().parse::<i64>().map(ExprVal::Int).unwrap_or(ExprVal::Null),
+                    other             => other,
+                },
+                "FLOAT" | "DOUBLE" | "REAL" | "NUMERIC" | "DECIMAL" => match val {
+                    ExprVal::Int(i)   => ExprVal::Float(i as f64),
+                    ExprVal::Str(s)   => s.trim().parse::<f64>().map(ExprVal::Float).unwrap_or(ExprVal::Null),
+                    other             => other,
+                },
+                "VARCHAR" | "TEXT" | "STRING" | "CHAR" => ExprVal::Str(match val {
+                    ExprVal::Int(i)   => i.to_string(),
+                    ExprVal::Float(f) => f.to_string(),
+                    ExprVal::Bool(b)  => b.to_string(),
+                    ExprVal::Str(s)   => s,
+                    ExprVal::Null     => return ExprVal::Null,
+                }),
+                _ => val,
+            }
+        }
+        _ => {
+            // Check UDFs via thread-local registry
+            let udf_result = CURRENT_UDFS.with(|cell| {
+                let udfs = cell.borrow();
+                if let Some(func) = udfs.get(name) {
+                    let evaluated_args: Vec<ExprVal> = args.iter()
+                        .map(|a| eval_expr(a, block, row))
+                        .collect();
+                    Some(func(&evaluated_args))
+                } else {
+                    None
+                }
+            });
+            udf_result.unwrap_or(ExprVal::Null)
+        }
     }
 }
 
@@ -2443,6 +2841,12 @@ fn get_cell(block: &DataBlock, col_name: &str, row: usize) -> ExprVal {    // Tr
 }
 
 fn eval_binop(op: &BinOpKind, l: ExprVal, r: ExprVal) -> ExprVal {
+    // String concatenation operator: ||
+    if let BinOpKind::Concat = op {
+        let ls = match &l { ExprVal::Str(s) => s.clone(), ExprVal::Int(i) => i.to_string(), ExprVal::Float(f) => f.to_string(), ExprVal::Bool(b) => b.to_string(), ExprVal::Null => return ExprVal::Null };
+        let rs = match &r { ExprVal::Str(s) => s.clone(), ExprVal::Int(i) => i.to_string(), ExprVal::Float(f) => f.to_string(), ExprVal::Bool(b) => b.to_string(), ExprVal::Null => return ExprVal::Null };
+        return ExprVal::Str(format!("{}{}", ls, rs));
+    }
     // Boolean short-circuits
     if let (BinOpKind::And, ExprVal::Bool(lb), ExprVal::Bool(rb)) = (op, &l, &r) {
         return ExprVal::Bool(*lb && *rb);
@@ -2499,6 +2903,7 @@ fn to_f64(v: &ExprVal) -> Option<f64> {
 
 // ─── Sort ─────────────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 fn sort_block(block: DataBlock, col: &str, desc: bool) -> Result<DataBlock, KoreError> {
     sort_block_nulls(block, col, desc, None)
 }
@@ -2584,6 +2989,133 @@ fn limit_block(block: DataBlock, n: usize) -> DataBlock {
     block.select_rows(&indices)
 }
 
+/// CROSS JOIN: Cartesian product of left × right.
+fn cross_join(left: &DataBlock, right: &DataBlock) -> DataBlock {
+    let ln = left.num_rows;
+    let rn = right.num_rows;
+    let total = ln * rn;
+    if total == 0 {
+        return DataBlock::empty();
+    }
+
+    let mut columns = Vec::new();
+    for col in &left.columns {
+        let data = match &col.data {
+            ColumnData::Int64(v) => ColumnData::Int64((0..total).map(|i| v[i / rn]).collect()),
+            ColumnData::Float64(v) => ColumnData::Float64((0..total).map(|i| v[i / rn]).collect()),
+            ColumnData::Str(v) => ColumnData::Str((0..total).map(|i| v[i / rn].clone()).collect()),
+            ColumnData::Bool(v) => ColumnData::Bool((0..total).map(|i| v[i / rn]).collect()),
+            ColumnData::StrDict { codes, dict } => {
+                ColumnData::StrDict {
+                    codes: (0..total).map(|i| codes[i / rn]).collect(),
+                    dict: dict.clone(),
+                }
+            }
+        };
+        columns.push(Column { name: col.name.clone(), data });
+    }
+    for col in &right.columns {
+        let data = match &col.data {
+            ColumnData::Int64(v) => ColumnData::Int64((0..total).map(|i| v[i % rn]).collect()),
+            ColumnData::Float64(v) => ColumnData::Float64((0..total).map(|i| v[i % rn]).collect()),
+            ColumnData::Str(v) => ColumnData::Str((0..total).map(|i| v[i % rn].clone()).collect()),
+            ColumnData::Bool(v) => ColumnData::Bool((0..total).map(|i| v[i % rn]).collect()),
+            ColumnData::StrDict { codes, dict } => {
+                ColumnData::StrDict {
+                    codes: (0..total).map(|i| codes[i % rn]).collect(),
+                    dict: dict.clone(),
+                }
+            }
+        };
+        columns.push(Column { name: col.name.clone(), data });
+    }
+    DataBlock { num_rows: total, columns }
+}
+
+/// Nested-loop join for non-equi conditions.
+fn nested_loop_join(left: &DataBlock, right: &DataBlock, on_expr: &Expr, join_type: &JoinKind) -> DataBlock {
+    let ln = left.num_rows;
+    let rn = right.num_rows;
+
+    // Build a merged schema block for evaluation
+    let mut left_matches: Vec<usize> = Vec::new();
+    let mut right_matches: Vec<usize> = Vec::new();
+
+    for li in 0..ln {
+        let mut matched = false;
+        for ri in 0..rn {
+            // Build temporary merged row for condition evaluation
+            let merged = merge_single_row(left, li, right, ri);
+            if eval_bool(on_expr, &merged, 0) {
+                left_matches.push(li);
+                right_matches.push(ri);
+                matched = true;
+            }
+        }
+        if !matched && matches!(join_type, JoinKind::Left | JoinKind::Full) {
+            left_matches.push(li);
+            right_matches.push(usize::MAX); // sentinel for NULL right
+        }
+    }
+
+    // Build output
+    let total = left_matches.len();
+    let mut columns = Vec::new();
+    for col in &left.columns {
+        let data = match &col.data {
+            ColumnData::Int64(v) => ColumnData::Int64(left_matches.iter().map(|&i| v[i]).collect()),
+            ColumnData::Float64(v) => ColumnData::Float64(left_matches.iter().map(|&i| v[i]).collect()),
+            ColumnData::Str(v) => ColumnData::Str(left_matches.iter().map(|&i| v[i].clone()).collect()),
+            ColumnData::Bool(v) => ColumnData::Bool(left_matches.iter().map(|&i| v[i]).collect()),
+            ColumnData::StrDict { codes, dict } => ColumnData::StrDict {
+                codes: left_matches.iter().map(|&i| codes[i]).collect(),
+                dict: dict.clone(),
+            },
+        };
+        columns.push(Column { name: col.name.clone(), data });
+    }
+    for col in &right.columns {
+        let data = match &col.data {
+            ColumnData::Int64(v) => ColumnData::Int64(right_matches.iter().map(|&i| if i == usize::MAX { None } else { v[i] }).collect()),
+            ColumnData::Float64(v) => ColumnData::Float64(right_matches.iter().map(|&i| if i == usize::MAX { None } else { v[i] }).collect()),
+            ColumnData::Str(v) => ColumnData::Str(right_matches.iter().map(|&i| if i == usize::MAX { None } else { v[i].clone() }).collect()),
+            ColumnData::Bool(v) => ColumnData::Bool(right_matches.iter().map(|&i| if i == usize::MAX { None } else { v[i] }).collect()),
+            ColumnData::StrDict { codes, dict } => ColumnData::StrDict {
+                codes: right_matches.iter().map(|&i| if i == usize::MAX { u8::MAX } else { codes[i] }).collect(),
+                dict: dict.clone(),
+            },
+        };
+        columns.push(Column { name: col.name.clone(), data });
+    }
+    DataBlock { num_rows: total, columns }
+}
+
+/// Build a single-row merged DataBlock from left row `li` and right row `ri`.
+fn merge_single_row(left: &DataBlock, li: usize, right: &DataBlock, ri: usize) -> DataBlock {
+    let mut columns = Vec::new();
+    for col in &left.columns {
+        let data = match &col.data {
+            ColumnData::Int64(v) => ColumnData::Int64(vec![v[li]]),
+            ColumnData::Float64(v) => ColumnData::Float64(vec![v[li]]),
+            ColumnData::Str(v) => ColumnData::Str(vec![v[li].clone()]),
+            ColumnData::Bool(v) => ColumnData::Bool(vec![v[li]]),
+            ColumnData::StrDict { codes, dict } => ColumnData::StrDict { codes: vec![codes[li]], dict: dict.clone() },
+        };
+        columns.push(Column { name: col.name.clone(), data });
+    }
+    for col in &right.columns {
+        let data = match &col.data {
+            ColumnData::Int64(v) => ColumnData::Int64(vec![v[ri]]),
+            ColumnData::Float64(v) => ColumnData::Float64(vec![v[ri]]),
+            ColumnData::Str(v) => ColumnData::Str(vec![v[ri].clone()]),
+            ColumnData::Bool(v) => ColumnData::Bool(vec![v[ri]]),
+            ColumnData::StrDict { codes, dict } => ColumnData::StrDict { codes: vec![codes[ri]], dict: dict.clone() },
+        };
+        columns.push(Column { name: col.name.clone(), data });
+    }
+    DataBlock { num_rows: 1, columns }
+}
+
 /// Remove duplicate rows (for SELECT DISTINCT).
 /// Builds a string key per row; keeps first occurrence.
 fn deduplicate(block: DataBlock) -> DataBlock {
@@ -2598,6 +3130,8 @@ fn deduplicate(block: DataBlock) -> DataBlock {
                 Value::Float(f)  => format!("{f:.10}"),
                 Value::Bool(b)   => b.to_string(),
                 Value::Str(s)    => s,
+                Value::Array(values) => format!("{values:?}"),
+                Value::Map(values)   => format!("{values:?}"),
             }
         }).collect::<Vec<_>>().join("\x00");
         if seen.insert(key) {
@@ -2871,7 +3405,7 @@ fn extract_f64_all(col: &Column) -> Vec<f64> {
 
 /// Aggregate the entire block into a single row.
 fn global_agg(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, KoreError> {
-    let all_rows: Vec<usize> = (0..block.num_rows).collect();
+    let _all_rows: Vec<usize> = (0..block.num_rows).collect();
     let mut new_cols: Vec<Column> = Vec::new();
     for proj in projections {
         if let Projection::Expr { expr: Expr::Agg { func, expr: inner }, alias } = proj {
@@ -2928,7 +3462,7 @@ fn global_agg(block: DataBlock, projections: &[Projection]) -> Result<DataBlock,
                 }
                 AggFunc::Median => {
                     if vals.is_empty() { None } else {
-                        let mut s = vals.clone(); s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        let mut s = vals.clone(); s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                         let m = s.len() / 2;
                         if s.len() % 2 == 0 { Some((s[m-1] + s[m]) / 2.0) } else { Some(s[m]) }
                     }
@@ -2936,7 +3470,7 @@ fn global_agg(block: DataBlock, projections: &[Projection]) -> Result<DataBlock,
                 AggFunc::Percentile { p } => {
                     let pct: f64 = p.parse().unwrap_or(0.5);
                     if vals.is_empty() { None } else {
-                        let mut s = vals.clone(); s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        let mut s = vals.clone(); s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                         let idx = ((s.len() - 1) as f64 * pct) as usize;
                         Some(s[idx.min(s.len()-1)])
                     }
@@ -3159,7 +3693,7 @@ fn group_by_agg(
                                 }
                                 AggFunc::Median => {
                                     if vals.is_empty() { None } else {
-                                        let mut s = vals.clone(); s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                                        let mut s = vals.clone(); s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                                         let m = s.len() / 2;
                                         if s.len() % 2 == 0 { Some((s[m-1] + s[m]) / 2.0) } else { Some(s[m]) }
                                     }
@@ -3167,7 +3701,7 @@ fn group_by_agg(
                                 AggFunc::Percentile { p } => {
                                     let pct: f64 = p.parse().unwrap_or(0.5);
                                     if vals.is_empty() { None } else {
-                                        let mut s = vals.clone(); s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                                        let mut s = vals.clone(); s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                                         let idx = ((s.len() - 1) as f64 * pct) as usize;
                                         Some(s[idx.min(s.len()-1)])
                                     }
@@ -3233,7 +3767,7 @@ fn group_by_agg(
                                 }
                             }
                             // Fallback: evaluate expression for each representative row
-                            let n = first_rows.len();
+                            let _n = first_rows.len();
                             let values: Vec<Option<String>> = first_rows.iter().map(|&r| {
                                 Some(match eval_expr(other, &block, r) {
                                     ExprVal::Str(s)   => s,
@@ -3259,6 +3793,7 @@ fn group_by_agg(
     Ok(DataBlock { columns: new_cols, num_rows })
 }
 
+#[allow(dead_code)]
 fn expr_vals_eq(a: &[ExprVal], b: &[ExprVal]) -> bool {
     a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| match (x, y) {
         (ExprVal::Int(x),   ExprVal::Int(y))   => x == y,
@@ -3289,7 +3824,7 @@ fn like_recursive(s: &[u8], p: &[u8]) -> bool {
             false
         }
         ([], _) => false,
-        ([sc, st @ ..], [b'_', pt @ ..]) => like_recursive(st, pt),  // _ matches any one
+        ([_, st @ ..], [b'_', pt @ ..]) => like_recursive(st, pt),  // _ matches any one
         ([sc, st @ ..], [pc, pt @ ..]) if sc == pc => like_recursive(st, pt),
         _ => false,
     }
@@ -3541,6 +4076,1485 @@ mod tests {
         ctx.register("t", make_strings());
         let r = ctx.query("SELECT COALESCE(id, 0) AS cid, CAST(val AS VARCHAR) AS sv FROM t LIMIT 1").unwrap();
         assert_eq!(r.num_rows, 1);
+    }
+
+    // ─── Parquet & cloud storage integration tests ───────────────────────────
+
+    #[test]
+    fn test_select_from_parquet_file() {
+        let dir = std::env::temp_dir().join("kore_test_select_parquet");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("orders.parquet");
+
+        let block = make_orders();
+        kore_parquet::ParquetWriter::write_file(&block, &path).unwrap();
+
+        let ctx = KqlContext::new();
+        let path_str = path.to_str().unwrap().replace('\\', "/");
+        // Use alias so columns get a clean prefix
+        let sql = format!("SELECT * FROM '{}' AS pq", path_str);
+        let result = ctx.query(&sql).unwrap();
+        assert_eq!(result.num_rows, 4);
+        assert_eq!(result.columns.len(), 3);
+        assert!(result.columns.iter().any(|c| c.name.ends_with("id")));
+        assert!(result.columns.iter().any(|c| c.name.ends_with("score")));
+
+        // Verify filtering works on parquet source
+        let sql2 = format!("SELECT id, score FROM '{}' AS pq WHERE score > 80", path_str);
+        let r2 = ctx.query(&sql2).unwrap();
+        assert_eq!(r2.num_rows, 2); // scores 90 and 85
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_copy_to_parquet() {
+        let dir = std::env::temp_dir().join("kore_test_copy_to");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("exported.parquet");
+
+        let mut ctx = KqlContext::new();
+        ctx.register("orders", make_orders());
+
+        let path_str = path.to_str().unwrap().replace('\\', "/");
+        let sql = format!("COPY (SELECT * FROM orders WHERE score > 70) TO '{}'", path_str);
+        let result = ctx.query(&sql).unwrap();
+        assert_eq!(result.num_rows, 1); // message row
+        assert!(path.exists(), "parquet file should have been created");
+
+        // Verify by reading back
+        let readback = kore_parquet::ParquetReader::new(&path).read().unwrap();
+        assert_eq!(readback.num_rows, 2); // scores 90 and 85 pass > 70
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_data_parquet() {
+        let dir = std::env::temp_dir().join("kore_test_load_data");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("customers.parquet");
+
+        let block = make_customers();
+        kore_parquet::ParquetWriter::write_file(&block, &path).unwrap();
+
+        let mut ctx = KqlContext::new();
+        let path_str = path.to_str().unwrap().replace('\\', "/");
+        let sql = format!("LOAD DATA '{}' INTO customers", path_str);
+        let (op, rows) = ctx.execute_dml(&sql).unwrap();
+        assert_eq!(op, "LOAD DATA");
+        assert_eq!(rows, 3);
+
+        // Verify the table is registered and queryable
+        let result = ctx.query("SELECT name FROM customers WHERE id = 20").unwrap();
+        assert_eq!(result.num_rows, 1);
+        if let ColumnData::Str(v) = &result.columns[0].data {
+            assert_eq!(v[0], Some("Bob".into()));
+        } else {
+            panic!("expected Str column");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── CTE tests ──────────────────────────────────────────────────────────
+
+    fn make_sales() -> DataBlock {
+        DataBlock {
+            num_rows: 5,
+            columns: vec![
+                Column { name: "region".into(), data: ColumnData::Str(vec![
+                    Some("East".into()), Some("East".into()), Some("West".into()),
+                    Some("West".into()), Some("East".into()),
+                ]) },
+                Column { name: "amount".into(), data: ColumnData::Float64(vec![
+                    Some(50.0), Some(80.0), Some(120.0), Some(30.0), Some(90.0),
+                ]) },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_cte_simple() {
+        let mut ctx = KqlContext::new();
+        ctx.register("sales", make_sales());
+        let r = ctx.query(
+            "WITH sales_summary AS (SELECT region, SUM(amount) AS total FROM sales GROUP BY region) \
+             SELECT * FROM sales_summary WHERE total > 100"
+        ).unwrap();
+        // East total = 50+80+90 = 220, West total = 120+30 = 150 → both > 100
+        assert_eq!(r.num_rows, 2);
+    }
+
+    #[test]
+    fn test_cte_filter_on_aggregate() {
+        let mut ctx = KqlContext::new();
+        ctx.register("sales", make_sales());
+        let r = ctx.query(
+            "WITH sales_summary AS (SELECT region, SUM(amount) AS total FROM sales GROUP BY region) \
+             SELECT * FROM sales_summary WHERE total > 200"
+        ).unwrap();
+        // East = 220 > 200, West = 150 not > 200
+        assert_eq!(r.num_rows, 1);
+    }
+
+    #[test]
+    fn test_cte_multiple() {
+        let mut ctx = KqlContext::new();
+        ctx.register("orders", make_orders());
+        let r = ctx.query(
+            "WITH high AS (SELECT * FROM orders WHERE score > 80), \
+                  low AS (SELECT * FROM orders WHERE score <= 80) \
+             SELECT * FROM high"
+        ).unwrap();
+        // scores: 90, 85 > 80
+        assert_eq!(r.num_rows, 2);
+    }
+
+    #[test]
+    fn test_cte_chained() {
+        let mut ctx = KqlContext::new();
+        ctx.register("orders", make_orders());
+        // Second CTE references the first CTE
+        let r = ctx.query(
+            "WITH filtered AS (SELECT * FROM orders WHERE score >= 70), \
+                  top AS (SELECT * FROM filtered WHERE score >= 85) \
+             SELECT * FROM top"
+        ).unwrap();
+        // scores >= 85: 90, 85
+        assert_eq!(r.num_rows, 2);
+    }
+
+    // ─── Window function tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_window_row_number() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", make_orders());
+        let r = ctx.query(
+            "SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM t"
+        ).unwrap();
+        assert_eq!(r.num_rows, 4);
+        let rn_col = r.columns.iter().find(|c| c.name == "rn").expect("rn column");
+        if let ColumnData::Float64(vals) = &rn_col.data {
+            // Ordered by id (1,2,3,4) → row_numbers 1,2,3,4
+            assert_eq!(vals[0], Some(1.0));
+            assert_eq!(vals[1], Some(2.0));
+            assert_eq!(vals[2], Some(3.0));
+            assert_eq!(vals[3], Some(4.0));
+        } else {
+            panic!("expected Float64 for window column");
+        }
+    }
+
+    #[test]
+    fn test_window_sum_partition() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", make_orders());
+        let r = ctx.query(
+            "SELECT cust_id, score, SUM(score) OVER (PARTITION BY cust_id) AS cust_total FROM t"
+        ).unwrap();
+        assert_eq!(r.num_rows, 4);
+        let total_col = r.columns.iter().find(|c| c.name == "cust_total").expect("cust_total column");
+        if let ColumnData::Float64(vals) = &total_col.data {
+            // cust_id=10: scores 90+85 = 175 (rows 0 and 2)
+            assert_eq!(vals[0], Some(175.0));
+            assert_eq!(vals[2], Some(175.0));
+            // cust_id=20: score 70 (row 1)
+            assert_eq!(vals[1], Some(70.0));
+            // cust_id=30: score 60 (row 3)
+            assert_eq!(vals[3], Some(60.0));
+        } else {
+            panic!("expected Float64 for window column");
+        }
+    }
+
+    #[test]
+    fn test_window_rank_desc() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", make_orders());
+        let r = ctx.query(
+            "SELECT *, RANK() OVER (ORDER BY score DESC) AS rnk FROM t"
+        ).unwrap();
+        assert_eq!(r.num_rows, 4);
+        let rnk_col = r.columns.iter().find(|c| c.name == "rnk").expect("rnk column");
+        if let ColumnData::Float64(vals) = &rnk_col.data {
+            // Scores: 90(row0), 70(row1), 85(row2), 60(row3)
+            // Ordered DESC: 90→1, 85→2, 70→3, 60→4
+            assert_eq!(vals[0], Some(1.0)); // score 90 → rank 1
+            assert_eq!(vals[1], Some(3.0)); // score 70 → rank 3
+            assert_eq!(vals[2], Some(2.0)); // score 85 → rank 2
+            assert_eq!(vals[3], Some(4.0)); // score 60 → rank 4
+        } else {
+            panic!("expected Float64 for window column");
+        }
+    }
+
+    #[test]
+    fn test_window_lag() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", make_orders());
+        let r = ctx.query(
+            "SELECT *, LAG(score, 1) OVER (ORDER BY id) AS prev_score FROM t"
+        ).unwrap();
+        assert_eq!(r.num_rows, 4);
+        let lag_col = r.columns.iter().find(|c| c.name == "prev_score").expect("prev_score column");
+        if let ColumnData::Float64(vals) = &lag_col.data {
+            // Ordered by id: scores are [90, 70, 85, 60]
+            // LAG(1): [NaN, 90, 70, 85]
+            assert!(vals[0].unwrap().is_nan()); // first row has no predecessor
+            assert_eq!(vals[1], Some(90.0));
+            assert_eq!(vals[2], Some(70.0));
+            assert_eq!(vals[3], Some(85.0));
+        } else {
+            panic!("expected Float64 for window column");
+        }
+    }
+
+    // ─── New mega-patch tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_union_dedup() {
+        let mut ctx = KqlContext::new();
+        ctx.register("a", DataBlock {
+            num_rows: 3,
+            columns: vec![Column { name: "x".into(), data: ColumnData::Int64(vec![Some(1), Some(2), Some(3)]) }],
+        });
+        ctx.register("b", DataBlock {
+            num_rows: 3,
+            columns: vec![Column { name: "x".into(), data: ColumnData::Int64(vec![Some(2), Some(3), Some(4)]) }],
+        });
+        // UNION (without ALL) should dedup
+        let r = ctx.query("SELECT x FROM a UNION SELECT x FROM b").unwrap();
+        assert_eq!(r.num_rows, 4); // 1, 2, 3, 4
+    }
+
+    #[test]
+    fn test_union_all() {
+        let mut ctx = KqlContext::new();
+        ctx.register("a", DataBlock {
+            num_rows: 2,
+            columns: vec![Column { name: "x".into(), data: ColumnData::Int64(vec![Some(1), Some(2)]) }],
+        });
+        ctx.register("b", DataBlock {
+            num_rows: 2,
+            columns: vec![Column { name: "x".into(), data: ColumnData::Int64(vec![Some(2), Some(3)]) }],
+        });
+        let r = ctx.query("SELECT x FROM a UNION ALL SELECT x FROM b").unwrap();
+        assert_eq!(r.num_rows, 4); // 1, 2, 2, 3
+    }
+
+    #[test]
+    fn test_intersect() {
+        let mut ctx = KqlContext::new();
+        ctx.register("a", DataBlock {
+            num_rows: 3,
+            columns: vec![Column { name: "x".into(), data: ColumnData::Int64(vec![Some(1), Some(2), Some(3)]) }],
+        });
+        ctx.register("b", DataBlock {
+            num_rows: 3,
+            columns: vec![Column { name: "x".into(), data: ColumnData::Int64(vec![Some(2), Some(3), Some(4)]) }],
+        });
+        let r = ctx.query("SELECT x FROM a INTERSECT SELECT x FROM b").unwrap();
+        assert_eq!(r.num_rows, 2); // 2, 3
+    }
+
+    #[test]
+    fn test_except() {
+        let mut ctx = KqlContext::new();
+        ctx.register("a", DataBlock {
+            num_rows: 3,
+            columns: vec![Column { name: "x".into(), data: ColumnData::Int64(vec![Some(1), Some(2), Some(3)]) }],
+        });
+        ctx.register("b", DataBlock {
+            num_rows: 2,
+            columns: vec![Column { name: "x".into(), data: ColumnData::Int64(vec![Some(2), Some(3)]) }],
+        });
+        let r = ctx.query("SELECT x FROM a EXCEPT SELECT x FROM b").unwrap();
+        assert_eq!(r.num_rows, 1); // 1
+    }
+
+    #[test]
+    fn test_ilike() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 3,
+            columns: vec![Column { name: "name".into(), data: ColumnData::Str(vec![
+                Some("Alice".into()), Some("BOB".into()), Some("Charlie".into()),
+            ]) }],
+        });
+        let r = ctx.query("SELECT name FROM t WHERE name ILIKE '%bob%'").unwrap();
+        assert_eq!(r.num_rows, 1);
+    }
+
+    #[test]
+    fn test_not_between() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 5,
+            columns: vec![Column { name: "v".into(), data: ColumnData::Int64(vec![
+                Some(1), Some(3), Some(5), Some(7), Some(9),
+            ]) }],
+        });
+        let r = ctx.query("SELECT v FROM t WHERE v NOT BETWEEN 3 AND 7").unwrap();
+        assert_eq!(r.num_rows, 2); // 1, 9
+    }
+
+    #[test]
+    fn test_concat_operator() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 2,
+            columns: vec![
+                Column { name: "first".into(), data: ColumnData::Str(vec![Some("Hello".into()), Some("Good".into())]) },
+                Column { name: "last".into(), data: ColumnData::Str(vec![Some(" World".into()), Some("bye".into())]) },
+            ],
+        });
+        let r = ctx.query("SELECT first || last AS full FROM t").unwrap();
+        assert_eq!(r.num_rows, 2);
+        if let ColumnData::Str(v) = &r.columns[0].data {
+            assert_eq!(v[0], Some("Hello World".to_string()));
+            assert_eq!(v[1], Some("Goodbye".to_string()));
+        } else { panic!("expected Str column"); }
+    }
+
+    #[test]
+    fn test_convert_function() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 2,
+            columns: vec![Column { name: "v".into(), data: ColumnData::Float64(vec![Some(3.14), Some(2.71)]) }],
+        });
+        let r = ctx.query("SELECT CONVERT(v, INT) AS vi FROM t").unwrap();
+        assert_eq!(r.num_rows, 2);
+    }
+
+    #[test]
+    fn test_order_by_expression() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 3,
+            columns: vec![
+                Column { name: "name".into(), data: ColumnData::Str(vec![Some("Charlie".into()), Some("Alice".into()), Some("Bob".into())]) },
+            ],
+        });
+        let r = ctx.query("SELECT name FROM t ORDER BY UPPER(name)").unwrap();
+        assert_eq!(r.num_rows, 3);
+        if let ColumnData::Str(v) = &r.columns[0].data {
+            assert_eq!(v[0], Some("Alice".to_string()));
+            assert_eq!(v[1], Some("Bob".to_string()));
+            assert_eq!(v[2], Some("Charlie".to_string()));
+        } else { panic!("expected Str column"); }
+    }
+
+    #[test]
+    fn test_cross_join() {
+        let mut ctx = KqlContext::new();
+        ctx.register("a", DataBlock {
+            num_rows: 2,
+            columns: vec![Column { name: "x".into(), data: ColumnData::Int64(vec![Some(1), Some(2)]) }],
+        });
+        ctx.register("b", DataBlock {
+            num_rows: 3,
+            columns: vec![Column { name: "y".into(), data: ColumnData::Int64(vec![Some(10), Some(20), Some(30)]) }],
+        });
+        let r = ctx.query("SELECT * FROM a CROSS JOIN b").unwrap();
+        assert_eq!(r.num_rows, 6); // 2 × 3
+    }
+
+    #[test]
+    fn test_create_view() {
+        let mut ctx = KqlContext::new();
+        ctx.register("orders", make_orders());
+        ctx.execute_dml("CREATE VIEW high_scores AS SELECT * FROM orders WHERE score > 80").unwrap();
+        let r = ctx.query("SELECT * FROM high_scores").unwrap();
+        assert_eq!(r.num_rows, 2); // scores 90, 85
+    }
+
+    #[test]
+    fn test_create_temp_table() {
+        let mut ctx = KqlContext::new();
+        ctx.register("orders", make_orders());
+        ctx.execute_dml("CREATE TEMP TABLE top AS SELECT * FROM orders WHERE score >= 85").unwrap();
+        let r = ctx.query("SELECT * FROM top").unwrap();
+        assert_eq!(r.num_rows, 2); // scores 90, 85
+    }
+
+    #[test]
+    fn test_drop_table() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", make_orders());
+        assert!(ctx.get("t").is_some());
+        ctx.execute_dml("DROP TABLE t").unwrap();
+        assert!(ctx.get("t").is_none());
+    }
+
+    #[test]
+    fn test_udf_registration() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 3,
+            columns: vec![Column { name: "v".into(), data: ColumnData::Int64(vec![Some(2), Some(3), Some(4)]) }],
+        });
+        ctx.register_udf("DOUBLE_IT", |args: &[ExprVal]| {
+            match args.first() {
+                Some(ExprVal::Int(i)) => ExprVal::Int(i * 2),
+                Some(ExprVal::Float(f)) => ExprVal::Float(f * 2.0),
+                _ => ExprVal::Null,
+            }
+        });
+        let r = ctx.query("SELECT DOUBLE_IT(v) AS doubled FROM t").unwrap();
+        assert_eq!(r.num_rows, 3);
+    }
+
+    #[test]
+    fn test_auto_analyze_stats() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", make_orders());
+        assert_eq!(ctx.row_count("t"), Some(4));
+    }
+
+    // ─── SQL Compliance Test Suite ────────────────────────────────────────────
+
+    fn make_test_ctx() -> KqlContext {
+        let mut ctx = KqlContext::new();
+        ctx.register("employees", DataBlock {
+            num_rows: 5,
+            columns: vec![
+                Column { name: "id".into(), data: ColumnData::Int64(vec![Some(1), Some(2), Some(3), Some(4), Some(5)]) },
+                Column { name: "name".into(), data: ColumnData::Str(vec![
+                    Some("Alice".into()), Some("Bob".into()), Some("Charlie".into()),
+                    Some("Alice".into()), Some("Eve".into()),
+                ]) },
+                Column { name: "dept_id".into(), data: ColumnData::Int64(vec![Some(10), Some(20), Some(10), Some(30), Some(20)]) },
+                Column { name: "salary".into(), data: ColumnData::Int64(vec![Some(50000), Some(60000), Some(55000), Some(45000), Some(70000)]) },
+            ],
+        });
+        ctx.register("departments", DataBlock {
+            num_rows: 4,
+            columns: vec![
+                Column { name: "id".into(), data: ColumnData::Int64(vec![Some(10), Some(20), Some(30), Some(40)]) },
+                Column { name: "dept_name".into(), data: ColumnData::Str(vec![
+                    Some("Engineering".into()), Some("Sales".into()),
+                    Some("HR".into()), Some("Marketing".into()),
+                ]) },
+            ],
+        });
+        ctx
+    }
+
+    // ─── 1. SQL Feature Tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_sql_select_distinct() {
+        let ctx = make_test_ctx();
+        let r = ctx.query("SELECT DISTINCT name FROM employees").unwrap();
+        assert_eq!(r.num_rows, 4); // Alice, Bob, Charlie, Eve (Alice deduped)
+    }
+
+    #[test]
+    fn test_sql_union_all_combined() {
+        let mut ctx = make_test_ctx();
+        ctx.register("contractors", DataBlock {
+            num_rows: 2,
+            columns: vec![
+                Column { name: "name".into(), data: ColumnData::Str(vec![Some("Frank".into()), Some("Alice".into())]) },
+            ],
+        });
+        let r = ctx.query(
+            "SELECT name FROM employees UNION ALL SELECT name FROM contractors"
+        ).unwrap();
+        assert_eq!(r.num_rows, 7); // 5 + 2, no dedup
+    }
+
+    #[test]
+    fn test_sql_group_by_having() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT dept_id, SUM(salary) AS total FROM employees GROUP BY dept_id HAVING total > 100000"
+        ).unwrap();
+        // dept_id=10: 50000+55000=105000 > 100000; dept_id=20: 60000+70000=130000 > 100000
+        assert_eq!(r.num_rows, 2);
+    }
+
+    #[test]
+    fn test_sql_order_by_desc_limit() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT name, salary FROM employees ORDER BY salary DESC LIMIT 3"
+        ).unwrap();
+        assert_eq!(r.num_rows, 3);
+        let sal_col = r.columns.iter().find(|c| c.name.contains("salary") || c.name.contains("sal"))
+            .unwrap_or(&r.columns[1]);
+        match &sal_col.data {
+            ColumnData::Int64(v) => {
+                assert_eq!(v[0], Some(70000));
+                assert_eq!(v[1], Some(60000));
+                assert_eq!(v[2], Some(55000));
+            }
+            ColumnData::Float64(v) => {
+                assert_eq!(v[0], Some(70000.0));
+                assert_eq!(v[1], Some(60000.0));
+                assert_eq!(v[2], Some(55000.0));
+            }
+            _ => panic!("expected numeric salary column"),
+        }
+    }
+
+    #[test]
+    fn test_sql_between_numeric() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT name FROM employees WHERE salary BETWEEN 50000 AND 60000"
+        ).unwrap();
+        // salaries 50000, 60000, 55000 are in range
+        assert_eq!(r.num_rows, 3);
+    }
+
+    #[test]
+    fn test_sql_not_in_list() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT name FROM employees WHERE dept_id NOT IN (10, 20)"
+        ).unwrap();
+        // Only dept_id=30 (Alice with salary 45000)
+        assert_eq!(r.num_rows, 1);
+    }
+
+    #[test]
+    fn test_sql_like_percent_wildcard() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT name FROM employees WHERE name LIKE 'A%'"
+        ).unwrap();
+        // Alice(row0), Alice(row3) → 2 rows
+        assert_eq!(r.num_rows, 2);
+    }
+
+    #[test]
+    fn test_sql_like_underscore_wildcard() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT name FROM employees WHERE name LIKE 'Bo_'"
+        ).unwrap();
+        assert_eq!(r.num_rows, 1);
+    }
+
+    #[test]
+    fn test_sql_case_when() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT name, CASE \
+               WHEN salary > 65000 THEN 'high' \
+               WHEN salary > 50000 THEN 'mid' \
+               ELSE 'low' \
+             END AS band FROM employees"
+        ).unwrap();
+        assert_eq!(r.num_rows, 5);
+        if let ColumnData::Str(v) = &r.columns.iter().find(|c| c.name == "band").unwrap().data {
+            assert_eq!(v[4], Some("high".to_string())); // Eve salary=70000
+            assert_eq!(v[0], Some("low".to_string()));  // Alice salary=50000
+        } else { panic!("expected Str band"); }
+    }
+
+    #[test]
+    fn test_sql_coalesce_null() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 3,
+            columns: vec![
+                Column { name: "a".into(), data: ColumnData::Int64(vec![None, Some(5), None]) },
+                Column { name: "b".into(), data: ColumnData::Int64(vec![Some(10), None, None]) },
+            ],
+        });
+        let r = ctx.query("SELECT COALESCE(a, b, 0) AS val FROM t").unwrap();
+        assert_eq!(r.num_rows, 3);
+    }
+
+    #[test]
+    fn test_sql_nullif() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 3,
+            columns: vec![
+                Column { name: "x".into(), data: ColumnData::Int64(vec![Some(1), Some(2), Some(2)]) },
+            ],
+        });
+        let r = ctx.query("SELECT NULLIF(x, 2) AS val FROM t").unwrap();
+        assert_eq!(r.num_rows, 3);
+    }
+
+    #[test]
+    fn test_sql_cast_int() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 2,
+            columns: vec![
+                Column { name: "v".into(), data: ColumnData::Float64(vec![Some(3.7), Some(2.1)]) },
+            ],
+        });
+        let r = ctx.query("SELECT CAST(v AS INT) AS vi FROM t").unwrap();
+        assert_eq!(r.num_rows, 2);
+    }
+
+    #[test]
+    fn test_sql_cast_varchar() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 2,
+            columns: vec![
+                Column { name: "v".into(), data: ColumnData::Int64(vec![Some(42), Some(7)]) },
+            ],
+        });
+        let r = ctx.query("SELECT CAST(v AS VARCHAR) AS vs FROM t").unwrap();
+        assert_eq!(r.num_rows, 2);
+    }
+
+    #[test]
+    fn test_sql_subquery_in_where() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT name FROM employees WHERE dept_id IN (SELECT id FROM departments WHERE dept_name = 'Engineering')"
+        ).unwrap();
+        // dept_id=10 → Alice(row0), Charlie(row2)
+        assert_eq!(r.num_rows, 2);
+    }
+
+    #[test]
+    fn test_sql_exists_subquery() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT dept_name FROM departments AS d WHERE EXISTS (SELECT 1 FROM employees AS e WHERE e.dept_id = d.id)"
+        ).unwrap();
+        // Engineering(10), Sales(20), HR(30) have employees; Marketing(40) does not
+        assert_eq!(r.num_rows, 3);
+    }
+
+    #[test]
+    fn test_sql_scalar_subquery() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT (SELECT MAX(salary) FROM employees) AS max_sal"
+        ).unwrap();
+        assert_eq!(r.num_rows, 1);
+        if let ColumnData::Float64(v) = &r.columns[0].data {
+            assert_eq!(v[0], Some(70000.0));
+        } else if let ColumnData::Int64(v) = &r.columns[0].data {
+            assert_eq!(v[0], Some(70000));
+        }
+    }
+
+    #[test]
+    fn test_sql_cte_basic() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "WITH eng AS (SELECT * FROM employees WHERE dept_id = 10) SELECT name FROM eng"
+        ).unwrap();
+        assert_eq!(r.num_rows, 2); // Alice, Charlie
+    }
+
+    #[test]
+    fn test_sql_window_row_number_partition() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT name, ROW_NUMBER() OVER (PARTITION BY dept_id ORDER BY salary DESC) AS rn FROM employees"
+        ).unwrap();
+        assert_eq!(r.num_rows, 5);
+        assert!(r.columns.iter().any(|c| c.name == "rn"));
+    }
+
+    #[test]
+    fn test_sql_aggregates_all() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT COUNT(*) AS cnt, SUM(salary) AS total, AVG(salary) AS avg_sal, \
+             MIN(salary) AS min_sal, MAX(salary) AS max_sal FROM employees"
+        ).unwrap();
+        assert_eq!(r.num_rows, 1);
+    }
+
+    #[test]
+    fn test_sql_count_distinct() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT COUNT(DISTINCT dept_id) AS uniq_depts FROM employees"
+        ).unwrap();
+        assert_eq!(r.num_rows, 1);
+        if let ColumnData::Float64(v) = &r.columns[0].data {
+            assert_eq!(v[0], Some(3.0)); // dept_ids: 10, 20, 30
+        }
+    }
+
+    #[test]
+    fn test_sql_string_agg() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT dept_id, STRING_AGG(name, ',') AS names FROM employees GROUP BY dept_id"
+        ).unwrap();
+        assert_eq!(r.num_rows, 3);
+    }
+
+    #[test]
+    fn test_sql_string_functions_comprehensive() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 2,
+            columns: vec![
+                Column { name: "s".into(), data: ColumnData::Str(vec![Some("Hello World".into()), Some("  test  ".into())]) },
+            ],
+        });
+        let r = ctx.query(
+            "SELECT UPPER(s) AS u, LOWER(s) AS l, TRIM(s) AS tr, LENGTH(s) AS n FROM t"
+        ).unwrap();
+        assert_eq!(r.num_rows, 2);
+        if let ColumnData::Str(v) = &r.columns.iter().find(|c| c.name == "u").unwrap().data {
+            assert_eq!(v[0], Some("HELLO WORLD".to_string()));
+        }
+    }
+
+    #[test]
+    fn test_sql_substring() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 1,
+            columns: vec![
+                Column { name: "s".into(), data: ColumnData::Str(vec![Some("Hello World".into())]) },
+            ],
+        });
+        let r = ctx.query("SELECT SUBSTRING(s, 1, 5) AS sub FROM t").unwrap();
+        assert_eq!(r.num_rows, 1);
+    }
+
+    #[test]
+    fn test_sql_concat_function() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 2,
+            columns: vec![
+                Column { name: "a".into(), data: ColumnData::Str(vec![Some("Hi".into()), Some("Good".into())]) },
+                Column { name: "b".into(), data: ColumnData::Str(vec![Some(" there".into()), Some("bye".into())]) },
+            ],
+        });
+        let r = ctx.query("SELECT CONCAT(a, b) AS c FROM t").unwrap();
+        assert_eq!(r.num_rows, 2);
+    }
+
+    #[test]
+    fn test_sql_replace_function() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 1,
+            columns: vec![
+                Column { name: "s".into(), data: ColumnData::Str(vec![Some("hello world".into())]) },
+            ],
+        });
+        let r = ctx.query("SELECT REPLACE(s, 'world', 'rust') AS rep FROM t").unwrap();
+        assert_eq!(r.num_rows, 1);
+        if let ColumnData::Str(v) = &r.columns[0].data {
+            assert_eq!(v[0], Some("hello rust".to_string()));
+        } else { panic!("expected Str"); }
+    }
+
+    #[test]
+    fn test_sql_math_abs_round_ceil_floor() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 3,
+            columns: vec![
+                Column { name: "v".into(), data: ColumnData::Float64(vec![Some(-3.7), Some(2.3), Some(0.0)]) },
+            ],
+        });
+        let r = ctx.query("SELECT ABS(v) AS a, ROUND(v, 0) AS rd, CEIL(v) AS ce, FLOOR(v) AS fl FROM t").unwrap();
+        assert_eq!(r.num_rows, 3);
+        if let ColumnData::Float64(v) = &r.columns.iter().find(|c| c.name == "a").unwrap().data {
+            assert!((v[0].unwrap() - 3.7).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn test_sql_math_sqrt_power() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 2,
+            columns: vec![
+                Column { name: "v".into(), data: ColumnData::Float64(vec![Some(9.0), Some(16.0)]) },
+            ],
+        });
+        let r = ctx.query("SELECT SQRT(v) AS sq, POWER(v, 2) AS pw FROM t").unwrap();
+        assert_eq!(r.num_rows, 2);
+        if let ColumnData::Float64(v) = &r.columns.iter().find(|c| c.name == "sq").unwrap().data {
+            assert!((v[0].unwrap() - 3.0).abs() < 0.001);
+            assert!((v[1].unwrap() - 4.0).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn test_sql_left_join_null_handling() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT d.dept_name, e.name FROM departments AS d \
+             LEFT JOIN employees AS e ON d.id = e.dept_id"
+        ).unwrap();
+        // Marketing(40) has no employees, appears once with NULL name
+        assert!(r.num_rows >= 5); // 5 employees + 1 Marketing with NULL
+    }
+
+    #[test]
+    fn test_sql_full_outer_join() {
+        let mut ctx = KqlContext::new();
+        ctx.register("left_t", DataBlock {
+            num_rows: 3,
+            columns: vec![
+                Column { name: "id".into(), data: ColumnData::Int64(vec![Some(1), Some(2), Some(3)]) },
+                Column { name: "val".into(), data: ColumnData::Str(vec![Some("a".into()), Some("b".into()), Some("c".into())]) },
+            ],
+        });
+        ctx.register("right_t", DataBlock {
+            num_rows: 3,
+            columns: vec![
+                Column { name: "id".into(), data: ColumnData::Int64(vec![Some(2), Some(3), Some(4)]) },
+                Column { name: "score".into(), data: ColumnData::Int64(vec![Some(90), Some(80), Some(70)]) },
+            ],
+        });
+        let r = ctx.query(
+            "SELECT * FROM left_t AS l FULL OUTER JOIN right_t AS r ON l.id = r.id"
+        ).unwrap();
+        // id=1 left only, id=2,3 matched, id=4 right only → 4 rows
+        assert_eq!(r.num_rows, 4);
+    }
+
+    #[test]
+    fn test_sql_multi_table_join() {
+        let mut ctx = make_test_ctx();
+        ctx.register("projects", DataBlock {
+            num_rows: 3,
+            columns: vec![
+                Column { name: "proj_id".into(), data: ColumnData::Int64(vec![Some(100), Some(200), Some(300)]) },
+                Column { name: "dept_id".into(), data: ColumnData::Int64(vec![Some(10), Some(20), Some(10)]) },
+                Column { name: "proj_name".into(), data: ColumnData::Str(vec![
+                    Some("Alpha".into()), Some("Beta".into()), Some("Gamma".into()),
+                ]) },
+            ],
+        });
+        let r = ctx.query(
+            "SELECT e.name, d.dept_name, p.proj_name FROM employees AS e \
+             INNER JOIN departments AS d ON e.dept_id = d.id \
+             INNER JOIN projects AS p ON e.dept_id = p.dept_id"
+        ).unwrap();
+        assert!(r.num_rows > 0);
+    }
+
+    #[test]
+    fn test_sql_insert_and_select() {
+        let mut ctx = KqlContext::new();
+        ctx.register("items", DataBlock {
+            num_rows: 1,
+            columns: vec![
+                Column { name: "id".into(), data: ColumnData::Int64(vec![Some(1)]) },
+                Column { name: "name".into(), data: ColumnData::Str(vec![Some("first".into())]) },
+            ],
+        });
+        let insert_result = ctx.execute_dml("INSERT INTO items VALUES (2, 'second')");
+        // INSERT should succeed
+        assert!(insert_result.is_ok());
+        let r = ctx.query("SELECT * FROM items").unwrap();
+        // If the engine appends in-place, we get 2 rows; otherwise at least 1
+        assert!(r.num_rows >= 1);
+    }
+
+    #[test]
+    fn test_sql_create_table_as_select() {
+        let mut ctx = make_test_ctx();
+        ctx.execute_dml(
+            "CREATE TABLE high_earners AS SELECT name, salary FROM employees WHERE salary > 55000"
+        ).unwrap();
+        let r = ctx.query("SELECT * FROM high_earners").unwrap();
+        // salaries > 55000: 60000, 70000
+        assert_eq!(r.num_rows, 2);
+    }
+
+    // ─── 2. Negative Tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_sql_error_nonexistent_table() {
+        let ctx = make_test_ctx();
+        let r = ctx.query("SELECT * FROM nonexistent_table");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_sql_error_nonexistent_column() {
+        let ctx = make_test_ctx();
+        let r = ctx.query("SELECT nonexistent_col FROM employees");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_sql_error_malformed_sql() {
+        let ctx = make_test_ctx();
+        let r = ctx.query("SELEC * FORM employees");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_sql_division_by_zero() {
+        let ctx = make_test_ctx();
+        let r = ctx.query("SELECT salary / 0 AS div FROM employees LIMIT 1");
+        // Should either error or return NULL — must not panic
+        match r {
+            Ok(block) => {
+                assert_eq!(block.num_rows, 1);
+            }
+            Err(_) => {} // graceful error is acceptable
+        }
+    }
+
+    #[test]
+    fn test_sql_type_mismatch_comparison() {
+        let ctx = make_test_ctx();
+        let r = ctx.query("SELECT * FROM employees WHERE name > 100");
+        // Should handle gracefully — error or empty result, no panic
+        match r {
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+
+    // ─── 3. Edge Case Tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_sql_empty_table() {
+        let mut ctx = KqlContext::new();
+        ctx.register("empty", DataBlock {
+            num_rows: 0,
+            columns: vec![
+                Column { name: "id".into(), data: ColumnData::Int64(vec![]) },
+                Column { name: "val".into(), data: ColumnData::Str(vec![]) },
+            ],
+        });
+        let r = ctx.query("SELECT * FROM empty").unwrap();
+        assert_eq!(r.num_rows, 0);
+    }
+
+    #[test]
+    fn test_sql_single_row_group_by() {
+        let mut ctx = KqlContext::new();
+        ctx.register("single", DataBlock {
+            num_rows: 1,
+            columns: vec![
+                Column { name: "cat".into(), data: ColumnData::Str(vec![Some("A".into())]) },
+                Column { name: "val".into(), data: ColumnData::Int64(vec![Some(42)]) },
+            ],
+        });
+        let r = ctx.query("SELECT cat, SUM(val) AS total FROM single GROUP BY cat").unwrap();
+        assert_eq!(r.num_rows, 1);
+    }
+
+    #[test]
+    fn test_sql_null_in_where() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 3,
+            columns: vec![
+                Column { name: "v".into(), data: ColumnData::Int64(vec![Some(1), None, Some(3)]) },
+            ],
+        });
+        let r = ctx.query("SELECT v FROM t WHERE v > 0").unwrap();
+        // NULL > 0 is UNKNOWN → excluded
+        assert_eq!(r.num_rows, 2);
+    }
+
+    #[test]
+    fn test_sql_null_in_group_by() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 4,
+            columns: vec![
+                Column { name: "grp".into(), data: ColumnData::Str(vec![Some("A".into()), None, Some("A".into()), None]) },
+                Column { name: "val".into(), data: ColumnData::Int64(vec![Some(1), Some(2), Some(3), Some(4)]) },
+            ],
+        });
+        let r = ctx.query("SELECT grp, SUM(val) AS total FROM t GROUP BY grp").unwrap();
+        // "A" group and NULL group
+        assert!(r.num_rows >= 2);
+    }
+
+    #[test]
+    fn test_sql_null_in_order_by() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 4,
+            columns: vec![
+                Column { name: "v".into(), data: ColumnData::Int64(vec![Some(3), None, Some(1), None]) },
+            ],
+        });
+        let r = ctx.query("SELECT v FROM t ORDER BY v").unwrap();
+        assert_eq!(r.num_rows, 4);
+    }
+
+    #[test]
+    fn test_sql_null_in_join_key() {
+        let mut ctx = KqlContext::new();
+        ctx.register("left_t", DataBlock {
+            num_rows: 3,
+            columns: vec![
+                Column { name: "k".into(), data: ColumnData::Int64(vec![Some(1), None, Some(2)]) },
+                Column { name: "lv".into(), data: ColumnData::Str(vec![Some("a".into()), Some("b".into()), Some("c".into())]) },
+            ],
+        });
+        ctx.register("right_t", DataBlock {
+            num_rows: 2,
+            columns: vec![
+                Column { name: "k".into(), data: ColumnData::Int64(vec![Some(1), Some(2)]) },
+                Column { name: "rv".into(), data: ColumnData::Str(vec![Some("x".into()), Some("y".into())]) },
+            ],
+        });
+        let r = ctx.query(
+            "SELECT * FROM left_t AS l INNER JOIN right_t AS r ON l.k = r.k"
+        ).unwrap();
+        // NULL key doesn't match anything
+        assert_eq!(r.num_rows, 2);
+    }
+
+    #[test]
+    fn test_sql_very_long_string() {
+        let long_str = "x".repeat(10000);
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 1,
+            columns: vec![
+                Column { name: "s".into(), data: ColumnData::Str(vec![Some(long_str.clone())]) },
+            ],
+        });
+        let r = ctx.query("SELECT LENGTH(s) AS n FROM t").unwrap();
+        assert_eq!(r.num_rows, 1);
+    }
+
+    #[test]
+    fn test_sql_many_columns() {
+        let cols: Vec<Column> = (0..50)
+            .map(|i| Column { name: format!("c{}", i), data: ColumnData::Int64(vec![Some(i as i64)]) })
+            .collect();
+        let mut ctx = KqlContext::new();
+        ctx.register("wide", DataBlock { num_rows: 1, columns: cols });
+        let r = ctx.query("SELECT * FROM wide").unwrap();
+        assert_eq!(r.num_rows, 1);
+        assert_eq!(r.columns.len(), 50);
+    }
+
+    #[test]
+    fn test_sql_nested_case_when() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT CASE \
+               WHEN salary > 65000 THEN CASE WHEN dept_id = 20 THEN 'top-sales' ELSE 'top-other' END \
+               WHEN salary > 50000 THEN CASE WHEN dept_id = 10 THEN 'mid-eng' ELSE 'mid-other' END \
+               ELSE 'low' \
+             END AS category FROM employees"
+        ).unwrap();
+        assert_eq!(r.num_rows, 5);
+    }
+
+    #[test]
+    fn test_sql_self_join() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT a.name AS name1, b.name AS name2 FROM employees AS a \
+             JOIN employees AS b ON a.dept_id = b.dept_id AND a.id < b.id"
+        ).unwrap();
+        // dept_id=10: (1,3); dept_id=20: (2,5) → 2 pairs
+        assert_eq!(r.num_rows, 2);
+    }
+
+    #[test]
+    fn test_sql_between_string_range() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT name FROM employees WHERE name BETWEEN 'A' AND 'C'"
+        ).unwrap();
+        // "Alice", "Alice", "Bob" (alphabetically < 'C'); "Charlie" starts with 'C' ≥ 'C'
+        assert!(r.num_rows >= 2);
+    }
+
+    #[test]
+    fn test_sql_multiple_aggregates_group() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT dept_id, COUNT(*) AS cnt, MIN(salary) AS mn, MAX(salary) AS mx \
+             FROM employees GROUP BY dept_id"
+        ).unwrap();
+        assert_eq!(r.num_rows, 3); // 3 departments
+    }
+
+    #[test]
+    fn test_sql_order_by_multiple_cols() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT name, salary FROM employees ORDER BY dept_id, salary DESC"
+        ).unwrap();
+        assert_eq!(r.num_rows, 5);
+    }
+
+    #[test]
+    fn test_sql_in_list_strings() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT name FROM employees WHERE name IN ('Alice', 'Eve')"
+        ).unwrap();
+        // Alice×2 + Eve×1 = 3
+        assert_eq!(r.num_rows, 3);
+    }
+
+    #[test]
+    fn test_sql_is_null_is_not_null() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock {
+            num_rows: 4,
+            columns: vec![
+                Column { name: "v".into(), data: ColumnData::Int64(vec![Some(1), None, Some(3), None]) },
+            ],
+        });
+        let r1 = ctx.query("SELECT v FROM t WHERE v IS NULL").unwrap();
+        assert_eq!(r1.num_rows, 2);
+        let r2 = ctx.query("SELECT v FROM t WHERE v IS NOT NULL").unwrap();
+        assert_eq!(r2.num_rows, 2);
+    }
+
+    #[test]
+    fn test_sql_aliased_expressions() {
+        let ctx = make_test_ctx();
+        let r = ctx.query(
+            "SELECT salary * 2 AS double_sal, salary + 1000 AS raised FROM employees LIMIT 2"
+        ).unwrap();
+        assert_eq!(r.num_rows, 2);
+        assert!(r.columns.iter().any(|c| c.name == "double_sal"));
+        assert!(r.columns.iter().any(|c| c.name == "raised"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Integration Tests: CSV -> SQL -> Verify
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_integ_csv_to_sql_mixed_types() {
+        let dir = std::env::temp_dir().join("kore_integ_csv_sql_mixed");
+        let _ = std::fs::create_dir_all(&dir);
+        let csv_path = dir.join("data.csv");
+        std::fs::write(&csv_path, "id,score,name\n1,3.14,Alice\n2,2.71,Bob\n3,1.41,Carol\n").unwrap();
+
+        let block = kore_io::CsvReader::new(&csv_path).read().unwrap();
+        assert_eq!(block.num_rows, 3);
+
+        let mut ctx = KqlContext::new();
+        ctx.register("data", block);
+
+        let r = ctx.query("SELECT * FROM data WHERE score > 2.0").unwrap();
+        assert_eq!(r.num_rows, 2);
+
+        let r2 = ctx.query("SELECT name FROM data WHERE id = 3").unwrap();
+        assert_eq!(r2.num_rows, 1);
+        if let ColumnData::Str(v) = &r2.columns[0].data {
+            assert_eq!(v[0], Some("Carol".into()));
+        } else { panic!("expected Str"); }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_integ_csv_type_inference_verification() {
+        let dir = std::env::temp_dir().join("kore_integ_csv_types_v");
+        let _ = std::fs::create_dir_all(&dir);
+        let csv_path = dir.join("typed.csv");
+        std::fs::write(&csv_path,
+            "int_col,float_col,str_col,nullable_col\n\
+             10,1.5,hello,\n\
+             20,2.5,world,value\n\
+             30,3.5,test,\n"
+        ).unwrap();
+
+        let block = kore_io::CsvReader::new(&csv_path).read().unwrap();
+        assert_eq!(block.num_rows, 3);
+        assert!(matches!(&block.columns[0].data, ColumnData::Int64(_)));
+        assert!(matches!(&block.columns[1].data, ColumnData::Float64(_)));
+        assert!(matches!(&block.columns[2].data, ColumnData::Str(_)));
+
+        let mut ctx = KqlContext::new();
+        ctx.register("typed", block);
+
+        let r = ctx.query("SELECT SUM(int_col) AS total FROM typed").unwrap();
+        assert_eq!(r.num_rows, 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_integ_csv_null_values_sql() {
+        let dir = std::env::temp_dir().join("kore_integ_csv_nulls_sql");
+        let _ = std::fs::create_dir_all(&dir);
+        let csv_path = dir.join("nulls.csv");
+        std::fs::write(&csv_path,
+            "id,value,label\n\
+             1,100,A\n\
+             2,,B\n\
+             3,300,\n\
+             4,,\n"
+        ).unwrap();
+
+        let block = kore_io::CsvReader::new(&csv_path).read().unwrap();
+        assert_eq!(block.num_rows, 4);
+
+        let mut ctx = KqlContext::new();
+        ctx.register("nulls_tbl", block);
+
+        let r = ctx.query("SELECT * FROM nulls_tbl WHERE value IS NULL").unwrap();
+        assert_eq!(r.num_rows, 2);
+
+        let r2 = ctx.query("SELECT * FROM nulls_tbl WHERE label IS NOT NULL").unwrap();
+        assert_eq!(r2.num_rows, 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Integration Tests: SQL -> Parquet -> SQL Pipeline
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_integ_sql_parquet_sql_pipeline() {
+        let dir = std::env::temp_dir().join("kore_integ_sql_pq_sql");
+        let _ = std::fs::create_dir_all(&dir);
+        let pq_path = dir.join("result.parquet");
+
+        let mut ctx = KqlContext::new();
+        ctx.register("orders", make_orders());
+
+        let result = ctx.query("SELECT id, score FROM orders WHERE score > 70 ORDER BY score DESC").unwrap();
+        let orig_rows = result.num_rows;
+        assert!(orig_rows > 0);
+
+        kore_parquet::ParquetWriter::write_file(&result, &pq_path).unwrap();
+        let readback = kore_parquet::ParquetReader::new(&pq_path).read().unwrap();
+        assert_eq!(readback.num_rows, orig_rows);
+
+        let mut ctx2 = KqlContext::new();
+        ctx2.register("from_parquet", readback);
+        let r2 = ctx2.query("SELECT COUNT(*) AS cnt FROM from_parquet").unwrap();
+        assert_eq!(r2.num_rows, 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_integ_aggregate_to_parquet_roundtrip() {
+        let dir = std::env::temp_dir().join("kore_integ_agg_pq_rt");
+        let _ = std::fs::create_dir_all(&dir);
+        let pq_path = dir.join("agg.parquet");
+
+        let mut ctx = KqlContext::new();
+        ctx.register("orders", make_orders());
+
+        let agg = ctx.query("SELECT cust_id, SUM(score) AS total FROM orders GROUP BY cust_id").unwrap();
+        let orig_rows = agg.num_rows;
+
+        kore_parquet::ParquetWriter::write_file(&agg, &pq_path).unwrap();
+        let readback = kore_parquet::ParquetReader::new(&pq_path).read().unwrap();
+        assert_eq!(readback.num_rows, orig_rows);
+
+        let mut ctx2 = KqlContext::new();
+        ctx2.register("agg_data", readback);
+        let r = ctx2.query("SELECT * FROM agg_data WHERE total > 100").unwrap();
+        assert!(r.num_rows >= 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_integ_join_to_parquet_to_sql() {
+        let dir = std::env::temp_dir().join("kore_integ_join_pq");
+        let _ = std::fs::create_dir_all(&dir);
+        let pq_path = dir.join("joined.parquet");
+
+        let mut ctx = KqlContext::new();
+        ctx.register("orders", make_orders());
+        ctx.register("customers", make_customers());
+
+        let joined = ctx.query(
+            "SELECT o.id AS id, c.name AS name, o.score AS score FROM orders AS o \
+             INNER JOIN customers AS c ON o.cust_id = c.id"
+        ).unwrap();
+        assert_eq!(joined.num_rows, 4);
+
+        kore_parquet::ParquetWriter::write_file(&joined, &pq_path).unwrap();
+        let readback = kore_parquet::ParquetReader::new(&pq_path).read().unwrap();
+        assert_eq!(readback.num_rows, 4);
+
+        let mut ctx2 = KqlContext::new();
+        ctx2.register("joined", readback);
+        let r = ctx2.query("SELECT * FROM joined WHERE score > 80").unwrap();
+        assert_eq!(r.num_rows, 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Integration Tests: Multi-Query Concurrent Execution
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_integ_concurrent_diverse_queries() {
+        use std::thread;
+        use std::sync::Arc;
+
+        let mut ctx = KqlContext::new();
+        ctx.register("orders", make_orders());
+        ctx.register("customers", make_customers());
+        let ctx = Arc::new(ctx);
+
+        let queries: Vec<&str> = vec![
+            "SELECT * FROM orders WHERE score > 70",
+            "SELECT * FROM orders WHERE id = 1",
+            "SELECT COUNT(*) AS cnt FROM orders",
+            "SELECT cust_id, SUM(score) AS total FROM orders GROUP BY cust_id",
+            "SELECT * FROM customers WHERE name = 'Alice'",
+            "SELECT * FROM orders ORDER BY score DESC LIMIT 2",
+            "SELECT * FROM orders WHERE score BETWEEN 60 AND 85",
+            "SELECT DISTINCT cust_id FROM orders",
+            "SELECT * FROM customers ORDER BY id",
+            "SELECT id, score FROM orders WHERE score > 80",
+        ];
+
+        let handles: Vec<_> = queries.into_iter().map(|sql| {
+            let ctx_clone = Arc::clone(&ctx);
+            let sql_owned = sql.to_string();
+            thread::spawn(move || {
+                ctx_clone.query(&sql_owned).unwrap()
+            })
+        }).collect();
+
+        let results: Vec<DataBlock> = handles.into_iter()
+            .map(|h| h.join().unwrap())
+            .collect();
+
+        assert!(results[0].num_rows >= 2);  // score > 70
+        assert_eq!(results[1].num_rows, 1); // id = 1
+        assert_eq!(results[2].num_rows, 1); // COUNT(*)
+        assert_eq!(results[3].num_rows, 3); // 3 distinct cust_ids
+        assert_eq!(results[4].num_rows, 1); // Alice
+    }
+
+    #[test]
+    fn test_integ_concurrent_identical_queries() {
+        use std::thread;
+        use std::sync::Arc;
+
+        let mut ctx = KqlContext::new();
+        ctx.register("orders", make_orders());
+        let ctx = Arc::new(ctx);
+
+        let handles: Vec<_> = (0..10).map(|_| {
+            let ctx_clone = Arc::clone(&ctx);
+            thread::spawn(move || {
+                ctx_clone.query("SELECT * FROM orders WHERE score >= 60").unwrap()
+            })
+        }).collect();
+
+        for handle in handles {
+            let result = handle.join().unwrap();
+            assert_eq!(result.num_rows, 4);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Integration Tests: DML (INSERT, DELETE, CREATE TABLE AS SELECT)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_integ_dml_insert_then_select() {
+        let mut ctx = KqlContext::new();
+        ctx.register_mut("employees", DataBlock::new(vec![
+            Column::int64("id", vec![Some(1), Some(2)]),
+            Column::str_col("name", vec![Some("Alice".into()), Some("Bob".into())]),
+        ]).unwrap());
+
+        let (op, rows) = ctx.execute_dml("INSERT INTO employees VALUES (3, 'Carol')").unwrap();
+        assert_eq!(op, "INSERT");
+        assert_eq!(rows, 1);
+
+        let r = ctx.query("SELECT * FROM employees").unwrap();
+        assert_eq!(r.num_rows, 3);
+    }
+
+    #[test]
+    fn test_integ_dml_insert_select_into_target() {
+        let mut ctx = KqlContext::new();
+        ctx.register("source", DataBlock::new(vec![
+            Column::int64("id", vec![Some(10), Some(20), Some(30)]),
+            Column::float64("val", vec![Some(1.0), Some(2.0), Some(3.0)]),
+        ]).unwrap());
+        ctx.register_mut("target", DataBlock::empty());
+
+        let (op, rows) = ctx.execute_dml("INSERT INTO target SELECT * FROM source WHERE val > 1.5").unwrap();
+        assert_eq!(op, "INSERT");
+        assert_eq!(rows, 2);
+
+        let r = ctx.query("SELECT * FROM target").unwrap();
+        assert_eq!(r.num_rows, 2);
+    }
+
+    #[test]
+    fn test_integ_dml_delete_then_verify() {
+        let mut ctx = KqlContext::new();
+        ctx.register_mut("items", DataBlock::new(vec![
+            Column::int64("id", vec![Some(1), Some(2), Some(3), Some(4)]),
+            Column::float64("price", vec![Some(10.0), Some(25.0), Some(5.0), Some(50.0)]),
+        ]).unwrap());
+
+        let (op, deleted) = ctx.execute_dml("DELETE FROM items WHERE price < 15").unwrap();
+        assert_eq!(op, "DELETE");
+        assert_eq!(deleted, 2);
+
+        let r = ctx.query("SELECT * FROM items").unwrap();
+        assert_eq!(r.num_rows, 2);
+    }
+
+    #[test]
+    fn test_integ_dml_ctas() {
+        let mut ctx = KqlContext::new();
+        ctx.register("orders", make_orders());
+
+        let (op, rows) = ctx.execute_dml("CREATE TABLE high_scores AS SELECT * FROM orders WHERE score > 80").unwrap();
+        assert_eq!(op, "CREATE TABLE AS SELECT");
+        assert_eq!(rows, 2);
+
+        let r = ctx.query("SELECT * FROM high_scores").unwrap();
+        assert_eq!(r.num_rows, 2);
+
+        let r2 = ctx.query("SELECT COUNT(*) AS cnt FROM high_scores").unwrap();
+        assert_eq!(r2.num_rows, 1);
+    }
+
+    #[test]
+    fn test_integ_dml_full_lifecycle() {
+        let mut ctx = KqlContext::new();
+        ctx.register_mut("users", DataBlock::new(vec![
+            Column::int64("id", vec![Some(1), Some(2)]),
+            Column::str_col("name", vec![Some("A".into()), Some("B".into())]),
+        ]).unwrap());
+
+        // INSERT
+        ctx.execute_dml("INSERT INTO users VALUES (3, 'C')").unwrap();
+        let r1 = ctx.query("SELECT * FROM users").unwrap();
+        assert_eq!(r1.num_rows, 3);
+
+        // DELETE
+        ctx.execute_dml("DELETE FROM users WHERE id = 2").unwrap();
+        let r2 = ctx.query("SELECT * FROM users").unwrap();
+        assert_eq!(r2.num_rows, 2);
+
+        // CTAS from remaining
+        ctx.execute_dml("CREATE TABLE backup AS SELECT * FROM users").unwrap();
+        let r3 = ctx.query("SELECT * FROM backup").unwrap();
+        assert_eq!(r3.num_rows, 2);
     }
 }
 

@@ -275,7 +275,7 @@ fn estimate_size(block: &ArrowBlock) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ArrowArray, ArrowColumn, ArrowColumnData, ArrowStringArray};
+    use crate::{ArrowArray, ArrowColumn, ArrowColumnData};
     use kore_core::{Column, ColumnData, DataBlock};
 
     fn dense_arrow_block(n: usize) -> ArrowBlock {

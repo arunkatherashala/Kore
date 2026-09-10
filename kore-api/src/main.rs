@@ -10,7 +10,6 @@
 //!   GET  /api/v1/ml/models          → List models
 //!   DELETE /api/v1/ml/models/{id}   → Delete a model
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -20,7 +19,7 @@ use axum::{
     routing::{delete, get, post},
     Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 

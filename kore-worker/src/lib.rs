@@ -58,6 +58,7 @@ impl Worker {
                 task_addr: task_addr.clone(),
                 cores: self.cores,
                 memory_mb: available_mem_mb(),
+                auth_token: std::env::var("KORE_WORKER_TOKEN").ok(),
             },
         )
         .await?;
@@ -240,7 +241,7 @@ async fn handle_task_conn(
             let t0 = now_ms();
             let result = load_shard_from_path(&path, filter_sql.as_deref());
             match result {
-                Ok(mut block) => {
+                Ok(block) => {
                     let rows = block.num_rows;
                     tables.register(&table_name, block);
                     let load_ms = now_ms() - t0;
@@ -565,8 +566,8 @@ fn available_mem_mb() -> usize {
 fn load_shard_from_path(path: &str, filter_sql: Option<&str>) -> Result<DataBlock, KoreError> {
     let block = if path.starts_with("s3://") || path.starts_with("gs://") || path.starts_with("az://") {
         // Cloud: download to a temp local path via object-store, then parse
-        let local_cache = format!(".kore_cache/{}", path.replace("://", "_").replace('/', "_"));
-        let store: &dyn kore_object_store::ObjectStore = &kore_object_store::LocalStore::new(".");
+        let _local_cache = format!(".kore_cache/{}", path.replace("://", "_").replace('/', "_"));
+        let _store: &dyn kore_object_store::ObjectStore = &kore_object_store::LocalStore::new(".");
         // For now: treat cloud paths as local paths with prefix stripped (LAN/MinIO setup)
         // Full S3 AWS Sig V4 support: set KORE_S3_ENDPOINT, KORE_S3_KEY, KORE_S3_SECRET
         let bare = path.splitn(4, '/').skip(3).collect::<Vec<_>>().join("/");

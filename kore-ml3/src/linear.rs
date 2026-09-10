@@ -22,7 +22,7 @@ impl LinearRegressor {
 
     /// Fit on raw feature matrix (no intercept column needed — added internally).
     pub fn fit_raw(&mut self, x: &[Vec<f64>], y: &[f64]) {
-        let n = x.len();
+        let _n = x.len();
         let d = x.first().map_or(0, |r| r.len());
         let p = d + 1; // +1 for intercept
 

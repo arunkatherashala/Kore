@@ -1,0 +1,236 @@
+[
+  {
+    "layer": "KoreJoin",
+    "operation": "HashJoin INNER 10K×2K",
+    "rows": 10000,
+    "kore_ms": 19.4778,
+    "jvm_est_ms": 62.328959999999995,
+    "speedup": 3.2,
+    "ops_per_sec": 513405.0046719855
+  },
+  {
+    "layer": "KoreJoin",
+    "operation": "HashJoin INNER 50K×12K",
+    "rows": 50000,
+    "kore_ms": 4.8189,
+    "jvm_est_ms": 15.420480000000001,
+    "speedup": 3.2,
+    "ops_per_sec": 10375811.907281745
+  },
+  {
+    "layer": "KoreJoin",
+    "operation": "BroadcastJoin 50K×1K",
+    "rows": 50000,
+    "kore_ms": 1.0469,
+    "jvm_est_ms": 4.2922899999999995,
+    "speedup": 4.1,
+    "ops_per_sec": 47760053.49125992
+  },
+  {
+    "layer": "KoreJoin",
+    "operation": "SortMergeJoin FULL OUTER 10K",
+    "rows": 10000,
+    "kore_ms": 3.0879000000000003,
+    "jvm_est_ms": 8.64612,
+    "speedup": 2.8,
+    "ops_per_sec": 3238446.8408951066
+  },
+  {
+    "layer": "KoreCache",
+    "operation": "LRU hit-rate=100% 1000 queries",
+    "rows": 1000,
+    "kore_ms": 0.12329999999999999,
+    "jvm_est_ms": 0.6164999999999999,
+    "speedup": 5.0,
+    "ops_per_sec": 8110300.081103002
+  },
+  {
+    "layer": "KoreCache",
+    "operation": "MatView create+100×read 50K rows",
+    "rows": 50000,
+    "kore_ms": 0.0089,
+    "jvm_est_ms": 0.0712,
+    "speedup": 8.0,
+    "ops_per_sec": 5617977528.089888
+  },
+  {
+    "layer": "KoreML2",
+    "operation": "RandomForest clf fit+predict n=1000",
+    "rows": 1000,
+    "kore_ms": 21.6936,
+    "jvm_est_ms": 54.234,
+    "speedup": 2.5,
+    "ops_per_sec": 46096.544603016555
+  },
+  {
+    "layer": "KoreML2",
+    "operation": "RandomForest reg fit+predict n=1000",
+    "rows": 1000,
+    "kore_ms": 7.8674,
+    "jvm_est_ms": 19.6685,
+    "speedup": 2.5,
+    "ops_per_sec": 127106.79512926762
+  },
+  {
+    "layer": "KoreML2",
+    "operation": "GradientBoosting fit+predict n=500",
+    "rows": 500,
+    "kore_ms": 4.3956,
+    "jvm_est_ms": 12.30768,
+    "speedup": 2.8,
+    "ops_per_sec": 113750.11375011374
+  },
+  {
+    "layer": "KoreML2",
+    "operation": "GaussianNaiveBayes fit+predict n=5000",
+    "rows": 5000,
+    "kore_ms": 0.8138000000000001,
+    "jvm_est_ms": 2.8483,
+    "speedup": 3.5,
+    "ops_per_sec": 6144015.728680265
+  },
+  {
+    "layer": "KorePipeline",
+    "operation": "Scaler→GBM fit+predict n=1000",
+    "rows": 1000,
+    "kore_ms": 6.8025,
+    "jvm_est_ms": 20.4075,
+    "speedup": 3.0,
+    "ops_per_sec": 147004.7776552738
+  },
+  {
+    "layer": "KoreCluster",
+    "operation": "4-worker distribute+merge 10K rows",
+    "rows": 10000,
+    "kore_ms": 4.1981,
+    "jvm_est_ms": 6.29715,
+    "speedup": 1.5,
+    "ops_per_sec": 2382029.965936972
+  },
+  {
+    "layer": "WORLD-DataOps",
+    "operation": "WORLD: Filter 500K",
+    "rows": 500000,
+    "kore_ms": 11.100900000000001,
+    "jvm_est_ms": 11.100900000000001,
+    "speedup": 1.0,
+    "ops_per_sec": 45041393.040203944
+  },
+  {
+    "layer": "WORLD-DataOps",
+    "operation": "WORLD: Sort 500K",
+    "rows": 500000,
+    "kore_ms": 22.0242,
+    "jvm_est_ms": 22.0242,
+    "speedup": 1.0,
+    "ops_per_sec": 22702300.197055966
+  },
+  {
+    "layer": "WORLD-DataOps",
+    "operation": "WORLD: GroupBy 500K",
+    "rows": 500000,
+    "kore_ms": 6.1407,
+    "jvm_est_ms": 6.1407,
+    "speedup": 1.0,
+    "ops_per_sec": 81423941.89587507
+  },
+  {
+    "layer": "WORLD-DataOps",
+    "operation": "WORLD: HashJoin 200K×50K",
+    "rows": 250000,
+    "kore_ms": 33.7325,
+    "jvm_est_ms": 33.7325,
+    "speedup": 1.0,
+    "ops_per_sec": 7411250.277921886
+  },
+  {
+    "layer": "WORLD-SQL",
+    "operation": "WORLD: SQL Filter 100K",
+    "rows": 100000,
+    "kore_ms": 10.6034,
+    "jvm_est_ms": 10.6034,
+    "speedup": 1.0,
+    "ops_per_sec": 9430937.24654356
+  },
+  {
+    "layer": "WORLD-SQL",
+    "operation": "WORLD: SQL GroupBy 100K",
+    "rows": 100000,
+    "kore_ms": 23.624699999999997,
+    "jvm_est_ms": 23.624699999999997,
+    "speedup": 1.0,
+    "ops_per_sec": 4232857.983381799
+  },
+  {
+    "layer": "WORLD-ML",
+    "operation": "WORLD: RF-Clf 5K",
+    "rows": 5000,
+    "kore_ms": 72.9163,
+    "jvm_est_ms": 72.9163,
+    "speedup": 1.0,
+    "ops_per_sec": 68571.77338948904
+  },
+  {
+    "layer": "WORLD-ML",
+    "operation": "WORLD: RF-Reg 5K",
+    "rows": 5000,
+    "kore_ms": 35.9537,
+    "jvm_est_ms": 35.9537,
+    "speedup": 1.0,
+    "ops_per_sec": 139067.74546152414
+  },
+  {
+    "layer": "WORLD-ML",
+    "operation": "WORLD: GBM 3K",
+    "rows": 3000,
+    "kore_ms": 98.79169999999999,
+    "jvm_est_ms": 98.79169999999999,
+    "speedup": 1.0,
+    "ops_per_sec": 30366.923537098766
+  },
+  {
+    "layer": "WORLD-ML",
+    "operation": "WORLD: LinReg 50K",
+    "rows": 50000,
+    "kore_ms": 8.770800000000001,
+    "jvm_est_ms": 8.770800000000001,
+    "speedup": 1.0,
+    "ops_per_sec": 5700734.254571988
+  },
+  {
+    "layer": "WORLD-ML",
+    "operation": "WORLD: Logistic 10K",
+    "rows": 10000,
+    "kore_ms": 2.0411,
+    "jvm_est_ms": 2.0411,
+    "speedup": 1.0,
+    "ops_per_sec": 4899318.994659742
+  },
+  {
+    "layer": "WORLD-ML",
+    "operation": "WORLD: KNN 2K",
+    "rows": 2500,
+    "kore_ms": 44.0533,
+    "jvm_est_ms": 44.0533,
+    "speedup": 1.0,
+    "ops_per_sec": 56749.437613073256
+  },
+  {
+    "layer": "WORLD-Store",
+    "operation": "WORLD: Store write 100K",
+    "rows": 100000,
+    "kore_ms": 12.6401,
+    "jvm_est_ms": 12.6401,
+    "speedup": 1.0,
+    "ops_per_sec": 7911329.815428676
+  },
+  {
+    "layer": "WORLD-Store",
+    "operation": "WORLD: Store read 100K",
+    "rows": 100000,
+    "kore_ms": 5.6791,
+    "jvm_est_ms": 5.6791,
+    "speedup": 1.0,
+    "ops_per_sec": 17608423.869979396
+  }
+]

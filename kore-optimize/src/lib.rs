@@ -30,6 +30,7 @@ pub struct Optimizer {
     pub projection_pruning:   bool,
     pub join_reorder:         bool,
     pub limit_pushdown:       bool,
+    pub partition_aware_agg:  bool,
 }
 
 impl Default for Optimizer {
@@ -44,6 +45,7 @@ impl Optimizer {
             projection_pruning: true,
             join_reorder:       true,
             limit_pushdown:     true,
+            partition_aware_agg: true,
         }
     }
 
@@ -51,7 +53,7 @@ impl Optimizer {
         if let Some(stmt) = &mut query.body {
             self.optimize_stmt(stmt);
         }
-        for stmt in &mut query.union_all {
+        for (_, stmt) in &mut query.set_ops {
             self.optimize_stmt(stmt);
         }
     }
@@ -61,6 +63,31 @@ impl Optimizer {
         if self.predicate_pushdown { self.push_predicates(stmt); }
         if self.join_reorder       { self.reorder_joins(stmt); }
         if self.limit_pushdown     { self.push_limit(stmt); }
+    }
+
+    /// Optimize a logical plan node tree, including partition-aware aggregation.
+    pub fn optimize_plan(&self, plan: &mut PlanNode) {
+        if self.partition_aware_agg {
+            Self::apply_partition_aware_agg(plan);
+        }
+    }
+
+    fn apply_partition_aware_agg(plan: &mut PlanNode) {
+        match plan {
+            PlanNode::Aggregate { group_by, input, local_only, .. } => {
+                Self::apply_partition_aware_agg(input);
+                if let Some(ref part_keys) = input.partitioning() {
+                    let all_matched = group_by.iter().all(|g| part_keys.contains(g));
+                    if all_matched && !group_by.is_empty() {
+                        *local_only = true;
+                    }
+                }
+            }
+            PlanNode::Scan { .. } => {}
+            PlanNode::Filter { input, .. } => Self::apply_partition_aware_agg(input),
+            PlanNode::Project { input, .. } => Self::apply_partition_aware_agg(input),
+            PlanNode::Exchange { input, .. } => Self::apply_partition_aware_agg(input),
+        }
     }
 
     // ── Rule 1: Constant Folding ───────────────────────────────────────────
@@ -78,11 +105,49 @@ impl Optimizer {
     // Move simple WHERE predicates (single-table, no aggregation) before JOINs.
 
     fn push_predicates(&self, stmt: &mut SelectStmt) {
-        // Simple: if WHERE references only the main table (not joined tables),
-        // mark it as pushable (already in correct position in executor — no-op here,
-        // but a real optimizer would split predicates and reorder)
-        // This is a structural pass — complex pushdown needs physical plan tree.
-        let _ = stmt; // Structural push is handled by executor ordering
+        if stmt.joins.is_empty() { return; }
+        let where_clause = match stmt.where_clause.take() {
+            Some(w) => w,
+            None => return,
+        };
+
+        let from_name = stmt.from.name.clone();
+        let from_alias = stmt.from.alias.clone();
+        let join_tables: Vec<(String, Option<String>)> = stmt.joins.iter()
+            .map(|j| (j.table.name.clone(), j.table.alias.clone()))
+            .collect();
+
+        let conjuncts = split_conjunction(where_clause);
+        let mut remaining = Vec::new();
+
+        for pred in conjuncts {
+            let refs = collect_table_refs(&pred);
+            if refs.is_empty() {
+                remaining.push(pred);
+                continue;
+            }
+
+            let refers_to_from = refs.iter().any(|r| {
+                r == &from_name || from_alias.as_deref() == Some(r.as_str())
+            });
+            let refers_to_join = join_tables.iter().enumerate().find(|(_, (name, alias))| {
+                refs.iter().any(|r| r == name || alias.as_deref() == Some(r.as_str()))
+            });
+
+            if refers_to_from && refers_to_join.is_none() {
+                stmt.from.push_filter = Some(Box::new(pred));
+                continue;
+            }
+            if let Some((idx, _)) = refers_to_join {
+                if !refers_to_from {
+                    stmt.joins[idx].push_filter = Some(Box::new(pred));
+                    continue;
+                }
+            }
+            remaining.push(pred);
+        }
+
+        stmt.where_clause = rebuild_conjunction(remaining);
     }
 
     // ── Rule 3: Join Reordering ────────────────────────────────────────────
@@ -90,17 +155,53 @@ impl Optimizer {
     // but we can add estimated cardinality hints here.)
 
     fn reorder_joins(&self, stmt: &mut SelectStmt) {
-        // Heuristic: if LIMIT is very small, broadcast join is better.
-        // Real implementation needs table statistics (row counts from catalog).
-        let _ = stmt;
+        if stmt.joins.is_empty() { return; }
+
+        // Sort joins so smaller tables come first (build side of hash join).
+        // Use a simple bubble approach since join count is typically small.
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for i in 0..stmt.joins.len() {
+                let left_name = if i == 0 { &stmt.from.name } else { &stmt.joins[i - 1].table.name };
+                let right_name = &stmt.joins[i].table.name;
+
+                let left_rows = estimate_table_rows(left_name);
+                let right_rows = estimate_table_rows(right_name);
+
+                if right_rows > left_rows && i == 0 {
+                    std::mem::swap(&mut stmt.from, &mut stmt.joins[0].table);
+                    let on = &mut stmt.joins[0].on;
+                    std::mem::swap(&mut on.left_col, &mut on.right_col);
+                    changed = true;
+                }
+            }
+        }
     }
 
     // ── Rule 4: Limit Pushdown ─────────────────────────────────────────────
 
     fn push_limit(&self, stmt: &mut SelectStmt) {
-        // If there are no JOINs and no GROUP BY, LIMIT can be applied during scan.
-        // (Current executor already applies LIMIT last, which is correct.)
-        let _ = stmt;
+        let limit = match stmt.limit {
+            Some(n) => n,
+            None => return,
+        };
+
+        // Push LIMIT into scan when there are no JOINs, no GROUP BY, no HAVING,
+        // and either no ORDER BY or a single ASC ORDER BY.
+        if !stmt.joins.is_empty() || !stmt.group_by.is_empty() || stmt.having.is_some() {
+            return;
+        }
+
+        if stmt.order_by.is_empty() {
+            if stmt.scan_limit.is_none() {
+                stmt.scan_limit = Some(limit);
+            }
+        } else if stmt.order_by.len() == 1 && !stmt.order_by[0].desc {
+            if stmt.scan_limit.is_none() {
+                stmt.scan_limit = Some(limit);
+            }
+        }
     }
 }
 
@@ -177,7 +278,63 @@ fn fold_expr(expr: &mut Expr) {
     }
 }
 
-// ── Statistics (for future cost-based optimization) ────────────────────────────
+// ── Predicate pushdown & join reorder helpers ─────────────────────────────────
+fn estimate_table_rows(name: &str) -> usize {
+    // Common naming heuristics: dimension/lookup tables are small
+    let lower = name.to_lowercase();
+    if lower.starts_with("dim_") || lower.ends_with("_dim")
+        || lower == "users" || lower == "regions" || lower == "categories"
+    {
+        100
+    } else {
+        10_000
+    }
+}
+
+// ── Predicate pushdown helpers ────────────────────────────────────────────────
+
+fn split_conjunction(expr: Expr) -> Vec<Expr> {
+    match expr {
+        Expr::BinOp { op: BinOpKind::And, left, right } => {
+            let mut v = split_conjunction(*left);
+            v.extend(split_conjunction(*right));
+            v
+        }
+        other => vec![other],
+    }
+}
+
+fn rebuild_conjunction(mut parts: Vec<Expr>) -> Option<Expr> {
+    if parts.is_empty() { return None; }
+    let mut result = parts.remove(0);
+    for p in parts {
+        result = Expr::BinOp { op: BinOpKind::And, left: Box::new(result), right: Box::new(p) };
+    }
+    Some(result)
+}
+
+fn collect_table_refs(expr: &Expr) -> Vec<String> {
+    let mut refs = Vec::new();
+    collect_table_refs_inner(expr, &mut refs);
+    refs.sort();
+    refs.dedup();
+    refs
+}
+
+fn collect_table_refs_inner(expr: &Expr, refs: &mut Vec<String>) {
+    match expr {
+        Expr::QualCol(table, _) => { refs.push(table.clone()); }
+        Expr::BinOp { left, right, .. } => {
+            collect_table_refs_inner(left, refs);
+            collect_table_refs_inner(right, refs);
+        }
+        Expr::Not(inner) => collect_table_refs_inner(inner, refs),
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => collect_table_refs_inner(inner, refs),
+        _ => {}
+    }
+}
+
+// ── Statistics (for cost-based optimization) ─────────────────────────────────
 
 /// Table statistics used by the cost-based optimizer.
 #[derive(Debug, Clone, Default)]
@@ -251,6 +408,61 @@ pub fn collect_stats(table_name: &str, block: &kore_core::DataBlock) -> TableSta
     TableStats { table_name: table_name.to_string(), row_count: block.num_rows, col_stats }
 }
 
+// ── Logical plan node (for partition-aware optimization) ──────────────────────
+
+/// Simplified logical plan node used for partition-aware optimizations.
+#[derive(Debug, Clone)]
+pub enum PlanNode {
+    Scan {
+        table: String,
+        partitioning: Option<Vec<String>>,
+    },
+    Filter {
+        predicate: String,
+        input: Box<PlanNode>,
+    },
+    Project {
+        columns: Vec<String>,
+        input: Box<PlanNode>,
+    },
+    Aggregate {
+        group_by: Vec<String>,
+        agg_exprs: Vec<String>,
+        local_only: bool,
+        input: Box<PlanNode>,
+    },
+    Exchange {
+        partition_by: Vec<String>,
+        input: Box<PlanNode>,
+    },
+}
+
+impl PlanNode {
+    /// Get the partitioning scheme at this node's output, if known.
+    pub fn partitioning(&self) -> Option<Vec<String>> {
+        match self {
+            PlanNode::Scan { partitioning, .. } => partitioning.clone(),
+            PlanNode::Filter { input, .. } => input.partitioning(),
+            PlanNode::Project { input, .. } => input.partitioning(),
+            PlanNode::Exchange { partition_by, .. } => Some(partition_by.clone()),
+            PlanNode::Aggregate { group_by, local_only, input, .. } => {
+                if *local_only { input.partitioning() } else { Some(group_by.clone()) }
+            }
+        }
+    }
+
+    /// Check if this node or any descendant is marked as local-only aggregation.
+    pub fn has_local_agg(&self) -> bool {
+        match self {
+            PlanNode::Aggregate { local_only, input, .. } => *local_only || input.has_local_agg(),
+            PlanNode::Filter { input, .. } => input.has_local_agg(),
+            PlanNode::Project { input, .. } => input.has_local_agg(),
+            PlanNode::Exchange { input, .. } => input.has_local_agg(),
+            PlanNode::Scan { .. } => false,
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -286,5 +498,133 @@ mod tests {
         Optimizer::new().optimize(&mut q);
         assert_eq!(q.ctes.len(), 1);
         assert_eq!(q.ctes[0].name, "high_value");
+    }
+
+    // ── Partition-Aware Aggregation tests ─────────────────────────────────
+
+    #[test]
+    fn test_partition_aware_agg_skips_shuffle() {
+        let opt = Optimizer::new();
+        let mut plan = PlanNode::Aggregate {
+            group_by: vec!["region".into()],
+            agg_exprs: vec!["SUM(sales)".into()],
+            local_only: false,
+            input: Box::new(PlanNode::Exchange {
+                partition_by: vec!["region".into()],
+                input: Box::new(PlanNode::Scan {
+                    table: "sales".into(),
+                    partitioning: None,
+                }),
+            }),
+        };
+        opt.optimize_plan(&mut plan);
+        match &plan {
+            PlanNode::Aggregate { local_only, .. } => {
+                assert!(*local_only, "Should be marked local_only when partitioning matches GROUP BY");
+            }
+            _ => panic!("Expected Aggregate node"),
+        }
+    }
+
+    #[test]
+    fn test_partition_aware_agg_from_scan_partitioning() {
+        let opt = Optimizer::new();
+        let mut plan = PlanNode::Aggregate {
+            group_by: vec!["date".into()],
+            agg_exprs: vec!["COUNT(*)".into()],
+            local_only: false,
+            input: Box::new(PlanNode::Scan {
+                table: "events".into(),
+                partitioning: Some(vec!["date".into()]),
+            }),
+        };
+        opt.optimize_plan(&mut plan);
+        match &plan {
+            PlanNode::Aggregate { local_only, .. } => {
+                assert!(*local_only, "Scan already partitioned by GROUP BY key => local_only");
+            }
+            _ => panic!("Expected Aggregate"),
+        }
+    }
+
+    #[test]
+    fn test_partition_aware_agg_no_match() {
+        let opt = Optimizer::new();
+        let mut plan = PlanNode::Aggregate {
+            group_by: vec!["category".into()],
+            agg_exprs: vec!["SUM(amount)".into()],
+            local_only: false,
+            input: Box::new(PlanNode::Exchange {
+                partition_by: vec!["region".into()],
+                input: Box::new(PlanNode::Scan {
+                    table: "orders".into(),
+                    partitioning: None,
+                }),
+            }),
+        };
+        opt.optimize_plan(&mut plan);
+        match &plan {
+            PlanNode::Aggregate { local_only, .. } => {
+                assert!(!*local_only, "GROUP BY key != partitioning => not local_only");
+            }
+            _ => panic!("Expected Aggregate"),
+        }
+    }
+
+    #[test]
+    fn test_plan_node_partitioning_propagation() {
+        let scan = PlanNode::Scan {
+            table: "t".into(),
+            partitioning: Some(vec!["key".into()]),
+        };
+        assert_eq!(scan.partitioning(), Some(vec!["key".into()]));
+
+        let filtered = PlanNode::Filter {
+            predicate: "x > 5".into(),
+            input: Box::new(scan),
+        };
+        assert_eq!(filtered.partitioning(), Some(vec!["key".into()]),
+            "Filter should propagate partitioning from child");
+    }
+
+    #[test]
+    fn test_plan_node_has_local_agg() {
+        let plan = PlanNode::Aggregate {
+            group_by: vec!["k".into()],
+            agg_exprs: vec!["SUM(v)".into()],
+            local_only: true,
+            input: Box::new(PlanNode::Scan { table: "t".into(), partitioning: None }),
+        };
+        assert!(plan.has_local_agg());
+
+        let plan2 = PlanNode::Aggregate {
+            group_by: vec!["k".into()],
+            agg_exprs: vec!["SUM(v)".into()],
+            local_only: false,
+            input: Box::new(PlanNode::Scan { table: "t".into(), partitioning: None }),
+        };
+        assert!(!plan2.has_local_agg());
+    }
+
+    #[test]
+    fn test_partition_aware_agg_disabled() {
+        let mut opt = Optimizer::new();
+        opt.partition_aware_agg = false;
+        let mut plan = PlanNode::Aggregate {
+            group_by: vec!["region".into()],
+            agg_exprs: vec!["SUM(sales)".into()],
+            local_only: false,
+            input: Box::new(PlanNode::Exchange {
+                partition_by: vec!["region".into()],
+                input: Box::new(PlanNode::Scan { table: "t".into(), partitioning: None }),
+            }),
+        };
+        opt.optimize_plan(&mut plan);
+        match &plan {
+            PlanNode::Aggregate { local_only, .. } => {
+                assert!(!*local_only, "Should not optimize when feature is disabled");
+            }
+            _ => panic!("Expected Aggregate"),
+        }
     }
 }

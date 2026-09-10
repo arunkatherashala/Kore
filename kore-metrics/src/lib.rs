@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 // ─── Metric types ─────────────────────────────────────────────────────────────
@@ -88,12 +88,36 @@ impl JobRecord {
 
 // ─── Metrics registry ─────────────────────────────────────────────────────────
 
+/// Record of a DAG stage execution for visualization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DagStageRecord {
+    pub query_id:     String,
+    pub stage_id:     usize,
+    pub stage_name:   String,
+    pub status:       DagStageStatus,
+    pub rows_output:  usize,
+    pub elapsed_ms:   u64,
+    pub worker_count: usize,
+    pub dependencies: Vec<usize>,
+    pub tables:       Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DagStageStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Skipped,
+}
+
 #[derive(Default)]
 pub struct MetricsRegistry {
     counters:   Mutex<HashMap<String, u64>>,
     gauges:     Mutex<HashMap<String, f64>>,
     histograms: Mutex<HashMap<String, HistogramData>>,
     jobs:       Mutex<Vec<JobRecord>>,
+    dag_stages: Mutex<Vec<DagStageRecord>>,
 }
 
 impl MetricsRegistry {
@@ -236,6 +260,51 @@ impl MetricsRegistry {
             "gauges":    *self.gauges.lock().unwrap(),
             "active_jobs": self.active_jobs().len(),
             "job_history": self.job_history(10),
+            "dag_stages": *self.dag_stages.lock().unwrap(),
+        })
+    }
+
+    // ── DAG stage visualization ───────────────────────────────────────────────
+
+    /// Record a completed DAG stage for visualization.
+    pub fn record_dag_stage(&self, stage: DagStageRecord) {
+        self.dag_stages.lock().unwrap().push(stage);
+    }
+
+    /// Get all DAG stages for a specific query.
+    pub fn dag_stages_for_query(&self, query_id: &str) -> Vec<DagStageRecord> {
+        self.dag_stages.lock().unwrap().iter()
+            .filter(|s| s.query_id == query_id)
+            .cloned()
+            .collect()
+    }
+
+    /// Export DAG stage graph as JSON for UI consumption.
+    pub fn dag_graph_json(&self, query_id: &str) -> serde_json::Value {
+        let stages = self.dag_stages_for_query(query_id);
+        let nodes: Vec<serde_json::Value> = stages.iter().map(|s| {
+            serde_json::json!({
+                "id": s.stage_id,
+                "name": s.stage_name,
+                "status": format!("{:?}", s.status),
+                "rows_output": s.rows_output,
+                "elapsed_ms": s.elapsed_ms,
+                "worker_count": s.worker_count,
+                "dependencies": s.dependencies,
+            })
+        }).collect();
+        let edges: Vec<serde_json::Value> = stages.iter().flat_map(|s| {
+            s.dependencies.iter().map(move |dep| {
+                serde_json::json!({
+                    "from": dep,
+                    "to": s.stage_id,
+                })
+            })
+        }).collect();
+        serde_json::json!({
+            "query_id": query_id,
+            "nodes": nodes,
+            "edges": edges,
         })
     }
 }
@@ -316,6 +385,44 @@ mod tests {
         assert_eq!(reg.counter("jobs.failed"), 1);
         let hist = reg.job_history(10);
         assert_eq!(hist[0].state, JobState::Failed);
+    }
+
+    #[test]
+    fn test_dag_stage_recording() {
+        let reg = MetricsRegistry::new();
+        reg.record_dag_stage(DagStageRecord {
+            query_id: "q-1".into(),
+            stage_id: 0,
+            stage_name: "Scan orders".into(),
+            status: DagStageStatus::Completed,
+            rows_output: 1000,
+            elapsed_ms: 50,
+            worker_count: 4,
+            dependencies: vec![],
+            tables: vec!["orders".into()],
+        });
+        reg.record_dag_stage(DagStageRecord {
+            query_id: "q-1".into(),
+            stage_id: 1,
+            stage_name: "Shuffle HashBy(region)".into(),
+            status: DagStageStatus::Completed,
+            rows_output: 1000,
+            elapsed_ms: 120,
+            worker_count: 4,
+            dependencies: vec![0],
+            tables: vec!["orders".into()],
+        });
+
+        let stages = reg.dag_stages_for_query("q-1");
+        assert_eq!(stages.len(), 2);
+
+        let graph = reg.dag_graph_json("q-1");
+        let nodes = graph["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 2);
+        let edges = graph["edges"].as_array().unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0]["from"], 0);
+        assert_eq!(edges[0]["to"], 1);
     }
 
     #[test]

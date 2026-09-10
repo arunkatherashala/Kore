@@ -7,6 +7,7 @@ edition = "2021"
 kore-core       = { workspace = true }
 kore-join       = { workspace = true }
 kore-window     = { workspace = true }
+kore-catalog    = { path = "../kore-catalog" }
 kore-spill      = { path = "../kore-spill" }
 kore-store      = { path = "../kore-store" }
 kore-delta      = { path = "../kore-delta" }

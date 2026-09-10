@@ -53,6 +53,7 @@ impl Default for ShuffleStore {
     fn default() -> Self { Self::new() }
 }
 
+#[allow(dead_code)]
 impl ShuffleStore {
     /// In-memory only (spill disabled). Used by tests + default cluster.
     pub fn new() -> Self {
@@ -114,7 +115,7 @@ impl ShuffleStore {
             Entry::InMem(block)
         };
         {
-            let mut map = self.inner.lock().unwrap();
+            let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             map.entry(key).or_default().push(entry);
         }
         // Broadcast: any reducer waiting on any partition should re-check.
@@ -127,7 +128,9 @@ impl ShuffleStore {
         partition: usize,
         block: &DataBlock,
     ) -> std::io::Result<SpillRef> {
-        let dir = self.spill_dir.as_ref().expect("spill_dir must be Some for spill");
+        let dir = self.spill_dir.as_ref().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "spill_dir must be Some for spill")
+        })?;
         let path = dir.join(format!(
             "kshuf-{shuffle_id}-p{partition}-{}.msg",
             spill_seq_next()
@@ -148,7 +151,7 @@ impl ShuffleStore {
     /// Snapshot the current count for a key without blocking.
     pub fn count(&self, shuffle_id: &str, partition: usize) -> usize {
         let key = (shuffle_id.to_string(), partition);
-        self.inner.lock().unwrap()
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
             .get(&key)
             .map(|v| v.len())
             .unwrap_or(0)
@@ -173,7 +176,7 @@ impl ShuffleStore {
         let entries = loop {
             if self.count(shuffle_id, partition) >= expected {
                 let key = (shuffle_id.to_string(), partition);
-                let mut map = self.inner.lock().unwrap();
+                let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
                 break map.remove(&key)?;
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -218,11 +221,11 @@ impl ShuffleStore {
     }
 
     /// Number of distinct (shuffle_id, partition) keys currently held.
-    pub fn key_count(&self) -> usize { self.inner.lock().unwrap().len() }
+    pub fn key_count(&self) -> usize { self.inner.lock().unwrap_or_else(|e| e.into_inner()).len() }
 
     /// Drop all entries for one shuffle_id (freeing memory + spill files).
     pub fn drop_shuffle(&self, shuffle_id: &str) {
-        let mut map = self.inner.lock().unwrap();
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let removed: Vec<Vec<Entry>> = map
             .iter()
             .filter(|((sid, _), _)| sid == shuffle_id)
@@ -237,6 +240,7 @@ impl ShuffleStore {
     }
 }
 
+#[allow(dead_code)]
 fn cheap_ref(e: &Entry) -> Entry {
     match e {
         Entry::InMem(_) => Entry::InMem(DataBlock::empty()),   // just a marker; not used to read

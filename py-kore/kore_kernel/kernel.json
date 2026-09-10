@@ -1,0 +1,5 @@
+{
+  "argv": ["python", "-m", "kore_kernel", "-f", "{connection_file}"],
+  "display_name": "KORE SQL",
+  "language": "sql"
+}

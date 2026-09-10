@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-worker
+  labels:
+    app: kore-worker
+    release: {{ .Release.Name }}
+spec:
+  serviceName: {{ .Release.Name }}-worker
+  replicas: {{ .Values.worker.replicas }}
+  selector:
+    matchLabels:
+      app: kore-worker
+      release: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: kore-worker
+        release: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: kore-worker
+          image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
+          imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
+          command: ["kore-worker"]
+          args:
+            - "--coordinator"
+            - "{{ .Release.Name }}-coordinator:{{ .Values.coordinator.service.port }}"
+          ports:
+            - name: worker
+              containerPort: {{ .Values.worker.port }}
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+  {{- if .Values.worker.storage.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: worker-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.worker.storage.storageClass }}
+        storageClassName: {{ .Values.worker.storage.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.worker.storage.size }}
+  {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-worker
+  labels:
+    app: kore-worker
+    release: {{ .Release.Name }}
+spec:
+  clusterIP: None
+  ports:
+    - port: {{ .Values.worker.port }}
+      targetPort: worker
+      protocol: TCP
+      name: worker
+  selector:
+    app: kore-worker
+    release: {{ .Release.Name }}

@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn test_rollup() {
-        let mut ctx = KqlContext::new();
+        let ctx = KqlContext::new();
         let block = regions();
         let result = rollup(&block, &ctx, "sales", &["region".to_string()], "SUM(revenue) AS total").unwrap();
         // ROLLUP(region): GROUP BY region + GROUP BY () = 2 levels

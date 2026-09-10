@@ -8,7 +8,8 @@ name = "kore_python"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-kore-core = { path = "../kore-core" }
-kore-sql  = { path = "../kore-sql" }
-serde_json = { workspace = true }
-libc = { workspace = true }
+kore-core    = { path = "../kore-core" }
+kore-sql     = { path = "../kore-sql" }
+kore-parquet = { path = "../kore-parquet" }
+serde_json   = { workspace = true }
+libc         = { workspace = true }

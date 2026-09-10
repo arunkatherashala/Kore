@@ -8,18 +8,25 @@ pub enum Token {
     Select, From, Where, Join, On, Inner, Left, Full, Outer, Right,
     As, Group, By, Order, Asc, Desc, Limit, And, Or, Not, Distinct,
     Count, Sum, Avg, Min, Max, Is, Null, Having, Union, All, With,
-    Like, In, Case, When, Then, Else, End, Between,
-    Intersect, Except, Merge, Extract,
+    Like, ILike, In, Case, When, Then, Else, End, Between,
+    Intersect, Except, Merge, Extract, Cross,
+    Create, Drop, View, Temp,
+    // ─── Spark SQL keywords ──────────────────────────────────────
+    Array, Map, Explode, Pivot, Unpivot, Lateral, For,
     // ─── Window function keywords ─────────────────────────────────
     Over, Partition, Rows, Range, Unbounded, Preceding, Following, Current,
     // ─── Punctuation / operators ──────────────────────────────────
     Star, Comma, Dot, LParen, RParen, Semicolon,
     Eq, Ne, Lt, Le, Gt, Ge, Plus, Minus, Slash, Percent,
+    Concat,  // ||
+    LBracket, RBracket,  // [ ]
     // ─── Literals ─────────────────────────────────────────────────
     Ident(String),
     Int(i64),
     Float(f64),
     Str(String),
+    /// Query hint: `/*+ BROADCAST(t) */` → Hint("BROADCAST(t)")
+    Hint(String),
     // ─── Meta ─────────────────────────────────────────────────────
     Eof,
 }
@@ -47,17 +54,29 @@ impl Lexer {
 
     fn peek(&self) -> Option<char> { self.chars.get(self.pos).copied() }
     fn peek2(&self) -> Option<char> { self.chars.get(self.pos + 1).copied() }
+    #[allow(dead_code)]
     fn advance(&mut self) -> char {
         let c = self.chars[self.pos]; self.pos += 1; c
     }
 
     fn skip_whitespace_and_comments(&mut self) {
         loop {
-            // whitespace
             while self.peek().map_or(false, |c| c.is_whitespace()) { self.pos += 1; }
-            // single-line comment `--`
             if self.peek() == Some('-') && self.peek2() == Some('-') {
                 while self.peek().map_or(false, |c| c != '\n') { self.pos += 1; }
+            } else if self.peek() == Some('/') && self.peek2() == Some('*') {
+                // Block comment — but NOT hint (/*+ is handled in next())
+                if self.chars.get(self.pos + 2).copied() == Some('+') {
+                    break; // let next() handle it as a Hint token
+                }
+                self.pos += 2;
+                while self.pos + 1 < self.chars.len() {
+                    if self.chars[self.pos] == '*' && self.chars[self.pos + 1] == '/' {
+                        self.pos += 2;
+                        break;
+                    }
+                    self.pos += 1;
+                }
             } else {
                 break;
             }
@@ -76,8 +95,26 @@ impl Lexer {
             ';'  => { self.pos += 1; Token::Semicolon }
             '+'  => { self.pos += 1; Token::Plus }
             '-'  => { self.pos += 1; Token::Minus }
-            '/'  => { self.pos += 1; Token::Slash }
+            '/'  => {
+                // /*+ ... */ → Hint token
+                if self.peek2() == Some('*') && self.chars.get(self.pos + 2).copied() == Some('+') {
+                    self.pos += 3; // skip /*+
+                    while self.peek().map_or(false, |c| c.is_whitespace()) { self.pos += 1; }
+                    let start = self.pos;
+                    while self.pos + 1 < self.chars.len() {
+                        if self.chars[self.pos] == '*' && self.chars[self.pos + 1] == '/' { break; }
+                        self.pos += 1;
+                    }
+                    let hint: String = self.chars[start..self.pos].iter().collect();
+                    self.pos += 2; // skip */
+                    Token::Hint(hint.trim().to_string())
+                } else {
+                    self.pos += 1; Token::Slash
+                }
+            }
             '%'  => { self.pos += 1; Token::Percent }
+            '['  => { self.pos += 1; Token::LBracket }
+            ']'  => { self.pos += 1; Token::RBracket }
             '='  => { self.pos += 1; Token::Eq }
             '!'  if self.peek2() == Some('=') => { self.pos += 2; Token::Ne }
             '<'  => { if self.peek2() == Some('=') { self.pos += 2; Token::Le }
@@ -86,6 +123,7 @@ impl Lexer {
             '>'  => { if self.peek2() == Some('=') { self.pos += 2; Token::Ge }
                       else { self.pos += 1; Token::Gt } }
             '\'' => self.read_str()?,
+            '|' if self.peek2() == Some('|') => { self.pos += 2; Token::Concat }
             c if c.is_ascii_digit() => self.read_number()?,
             c if c.is_alphabetic() || c == '_' => self.read_ident(),
             other => return Err(KoreError::InvalidArgument(format!("unexpected char {:?} at pos {}", other, self.pos))),
@@ -170,7 +208,8 @@ impl Lexer {
             "UNION"    => Token::Union,
             "ALL"      => Token::All,
             "WITH"     => Token::With,
-            "LIKE"     => Token::Like,
+            "LIKE"      => Token::Like,
+            "ILIKE"     => Token::ILike,
             "IN"       => Token::In,
             "CASE"     => Token::Case,
             "WHEN"     => Token::When,
@@ -191,6 +230,18 @@ impl Lexer {
             "EXCEPT"    => Token::Except,
             "MERGE"     => Token::Merge,
             "EXTRACT"   => Token::Extract,
+            "CROSS"     => Token::Cross,
+            "CREATE"    => Token::Create,
+            "DROP"      => Token::Drop,
+            "VIEW"      => Token::View,
+            "TEMP" | "TEMPORARY" => Token::Temp,
+            "ARRAY"     => Token::Array,
+            "MAP"       => Token::Map,
+            "EXPLODE"   => Token::Explode,
+            "PIVOT"     => Token::Pivot,
+            "UNPIVOT"   => Token::Unpivot,
+            "LATERAL"   => Token::Lateral,
+            "FOR"       => Token::For,
             _           => Token::Ident(s),
         }
     }

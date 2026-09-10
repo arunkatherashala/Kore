@@ -44,7 +44,8 @@ pub struct EncodedGroup {
 pub struct LowCardGroupBy {
     group_cols: Vec<String>,
     agg_col:    String,
-    max_groups: usize,  // product of distinct values per column
+    #[allow(dead_code)]
+    max_groups: usize,
 }
 
 impl LowCardGroupBy {
@@ -56,7 +57,7 @@ impl LowCardGroupBy {
     /// Returns: Vec<(group_keys, sum, count)>
     pub fn execute_sum(&self, block: &DataBlock) -> Vec<(Vec<String>, f64, u64)> {
         // Step 1: Build per-column string → u8 dictionaries
-        let mut dicts: Vec<HashMap<String, u8>> = self.group_cols.iter().map(|col_name| {
+        let dicts: Vec<HashMap<String, u8>> = self.group_cols.iter().map(|col_name| {
             let mut dict: HashMap<String, u8> = HashMap::new();
             if let Some(col) = block.columns.iter().find(|c| c.name == *col_name) {
                 if let ColumnData::Str(v) = &col.data {
@@ -151,7 +152,7 @@ impl LowCardGroupBy {
         }).collect();
 
         let mut result = Vec::new();
-        let mut stride = 1usize;
+        let _stride = 1usize;
         for (gid, (sum, count)) in merged.iter().enumerate() {
             if *count == 0 { continue; }
             // Decode gid to group labels

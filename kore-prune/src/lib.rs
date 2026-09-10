@@ -15,7 +15,6 @@
 //! For a table with N partitions and a selective predicate, pruning can
 //! reduce I/O by 90%+ on sorted or range-partitioned data.
 
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use kore_core::{ColumnData, DataBlock};
 

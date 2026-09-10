@@ -83,7 +83,7 @@ impl Coordinator {
     pub fn plan_sql(&self, sql: &str) -> Result<(PhysicalPlan, Dispatch), KoreError> {
         let query = parse_query(sql)
             .map_err(|e| KoreError::InvalidArgument(format!("parse: {e:?}")))?;
-        let catalog = self.catalog.lock().unwrap();
+        let catalog = self.catalog.lock().unwrap_or_else(|e| e.into_inner());
         let plan = plan_query(&query, &catalog)
             .ok_or_else(|| KoreError::InvalidArgument("empty query body".into()))?;
         drop(catalog); // release the lock before dispatch classification

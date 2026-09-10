@@ -161,7 +161,7 @@ pub fn vectorized_filter(block: &DataBlock, filter: &VecFilter) -> Vec<usize> {
 }
 
 fn filter_range(
-    block: &DataBlock,
+    _block: &DataBlock,
     filter: &VecFilter,
     col_refs: &[Option<&Column>],
     row_start: usize,
@@ -398,6 +398,497 @@ pub fn vectorized_group_by(
     }).collect()
 }
 
+// ─── Vectorized Hash Join ─────────────────────────────────────────────────────
+
+/// FNV-1a hash for a column value at a given row.
+#[inline(always)]
+fn fnv1a_column_value(col: &Column, row: usize) -> u64 {
+    const FNV_OFFSET: u64 = 14695981039346656037;
+    const FNV_PRIME: u64 = 1099511628211;
+    match &col.data {
+        ColumnData::Int64(v) => {
+            let val = v.get(row).and_then(|x| *x).unwrap_or(i64::MIN);
+            let bytes = val.to_le_bytes();
+            let mut h = FNV_OFFSET;
+            for b in &bytes { h ^= *b as u64; h = h.wrapping_mul(FNV_PRIME); }
+            h
+        }
+        ColumnData::Float64(v) => {
+            let val = v.get(row).and_then(|x| *x).unwrap_or(f64::NAN);
+            let bytes = val.to_bits().to_le_bytes();
+            let mut h = FNV_OFFSET;
+            for b in &bytes { h ^= *b as u64; h = h.wrapping_mul(FNV_PRIME); }
+            h
+        }
+        ColumnData::Str(v) => {
+            let s = v.get(row).and_then(|x| x.as_deref()).unwrap_or("");
+            let mut h = FNV_OFFSET;
+            for b in s.bytes() { h ^= b as u64; h = h.wrapping_mul(FNV_PRIME); }
+            h
+        }
+        ColumnData::StrDict { codes, dict } => {
+            let c = codes.get(row).copied().unwrap_or(u8::MAX);
+            let s = if c == u8::MAX { "" } else { dict.get(c as usize).map(|x| x.as_str()).unwrap_or("") };
+            let mut h = FNV_OFFSET;
+            for b in s.bytes() { h ^= b as u64; h = h.wrapping_mul(FNV_PRIME); }
+            h
+        }
+        ColumnData::Bool(v) => {
+            let val = v.get(row).and_then(|x| *x).unwrap_or(false) as u8;
+            let mut h = FNV_OFFSET;
+            h ^= val as u64; h = h.wrapping_mul(FNV_PRIME);
+            h
+        }
+    }
+}
+
+/// Compare two column values for equality (used in hash join probe).
+#[inline]
+fn column_values_eq(left_col: &Column, left_row: usize, right_col: &Column, right_row: usize) -> bool {
+    match (&left_col.data, &right_col.data) {
+        (ColumnData::Int64(lv), ColumnData::Int64(rv)) => {
+            lv.get(left_row).and_then(|x| *x) == rv.get(right_row).and_then(|x| *x)
+        }
+        (ColumnData::Float64(lv), ColumnData::Float64(rv)) => {
+            match (lv.get(left_row).and_then(|x| *x), rv.get(right_row).and_then(|x| *x)) {
+                (Some(a), Some(b)) => (a - b).abs() < 1e-10,
+                (None, None) => true,
+                _ => false,
+            }
+        }
+        (ColumnData::Str(lv), ColumnData::Str(rv)) => {
+            lv.get(left_row).and_then(|x| x.as_deref()) == rv.get(right_row).and_then(|x| x.as_deref())
+        }
+        (ColumnData::Int64(lv), ColumnData::Float64(rv)) => {
+            match (lv.get(left_row).and_then(|x| *x), rv.get(right_row).and_then(|x| *x)) {
+                (Some(a), Some(b)) => (a as f64 - b).abs() < 1e-10,
+                _ => false,
+            }
+        }
+        (ColumnData::Float64(lv), ColumnData::Int64(rv)) => {
+            match (lv.get(left_row).and_then(|x| *x), rv.get(right_row).and_then(|x| *x)) {
+                (Some(a), Some(b)) => (a - b as f64).abs() < 1e-10,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Vectorized hash join (inner join): build on right, probe from left in batches.
+///
+/// Uses FNV-1a hashing for the build phase and processes the probe side
+/// in batches of BATCH_SIZE for cache-friendly access patterns.
+pub fn vectorized_hash_join(
+    left: &DataBlock,
+    right: &DataBlock,
+    left_key: &str,
+    right_key: &str,
+) -> DataBlock {
+    let left_col = left.columns.iter().find(|c| c.name == left_key);
+    let right_col = right.columns.iter().find(|c| c.name == right_key);
+
+    let (left_col, right_col) = match (left_col, right_col) {
+        (Some(l), Some(r)) => (l, r),
+        _ => return DataBlock::empty(),
+    };
+
+    // Build phase: hash right side into HashMap<hash, Vec<row_idx>>
+    let mut build_table: HashMap<u64, Vec<usize>> = HashMap::with_capacity(right.num_rows);
+    for row in 0..right.num_rows {
+        let h = fnv1a_column_value(right_col, row);
+        build_table.entry(h).or_default().push(row);
+    }
+
+    // Probe phase: scan left in BATCH_SIZE chunks, collect (left_idx, right_idx) pairs
+    let mut left_indices: Vec<usize> = Vec::new();
+    let mut right_indices: Vec<usize> = Vec::new();
+
+    let n_left = left.num_rows;
+    let mut batch_start = 0;
+    while batch_start < n_left {
+        let batch_end = (batch_start + BATCH_SIZE).min(n_left);
+
+        for left_row in batch_start..batch_end {
+            let h = fnv1a_column_value(left_col, left_row);
+            if let Some(candidates) = build_table.get(&h) {
+                for &right_row in candidates {
+                    if column_values_eq(left_col, left_row, right_col, right_row) {
+                        left_indices.push(left_row);
+                        right_indices.push(right_row);
+                    }
+                }
+            }
+        }
+
+        batch_start = batch_end;
+    }
+
+    // Build output: all left columns + all right columns (except right join key)
+    let mut out_columns: Vec<Column> = Vec::new();
+
+    for col in &left.columns {
+        out_columns.push(Column {
+            name: col.name.clone(),
+            data: col.data.take_rows(&left_indices),
+        });
+    }
+    for col in &right.columns {
+        if col.name == right_key { continue; }
+        let out_name = if left.columns.iter().any(|c| c.name == col.name) {
+            format!("{}_right", col.name)
+        } else {
+            col.name.clone()
+        };
+        out_columns.push(Column {
+            name: out_name,
+            data: col.data.take_rows(&right_indices),
+        });
+    }
+
+    DataBlock { columns: out_columns, num_rows: left_indices.len() }
+}
+
+// ─── Vectorized Sort-Merge Join ──────────────────────────────────────────────
+
+/// Vectorized sort-merge join (inner join): sort both sides, then two-pointer merge.
+///
+/// Handles duplicate keys by tracking run boundaries and producing the
+/// cross product for matching key groups, processed in batches.
+pub fn vectorized_sort_merge_join(
+    left: &DataBlock,
+    right: &DataBlock,
+    left_key: &str,
+    right_key: &str,
+) -> DataBlock {
+    // Sort both sides by key column
+    let left_sorted = match left.sort_by(left_key, true) {
+        Ok(b) => b,
+        Err(_) => return DataBlock::empty(),
+    };
+    let right_sorted = match right.sort_by(right_key, true) {
+        Ok(b) => b,
+        Err(_) => return DataBlock::empty(),
+    };
+
+    let left_col = match left_sorted.columns.iter().find(|c| c.name == left_key) {
+        Some(c) => c,
+        None => return DataBlock::empty(),
+    };
+    let right_col = match right_sorted.columns.iter().find(|c| c.name == right_key) {
+        Some(c) => c,
+        None => return DataBlock::empty(),
+    };
+
+    let n_left = left_sorted.num_rows;
+    let n_right = right_sorted.num_rows;
+
+    let mut left_indices: Vec<usize> = Vec::new();
+    let mut right_indices: Vec<usize> = Vec::new();
+
+    let mut li = 0usize;
+    let mut ri = 0usize;
+
+    while li < n_left && ri < n_right {
+        let cmp = compare_column_values(left_col, li, right_col, ri);
+        match cmp {
+            std::cmp::Ordering::Less => { li += 1; }
+            std::cmp::Ordering::Greater => { ri += 1; }
+            std::cmp::Ordering::Equal => {
+                // Find the extent of duplicates on both sides
+                let li_start = li;
+                while li < n_left && compare_column_values(left_col, li, left_col, li_start) == std::cmp::Ordering::Equal {
+                    li += 1;
+                }
+                let ri_start = ri;
+                while ri < n_right && compare_column_values(right_col, ri, right_col, ri_start) == std::cmp::Ordering::Equal {
+                    ri += 1;
+                }
+                // Cross-product of matching groups, in batches
+                let mut pair_count = 0;
+                for l in li_start..li {
+                    for r in ri_start..ri {
+                        left_indices.push(l);
+                        right_indices.push(r);
+                        pair_count += 1;
+                        if pair_count % BATCH_SIZE == 0 {
+                            // Batch boundary — continue (allows future async yield points)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Build output from sorted blocks
+    let mut out_columns: Vec<Column> = Vec::new();
+
+    for col in &left_sorted.columns {
+        out_columns.push(Column {
+            name: col.name.clone(),
+            data: col.data.take_rows(&left_indices),
+        });
+    }
+    for col in &right_sorted.columns {
+        if col.name == right_key { continue; }
+        let out_name = if left_sorted.columns.iter().any(|c| c.name == col.name) {
+            format!("{}_right", col.name)
+        } else {
+            col.name.clone()
+        };
+        out_columns.push(Column {
+            name: out_name,
+            data: col.data.take_rows(&right_indices),
+        });
+    }
+
+    DataBlock { columns: out_columns, num_rows: left_indices.len() }
+}
+
+/// Compare column values at given rows for ordering (used in sort-merge join).
+fn compare_column_values(col_a: &Column, row_a: usize, col_b: &Column, row_b: usize) -> std::cmp::Ordering {
+    match (&col_a.data, &col_b.data) {
+        (ColumnData::Int64(va), ColumnData::Int64(vb)) => {
+            let a = va.get(row_a).and_then(|x| *x);
+            let b = vb.get(row_b).and_then(|x| *x);
+            match (a, b) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, _) => std::cmp::Ordering::Less,
+                (_, None) => std::cmp::Ordering::Greater,
+            }
+        }
+        (ColumnData::Float64(va), ColumnData::Float64(vb)) => {
+            let a = va.get(row_a).and_then(|x| *x);
+            let b = vb.get(row_b).and_then(|x| *x);
+            match (a, b) {
+                (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, _) => std::cmp::Ordering::Less,
+                (_, None) => std::cmp::Ordering::Greater,
+            }
+        }
+        (ColumnData::Str(va), ColumnData::Str(vb)) => {
+            let a = va.get(row_a).and_then(|x| x.as_deref());
+            let b = vb.get(row_b).and_then(|x| x.as_deref());
+            match (a, b) {
+                (Some(x), Some(y)) => x.cmp(y),
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, _) => std::cmp::Ordering::Less,
+                (_, None) => std::cmp::Ordering::Greater,
+            }
+        }
+        (ColumnData::StrDict { codes: ca, dict: da }, ColumnData::StrDict { codes: cb, dict: db }) => {
+            let a_code = ca.get(row_a).copied().unwrap_or(u8::MAX);
+            let b_code = cb.get(row_b).copied().unwrap_or(u8::MAX);
+            let a_s = if a_code == u8::MAX { None } else { da.get(a_code as usize).map(|s| s.as_str()) };
+            let b_s = if b_code == u8::MAX { None } else { db.get(b_code as usize).map(|s| s.as_str()) };
+            match (a_s, b_s) {
+                (Some(x), Some(y)) => x.cmp(y),
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, _) => std::cmp::Ordering::Less,
+                (_, None) => std::cmp::Ordering::Greater,
+            }
+        }
+        _ => std::cmp::Ordering::Equal,
+    }
+}
+
+// ─── Vectorized Window Functions ─────────────────────────────────────────────
+
+/// Window function variants for vectorized computation.
+#[derive(Debug, Clone)]
+pub enum VecWindowFn {
+    RowNumber,
+    Rank,
+    DenseRank,
+    Lag(usize),
+    Lead(usize),
+    RunningSum,
+    RunningAvg,
+}
+
+/// Vectorized window function: partition, sort within partition, compute window values.
+///
+/// Returns the original block with an additional column `_window` containing
+/// the computed window function result as Float64.
+pub fn vectorized_window(
+    block: &DataBlock,
+    partition_col: Option<&str>,
+    order_col: &str,
+    func: VecWindowFn,
+) -> DataBlock {
+    if block.num_rows == 0 {
+        let mut cols = block.columns.clone();
+        cols.push(Column::float64("_window", vec![]));
+        return DataBlock { columns: cols, num_rows: 0 };
+    }
+
+    // Build partition groups: Vec<Vec<usize>> where each inner vec is sorted row indices
+    let partitions = build_partitions(block, partition_col, order_col);
+
+    // Compute window function values, placing results at original row positions
+    let mut window_values: Vec<Option<f64>> = vec![None; block.num_rows];
+
+    let order_col_ref = block.columns.iter().find(|c| c.name == order_col);
+
+    for partition in &partitions {
+        compute_window_for_partition(block, partition, order_col_ref, &func, &mut window_values);
+    }
+
+    let mut out_columns = block.columns.clone();
+    out_columns.push(Column::float64("_window", window_values));
+    DataBlock { columns: out_columns, num_rows: block.num_rows }
+}
+
+/// Group row indices by partition column value, sorted by order column within each partition.
+fn build_partitions(block: &DataBlock, partition_col: Option<&str>, order_col: &str) -> Vec<Vec<usize>> {
+    let all_rows: Vec<usize> = (0..block.num_rows).collect();
+
+    let groups: Vec<Vec<usize>> = match partition_col {
+        None => vec![all_rows],
+        Some(pcol) => {
+            let col = match block.columns.iter().find(|c| c.name == pcol) {
+                Some(c) => c,
+                None => return vec![all_rows],
+            };
+            // Group by partition value using FNV-1a hash
+            let mut map: HashMap<u64, Vec<usize>> = HashMap::new();
+            let mut order: Vec<u64> = Vec::new();
+            for row in 0..block.num_rows {
+                let h = fnv1a_column_value(col, row);
+                if !map.contains_key(&h) { order.push(h); }
+                map.entry(h).or_default().push(row);
+            }
+            order.into_iter().map(|k| map.remove(&k).unwrap()).collect()
+        }
+    };
+
+    // Sort each group by order_col
+    let order_col_ref = block.columns.iter().find(|c| c.name == order_col);
+    groups.into_iter().map(|mut group| {
+        if let Some(ocol) = order_col_ref {
+            group.sort_by(|&a, &b| {
+                compare_column_values_single(ocol, a, ocol, b)
+            });
+        }
+        group
+    }).collect()
+}
+
+/// Compare values within a single column at two row positions.
+fn compare_column_values_single(col: &Column, row_a: usize, _col_b: &Column, row_b: usize) -> std::cmp::Ordering {
+    compare_column_values(col, row_a, col, row_b)
+}
+
+/// Compute window function values for a single partition (already sorted).
+fn compute_window_for_partition(
+    block: &DataBlock,
+    partition: &[usize],
+    order_col: Option<&Column>,
+    func: &VecWindowFn,
+    output: &mut [Option<f64>],
+) {
+    match func {
+        VecWindowFn::RowNumber => {
+            for (i, &row) in partition.iter().enumerate() {
+                output[row] = Some((i + 1) as f64);
+            }
+        }
+
+        VecWindowFn::Rank => {
+            if partition.is_empty() { return; }
+            output[partition[0]] = Some(1.0);
+            for i in 1..partition.len() {
+                let prev = partition[i - 1];
+                let curr = partition[i];
+                let same = match order_col {
+                    Some(c) => compare_column_values(c, prev, c, curr) == std::cmp::Ordering::Equal,
+                    None => true,
+                };
+                if same {
+                    output[curr] = output[prev];
+                } else {
+                    output[curr] = Some((i + 1) as f64);
+                }
+            }
+        }
+
+        VecWindowFn::DenseRank => {
+            if partition.is_empty() { return; }
+            let mut dense = 1.0f64;
+            output[partition[0]] = Some(dense);
+            for i in 1..partition.len() {
+                let prev = partition[i - 1];
+                let curr = partition[i];
+                let same = match order_col {
+                    Some(c) => compare_column_values(c, prev, c, curr) == std::cmp::Ordering::Equal,
+                    None => true,
+                };
+                if !same { dense += 1.0; }
+                output[curr] = Some(dense);
+            }
+        }
+
+        VecWindowFn::Lag(offset) => {
+            for (i, &row) in partition.iter().enumerate() {
+                if i >= *offset {
+                    let source_row = partition[i - offset];
+                    output[row] = get_numeric_value(block, order_col, source_row);
+                } else {
+                    output[row] = None;
+                }
+            }
+        }
+
+        VecWindowFn::Lead(offset) => {
+            for (i, &row) in partition.iter().enumerate() {
+                if i + offset < partition.len() {
+                    let source_row = partition[i + offset];
+                    output[row] = get_numeric_value(block, order_col, source_row);
+                } else {
+                    output[row] = None;
+                }
+            }
+        }
+
+        VecWindowFn::RunningSum => {
+            let mut sum = 0.0f64;
+            for &row in partition {
+                if let Some(val) = get_numeric_value(block, order_col, row) {
+                    sum += val;
+                }
+                output[row] = Some(sum);
+            }
+        }
+
+        VecWindowFn::RunningAvg => {
+            let mut sum = 0.0f64;
+            let mut count = 0u64;
+            for &row in partition {
+                if let Some(val) = get_numeric_value(block, order_col, row) {
+                    sum += val;
+                    count += 1;
+                }
+                output[row] = if count > 0 { Some(sum / count as f64) } else { None };
+            }
+        }
+    }
+}
+
+/// Extract numeric value from the order column at a given row.
+#[inline]
+fn get_numeric_value(_block: &DataBlock, order_col: Option<&Column>, row: usize) -> Option<f64> {
+    match order_col {
+        None => None,
+        Some(col) => match &col.data {
+            ColumnData::Int64(v) => v.get(row).and_then(|x| *x).map(|i| i as f64),
+            ColumnData::Float64(v) => v.get(row).and_then(|x| *x),
+            _ => None,
+        }
+    }
+}
+
 // ─── High-level API ───────────────────────────────────────────────────────────
 
 /// Full pipeline: filter → group by → aggregate, all vectorized.
@@ -474,5 +965,488 @@ mod tests {
         let results = vectorized_group_by(&block, &all_rows, &spec);
         assert_eq!(results.len(), 3);  // 3 distinct categories
         for r in &results { assert_eq!(r.aggs[0].value, 100.0); }  // 100 rows each
+    }
+
+    // ─── Hash Join Tests ─────────────────────────────────────────────────────
+
+    fn make_join_blocks() -> (DataBlock, DataBlock) {
+        let left = DataBlock {
+            num_rows: 5,
+            columns: vec![
+                Column::int64("id", vec![Some(1), Some(2), Some(3), Some(4), Some(5)]),
+                Column::str_col("name", vec![
+                    Some("Alice".into()), Some("Bob".into()), Some("Charlie".into()),
+                    Some("Diana".into()), Some("Eve".into()),
+                ]),
+            ],
+        };
+        let right = DataBlock {
+            num_rows: 4,
+            columns: vec![
+                Column::int64("id", vec![Some(2), Some(3), Some(5), Some(7)]),
+                Column::float64("score", vec![Some(85.0), Some(92.0), Some(78.0), Some(99.0)]),
+            ],
+        };
+        (left, right)
+    }
+
+    #[test]
+    fn test_hash_join_basic() {
+        let (left, right) = make_join_blocks();
+        let result = vectorized_hash_join(&left, &right, "id", "id");
+        assert_eq!(result.num_rows, 3); // ids 2, 3, 5 match
+        let id_col = result.column("id").unwrap();
+        if let ColumnData::Int64(vals) = &id_col.data {
+            let mut ids: Vec<i64> = vals.iter().filter_map(|x| *x).collect();
+            ids.sort();
+            assert_eq!(ids, vec![2, 3, 5]);
+        } else { panic!("expected Int64 column"); }
+    }
+
+    #[test]
+    fn test_hash_join_with_duplicates() {
+        let left = DataBlock {
+            num_rows: 4,
+            columns: vec![
+                Column::int64("key", vec![Some(1), Some(1), Some(2), Some(3)]),
+                Column::str_col("val", vec![
+                    Some("a".into()), Some("b".into()), Some("c".into()), Some("d".into()),
+                ]),
+            ],
+        };
+        let right = DataBlock {
+            num_rows: 3,
+            columns: vec![
+                Column::int64("key", vec![Some(1), Some(1), Some(2)]),
+                Column::float64("score", vec![Some(10.0), Some(20.0), Some(30.0)]),
+            ],
+        };
+        let result = vectorized_hash_join(&left, &right, "key", "key");
+        // left key=1 (2 rows) × right key=1 (2 rows) = 4 matches, plus left key=2 × right key=2 = 1
+        assert_eq!(result.num_rows, 5);
+    }
+
+    #[test]
+    fn test_hash_join_no_matches() {
+        let left = DataBlock {
+            num_rows: 2,
+            columns: vec![
+                Column::int64("id", vec![Some(10), Some(20)]),
+            ],
+        };
+        let right = DataBlock {
+            num_rows: 2,
+            columns: vec![
+                Column::int64("id", vec![Some(30), Some(40)]),
+            ],
+        };
+        let result = vectorized_hash_join(&left, &right, "id", "id");
+        assert_eq!(result.num_rows, 0);
+    }
+
+    #[test]
+    fn test_hash_join_string_keys() {
+        let left = DataBlock {
+            num_rows: 3,
+            columns: vec![
+                Column::str_col("dept", vec![
+                    Some("eng".into()), Some("sales".into()), Some("eng".into()),
+                ]),
+                Column::int64("emp_id", vec![Some(1), Some(2), Some(3)]),
+            ],
+        };
+        let right = DataBlock {
+            num_rows: 2,
+            columns: vec![
+                Column::str_col("dept", vec![Some("eng".into()), Some("hr".into())]),
+                Column::float64("budget", vec![Some(1_000_000.0), Some(500_000.0)]),
+            ],
+        };
+        let result = vectorized_hash_join(&left, &right, "dept", "dept");
+        assert_eq!(result.num_rows, 2); // two "eng" rows from left match
+    }
+
+    #[test]
+    fn test_hash_join_missing_column() {
+        let left = DataBlock {
+            num_rows: 2,
+            columns: vec![Column::int64("a", vec![Some(1), Some(2)])],
+        };
+        let right = DataBlock {
+            num_rows: 2,
+            columns: vec![Column::int64("b", vec![Some(1), Some(2)])],
+        };
+        let result = vectorized_hash_join(&left, &right, "x", "y");
+        assert_eq!(result.num_rows, 0);
+    }
+
+    #[test]
+    fn test_hash_join_large_batch() {
+        let n = 2048; // > BATCH_SIZE to exercise batching
+        let left = DataBlock {
+            num_rows: n,
+            columns: vec![
+                Column::int64("id", (0..n as i64).map(|i| Some(i)).collect()),
+                Column::float64("val", (0..n).map(|i| Some(i as f64 * 1.5)).collect()),
+            ],
+        };
+        let right = DataBlock {
+            num_rows: n,
+            columns: vec![
+                Column::int64("id", (0..n as i64).map(|i| Some(i)).collect()),
+                Column::float64("score", (0..n).map(|i| Some(i as f64 * 2.0)).collect()),
+            ],
+        };
+        let result = vectorized_hash_join(&left, &right, "id", "id");
+        assert_eq!(result.num_rows, n);
+    }
+
+    // ─── Sort-Merge Join Tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_sort_merge_join_basic() {
+        let (left, right) = make_join_blocks();
+        let result = vectorized_sort_merge_join(&left, &right, "id", "id");
+        assert_eq!(result.num_rows, 3); // ids 2, 3, 5 match
+    }
+
+    #[test]
+    fn test_sort_merge_join_with_duplicates() {
+        let left = DataBlock {
+            num_rows: 4,
+            columns: vec![
+                Column::int64("key", vec![Some(1), Some(1), Some(2), Some(3)]),
+                Column::str_col("val", vec![
+                    Some("a".into()), Some("b".into()), Some("c".into()), Some("d".into()),
+                ]),
+            ],
+        };
+        let right = DataBlock {
+            num_rows: 3,
+            columns: vec![
+                Column::int64("key", vec![Some(1), Some(1), Some(2)]),
+                Column::float64("score", vec![Some(10.0), Some(20.0), Some(30.0)]),
+            ],
+        };
+        let result = vectorized_sort_merge_join(&left, &right, "key", "key");
+        assert_eq!(result.num_rows, 5); // 2×2 + 1×1
+    }
+
+    #[test]
+    fn test_sort_merge_join_unsorted_input() {
+        let left = DataBlock {
+            num_rows: 4,
+            columns: vec![
+                Column::int64("id", vec![Some(5), Some(1), Some(3), Some(2)]),
+                Column::str_col("data", vec![
+                    Some("e".into()), Some("a".into()), Some("c".into()), Some("b".into()),
+                ]),
+            ],
+        };
+        let right = DataBlock {
+            num_rows: 3,
+            columns: vec![
+                Column::int64("id", vec![Some(3), Some(1), Some(5)]),
+                Column::float64("v", vec![Some(30.0), Some(10.0), Some(50.0)]),
+            ],
+        };
+        let result = vectorized_sort_merge_join(&left, &right, "id", "id");
+        assert_eq!(result.num_rows, 3); // ids 1, 3, 5 match
+    }
+
+    #[test]
+    fn test_sort_merge_join_no_matches() {
+        let left = DataBlock {
+            num_rows: 2,
+            columns: vec![Column::int64("id", vec![Some(1), Some(2)])],
+        };
+        let right = DataBlock {
+            num_rows: 2,
+            columns: vec![Column::int64("id", vec![Some(3), Some(4)])],
+        };
+        let result = vectorized_sort_merge_join(&left, &right, "id", "id");
+        assert_eq!(result.num_rows, 0);
+    }
+
+    #[test]
+    fn test_sort_merge_join_string_keys() {
+        let left = DataBlock {
+            num_rows: 3,
+            columns: vec![
+                Column::str_col("name", vec![
+                    Some("bob".into()), Some("alice".into()), Some("charlie".into()),
+                ]),
+                Column::int64("age", vec![Some(30), Some(25), Some(35)]),
+            ],
+        };
+        let right = DataBlock {
+            num_rows: 2,
+            columns: vec![
+                Column::str_col("name", vec![Some("alice".into()), Some("charlie".into())]),
+                Column::float64("salary", vec![Some(75000.0), Some(90000.0)]),
+            ],
+        };
+        let result = vectorized_sort_merge_join(&left, &right, "name", "name");
+        assert_eq!(result.num_rows, 2);
+    }
+
+    #[test]
+    fn test_join_results_match() {
+        let (left, right) = make_join_blocks();
+        let hash_result = vectorized_hash_join(&left, &right, "id", "id");
+        let merge_result = vectorized_sort_merge_join(&left, &right, "id", "id");
+        assert_eq!(hash_result.num_rows, merge_result.num_rows);
+    }
+
+    // ─── Window Function Tests ───────────────────────────────────────────────
+
+    fn make_window_block() -> DataBlock {
+        DataBlock {
+            num_rows: 8,
+            columns: vec![
+                Column::str_col("dept", vec![
+                    Some("eng".into()), Some("eng".into()), Some("eng".into()),
+                    Some("sales".into()), Some("sales".into()),
+                    Some("hr".into()), Some("hr".into()), Some("hr".into()),
+                ]),
+                Column::int64("salary", vec![
+                    Some(100), Some(120), Some(110),
+                    Some(90), Some(95),
+                    Some(80), Some(85), Some(82),
+                ]),
+            ],
+        }
+    }
+
+    #[test]
+    fn test_window_row_number_no_partition() {
+        let block = DataBlock {
+            num_rows: 5,
+            columns: vec![
+                Column::int64("val", vec![Some(50), Some(30), Some(40), Some(10), Some(20)]),
+            ],
+        };
+        let result = vectorized_window(&block, None, "val", VecWindowFn::RowNumber);
+        assert_eq!(result.num_rows, 5);
+        let win_col = result.column("_window").unwrap();
+        if let ColumnData::Float64(vals) = &win_col.data {
+            // Sorted order: 10(row3), 20(row4), 30(row1), 40(row2), 50(row0)
+            assert_eq!(vals[3], Some(1.0)); // val=10 is rank 1
+            assert_eq!(vals[4], Some(2.0)); // val=20 is rank 2
+            assert_eq!(vals[1], Some(3.0)); // val=30 is rank 3
+            assert_eq!(vals[2], Some(4.0)); // val=40 is rank 4
+            assert_eq!(vals[0], Some(5.0)); // val=50 is rank 5
+        } else { panic!("expected Float64"); }
+    }
+
+    #[test]
+    fn test_window_row_number_with_partition() {
+        let block = make_window_block();
+        let result = vectorized_window(&block, Some("dept"), "salary", VecWindowFn::RowNumber);
+        let win_col = result.column("_window").unwrap();
+        if let ColumnData::Float64(vals) = &win_col.data {
+            // eng partition (rows 0,1,2) sorted by salary: 100,110,120 → row_numbers 1,2,3
+            // Original row 0 (salary=100) → row_number 1
+            assert_eq!(vals[0], Some(1.0));
+            // Original row 2 (salary=110) → row_number 2
+            assert_eq!(vals[2], Some(2.0));
+            // Original row 1 (salary=120) → row_number 3
+            assert_eq!(vals[1], Some(3.0));
+        } else { panic!("expected Float64"); }
+    }
+
+    #[test]
+    fn test_window_rank() {
+        let block = DataBlock {
+            num_rows: 5,
+            columns: vec![
+                Column::int64("score", vec![Some(100), Some(90), Some(100), Some(80), Some(90)]),
+            ],
+        };
+        let result = vectorized_window(&block, None, "score", VecWindowFn::Rank);
+        let win_col = result.column("_window").unwrap();
+        if let ColumnData::Float64(vals) = &win_col.data {
+            // Sorted: 80(row3), 90(row1), 90(row4), 100(row0), 100(row2)
+            assert_eq!(vals[3], Some(1.0)); // 80 → rank 1
+            // 90s share rank 2
+            assert_eq!(vals[1], Some(2.0));
+            assert_eq!(vals[4], Some(2.0));
+            // 100s share rank 4
+            assert_eq!(vals[0], Some(4.0));
+            assert_eq!(vals[2], Some(4.0));
+        } else { panic!("expected Float64"); }
+    }
+
+    #[test]
+    fn test_window_dense_rank() {
+        let block = DataBlock {
+            num_rows: 5,
+            columns: vec![
+                Column::int64("score", vec![Some(100), Some(90), Some(100), Some(80), Some(90)]),
+            ],
+        };
+        let result = vectorized_window(&block, None, "score", VecWindowFn::DenseRank);
+        let win_col = result.column("_window").unwrap();
+        if let ColumnData::Float64(vals) = &win_col.data {
+            // Sorted: 80(row3), 90(row1), 90(row4), 100(row0), 100(row2)
+            assert_eq!(vals[3], Some(1.0)); // 80 → dense_rank 1
+            assert_eq!(vals[1], Some(2.0)); // 90 → dense_rank 2
+            assert_eq!(vals[4], Some(2.0)); // 90 → dense_rank 2
+            assert_eq!(vals[0], Some(3.0)); // 100 → dense_rank 3
+            assert_eq!(vals[2], Some(3.0)); // 100 → dense_rank 3
+        } else { panic!("expected Float64"); }
+    }
+
+    #[test]
+    fn test_window_lag() {
+        let block = DataBlock {
+            num_rows: 5,
+            columns: vec![
+                Column::int64("val", vec![Some(10), Some(20), Some(30), Some(40), Some(50)]),
+            ],
+        };
+        let result = vectorized_window(&block, None, "val", VecWindowFn::Lag(1));
+        let win_col = result.column("_window").unwrap();
+        if let ColumnData::Float64(vals) = &win_col.data {
+            // Already sorted (10,20,30,40,50). Lag(1) gives previous value in sorted order.
+            assert_eq!(vals[0], None);       // first in sort → no lag
+            assert_eq!(vals[1], Some(10.0)); // lag of 20 = 10
+            assert_eq!(vals[2], Some(20.0)); // lag of 30 = 20
+            assert_eq!(vals[3], Some(30.0)); // lag of 40 = 30
+            assert_eq!(vals[4], Some(40.0)); // lag of 50 = 40
+        } else { panic!("expected Float64"); }
+    }
+
+    #[test]
+    fn test_window_lead() {
+        let block = DataBlock {
+            num_rows: 5,
+            columns: vec![
+                Column::int64("val", vec![Some(10), Some(20), Some(30), Some(40), Some(50)]),
+            ],
+        };
+        let result = vectorized_window(&block, None, "val", VecWindowFn::Lead(1));
+        let win_col = result.column("_window").unwrap();
+        if let ColumnData::Float64(vals) = &win_col.data {
+            assert_eq!(vals[0], Some(20.0)); // lead of 10 = 20
+            assert_eq!(vals[1], Some(30.0)); // lead of 20 = 30
+            assert_eq!(vals[2], Some(40.0)); // lead of 30 = 40
+            assert_eq!(vals[3], Some(50.0)); // lead of 40 = 50
+            assert_eq!(vals[4], None);       // last in sort → no lead
+        } else { panic!("expected Float64"); }
+    }
+
+    #[test]
+    fn test_window_lag_offset_2() {
+        let block = DataBlock {
+            num_rows: 5,
+            columns: vec![
+                Column::int64("val", vec![Some(10), Some(20), Some(30), Some(40), Some(50)]),
+            ],
+        };
+        let result = vectorized_window(&block, None, "val", VecWindowFn::Lag(2));
+        let win_col = result.column("_window").unwrap();
+        if let ColumnData::Float64(vals) = &win_col.data {
+            assert_eq!(vals[0], None);
+            assert_eq!(vals[1], None);
+            assert_eq!(vals[2], Some(10.0));
+            assert_eq!(vals[3], Some(20.0));
+            assert_eq!(vals[4], Some(30.0));
+        } else { panic!("expected Float64"); }
+    }
+
+    #[test]
+    fn test_window_running_sum() {
+        let block = DataBlock {
+            num_rows: 4,
+            columns: vec![
+                Column::int64("val", vec![Some(10), Some(20), Some(30), Some(40)]),
+            ],
+        };
+        let result = vectorized_window(&block, None, "val", VecWindowFn::RunningSum);
+        let win_col = result.column("_window").unwrap();
+        if let ColumnData::Float64(vals) = &win_col.data {
+            assert_eq!(vals[0], Some(10.0));  // 10
+            assert_eq!(vals[1], Some(30.0));  // 10+20
+            assert_eq!(vals[2], Some(60.0));  // 10+20+30
+            assert_eq!(vals[3], Some(100.0)); // 10+20+30+40
+        } else { panic!("expected Float64"); }
+    }
+
+    #[test]
+    fn test_window_running_avg() {
+        let block = DataBlock {
+            num_rows: 4,
+            columns: vec![
+                Column::int64("val", vec![Some(10), Some(20), Some(30), Some(40)]),
+            ],
+        };
+        let result = vectorized_window(&block, None, "val", VecWindowFn::RunningAvg);
+        let win_col = result.column("_window").unwrap();
+        if let ColumnData::Float64(vals) = &win_col.data {
+            assert!((vals[0].unwrap() - 10.0).abs() < 0.01);  // 10/1
+            assert!((vals[1].unwrap() - 15.0).abs() < 0.01);  // 30/2
+            assert!((vals[2].unwrap() - 20.0).abs() < 0.01);  // 60/3
+            assert!((vals[3].unwrap() - 25.0).abs() < 0.01);  // 100/4
+        } else { panic!("expected Float64"); }
+    }
+
+    #[test]
+    fn test_window_running_sum_partitioned() {
+        let block = DataBlock {
+            num_rows: 6,
+            columns: vec![
+                Column::str_col("grp", vec![
+                    Some("A".into()), Some("A".into()), Some("A".into()),
+                    Some("B".into()), Some("B".into()), Some("B".into()),
+                ]),
+                Column::int64("val", vec![Some(10), Some(20), Some(30), Some(5), Some(15), Some(25)]),
+            ],
+        };
+        let result = vectorized_window(&block, Some("grp"), "val", VecWindowFn::RunningSum);
+        let win_col = result.column("_window").unwrap();
+        if let ColumnData::Float64(vals) = &win_col.data {
+            // Group A sorted: 10,20,30 → running sums: 10,30,60
+            assert_eq!(vals[0], Some(10.0));
+            assert_eq!(vals[1], Some(30.0));
+            assert_eq!(vals[2], Some(60.0));
+            // Group B sorted: 5,15,25 → running sums: 5,20,45
+            assert_eq!(vals[3], Some(5.0));
+            assert_eq!(vals[4], Some(20.0));
+            assert_eq!(vals[5], Some(45.0));
+        } else { panic!("expected Float64"); }
+    }
+
+    #[test]
+    fn test_window_empty_block() {
+        let block = DataBlock { num_rows: 0, columns: vec![
+            Column::int64("val", vec![]),
+        ]};
+        let result = vectorized_window(&block, None, "val", VecWindowFn::RowNumber);
+        assert_eq!(result.num_rows, 0);
+        assert!(result.column("_window").is_some());
+    }
+
+    #[test]
+    fn test_window_single_row() {
+        let block = DataBlock {
+            num_rows: 1,
+            columns: vec![Column::int64("val", vec![Some(42)])],
+        };
+        let result = vectorized_window(&block, None, "val", VecWindowFn::RowNumber);
+        let win_col = result.column("_window").unwrap();
+        if let ColumnData::Float64(vals) = &win_col.data {
+            assert_eq!(vals[0], Some(1.0));
+        } else { panic!("expected Float64"); }
+    }
+
+    #[test]
+    fn test_window_preserves_original_columns() {
+        let block = make_window_block();
+        let result = vectorized_window(&block, Some("dept"), "salary", VecWindowFn::RunningSum);
+        assert!(result.column("dept").is_some());
+        assert!(result.column("salary").is_some());
+        assert!(result.column("_window").is_some());
+        assert_eq!(result.columns.len(), 3);
     }
 }

@@ -610,4 +610,71 @@ mod tests {
         assert_eq!(result.num_rows, 3, "Expected 3 groups (A/B/C)");
         println!("Network distributed query: {} groups ✓", result.num_rows);
     }
+
+    // ─── Network failure tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_worker_not_reachable() {
+        let data = test_data(100);
+        // distribute_query logs connection errors per-worker and returns an
+        // empty DataBlock when all workers fail (it doesn't propagate as Err).
+        let result = distribute_query(
+            "SELECT cat, SUM(amount) AS total FROM sales GROUP BY cat",
+            "sales",
+            &data,
+            &["127.0.0.1:19999"], // no worker is listening here
+        );
+        match result {
+            Err(e) => {
+                assert!(!e.is_empty(), "error message should not be empty");
+            }
+            Ok(block) => {
+                assert_eq!(block.num_rows, 0,
+                    "unreachable worker should yield empty result, got {} rows", block.num_rows);
+            }
+        }
+    }
+
+    #[test]
+    fn test_invalid_worker_response() {
+        // Spin up a fake "worker" that accepts connections but sends garbage
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut len_buf = [0u8; 8];
+                let _ = stream.read_exact(&mut len_buf);
+                let len = u64::from_le_bytes(len_buf) as usize;
+                let mut buf = vec![0u8; len];
+                let _ = stream.read_exact(&mut buf);
+                let garbage = b"this is not valid json at all!!!";
+                let resp_len = (garbage.len() as u64).to_le_bytes();
+                let _ = stream.write_all(&resp_len);
+                let _ = stream.write_all(garbage);
+                let _ = stream.flush();
+                break;
+            }
+        });
+        thread::sleep(Duration::from_millis(50));
+
+        let data = test_data(10);
+        let addr = format!("127.0.0.1:{port}");
+        let result = distribute_query(
+            "SELECT * FROM sales",
+            "sales",
+            &data,
+            &[&addr],
+        );
+        match result {
+            Err(e) => {
+                assert!(!e.is_empty(), "error message should describe the failure");
+            }
+            Ok(block) => {
+                assert_eq!(block.num_rows, 0,
+                    "garbage response should yield empty result, got {} rows", block.num_rows);
+            }
+        }
+    }
 }

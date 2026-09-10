@@ -556,6 +556,8 @@ fn block_to_json_stripped(block: &DataBlock) -> String {
                 kore_core::Value::Float(f) => serde_json::json!(f),
                 kore_core::Value::Bool(b)  => serde_json::json!(b),
                 kore_core::Value::Str(s)   => serde_json::json!(s),
+                kore_core::Value::Array(_) => serde_json::json!([]),
+                kore_core::Value::Map(_)   => serde_json::json!({}),
                 kore_core::Value::Null     => serde_json::Value::Null,
             };
             obj.insert(key, jv);

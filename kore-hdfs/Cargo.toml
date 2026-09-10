@@ -1,0 +1,11 @@
+[package]
+name = "kore-hdfs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kore-core = { path = "../kore-core" }
+kore-object-store = { path = "../kore-object-store" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
