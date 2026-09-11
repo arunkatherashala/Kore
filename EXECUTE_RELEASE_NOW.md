@@ -166,7 +166,7 @@ docker pull kore-engine:1.8.0
 
 **PyPI** (after ~35 min):
 ```bash
-pip install kore-fileformat==1.8.0
+pip install kore-engine==1.8.0
 # Should work after PyPI publish completes
 ```
 
@@ -266,8 +266,8 @@ docker pull kore-engine:1.8.0
 # Expected: "Downloaded newer image for kore-engine:1.8.0"
 
 # Check PyPI
-pip install --dry-run kore-fileformat==1.8.0
-# Expected: "Successfully installed kore-fileformat-1.8.0"
+pip install --dry-run kore-engine==1.8.0
+# Expected: "Successfully installed kore-engine-1.8.0"
 ```
 
 ---

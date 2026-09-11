@@ -32,7 +32,7 @@ git push origin v1.8.0
   - macOS (Intel + Apple Silicon)
   - Windows MSVC
 ✓ Docker image (kore-engine:1.8.0)
-✓ Python wheel (PyPI: kore-fileformat)
+✓ Python wheel (PyPI: kore-engine)
 ✓ Documentation bundle
 ✓ Benchmark data + scripts
 ```
@@ -96,7 +96,7 @@ docker push kore-engine:latest
 from setuptools import setup
 
 setup(
-    name="kore-fileformat",
+    name="kore-engine",
     version="1.8.0",
     description="KORE SQL Engine - High-performance analytical SQL (340x faster than Spark)",
     author="KORE Team",
@@ -120,7 +120,7 @@ setup(
 **Build & publish:**
 ```bash
 maturin build --release
-twine upload target/wheels/kore_fileformat-1.8.0-*.whl
+twine upload target/wheels/kore_engine-1.8.0-*.whl
 ```
 
 ---
@@ -216,7 +216,7 @@ docker run -it kore-engine:1.8.0 kore-coord
 
 ### Python
 ```bash
-pip install kore-fileformat==1.8.0
+pip install kore-engine==1.8.0
 ```
 
 ## 📊 Benchmarks

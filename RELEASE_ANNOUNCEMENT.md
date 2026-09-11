@@ -74,7 +74,7 @@ Proof: All 22 TPC-H queries complete in **10.2 seconds** on KORE vs **3,465 seco
 
 ### 🔗 Language Bindings
 
-✅ **Python:** PEP 517 wheel (pip install kore-fileformat)  
+✅ **Python:** PEP 517 wheel (pip install kore-engine)  
 ✅ **Rust:** FFI + complete proc-macro support  
 ✅ **Java:** JNI bindings (JDBC driver)  
 ✅ **C/C++:** C ABI with header files  
@@ -136,7 +136,7 @@ docker run -it kore-engine:1.8.0 kore --version
 
 ### Python
 ```bash
-pip install kore-fileformat==1.8.0
+pip install kore-engine==1.8.0
 ```
 
 ### Cargo

@@ -80,7 +80,7 @@ KORE v1.8.0 marks the **completion of Phase 20** - the final phase of our 20-pha
 - ✅ Pure Python wrapper with ctypes FFI
 - ✅ Easy DataFrame conversion (Pandas, PyArrow)
 - ✅ Jupyter notebook integration
-- ✅ Published on PyPI as `kore-fileformat`
+- ✅ Published on PyPI as `kore-engine`
 - ✅ Supports Python 3.8-3.14
 
 ---
@@ -152,7 +152,7 @@ Estimated 20-50x speedup on complex queries (DuckDB single-node, similar to KORE
 ### New Features
 1. **Distributed Query Execution** - Multi-node cluster support
 2. **ACID Transactions** - Full transaction semantics
-3. **Python PyPI Package** - `pip install kore-fileformat`
+3. **Python PyPI Package** - `pip install kore-engine`
 4. **Compressed .kore Format** - Compact binary format with compression
 5. **Kafka Integration** - Streaming data source
 6. **JIT Compilation** - Query-to-native code
@@ -178,8 +178,8 @@ Estimated 20-50x speedup on complex queries (DuckDB single-node, similar to KORE
 
 **Python (recommended for most users):**
 ```bash
-pip install kore-fileformat==1.8.0
-python3 -c "from kore_fileformat import KoreSession; print('✅ Installed')"
+pip install kore-engine==1.8.0
+python3 -c "from kore_engine import KoreSession; print('✅ Installed')"
 ```
 
 **Rust:**
@@ -235,7 +235,7 @@ print(results)
 | Platform | Package | Link | Notes |
 |----------|---------|------|-------|
 | **Rust** | kore-core, kore-sql, kore-python, etc. (63 crates) | [crates.io](https://crates.io/search?q=kore) | v1.8.0 published Aug 24 |
-| **Python** | kore-fileformat | [PyPI](https://pypi.org/project/kore-fileformat/) | v1.8.0 available |
+| **Python** | kore-engine | [PyPI](https://pypi.org/project/kore-engine/) | v1.8.0 available |
 | **Binary** | kore-cli | GitHub Releases | Coming soon |
 | **Docker** | kore-engine:1.8.0 | Docker Hub | Coming soon |
 

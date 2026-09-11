@@ -141,12 +141,12 @@ While CI builds, verify these will be ready:
 
 - [ ] **PyPI Package Page**
   ```
-  https://pypi.org/project/kore-fileformat/1.8.0/
+  https://pypi.org/project/kore-engine/1.8.0/
   
   Should show:
   - Version 1.8.0
   - Python wheels for 3.8-3.14
-  - Installation command: pip install kore-fileformat==1.8.0
+  - Installation command: pip install kore-engine==1.8.0
   ```
 
 ### Step 4: Launch Announcement Campaign (11 AM PT)
@@ -276,7 +276,7 @@ curl -I https://api.github.com/repos/kore-engine/kore/releases/assets
 # Expected: 4 binary artifacts downloaded
 
 # Check PyPI download stats (updates every hour)
-# https://pypistats.org/packages/kore-fileformat
+# https://pypistats.org/packages/kore-engine
 
 # Check Docker pulls
 # https://hub.docker.com/r/kore-engine/kore

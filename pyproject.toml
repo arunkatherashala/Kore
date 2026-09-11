@@ -3,7 +3,7 @@ requires = ["maturin>=0.15,<0.16"]
 build-backend = "maturin"
 
 [project]
-name = "kore-fileformat"
+name = "kore-engine"
 version = "1.8.0"
 description = "KORE v1.8.0 - 339x Faster SQL Engine. Distributed columnar database with Python bindings."
 readme = "README.md"

@@ -55,9 +55,9 @@
    - `kore-engine:latest`
 
 3. **PyPI**
-   - `kore-fileformat` v1.8.0
+   - `kore-engine` v1.8.0
    - Python 3.8-3.14 wheels
-   - Installation: `pip install kore-fileformat==1.8.0`
+   - Installation: `pip install kore-engine==1.8.0`
 
 4. **Cargo Registry**
    - Core Rust crates published to crates.io

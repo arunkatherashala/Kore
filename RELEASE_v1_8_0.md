@@ -115,7 +115,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
 ### Python
 ```bash
-pip install kore-fileformat
+pip install kore-engine
 ```
 
 ### Rust
@@ -220,7 +220,7 @@ cargo build --release -p kore-distributed
 ## 🚢 PUBLISH TARGETS
 
 ### ✅ PUBLISHED
-- [x] PyPI: `kore-fileformat` v1.8.0
+- [x] PyPI: `kore-engine` v1.8.0
 - [x] GitHub: Tag `v1.8.0` with full commit history
 
 ### ⏳ IN PROGRESS

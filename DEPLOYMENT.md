@@ -125,7 +125,7 @@ source kore_env/bin/activate  # On Windows: kore_env\Scripts\activate
 pip install kore-fileformat==1.8.0
 
 # Verify installation
-python3 -c "from kore_fileformat import KoreSession; print('✅ KORE installed')"
+python3 -c "from kore_engine import KoreSession; print('✅ KORE installed')"
 ```
 
 ### Verification
@@ -351,11 +351,11 @@ session = KoreSession(config)
 
 ### Python: ImportError - Cannot find kore_fileformat
 
-**Error:** `ModuleNotFoundError: No module named 'kore_fileformat'`
+**Error:** `ModuleNotFoundError: No module named 'kore_engine'`
 
-**Solutions:**
-1. Verify installation: `pip list | grep kore-fileformat`
-2. Reinstall: `pip install --upgrade --force-reinstall kore-fileformat==1.8.0`
+**Solution:**
+1. Verify installation: `pip list | grep kore-engine`
+2. Reinstall: `pip install --upgrade --force-reinstall kore-engine==1.8.0`
 3. Check Python version: `python --version` (3.8+ required)
 4. Try with full path: `python3 -m pip install kore-fileformat==1.8.0`
 
@@ -389,7 +389,7 @@ session = KoreSession(config)
 **Solutions:**
 1. Check LD_LIBRARY_PATH: `echo $LD_LIBRARY_PATH`
 2. Install missing dependencies: `sudo apt-get install libssl-dev libffi-dev`
-3. Rebuild from source: `pip install --no-binary :all: kore-fileformat==1.8.0`
+3. Rebuild from source: `pip install --no-binary :all: kore-engine==1.8.0`
 
 ---
 
