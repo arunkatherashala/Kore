@@ -20,6 +20,10 @@ use kore_core::types::{Column, ColumnData, DataBlock};
 pub mod gpu_matops;
 pub use gpu_matops::{GpuMatrix, gemm, batch_norm, relu, sigmoid, softmax, transpose};
 
+// ─── GPU-accelerated database kernels (GROUP BY, Hash Join, Radix Sort) ────────
+pub mod kernels;
+pub use kernels::{GPUGroupBy, GPUHashJoin, GPURadixSort, MultiGPUSharding, KernelMetrics};
+
 // ─── GPU device detection ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]

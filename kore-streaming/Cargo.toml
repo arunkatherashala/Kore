@@ -1,0 +1,15 @@
+[package]
+name    = "kore-streaming"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+kore-core    = { workspace = true }
+kore-sql     = { workspace = true }
+kore-kafka   = { workspace = true }
+tokio        = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+chrono       = "0.4"
+uuid         = { version = "1", features = ["v4"] }
+async-trait  = "0.1"

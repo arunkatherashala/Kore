@@ -68,6 +68,11 @@ members = [
     "kore-submit",       # CLI — spark-submit-style job submission
     "kore-demo",         # End-to-end demo binary
     "kore-hdfs",         # Layer 75 — HDFS connector (WebHDFS REST)
+    # Phase 2 Infrastructure (v1.0.0→v2.0 transition)
+    "kore-benchmark",    # Phase 2A — Multi-engine benchmarking (TPC-H/DS, YCSB)
+    "kore-streaming",    # Phase 2D — Structured streaming (Kafka/Kinesis, stateful, 100K+ eps)
+    "kore-graph",        # Phase 2F — Graph algorithms (PageRank, Shortest Path, CC, etc.)
+    "kore-sdk",          # Phase 2G — Multi-language SDK generation (Python, Java, Go, C#, Ruby, R, Scala, Node.js)
 ]
 resolver = "2"
 
@@ -84,6 +89,12 @@ lz4_flex    = "0.11"
 axum        = "0.8"
 tower-http  = { version = "0.6", features = ["cors", "trace"] }
 libc        = "0.2"
+chrono      = "0.4"
+uuid        = { version = "1", features = ["v4"] }
+async-trait = "0.1"
+indicatif   = "0.17"
+prost       = "0.12"
+tonic       = { version = "0.11", features = ["transport"] }
 kore-core   = { path = "kore-core" }
 kore-join   = { path = "kore-join" }
 kore-cache  = { path = "kore-cache" }
@@ -102,6 +113,7 @@ kore-parquet = { path = "kore-parquet" }
 kore-optimize = { path = "kore-optimize" }
 kore-parallel = { path = "kore-parallel" }
 kore-gpu     = { path = "kore-gpu" }
+kore-arrow   = { path = "kore-arrow" }
 
 kore-mcp    = { path = "kore-mcp" }
 kore-python      = { path = "kore-python" }
@@ -110,3 +122,9 @@ kore-kafka     = { path = "kore-kafka" }
 kore-mlx       = { path = "kore-mlx" }
 kore-node      = { path = "kore-node" }
 kore-deploy    = { path = "kore-deploy" }
+
+# Phase 2 Infrastructure (v1.0.0→v2.0 transition)
+kore-benchmark = { path = "kore-benchmark" }
+kore-streaming = { path = "kore-streaming" }
+kore-graph     = { path = "kore-graph" }
+kore-sdk       = { path = "kore-sdk" }

@@ -1,0 +1,13 @@
+[package]
+name    = "kore-graph"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+kore-core    = { workspace = true }
+kore-sql     = { workspace = true }
+kore-store   = { workspace = true }
+kore-parallel = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+rayon        = { workspace = true }

@@ -1,0 +1,31 @@
+[package]
+name    = "kore-benchmark"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+kore-core    = { workspace = true }
+kore-sql     = { workspace = true }
+kore-store   = { workspace = true }
+kore-parquet = { workspace = true }
+tokio        = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+chrono       = "0.4"
+indicatif    = "0.17"
+
+[[bin]]
+name = "tpch-benchmark"
+path = "src/bin/tpch.rs"
+
+[[bin]]
+name = "tpcds-benchmark"
+path = "src/bin/tpcds.rs"
+
+[[bin]]
+name = "ycsb-benchmark"
+path = "src/bin/ycsb.rs"
+
+[[bin]]
+name = "compare-engines"
+path = "src/bin/compare.rs"

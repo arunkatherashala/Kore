@@ -1,0 +1,18 @@
+[package]
+name    = "kore-sdk"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+kore-core    = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+prost        = "0.12"
+tonic        = { version = "0.11", features = ["transport"] }
+tokio        = { workspace = true }
+
+[build-dependencies]
+tonic-build  = "0.11"
+
+# Code generation templates for multi-language SDKs
+# Supported languages: Python, Java, Go, C#, Ruby, R, Scala, Node.js
