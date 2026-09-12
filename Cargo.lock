@@ -2045,7 +2045,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "kore-api"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "axum",
  "kore-cache",
@@ -2064,7 +2064,7 @@ dependencies = [
 
 [[package]]
 name = "kore-aqe"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "serde",
@@ -2073,7 +2073,7 @@ dependencies = [
 
 [[package]]
 name = "kore-arrow"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "serde",
@@ -2083,7 +2083,7 @@ dependencies = [
 
 [[package]]
 name = "kore-bench"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-cache",
  "kore-cluster",
@@ -2101,14 +2101,14 @@ dependencies = [
 
 [[package]]
 name = "kore-bloom"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
 ]
 
 [[package]]
 name = "kore-cache"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "serde",
@@ -2117,7 +2117,7 @@ dependencies = [
 
 [[package]]
 name = "kore-catalog"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "serde",
@@ -2126,7 +2126,7 @@ dependencies = [
 
 [[package]]
 name = "kore-catalyst"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-bloom",
  "kore-catalog",
@@ -2136,7 +2136,7 @@ dependencies = [
 
 [[package]]
 name = "kore-cluster"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "serde",
@@ -2146,7 +2146,7 @@ dependencies = [
 
 [[package]]
 name = "kore-codegen"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-catalyst",
  "kore-core",
@@ -2155,14 +2155,14 @@ dependencies = [
 
 [[package]]
 name = "kore-compress"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
 ]
 
 [[package]]
 name = "kore-connect"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-store",
@@ -2171,7 +2171,7 @@ dependencies = [
 
 [[package]]
 name = "kore-coord"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-aqe",
  "kore-catalog",
@@ -2194,7 +2194,7 @@ dependencies = [
 
 [[package]]
 name = "kore-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "rayon",
  "serde",
@@ -2204,7 +2204,7 @@ dependencies = [
 
 [[package]]
 name = "kore-delta"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-parquet",
@@ -2214,7 +2214,7 @@ dependencies = [
 
 [[package]]
 name = "kore-demo"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-coord",
  "kore-core",
@@ -2227,7 +2227,7 @@ dependencies = [
 
 [[package]]
 name = "kore-deploy"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "serde",
@@ -2237,7 +2237,7 @@ dependencies = [
 
 [[package]]
 name = "kore-dist-net"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-sql",
@@ -2250,7 +2250,7 @@ dependencies = [
 
 [[package]]
 name = "kore-distml"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-net",
@@ -2261,7 +2261,7 @@ dependencies = [
 
 [[package]]
 name = "kore-distributed"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-coord",
  "kore-core",
@@ -2277,7 +2277,7 @@ dependencies = [
 
 [[package]]
 name = "kore-dml"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-delta",
@@ -2288,7 +2288,7 @@ dependencies = [
 
 [[package]]
 name = "kore-fault"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-sql",
@@ -2299,7 +2299,7 @@ dependencies = [
 
 [[package]]
 name = "kore-ffi"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-io",
@@ -2315,7 +2315,7 @@ dependencies = [
 
 [[package]]
 name = "kore-flight"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-net",
@@ -2326,7 +2326,7 @@ dependencies = [
 
 [[package]]
 name = "kore-gpu"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bytemuck",
  "kore-core",
@@ -2339,7 +2339,7 @@ dependencies = [
 
 [[package]]
 name = "kore-hdfs"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-object-store",
@@ -2350,7 +2350,7 @@ dependencies = [
 
 [[package]]
 name = "kore-iceberg"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-store",
@@ -2360,7 +2360,7 @@ dependencies = [
 
 [[package]]
 name = "kore-io"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-store",
@@ -2370,7 +2370,7 @@ dependencies = [
 
 [[package]]
 name = "kore-jit"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-sql",
@@ -2380,7 +2380,7 @@ dependencies = [
 
 [[package]]
 name = "kore-join"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "rayon",
@@ -2390,7 +2390,7 @@ dependencies = [
 
 [[package]]
 name = "kore-kafka"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-stream",
@@ -2400,7 +2400,7 @@ dependencies = [
 
 [[package]]
 name = "kore-mcp"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-sql",
@@ -2411,7 +2411,7 @@ dependencies = [
 
 [[package]]
 name = "kore-metrics"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "serde",
@@ -2419,8 +2419,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "kore-ml"
+version = "1.0.0"
+dependencies = [
+ "kore-core",
+ "kore-gpu",
+ "kore-ml2",
+ "kore-ml3",
+ "kore-mlx",
+ "kore-parallel",
+ "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kore-ml2"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "rayon",
@@ -2430,7 +2445,7 @@ dependencies = [
 
 [[package]]
 name = "kore-ml3"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "rayon",
@@ -2439,7 +2454,7 @@ dependencies = [
 
 [[package]]
 name = "kore-mlx"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "rayon",
@@ -2447,7 +2462,7 @@ dependencies = [
 
 [[package]]
 name = "kore-mv"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-sql",
@@ -2457,7 +2472,7 @@ dependencies = [
 
 [[package]]
 name = "kore-net"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-arrow",
  "kore-core",
@@ -2473,7 +2488,7 @@ dependencies = [
 
 [[package]]
 name = "kore-node"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-sql",
@@ -2484,7 +2499,7 @@ dependencies = [
 
 [[package]]
 name = "kore-object-store"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aws-config",
  "aws-sdk-s3",
@@ -2497,7 +2512,7 @@ dependencies = [
 
 [[package]]
 name = "kore-optimize"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-sql",
@@ -2506,7 +2521,7 @@ dependencies = [
 
 [[package]]
 name = "kore-parallel"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "rayon",
@@ -2514,7 +2529,7 @@ dependencies = [
 
 [[package]]
 name = "kore-parquet"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2526,7 +2541,7 @@ dependencies = [
 
 [[package]]
 name = "kore-pipeline"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-ml2",
@@ -2535,7 +2550,7 @@ dependencies = [
 
 [[package]]
 name = "kore-prune"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "serde",
@@ -2544,7 +2559,7 @@ dependencies = [
 
 [[package]]
 name = "kore-pyo3"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-io",
@@ -2555,7 +2570,7 @@ dependencies = [
 
 [[package]]
 name = "kore-python"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-parquet",
@@ -2566,7 +2581,7 @@ dependencies = [
 
 [[package]]
 name = "kore-rm"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-net",
@@ -2577,7 +2592,7 @@ dependencies = [
 
 [[package]]
 name = "kore-security"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "serde",
@@ -2586,7 +2601,7 @@ dependencies = [
 
 [[package]]
 name = "kore-server"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-sql",
@@ -2596,7 +2611,7 @@ dependencies = [
 
 [[package]]
 name = "kore-shuffle"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-store",
@@ -2608,7 +2623,7 @@ dependencies = [
 
 [[package]]
 name = "kore-shuffle-store"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-store",
@@ -2618,14 +2633,14 @@ dependencies = [
 
 [[package]]
 name = "kore-simd"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
 ]
 
 [[package]]
 name = "kore-sortmerge"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "rayon",
@@ -2633,7 +2648,7 @@ dependencies = [
 
 [[package]]
 name = "kore-spill"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-store",
@@ -2642,7 +2657,7 @@ dependencies = [
 
 [[package]]
 name = "kore-sql"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-catalog",
  "kore-core",
@@ -2662,7 +2677,7 @@ dependencies = [
 
 [[package]]
 name = "kore-sql-v2"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-sql",
@@ -2670,7 +2685,7 @@ dependencies = [
 
 [[package]]
 name = "kore-store"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "lz4_flex 0.11.6",
@@ -2681,7 +2696,7 @@ dependencies = [
 
 [[package]]
 name = "kore-stream"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-sql",
@@ -2693,7 +2708,7 @@ dependencies = [
 
 [[package]]
 name = "kore-submit"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-io",
@@ -2706,7 +2721,7 @@ dependencies = [
 
 [[package]]
 name = "kore-subquery"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-sql",
@@ -2714,7 +2729,7 @@ dependencies = [
 
 [[package]]
 name = "kore-tpch"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-arrow",
  "kore-core",
@@ -2736,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "kore-vectorized"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "rayon",
@@ -2744,7 +2759,7 @@ dependencies = [
 
 [[package]]
 name = "kore-window"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "rayon",
@@ -2753,7 +2768,7 @@ dependencies = [
 
 [[package]]
 name = "kore-worker"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-io",

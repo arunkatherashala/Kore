@@ -16,6 +16,10 @@
 
 use kore_core::types::{Column, ColumnData, DataBlock};
 
+// ─── GPU matrix operations (GEMM, batch norm, activations) ─────────────────────
+pub mod gpu_matops;
+pub use gpu_matops::{GpuMatrix, gemm, batch_norm, relu, sigmoid, softmax, transpose};
+
 // ─── GPU device detection ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]

@@ -1,0 +1,19 @@
+[package]
+name    = "kore-ml"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+kore-core    = { workspace = true }
+kore-ml2     = { workspace = true }
+kore-ml3     = { workspace = true }
+kore-mlx     = { workspace = true }
+kore-gpu     = { workspace = true }
+kore-parallel = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+rayon      = { workspace = true }
+
+[profile.release]
+opt-level = 3
+lto = true

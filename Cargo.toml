@@ -10,6 +10,7 @@ members = [
     "kore-sql",      # Layer 21 — KQL query language
     "kore-store",    # Layer 22 — columnar storage engine
     "kore-ml3",      # Layer 23 — more ML: LinReg, KNN, SVM, LogReg
+    "kore-ml",       # Layer 24 — Unified ML API (all 7 algorithms + distributed training)
     "kore-ffi",      # Layer 24 — C ABI + 7-language bindings
     "kore-api",      # Layer 25 — Axum REST / WebSocket API
     "kore-window",   # Layer 27 — Window functions
@@ -92,12 +93,15 @@ kore-cluster  = { path = "kore-cluster" }
 kore-sql    = { path = "kore-sql" }
 kore-store  = { path = "kore-store" }
 kore-ml3    = { path = "kore-ml3" }
+kore-ml     = { path = "kore-ml" }
 kore-window = { path = "kore-window" }
 kore-io     = { path = "kore-io" }
 kore-shuffle = { path = "kore-shuffle" }
 kore-spill  = { path = "kore-spill" }
 kore-parquet = { path = "kore-parquet" }
 kore-optimize = { path = "kore-optimize" }
+kore-parallel = { path = "kore-parallel" }
+kore-gpu     = { path = "kore-gpu" }
 
 kore-mcp    = { path = "kore-mcp" }
 kore-python      = { path = "kore-python" }
