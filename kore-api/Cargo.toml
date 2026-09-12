@@ -1,6 +1,6 @@
 [package]
 name    = "kore-api"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
 
 [[bin]]
@@ -21,4 +21,12 @@ tower-http    = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
 thiserror     = { workspace = true }
+# Phase 2E: Security & Authentication
+jsonwebtoken  = "9.2"
+ldap3         = "0.11"
+governor      = "0.7"
+axum-server   = { version = "0.6", features = ["tls-rustls"] }
+rustls-pemfile = "2.0"
+uuid          = { workspace = true }
+chrono        = "0.4"
 
