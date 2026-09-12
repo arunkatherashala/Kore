@@ -1,52 +1,62 @@
-//! KORE Layer 26D: Structured Streaming Engine
+//! KORE Streaming Engine — Layer 70: Real-time Distributed Streaming (Phase 2D)
 //!
-//! High-throughput streaming SQL with exactly-once semantics.
+//! Features:
+//! - Kafka, Kinesis, Pub/Sub connectors
+//! - Windowed aggregations (tumbling, sliding, session)
+//! - Stateful processing with checkpointing
+//! - Exactly-once semantics
+//! - 100K+ events/sec throughput
+//! - Parallel partition processing
+//! - Event time vs processing time
 //!
-//! **Supported Sources:**
-//!   • Apache Kafka (via kore-kafka connector)
-//!   • Amazon Kinesis
-//!   • Google Cloud Pub/Sub
-//!   • HTTP (WebSocket pull)
-//!   • File streaming (watch directory)
-//!
-//! **Supported Sinks:**
-//!   • Kafka topics
-//!   • S3 (Parquet, CSV, JSON)
-//!   • Delta Lake
-//!   • PostgreSQL/MySQL
-//!   • File system
-//!
-//! **Features:**
-//!   • Micro-batch processing (10ms-10s batches)
-//!   • Stateful aggregations (count, sum, avg, window functions)
-//!   • Exactly-once semantics (checkpointing)
-//!   • Late data handling (watermarking)
-//!   • Time windows (tumbling, sliding, session)
-//!   • Target: 100K+ events/sec
-//!
-//! **Example:**
-//! ```ignore
-//! let query = StreamQuery::new(source)
-//!     .select("SELECT user_id, COUNT(*) as event_count FROM events GROUP BY user_id")
-//!     .window(Window::Tumbling { duration_secs: 60 })
-//!     .sink(SinkConfig::Kafka { topic: "output" })
-//!     .run()
-//!     .await?;
-//! ```
+//! Throughput targets:
+//! - Single node: 250K+ events/sec
+//! - Multi-node: 1M+ events/sec (4-node cluster)
+//! - Kafka backend: 500K+ events/sec
+//! - Kinesis backend: 250K+ events/sec
 
-use std::time::{SystemTime, Duration};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use async_trait::async_trait;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-// ─── Stream Sources ───────────────────────────────────────────────────────────
+// ─── Stream Source/Sink Connectors ─────────────────────────────────────────
 
-#[async_trait]
-pub trait StreamSource: Send + Sync {
-    /// Read next batch of events (non-blocking)
-    async fn read_batch(&mut self, batch_size: usize) -> Result<Vec<StreamEvent>, String>;
-    
-    /// Checkpoint: save current offset for recovery
-    async fn checkpoint(&self, offset: u64) -> Result<(), String>;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StreamSource {
+    Kafka { broker: String, topic: String, partitions: usize },
+    Kinesis { stream: String, shards: usize },
+    PubSub { project: String, subscription: String },
+    HttpWebhook { endpoint: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StreamSink {
+    Kafka { broker: String, topic: String },
+    Kinesis { stream: String },
+    PubSub { topic: String },
+    S3 { bucket: String, prefix: String },
+    Database { connection_string: String, table: String },
+}
+
+// ─── Event Model ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Event {
+    pub event_id: String,
+    pub event_time: DateTime<Utc>,
+    pub processing_time: DateTime<Utc>,
+    pub partition_key: String,
+    pub payload: serde_json::Value,
+    pub watermark: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamEvent {
+    pub timestamp: u64,
+    pub key: String,
+    pub value: serde_json::Value,
+}
     
     /// Get source name
     fn name(&self) -> &str;
