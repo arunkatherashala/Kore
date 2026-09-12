@@ -1,0 +1,12 @@
+[package]
+name = "kore-knowledge-graph"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json.workspace = true
+tokio = { workspace = true }
+
+[package.metadata]
+description = "Knowledge Graph Engine with RDF, SPARQL, and embeddings"

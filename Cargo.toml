@@ -73,8 +73,45 @@ members = [
     "kore-streaming",    # Phase 2D — Structured streaming (Kafka/Kinesis, stateful, 100K+ eps)
     "kore-graph",        # Phase 2F — Graph algorithms (PageRank, Shortest Path, CC, etc.)
     "kore-sdk",          # Phase 2G — Multi-language SDK generation (Python, Java, Go, C#, Ruby, R, Scala, Node.js)
+    
+    # Phase 3: AI/LLM Integration (v3.0.0)
+    "kore-vectors",      # Phase 3A — Vector/semantic search (HNSW, ANN, embeddings)
+    "kore-llm",          # Phase 3B — LLM inference (Llama, Mistral, Phi; quantization, streaming)
+    "kore-rag",          # Phase 3C — RAG pipeline (document chunking, retrieval, augmentation)
+    "kore-rl",           # Phase 3D — Reinforcement learning (Q-learning, policy gradient, multi-armed bandit)
+    
+    # Phase 4: Advanced ML/GenAI
+    "kore-finetune",     # Phase 4A — Fine-tuning framework (LoRA, QLoRA, adapter modules)
+    "kore-multimodal",   # Phase 4C — Multimodal (images, audio, video embeddings; CLIP)
+    "kore-timeseries",   # Phase 4D — Time-series + forecasting (LSTM, Transformer, ARIMA, Prophet)
+    
+    # Phase 5: Enterprise AI
+    "kore-mlops",        # Phase 5A — Model registry, versioning, A/B testing, drift detection
+    "kore-explainability", # Phase 5B — Explainability (SHAP, LIME, attention, counterfactuals)
+    "kore-privacy",      # Phase 5C — Privacy (differential privacy, federated learning, homomorphic encryption)
+    "kore-automl",       # Phase 5D — AutoML (hyperparameter optimization, NAS, feature engineering)
+    
+    # Phase 6: Knowledge Graphs & Reasoning
+    "kore-knowledge-graph", # Phase 6A — Knowledge graph engine (RDF, SPARQL, embeddings)
+    "kore-gnn",          # Phase 6B — Graph neural networks (GCN, GAT, GraphSAGE)
+    "kore-qa",           # Phase 6C — Question answering (KGQA, multi-hop reasoning, semantic parsing)
+    "kore-logic",        # Phase 6D — Logic programming (Datalog, Prolog-like inference, constraints)
+    
+    # Phase 7: Autonomous Systems
+    "kore-autonomy",     # Phase 7A-7D — Query optimization AI, autonomous caching, self-healing, cost optimization
+    "kore-causality",    # Phase 8A — Causal inference (causal graphs, counterfactuals, treatment effects)
+    "kore-continual-learning", # Phase 8B — Continual learning (online learning, concept drift, domain adaptation)
+    "kore-meta-learning", # Phase 8C — Meta-learning (few-shot learning, transfer learning, task adaptation)
+    "kore-neurosymbolic", # Phase 8D — Neurosymbolic AI (neural-symbolic integration, logic constraints)
+    "kore-quantum",      # Quantum — Quantum-ready architecture (QAOA, VQE, hybrid execution)
 ]
 resolver = "2"
+
+[workspace.package]
+version = "3.0.0"
+edition = "2021"
+authors = ["KORE Team"]
+license = "Apache-2.0"
 
 [workspace.dependencies]
 serde       = { version = "1", features = ["derive"] }

@@ -1,0 +1,9 @@
+[package]
+name = "kore-gnn"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json.workspace = true
+ndarray = "0.15"

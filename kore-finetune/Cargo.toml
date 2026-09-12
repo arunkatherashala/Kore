@@ -1,0 +1,11 @@
+[package]
+name = "kore-finetune"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json.workspace = true
+tokio = { workspace = true }
+ndarray = "0.15"
+uuid = { workspace = true }

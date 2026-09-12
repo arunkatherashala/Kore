@@ -1,0 +1,12 @@
+[package]
+name = "kore-rag"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json.workspace = true
+tokio = { workspace = true }
+async-trait.workspace = true
+uuid = { workspace = true }
+chrono = { workspace = true }
