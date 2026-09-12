@@ -1,6 +1,6 @@
 [package]
 name = "kore-grpc"
-version = "2.0.0-alpha"
+version = "1.0.0"
 edition = "2021"
 description = "gRPC server for KORE Engine - Multi-language support via gRPC"
 
@@ -29,3 +29,4 @@ chrono = "0.4"
 
 [build-dependencies]
 tonic-build = "0.11"
+

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "kore-engine"
-version = "1.8.0"
+version = "1.0.0"
 description = "KORE v1.8.0 - 339x Faster SQL Engine. Distributed columnar database with Python bindings."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -68,6 +68,7 @@ target-version = ['py38']
 
 [tool.ruff]
 line-length = 88
-target-version = "py38"
+target-version = "1.0.0"
 select = ["E", "F", "W"]
 ignore = ["E501"]
+

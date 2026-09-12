@@ -1,6 +1,6 @@
 [package]
 name    = "kore-gpu"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 # GPU backend selection:
@@ -20,3 +20,4 @@ serde_json = { workspace = true }
 wgpu      = { version = "0.20", optional = true }
 pollster  = { version = "0.3", optional = true }
 bytemuck  = { version = "1", optional = true, features = ["derive"] }
+

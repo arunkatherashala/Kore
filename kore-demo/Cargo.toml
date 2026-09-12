@@ -1,6 +1,6 @@
 [package]
 name = "kore-demo"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 [[bin]]
@@ -15,3 +15,4 @@ kore-coord   = { path = "../kore-coord" }
 kore-worker  = { path = "../kore-worker" }
 kore-net     = { path = "../kore-net" }
 tokio        = { workspace = true }
+

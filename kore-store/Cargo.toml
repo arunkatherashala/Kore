@@ -1,6 +1,6 @@
 [package]
 name    = "kore-store"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 [dependencies]
@@ -9,3 +9,4 @@ thiserror = { workspace = true }
 lz4_flex  = { workspace = true }
 rayon     = { workspace = true }
 memmap2 = "0.9.11"
+

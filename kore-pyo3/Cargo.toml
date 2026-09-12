@@ -1,6 +1,6 @@
 [package]
 name = "kore-pyo3"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 [lib]
@@ -13,3 +13,4 @@ kore-sql     = { path = "../kore-sql" }
 kore-parquet = { path = "../kore-parquet" }
 kore-io      = { path = "../kore-io" }
 pyo3         = { version = "0.23", features = ["extension-module"] }
+

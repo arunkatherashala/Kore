@@ -1,6 +1,6 @@
 [package]
 name    = "kore-coord"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 [[bin]]
@@ -34,3 +34,4 @@ kore-core   = { workspace = true }
 kore-worker = { path = "../kore-worker" }
 kore-sql    = { path = "../kore-sql" }
 tokio       = { workspace = true, features = ["full", "test-util"] }
+

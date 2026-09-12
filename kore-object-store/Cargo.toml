@@ -1,6 +1,6 @@
 [package]
 name    = "kore-object-store"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 [dependencies]
@@ -15,3 +15,4 @@ tokio       = { workspace = true }
 [features]
 default = []
 s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
+

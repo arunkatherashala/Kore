@@ -1,6 +1,6 @@
 [package]
 name    = "kore-api"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 [[bin]]
@@ -21,3 +21,4 @@ tower-http    = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
 thiserror     = { workspace = true }
+

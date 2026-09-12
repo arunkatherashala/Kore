@@ -1,6 +1,6 @@
 [package]
 name    = "kore-worker"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 [[bin]]
@@ -21,3 +21,4 @@ kore-io           = { path = "../kore-io" }
 kore-object-store = { path = "../kore-object-store" }
 serde_json        = { workspace = true }
 tokio             = { workspace = true }
+
