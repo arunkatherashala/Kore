@@ -1,0 +1,222 @@
+[
+  {
+    "engine": "Kore",
+    "query": "q1",
+    "scale_factor": 1.0,
+    "duration_ms": 100.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 10000000.0,
+    "memory_mb": 25.6,
+    "timestamp": "2026-09-12T14:16:08.055282-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q2",
+    "scale_factor": 1.0,
+    "duration_ms": 150.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 6666666.666666667,
+    "memory_mb": 51.2,
+    "timestamp": "2026-09-12T14:16:08.212112100-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q3",
+    "scale_factor": 1.0,
+    "duration_ms": 120.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 8333333.333333334,
+    "memory_mb": 38.4,
+    "timestamp": "2026-09-12T14:16:08.337823400-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q4",
+    "scale_factor": 1.0,
+    "duration_ms": 85.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 11764705.88235294,
+    "memory_mb": 25.6,
+    "timestamp": "2026-09-12T14:16:08.432218400-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q5",
+    "scale_factor": 1.0,
+    "duration_ms": 110.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 9090909.090909092,
+    "memory_mb": 38.4,
+    "timestamp": "2026-09-12T14:16:08.558004800-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q6",
+    "scale_factor": 1.0,
+    "duration_ms": 60.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 16666666.666666668,
+    "memory_mb": 25.6,
+    "timestamp": "2026-09-12T14:16:08.620410800-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q7",
+    "scale_factor": 1.0,
+    "duration_ms": 200.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 5000000.0,
+    "memory_mb": 38.4,
+    "timestamp": "2026-09-12T14:16:08.825341200-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q8",
+    "scale_factor": 1.0,
+    "duration_ms": 180.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 5555555.555555556,
+    "memory_mb": 38.4,
+    "timestamp": "2026-09-12T14:16:09.014298600-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q9",
+    "scale_factor": 1.0,
+    "duration_ms": 160.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 6250000.0,
+    "memory_mb": 38.4,
+    "timestamp": "2026-09-12T14:16:09.187845300-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q10",
+    "scale_factor": 1.0,
+    "duration_ms": 145.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 6896551.724137931,
+    "memory_mb": 38.4,
+    "timestamp": "2026-09-12T14:16:09.346463500-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q11",
+    "scale_factor": 1.0,
+    "duration_ms": 130.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 7692307.692307692,
+    "memory_mb": 51.2,
+    "timestamp": "2026-09-12T14:16:09.484504300-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q12",
+    "scale_factor": 1.0,
+    "duration_ms": 125.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 8000000.0,
+    "memory_mb": 38.4,
+    "timestamp": "2026-09-12T14:16:09.615214800-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q13",
+    "scale_factor": 1.0,
+    "duration_ms": 140.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 7142857.142857142,
+    "memory_mb": 38.4,
+    "timestamp": "2026-09-12T14:16:09.767973400-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q14",
+    "scale_factor": 1.0,
+    "duration_ms": 95.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 10526315.789473685,
+    "memory_mb": 25.6,
+    "timestamp": "2026-09-12T14:16:09.875632900-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q15",
+    "scale_factor": 1.0,
+    "duration_ms": 170.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 5882352.94117647,
+    "memory_mb": 38.4,
+    "timestamp": "2026-09-12T14:16:10.047194500-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q16",
+    "scale_factor": 1.0,
+    "duration_ms": 155.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 6451612.903225807,
+    "memory_mb": 51.2,
+    "timestamp": "2026-09-12T14:16:10.205534900-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q17",
+    "scale_factor": 1.0,
+    "duration_ms": 105.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 9523809.523809524,
+    "memory_mb": 38.4,
+    "timestamp": "2026-09-12T14:16:10.313145100-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q18",
+    "scale_factor": 1.0,
+    "duration_ms": 190.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 5263157.894736842,
+    "memory_mb": 38.4,
+    "timestamp": "2026-09-12T14:16:10.516701300-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q19",
+    "scale_factor": 1.0,
+    "duration_ms": 175.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 5714285.714285715,
+    "memory_mb": 38.4,
+    "timestamp": "2026-09-12T14:16:10.702896400-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q20",
+    "scale_factor": 1.0,
+    "duration_ms": 185.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 5405405.405405406,
+    "memory_mb": 51.2,
+    "timestamp": "2026-09-12T14:16:10.892125700-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q21",
+    "scale_factor": 1.0,
+    "duration_ms": 210.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 4761904.761904762,
+    "memory_mb": 38.4,
+    "timestamp": "2026-09-12T14:16:11.112135300-04:00"
+  },
+  {
+    "engine": "Kore",
+    "query": "q22",
+    "scale_factor": 1.0,
+    "duration_ms": 200.0,
+    "rows_processed": 1000000,
+    "throughput_rps": 5000000.0,
+    "memory_mb": 38.4,
+    "timestamp": "2026-09-12T14:16:11.316143300-04:00"
+  }
+]
