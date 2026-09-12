@@ -1,0 +1,31 @@
+syntax = "proto3";
+package kore.v1;
+import "common.proto";
+
+service KoreGraph {
+  rpc CreateGraph(CreateGraphRequest) returns (CreateGraphResponse);
+  rpc PageRank(PageRankRequest) returns (stream PageRankResponse);
+}
+
+message CreateGraphRequest {
+  string session_id = 1;
+  string graph_name = 2;
+  string edges_query = 3;
+  string source_col = 4;
+  string target_col = 5;
+}
+
+message CreateGraphResponse {
+  string graph_id = 1;
+  int64 num_vertices = 2;
+  int64 num_edges = 3;
+}
+
+message PageRankRequest {
+  string graph_id = 1;
+  int32 iterations = 2;
+}
+
+message PageRankResponse {
+  DataBlock ranks = 1;
+}

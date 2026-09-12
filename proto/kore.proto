@@ -1,0 +1,53 @@
+syntax = "proto3";
+package kore.v1;
+import "common.proto";
+
+service KoreSQL {
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc ExecuteSQL(ExecuteSQLRequest) returns (stream ExecuteSQLResponse);
+  rpc GetQueryStatus(GetQueryStatusRequest) returns (GetQueryStatusResponse);
+  rpc ExplainSQL(ExplainSQLRequest) returns (ExplainSQLResponse);
+}
+
+message CreateSessionRequest {
+  string session_name = 1;
+  map<string, string> config = 2;
+}
+
+message CreateSessionResponse {
+  string session_id = 1;
+  string status = 2;
+}
+
+message ExecuteSQLRequest {
+  string session_id = 1;
+  string query = 2;
+  int64 timeout_ms = 3;
+}
+
+message ExecuteSQLResponse {
+  string query_id = 1;
+  oneof response {
+    DataBlock data = 2;
+    ExecutionStats stats = 3;
+    ErrorResponse error = 4;
+  }
+  bool is_final = 5;
+}
+
+message GetQueryStatusRequest {
+  string query_id = 1;
+}
+
+message GetQueryStatusResponse {
+  string query_id = 1;
+  string status = 2;
+}
+
+message ExplainSQLRequest {
+  string query = 1;
+}
+
+message ExplainSQLResponse {
+  string plan = 1;
+}

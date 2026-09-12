@@ -1,0 +1,36 @@
+syntax = "proto3";
+package kore.v1;
+
+enum ColumnType {
+  UNKNOWN = 0;
+  INT32 = 1;
+  INT64 = 2;
+  DOUBLE = 3;
+  STRING = 4;
+}
+
+message ColumnInfo {
+  string name = 1;
+  ColumnType type = 2;
+  bool nullable = 3;
+}
+
+message SchemaInfo {
+  repeated ColumnInfo columns = 1;
+}
+
+message DataBlock {
+  SchemaInfo schema = 1;
+  repeated bytes columns = 2;
+  int64 num_rows = 3;
+}
+
+message ExecutionStats {
+  int64 total_time_ms = 1;
+  int64 rows_processed = 2;
+}
+
+message ErrorResponse {
+  int32 code = 1;
+  string message = 2;
+}

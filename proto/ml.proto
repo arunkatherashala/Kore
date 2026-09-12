@@ -1,0 +1,30 @@
+syntax = "proto3";
+package kore.v1;
+import "common.proto";
+
+service KoreML {
+  rpc TrainModel(TrainModelRequest) returns (TrainModelResponse);
+  rpc Predict(PredictRequest) returns (stream PredictResponse);
+}
+
+message TrainModelRequest {
+  string session_id = 1;
+  string model_name = 2;
+  string model_type = 3;
+  string training_query = 4;
+  string target_column = 5;
+}
+
+message TrainModelResponse {
+  string model_id = 1;
+  map<string, double> metrics = 2;
+}
+
+message PredictRequest {
+  string model_id = 1;
+  DataBlock input_data = 2;
+}
+
+message PredictResponse {
+  DataBlock predictions = 1;
+}

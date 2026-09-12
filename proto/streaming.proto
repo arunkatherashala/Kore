@@ -1,0 +1,31 @@
+syntax = "proto3";
+package kore.v1;
+import "common.proto";
+
+service KoreStreaming {
+  rpc CreateStream(CreateStreamRequest) returns (CreateStreamResponse);
+  rpc ProcessStream(stream ProcessStreamRequest) returns (stream ProcessStreamResponse);
+}
+
+message CreateStreamRequest {
+  string session_id = 1;
+  string stream_name = 2;
+  string source_type = 3;
+  map<string, string> source_config = 4;
+}
+
+message CreateStreamResponse {
+  string stream_id = 1;
+  SchemaInfo schema = 2;
+}
+
+message ProcessStreamRequest {
+  string stream_id = 1;
+  string operation = 2;
+  string query = 3;
+}
+
+message ProcessStreamResponse {
+  DataBlock result = 1;
+  int64 watermark = 2;
+}

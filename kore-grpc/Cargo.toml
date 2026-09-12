@@ -1,0 +1,31 @@
+[package]
+name = "kore-grpc"
+version = "2.0.0-alpha"
+edition = "2021"
+description = "gRPC server for KORE Engine - Multi-language support via gRPC"
+
+[[bin]]
+name = "kore-grpc-server"
+path = "src/bin/server.rs"
+
+[dependencies]
+tonic = "0.11"
+tokio = { version = "1", features = ["full"] }
+prost = "0.12"
+prost-types = "0.12"
+axum = "0.7"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace", "cors"] }
+async-trait = "0.1"
+bytes = "1"
+prometheus = "0.13"
+chrono = "0.4"
+
+[build-dependencies]
+tonic-build = "0.11"
