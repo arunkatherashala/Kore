@@ -16,7 +16,7 @@ use parquet::file::properties::WriterProperties;
 use parquet::data_type::ByteArray;
 use parquet::record::Field;
 
-use arrow_schema::DataType as ArrowType;
+use arrow_schema::{DataType as ArrowType, TimeUnit};
 use arrow_array::{
     Array, RecordBatch,
     Int8Array, Int16Array, Int32Array, Int64Array,
@@ -24,6 +24,8 @@ use arrow_array::{
     Float32Array, Float64Array, BooleanArray,
     StringArray, LargeStringArray,
     Date32Array, Date64Array,
+    TimestampSecondArray, TimestampMillisecondArray,
+    TimestampMicrosecondArray, TimestampNanosecondArray,
 };
 
 use kore_core::{Column, ColumnData, DataBlock, KoreError};
@@ -71,6 +73,23 @@ fn build_kore_column(batches: &[RecordBatch], ci: usize, dtype: &ArrowType, tota
         ArrowType::Float64 => { let mut out: Vec<Option<f64>> = Vec::with_capacity(total); for b in batches { let a = b.column(ci).as_any().downcast_ref::<Float64Array>().unwrap(); for i in 0..a.len() { out.push(if a.is_null(i) { None } else { Some(a.value(i)) }); } } ColumnData::Float64(out) }
         ArrowType::Float32 => { let mut out: Vec<Option<f64>> = Vec::with_capacity(total); for b in batches { let a = b.column(ci).as_any().downcast_ref::<Float32Array>().unwrap(); for i in 0..a.len() { out.push(if a.is_null(i) { None } else { Some(a.value(i) as f64) }); } } ColumnData::Float64(out) }
         ArrowType::Utf8 | ArrowType::LargeUtf8 => { let mut out: Vec<Option<String>> = Vec::with_capacity(total); for b in batches { let arr = b.column(ci); if let Some(a) = arr.as_any().downcast_ref::<StringArray>() { for i in 0..a.len() { out.push(if a.is_null(i) { None } else { Some(a.value(i).to_string()) }); } } else if let Some(a) = arr.as_any().downcast_ref::<LargeStringArray>() { for i in 0..a.len() { out.push(if a.is_null(i) { None } else { Some(a.value(i).to_string()) }); } } } ColumnData::Str(out) }
+        // Dates stored as int64 days since epoch — delta-compresses to a few bits/row.
+        ArrowType::Date32 => { let mut out: Vec<Option<i64>> = Vec::with_capacity(total); for b in batches { let a = b.column(ci).as_any().downcast_ref::<Date32Array>().unwrap(); for i in 0..a.len() { out.push(if a.is_null(i) { None } else { Some(a.value(i) as i64) }); } } ColumnData::Int64(out) }
+        ArrowType::Date64 => { let mut out: Vec<Option<i64>> = Vec::with_capacity(total); for b in batches { let a = b.column(ci).as_any().downcast_ref::<Date64Array>().unwrap(); for i in 0..a.len() { out.push(if a.is_null(i) { None } else { Some(a.value(i) / 86_400_000) }); } } ColumnData::Int64(out) }
+        // Timestamps normalized to int64 microseconds since epoch (matches DuckDB TIMESTAMP).
+        ArrowType::Timestamp(unit, _tz) => {
+            let mut out: Vec<Option<i64>> = Vec::with_capacity(total);
+            for b in batches {
+                let arr = b.column(ci);
+                match unit {
+                    TimeUnit::Second      => { let a = arr.as_any().downcast_ref::<TimestampSecondArray>().unwrap();      for i in 0..a.len() { out.push(if a.is_null(i) { None } else { Some(a.value(i) * 1_000_000) }); } }
+                    TimeUnit::Millisecond => { let a = arr.as_any().downcast_ref::<TimestampMillisecondArray>().unwrap(); for i in 0..a.len() { out.push(if a.is_null(i) { None } else { Some(a.value(i) * 1_000) }); } }
+                    TimeUnit::Microsecond => { let a = arr.as_any().downcast_ref::<TimestampMicrosecondArray>().unwrap(); for i in 0..a.len() { out.push(if a.is_null(i) { None } else { Some(a.value(i)) }); } }
+                    TimeUnit::Nanosecond  => { let a = arr.as_any().downcast_ref::<TimestampNanosecondArray>().unwrap();  for i in 0..a.len() { out.push(if a.is_null(i) { None } else { Some(a.value(i) / 1_000) }); } }
+                }
+            }
+            ColumnData::Int64(out)
+        }
         _ => ColumnData::Str(vec![None; total]),
     }
 }
