@@ -1,4 +1,4 @@
-﻿name: KORE v1.0.0 - COMPLETE CI/CD DEPLOYMENT
+name: KORE v1.0.0 - COMPLETE CI/CD DEPLOYMENT
 
 on:
   release:
@@ -53,7 +53,7 @@ jobs:
         continue-on-error: true
       
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: build-artifacts
           path: |
