@@ -1,0 +1,41 @@
+[package]
+name = "kore-continual-learning"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json.workspace = true
+
+---SPLIT---
+
+[package]
+name = "kore-meta-learning"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json.workspace = true
+
+---SPLIT---
+
+[package]
+name = "kore-neurosymbolic"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json.workspace = true
+
+---SPLIT---
+
+[package]
+name = "kore-quantum"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json.workspace = true

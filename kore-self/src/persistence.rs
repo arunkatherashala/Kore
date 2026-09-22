@@ -1,5 +1,5 @@
 // persistence.rs — Atomic, crash-safe disk persistence.
-// Saves to ~/.kore-self/<owner>/memories.kore.json
+// Saves to ~/.kore-self/<owner>/memories.kore using native KORE storage.
 // Atomic write: write to .tmp → rename (never corrupts on crash)
 
 use std::fs;
@@ -62,7 +62,11 @@ pub fn data_path(owner: &str) -> PathBuf {
     home_dir()
         .join(".kore-self")
         .join(owner)
-        .join("memories.kore.json")
+        .join("memories.kore")
+}
+
+fn legacy_data_path(owner: &str) -> PathBuf {
+    home_dir().join(".kore-self").join(owner).join("memories.kore.json")
 }
 
 fn home_dir() -> PathBuf {
@@ -117,20 +121,14 @@ pub fn save(
 
     let json = serde_json::to_string_pretty(&sf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-    // Atomic: write tmp, then rename into place
-    let tmp_path = path.with_extension("tmp");
-    fs::write(&tmp_path, json.as_bytes())?;
-    fs::rename(&tmp_path, &path)?;
-
-    Ok(())
+    crate::aru_store::write_payload(&path, &json)
 }
 
 /// Load full state from disk.
 pub fn load(owner: &str) -> Option<(Vec<Memory>, IdentityModel, ConsciousnessState, DreamEngine, ShadowObserver, PredictiveEngine, VoiceEngine, MortalityEngine, EvolutionEngine, BroadcastEngine, AssistantEngine, u64)> {
-    let path = data_path(owner);
-    let bytes = fs::read(&path).ok()?;
-    let sf: SaveFile = serde_json::from_slice(&bytes)
+    let payload = crate::aru_store::read_payload(&data_path(owner)).ok().flatten()
+        .or_else(|| fs::read_to_string(legacy_data_path(owner)).ok())?;
+    let sf: SaveFile = serde_json::from_str(&payload)
         .map_err(|e| eprintln!("[kore-self] Warning: save file corrupt ({e}), starting fresh"))
         .ok()?;
     Some((sf.memories, sf.identity, sf.consciousness, sf.dream, sf.shadow, sf.predictive, sf.social, sf.mortality, sf.evolution, sf.broadcast, sf.assistant, sf.next_id))
@@ -144,7 +142,7 @@ pub fn save_becoming(
     story:        &Story,
     becoming:     &BecomingEngine,
 ) -> std::io::Result<()> {
-    let path = data_path(owner).with_file_name("becoming.kore.json");
+    let path = data_path(owner).with_file_name("becoming.kore");
     let json = serde_json::to_string_pretty(&serde_json::json!({
         "needs":        needs,
         "temporal_self": temporal,
@@ -152,17 +150,14 @@ pub fn save_becoming(
         "becoming":     becoming,
         "saved_at":     crate::now(),
     })).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, json.as_bytes())?;
-    fs::rename(&tmp, &path)?;
-    Ok(())
+    crate::aru_store::write_payload(&path, &json)
 }
 
 /// Load KORE-BECOMING layer from disk (returns None if not saved yet)
 pub fn load_becoming(owner: &str) -> Option<(NeedEngine, TemporalSelf, Story, BecomingEngine)> {
-    let path = data_path(owner).with_file_name("becoming.kore.json");
-    let bytes = fs::read(&path).ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let path = data_path(owner).with_file_name("becoming.kore");
+    let payload = crate::aru_store::read_payload(&path).ok().flatten()?;
+    let v: serde_json::Value = serde_json::from_str(&payload).ok()?;
     let needs:    NeedEngine    = serde_json::from_value(v["needs"].clone()).ok()?;
     let temporal: TemporalSelf  = serde_json::from_value(v["temporal_self"].clone()).ok()?;
     let story:    Story         = serde_json::from_value(v["story"].clone()).ok()?;

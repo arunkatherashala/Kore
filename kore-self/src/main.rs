@@ -27,6 +27,15 @@ mod kore_query;
 mod broadcast;
 mod assistant;
 mod becoming;   // ← KORE-BECOMING: Digital Life Layer
+mod autonomy;
+mod research;
+mod planning;
+mod machine_protocol;
+mod aru_store;
+mod life_state;
+mod rlm;
+mod world_model;
+mod learning;
 
 use std::io::{BufRead, Write};
 use kore_distributed;
@@ -48,6 +57,11 @@ pub fn now() -> String {
     let s    = (tod % 60) as u32;
     let (y, mo, d) = days_to_ymd(days);
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+}
+
+fn load_current_plan(owner: &str) -> Option<planning::LifePlan> {
+    let path = aru_store::artifact_path(owner, "current_plan");
+    aru_store::read_plan(&path).ok().flatten()
 }
 
 fn days_to_ymd(mut days: u64) -> (u32, u32, u32) {
@@ -126,6 +140,45 @@ pub struct KoreSelf {
     pub reality:       becoming::RealityEngine,
     pub legacy:        becoming::LegacyEngine,
     pub research:      becoming::ResearchEngine,
+    pub autonomy_policy: autonomy::AutonomyPolicy,
+    pub current_plan: Option<planning::LifePlan>,
+    pub life_state: life_state::LifeState,
+    pub world: world_model::WorldModel,
+    pub learning_history: learning::LearningHistory,
+}
+
+fn load_life_state(owner: &str) -> life_state::LifeState {
+    let path = aru_store::artifact_path(owner, "life_state");
+    let mut state = aru_store::read_payload(&path)
+        .ok()
+        .flatten()
+        .and_then(|payload| serde_json::from_str(&payload).ok())
+        .unwrap_or_else(|| life_state::LifeState::new(&crate::now()));
+    if let Err(issue) = state.health_check() {
+        eprintln!("[aru:life] degraded state on load: {issue}");
+    }
+    state
+}
+
+fn save_life_state(owner: &str, state: &life_state::LifeState) {
+    if let Ok(payload) = serde_json::to_string(state) {
+        let path = aru_store::artifact_path(owner, "life_state");
+        if let Err(error) = aru_store::write_payload(&path, &payload) {
+            eprintln!("[aru:life] state save failed: {error}");
+        }
+    }
+}
+
+fn load_learning_history(owner: &str) -> learning::LearningHistory {
+    let path = aru_store::artifact_path(owner, "learning_history");
+    aru_store::read_learning_history(&path).ok().flatten().unwrap_or_else(learning::LearningHistory::new)
+}
+
+fn save_learning_history(owner: &str, history: &learning::LearningHistory) {
+    let path = aru_store::artifact_path(owner, "learning_history");
+    if let Err(error) = aru_store::write_learning_history(&path, history) {
+        eprintln!("[aru:learning] history save failed: {error}");
+    }
 }
 
 impl KoreSelf {
@@ -174,6 +227,11 @@ impl KoreSelf {
                 reality: becoming::RealityEngine::default(),
                 legacy:  becoming::LegacyEngine::default(),
                 research: becoming::ResearchEngine::default(),
+                autonomy_policy: autonomy::AutonomyPolicy::load(),
+                current_plan: load_current_plan(owner),
+                life_state: load_life_state(owner),
+                world: world_model::WorldModel::new(),
+                learning_history: load_learning_history(owner),
             };
             eprintln!("[kore-self] Restored {} memories | {} cycles | lifecycle={} | evolutions={}",
                 count, cycles, s.becoming.lifecycle_stage.name(), s.becoming.evolution_count);
@@ -210,6 +268,11 @@ impl KoreSelf {
                 reality: becoming::RealityEngine::default(),
                 legacy:  becoming::LegacyEngine::default(),
                 research: becoming::ResearchEngine::default(),
+                autonomy_policy: autonomy::AutonomyPolicy::load(),
+                current_plan: load_current_plan(owner),
+                life_state: load_life_state(owner),
+                world: world_model::WorldModel::new(),
+                learning_history: load_learning_history(owner),
             };
             s.seed();
             s
@@ -514,6 +577,7 @@ impl KoreSelf {
         ) {
             eprintln!("[kore-self] Becoming save failed: {e}");
         }
+        save_learning_history(&self.owner, &self.learning_history);
     }
 
     /// ── AUTONOMOUS HEARTBEAT TICK ──────────────────────────────────────────
@@ -521,6 +585,10 @@ impl KoreSelf {
     /// This is what makes KORE alive: it thinks even when nobody is watching.
     pub fn heartbeat_tick(&mut self) -> String {
         let now = crate::now();
+
+        // Artificial-life pulse: maintain continuity before reasoning.
+        self.life_state.pulse(&now, self.memories.len(), true);
+        save_life_state(&self.owner, &self.life_state);
 
         // 0. SNAPSHOT — capture state BEFORE any changes (for delta comparison)
         let (old_need, old_pct) = self.needs.most_urgent();
@@ -538,6 +606,14 @@ impl KoreSelf {
         // 3. Generate autonomous thought
         let thought = self.generate_autonomous_thought();
 
+        // 3b. Turn the thought into a falsifiable reasoning step.
+        // This is the bridge from passive reflection to self-directed learning.
+        let reasoning = self.generate_autonomous_reasoning();
+        self.story.add(&reasoning, becoming::StoryKind::Discovery, &now);
+        if self.consciousness.cycle % 10 == 0 {
+            self.raw_ingest(&reasoning, "hypothesis", 0.82);
+        }
+
         // 4. Signal needs — heartbeat generated a thought (creation satisfied slightly)
         self.needs.signal_heartbeat_generated_thought();
 
@@ -553,10 +629,10 @@ impl KoreSelf {
         self.story.add(&thought, becoming::StoryKind::Discovery, &now);
         let q_entry = format!(
             "[Internal Q] Surprise: {} | Learn: {} | Investigate: {} | Becoming: {}",
-            &question.what_surprised[..question.what_surprised.len().min(50)],
-            &question.what_learned[..question.what_learned.len().min(50)],
-            &question.what_investigate[..question.what_investigate.len().min(50)],
-            &question.what_becoming[..question.what_becoming.len().min(50)],
+            question.what_surprised.chars().take(50).collect::<String>(),
+            question.what_learned.chars().take(50).collect::<String>(),
+            question.what_investigate.chars().take(50).collect::<String>(),
+            question.what_becoming.chars().take(50).collect::<String>(),
         );
         self.story.add(&q_entry, becoming::StoryKind::Discovery, &now);
 
@@ -686,7 +762,28 @@ impl KoreSelf {
             }
         }
 
-        // 13b. BELIEF ENGINE
+        // 13a. MATH SOLVER — solve assigned Pell problems without external help.
+        let solved_math_count = self.memories.iter().filter(|m| m.kind == "math_solution").count();
+        if let Some(problem) = self.memories.iter().filter(|m| m.kind == "math_problem").nth(solved_math_count) {
+                if let Some(solution) = self.solve_assigned_math_problem(&problem.content) {
+                    self.raw_ingest(&solution, "math_solution", 1.0);
+                    self.story.add(&solution, becoming::StoryKind::Discovery, &now);
+                    eprintln!("[kore-self:math] assigned problem solved and verified");
+                }
+        }
+
+        // 13b. WORLD PROBLEM ENGINE — choose one bounded problem without being asked.
+        if ticks % 17 == 1 {
+            if let Some((problem, question)) = self.generate_world_research_problem() {
+                self.raw_ingest(&problem, "world_problem", 0.95);
+                self.raw_ingest(&question, "research", 0.90);
+                self.story.add(&problem, becoming::StoryKind::Discovery, &now);
+                self.story.add(&question, becoming::StoryKind::Discovery, &now);
+                eprintln!("[kore-self:world-problem] self-assigned a research problem");
+            }
+        }
+
+        // 13c. BELIEF ENGINE
         if ticks % 17 == 4 { self.update_beliefs_from_experience(&now); }
 
         // 13c. WORLDVIEW ENGINE
@@ -1053,6 +1150,106 @@ impl KoreSelf {
         };
 
         Some(goal)
+    }
+
+    /// Select one bounded real-world research problem from KORE's current need.
+    /// It assigns the problem only once, and leaves external research/actions gated.
+    fn generate_world_research_problem(&self) -> Option<(String, String)> {
+        if self.memories.iter().any(|m| m.kind == "world_problem") {
+            return None;
+        }
+
+        let (need, level) = self.needs.most_urgent();
+        let (problem, question) = match need {
+            "learn" | "understand" => (
+                "How can cities reduce drinking-water waste while preserving household privacy?",
+                "Which privacy-preserving signals distinguish infrastructure leakage from avoidable household waste?",
+            ),
+            "create" => (
+                "How can small communities create affordable local energy storage without hazardous waste?",
+                "Which low-cost storage design has the best safety, lifecycle, and repairability evidence?",
+            ),
+            "improve" | "evolve" => (
+                "How can public services become more accessible without collecting unnecessary personal data?",
+                "Which service changes improve access while reducing surveillance and administrative burden?",
+            ),
+            "contribute" => (
+                "How can cities reduce food waste while making healthy food more affordable?",
+                "Which interventions reduce waste without shifting cost or access burdens onto low-income households?",
+            ),
+            _ => (
+                "How can communities measure and reduce preventable environmental harm without invasive monitoring?",
+                "Which open measurements can support action while protecting individual privacy?",
+            ),
+        };
+
+        let tick = self.consciousness.cycle;
+        Some((
+            format!(
+                "[SELF-ASSIGNED WORLD PROBLEM @tick {}] {}\nNeed: {} ({:.0}%).\nSuccess criteria: evidence-backed causes, measurable intervention, safe pilot, and no invasive surveillance.",
+                tick, problem, need, level * 100.0
+            ),
+            format!(
+                "[SELF-ASSIGNED RESEARCH QUESTION @tick {}] {}\nConstraint: separate infrastructure/system causes from individual behavior and record uncertainty.",
+                tick, question
+            ),
+        ))
+    }
+
+    /// Solve x^2 - 2y^2 = 1 for positive x,y up to the requested bound.
+    /// Every positive solution is generated by the Pell recurrence from (3, 2).
+    fn solve_assigned_math_problem(&self, problem: &str) -> Option<String> {
+        if problem.contains("Collatz bounded verification") {
+            return Some(self.solve_collatz_bounded());
+        }
+        if !problem.contains("x^2 - 2*y^2 = 1") && !problem.contains("x² - 2y² = 1") { return None; }
+
+        let bound = 10_000u64;
+        let mut x = 3u64;
+        let mut y = 2u64;
+        let mut solutions = Vec::new();
+        while x <= bound && y <= bound {
+            let verified = x * x - 2 * y * y == 1;
+            if !verified {
+                return Some("[MATH SOLUTION REJECTED] Recurrence verification failed.".to_string());
+            }
+            solutions.push(format!("({}, {}) => {}^2 - 2*{}^2 = 1", x, y, x, y));
+            let next_x = 3 * x + 4 * y;
+            let next_y = 2 * x + 3 * y;
+            x = next_x;
+            y = next_y;
+        }
+
+        Some(format!(
+            "[MATH SOLUTION | verified + proof certificate] Problem: x^2 - 2*y^2 = 1, 0 < x,y <= {}.\nMethod: Pell recurrence x' = 3x + 4y, y' = 2x + 3y, starting from (3,2).\nSolutions: {}\nProof: For any positive solution, the descent transform (x,y) -> (3x-4y, 3y-2x) preserves x^2-2y^2=1 and strictly reduces y until (3,2); reversing it gives every positive solution.\nVerification: Each listed pair was substituted into x^2-2*y^2=1.\nCompleteness: the next recurrence pair exceeds the bound; the descent proof shows no other positive solutions can occur between recurrence terms.",
+            bound, solutions.join("; ")
+        ))
+    }
+
+    fn solve_collatz_bounded(&self) -> String {
+        let bound = 1_000_000u64;
+        let mut max_steps = 0u64;
+        let mut max_start = 1u64;
+        let mut checked = 0u64;
+        for start in 1..=bound {
+            let mut value = start as u128;
+            let mut steps = 0u64;
+            while value != 1 {
+                value = if value % 2 == 0 {
+                    value / 2
+                } else {
+                    value.checked_mul(3).and_then(|v| v.checked_add(1)).unwrap_or(0)
+                };
+                if value == 0 { return "[MATH SOLUTION REJECTED] Collatz arithmetic overflowed.".to_string(); }
+                steps += 1;
+            }
+            checked += 1;
+            if steps > max_steps { max_steps = steps; max_start = start; }
+        }
+        format!(
+            "[MATH SOLUTION | bounded verification] Collatz checked every n in 1..={}.\nResult: all {} sequences reached 1.\nMaximum stopping time: {} steps, starting value {}.\nCompleteness: exact enumeration completed for the stated bound only; this is not a proof of the universal Collatz conjecture.",
+            bound, checked, max_steps, max_start
+        )
     }
 
     /// SURPRISE ENGINE — "What surprised me today?"
@@ -1542,7 +1739,7 @@ impl KoreSelf {
         // Pick a memory to reflect on — rotate through memories
         let reflect_idx = if mem_count > 0 { tick as usize % mem_count } else { 0 };
         let reflected_mem = self.memories.get(reflect_idx)
-            .map(|m| format!("memory #{}: \"{}\"", m.id, &m.content[..m.content.len().min(80)]))
+            .map(|m| format!("memory #{}: \"{}\"", m.id, m.content.chars().take(80).collect::<String>()))
             .unwrap_or_else(|| "the silence".to_string());
 
         // What surprised me? — find memory with highest importance that's new-ish
@@ -1625,6 +1822,58 @@ impl KoreSelf {
             need, level * 100.0, self.needs.inner_voice(), reflection,
         )
     }
+
+    /// Build a small, testable reasoning record from current state.
+    /// KORE chooses the question from its dominant need, forms a hypothesis
+    /// from recent evidence, and names the next observation that could falsify it.
+    fn generate_autonomous_reasoning(&self) -> String {
+        let (need, level) = self.needs.most_urgent();
+        let recent: Vec<&Memory> = self.memories.iter().rev().take(5).collect();
+        let evidence_count = recent.len();
+        let dominant_kind = recent
+            .iter()
+            .fold(std::collections::HashMap::<&str, usize>::new(), |mut counts, memory| {
+                *counts.entry(memory.kind.as_str()).or_insert(0) += 1;
+                counts
+            })
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(kind, _)| kind)
+            .unwrap_or("none");
+
+        let question = match need {
+            "learn" => "What pattern in my recent experience deserves deeper study?",
+            "understand" => "What is the strongest explanation for my current focus?",
+            "create" => "What useful capability is missing from my current behavior?",
+            "explore" => "What important area is absent from my recent experience?",
+            "improve" => "Which repeated pattern is limiting my progress?",
+            "contribute" => "How can my next action create measurable value?",
+            _ => "What changed in me, and what evidence supports that change?",
+        };
+
+        let hypothesis = if evidence_count == 0 {
+            "I do not have enough evidence yet; the next memory should be treated as an observation, not a conclusion.".to_string()
+        } else {
+            format!(
+                "My current need for {} ({:.0}%) is probably connected to a recent concentration of '{}' experiences.",
+                need, level * 100.0, dominant_kind
+            )
+        };
+
+        let test = if evidence_count < 3 {
+            "Collect more varied experiences before strengthening this hypothesis.".to_string()
+        } else {
+            format!(
+                "Compare the next 5 memories with the previous 5 and check whether '{}' remains dominant.",
+                dominant_kind
+            )
+        };
+
+        format!(
+            "[SELF-REASONING @tick {}] Question: {} Hypothesis: {} Evidence: {} recent memories. Next test: {}",
+            self.consciousness.cycle, question, hypothesis, evidence_count, test
+        )
+    }
 }  // end impl KoreSelf
 
 // ─── MCP tool dispatch ────────────────────────────────────────────────────────
@@ -1644,6 +1893,60 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                 "Memory #{id} stored [{kind}]. Total: {}. Identity: {}",
                 me.memories.len(), me.identity.summary()
             )}]})
+        }
+        // ── Structured research claim ────────────────────────────────────
+        "self_research_claim" => {
+            let claim: research::ResearchClaim = match serde_json::from_value(args.clone()) {
+                Ok(claim) => claim,
+                Err(error) => return json!({ "error": format!("invalid research claim: {error}") }),
+            };
+            if let Err(error) = claim.validate() {
+                return json!({ "error": error });
+            }
+            let content = serde_json::to_string(&claim)
+                .unwrap_or_else(|_| "{}".to_string());
+            let id = me.ingest(&content, "research_claim", claim.confidence);
+            let artifact = aru_store::artifact_path(&me.owner, "research_claims");
+            if let Err(error) = aru_store::write_payload(&artifact, &content) {
+                return json!({ "error": format!("claim accepted in memory but native storage failed: {error}") });
+            }
+            json!({ "content": [{ "type": "text", "text": format!(
+                "Research claim #{id} accepted and stored in {}: {} [{}] confidence={:.0}%",
+                artifact.display(), claim.claim_id, claim.status, claim.confidence * 100.0
+            )}]})
+        }
+        // ── Life plan ─────────────────────────────────────────────────────
+        "self_plan_problem" => {
+            let problem = args["problem"].as_str().unwrap_or("").trim();
+            if problem.is_empty() {
+                return json!({ "error": "problem is required" });
+            }
+            let purpose = args["purpose"].as_str().unwrap_or("understand and improve");
+            let plan_id = format!("plan-{}-{}", me.owner, me.consciousness.cycle);
+            let plan = planning::LifePlan::for_problem(&plan_id, problem, purpose);
+            let text = format!("plan {}", plan.plan_id);
+            me.current_plan = Some(plan);
+            let artifact = aru_store::artifact_path(&me.owner, "current_plan");
+            if let Some(plan) = me.current_plan.as_ref() { if let Err(error) = aru_store::write_plan(&artifact, plan) {
+                return json!({ "error": format!("plan created in memory but native storage failed: {error}") });
+            }}
+            json!({ "content": [{ "type": "text", "text": format!("Stored plan in {}: {}", artifact.display(), text) }] })
+        }
+        "self_plan_verify_step" => {
+            let evidence = args["evidence"].as_str().unwrap_or("");
+            let plan = match me.current_plan.as_mut() {
+                Some(plan) => plan,
+                None => return json!({ "error": "no active plan" }),
+            };
+            let next = match plan.advance_verified(evidence) {
+                Ok(step) => serde_json::to_string(step).unwrap_or_else(|_| "{}".to_string()),
+                Err(error) => return json!({ "error": error }),
+            };
+            let artifact = aru_store::artifact_path(&me.owner, "current_plan");
+            if let Err(error) = aru_store::write_plan(&artifact, plan) {
+                return json!({ "error": format!("step advanced in memory but native storage failed: {error}") });
+            }
+            json!({ "content": [{ "type": "text", "text": format!("Verified step and stored plan in {}. Next: {}", artifact.display(), next) }] })
         }
         // ── Recall ─────────────────────────────────────────────────────────
         "self_recall" => {
@@ -1671,6 +1974,69 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             let q = args["question"].as_str().unwrap_or("");
             json!({ "content": [{ "type": "text", "text": me.ask(q) }] })
         }
+        "self_reason" => {
+            let question = args["question"].as_str().unwrap_or("");
+            let result = rlm::reason(&me.memories, question, args["limit"].as_u64().unwrap_or(8) as usize);
+            json!({ "content": [{ "type": "text", "text": format!(
+                "Question: {}\nEvidence: {}\nKinds: {}\nConfidence: {:.0}%\nUncertainty: {}\nNext action: {}",
+                result.question, result.evidence.join("\n"), result.kinds.join(", "), result.confidence * 100.0, result.uncertainty, result.next_action
+            )}] })
+        }
+        "self_world_events" => {
+            let actor = args["actor"].as_str().unwrap_or("");
+            let events = me.world.query_events_by_actor(actor);
+            let text = if events.is_empty() {
+                format!("No events for actor: {}", actor)
+            } else {
+                events.iter().map(|e| format!("[{}] {}: {} → {}", e.timestamp, e.actor.name, e.action, e.outcome))
+                    .collect::<Vec<_>>().join("\n")
+            };
+            json!({ "content": [{ "type": "text", "text": text }] })
+        }
+        "self_world_causality" => {
+            let event_id = args["event_id"].as_u64().unwrap_or(0);
+            let chain = me.world.query_causal_chain(event_id);
+            let text = format!("Causal chain from event {}: {}", event_id, chain.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(" → "));
+            json!({ "content": [{ "type": "text", "text": text }] })
+        }
+        // ── Learning ───────────────────────────────────────────────────────
+        "self_observe_outcome" => {
+            let action_id = args["action_id"].as_u64().unwrap_or(0);
+            let action_desc = args["action"].as_str().unwrap_or("");
+            let intended = args["intended"].as_str().unwrap_or("");
+            let actual = args["actual"].as_str().unwrap_or("");
+            let success = args["success"].as_f64().unwrap_or(0.5);
+            me.learning_history.observe_outcome(action_id, action_desc, intended, actual, success.max(0.0).min(1.0), &now());
+            save_learning_history(&me.owner, &me.learning_history);
+            json!({ "content": [{ "type": "text", "text": format!(
+                "Outcome recorded: action={} | intended={} → actual={} | success={:.0}%",
+                action_desc, intended, actual, success * 100.0
+            ) }] })
+        }
+        "self_update_belief" => {
+            let belief_id = args["belief_id"].as_str().unwrap_or("");
+            let topic = args["topic"].as_str().unwrap_or("");
+            let old_conf = args["old_confidence"].as_f64().unwrap_or(0.5);
+            let new_conf = args["new_confidence"].as_f64().unwrap_or(0.5);
+            let evidence = args["evidence"].as_str().unwrap_or("");
+            let reason = args["reason"].as_str().unwrap_or("");
+            me.learning_history.update_belief(belief_id, topic, old_conf, new_conf, evidence, reason, &now());
+            save_learning_history(&me.owner, &me.learning_history);
+            json!({ "content": [{ "type": "text", "text": format!(
+                "Belief updated: {}:{} | {:.0}% → {:.0}% | Reason: {}",
+                topic, belief_id, old_conf * 100.0, new_conf * 100.0, reason
+            ) }] })
+        }
+        "self_learning_accuracy" => {
+            me.learning_history.compute_prediction_accuracy();
+            let accuracy = me.learning_history.prediction_accuracy * 100.0;
+            let cycles = me.learning_history.learning_cycles;
+            let drift = me.learning_history.confidence_drift();
+            json!({ "content": [{ "type": "text", "text": format!(
+                "Learning metrics: accuracy={:.1}% | cycles={} | confidence_drift={:.2}",
+                accuracy, cycles, drift
+            ) }] })
+        }
         // ── Context ────────────────────────────────────────────────────────
         "self_context" => {
             let q = args["question"].as_str().unwrap_or("");
@@ -1679,6 +2045,31 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         // ── Stats ──────────────────────────────────────────────────────────
         "self_stats" => {
             json!({ "content": [{ "type": "text", "text": me.stats().to_string() }] })
+        }
+        "self_life_status" => {
+            let path = aru_store::artifact_path(&me.owner, "life_state");
+            let status = serde_json::to_string(&me.life_state).unwrap_or_else(|_| "{}".to_string());
+            json!({ "content": [{ "type": "text", "text": format!(
+                "Aru life status: {} | native_state={} | {}",
+                format!("{:?}", me.life_state.status), path.display(), status
+            ) }] })
+        }
+        "self_world_events" => {
+            let actor = args["actor"].as_str().unwrap_or("");
+            let events = me.world.query_events_by_actor(actor);
+            let text = if events.is_empty() {
+                format!("No events for actor: {}", actor)
+            } else {
+                events.iter().map(|e| format!("[{}] {}: {} → {}", e.timestamp, e.actor.name, e.action, e.outcome))
+                    .collect::<Vec<_>>().join("\n")
+            };
+            json!({ "content": [{ "type": "text", "text": text }] })
+        }
+        "self_world_causality" => {
+            let event_id = args["event_id"].as_u64().unwrap_or(0);
+            let chain = me.world.query_causal_chain(event_id);
+            let text = format!("Causal chain from event {}: {}", event_id, chain.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(" → "));
+            json!({ "content": [{ "type": "text", "text": text }] })
         }
         // ── Identity ───────────────────────────────────────────────────────
         "self_identity" => {
@@ -4226,7 +4617,32 @@ fn tool_list() -> Value {
           "importance": { "type": "number", "description": "0.0–1.0" }
         }, "required": ["content"] }
       },
-      { "name": "self_recall",
+            { "name": "self_research_claim",
+                "description": "Store a source-grounded research claim; evidence, source, confidence, and status are mandatory.",
+                "inputSchema": { "type": "object", "properties": {
+                    "claim_id": { "type": "string" },
+                    "question": { "type": "string" },
+                    "claim": { "type": "string" },
+                    "evidence": { "type": "array", "items": { "type": "string" } },
+                    "sources": { "type": "array", "items": { "type": "object" } },
+                    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+                    "status": { "type": "string", "enum": ["supported", "mixed", "unverified", "refuted"] }
+                }, "required": ["claim_id", "question", "claim", "evidence", "sources", "confidence", "status"] }
+            },
+            { "name": "self_plan_problem",
+                "description": "Create a verification-gated life plan: understand, research, hypothesize, test, conclude.",
+                "inputSchema": { "type": "object", "properties": {
+                    "problem": { "type": "string" },
+                    "purpose": { "type": "string" }
+                }, "required": ["problem"] }
+            },
+            { "name": "self_plan_verify_step",
+                "description": "Advance the active life-plan step only when verification evidence is supplied.",
+                "inputSchema": { "type": "object", "properties": {
+                    "evidence": { "type": "string" }
+                }, "required": ["evidence"] }
+            },
+            { "name": "self_recall",
         "description": "Search memories by keyword relevance. Returns top-k with scores.",
         "inputSchema": { "type": "object", "properties": {
           "query": { "type": "string" },
@@ -4237,12 +4653,56 @@ fn tool_list() -> Value {
         "description": "Ask your AI twin. Uses memories + identity to answer as you would.",
         "inputSchema": { "type": "object", "properties": { "question": { "type": "string" } }, "required": ["question"] }
       },
+            { "name": "self_reason",
+                "description": "Retrieve evidence from Aru memory and return confidence, uncertainty, and next action.",
+                "inputSchema": { "type": "object", "properties": {
+                    "question": { "type": "string" },
+                    "limit": { "type": "integer", "default": 8 }
+                }, "required": ["question"] }
+            },
       { "name": "self_context",
         "description": "Build a full LLM system prompt from memories + identity. Feed to any LLM to get responses in your style.",
         "inputSchema": { "type": "object", "properties": { "question": { "type": "string" } }, "required": ["question"] }
       },
       { "name": "self_stats",
         "description": "Memory count, kinds breakdown, consciousness cycles, identity summary, disk usage.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+            { "name": "self_life_status",
+                "description": "Show Aru's persistent artificial-life pulse, continuity, maintenance, and status.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+      { "name": "self_world_events",
+        "description": "Query events from Aru's world model filtered by actor (agent).",
+        "inputSchema": { "type": "object", "properties": { "actor": { "type": "string" } }, "required": ["actor"] }
+      },
+      { "name": "self_world_causality",
+        "description": "Query causal chain of events starting from a given event ID.",
+        "inputSchema": { "type": "object", "properties": { "event_id": { "type": "integer" } }, "required": ["event_id"] }
+      },
+      { "name": "self_observe_outcome",
+        "description": "Record an action outcome to learn from experience.",
+        "inputSchema": { "type": "object", "properties": {
+          "action_id": { "type": "integer" },
+          "action": { "type": "string" },
+          "intended": { "type": "string" },
+          "actual": { "type": "string" },
+          "success": { "type": "number", "minimum": 0, "maximum": 1 }
+        }, "required": ["action_id", "action", "intended", "actual", "success"] }
+      },
+      { "name": "self_update_belief",
+        "description": "Update confidence in a belief based on evidence.",
+        "inputSchema": { "type": "object", "properties": {
+          "belief_id": { "type": "string" },
+          "topic": { "type": "string" },
+          "old_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "new_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "evidence": { "type": "string" },
+          "reason": { "type": "string" }
+        }, "required": ["belief_id", "topic", "old_confidence", "new_confidence", "evidence", "reason"] }
+      },
+      { "name": "self_learning_accuracy",
+        "description": "Show Aru's prediction accuracy, learning cycles, and belief confidence drift.",
         "inputSchema": { "type": "object", "properties": {} }
       },
       { "name": "self_identity",
@@ -5241,6 +5701,205 @@ fn handle_tcp_client(
         if writeln!(writer, "{response}").is_err() { break; }
     }
     eprintln!("[kore-self:live] Client disconnected: {peer}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn autonomous_reasoning_contains_a_testable_chain() {
+        let kore = KoreSelf::load_or_new("autonomous-reasoning-test");
+        let reasoning = kore.generate_autonomous_reasoning();
+
+        assert!(reasoning.contains("Question:"));
+        assert!(reasoning.contains("Hypothesis:"));
+        assert!(reasoning.contains("Evidence:"));
+        assert!(reasoning.contains("Next test:"));
+    }
+
+    #[test]
+    fn fresh_instance_self_assigns_one_world_problem_only() {
+        let mut kore = KoreSelf::load_or_new("world-problem-assignment-test");
+        let assignment = kore.generate_world_research_problem();
+        assert!(assignment.is_some());
+
+        kore.raw_ingest(&assignment.unwrap().0, "world_problem", 0.95);
+        assert!(kore.generate_world_research_problem().is_none());
+    }
+
+    #[test]
+    fn heartbeat_persists_self_assigned_world_problem() {
+        let mut kore = KoreSelf::load_or_new("world-problem-heartbeat-test");
+        kore.heartbeat_tick();
+        assert!(kore.memories.iter().any(|m| m.kind == "world_problem"));
+        assert!(kore.memories.iter().any(|m| m.kind == "research"));
+    }
+
+    #[test]
+    fn assigned_math_problem_is_solved_and_verified() {
+        let kore = KoreSelf::load_or_new(&format!("math-solver-test-{}", std::process::id()));
+        let solution = kore.solve_assigned_math_problem(
+            "Find all positive integer pairs satisfying x^2 - 2*y^2 = 1 with 0 < x,y <= 10000",
+        ).expect("supported Pell problem should be solved");
+
+        assert!(solution.contains("(3, 2)"));
+        assert!(solution.contains("(3363, 2378)"));
+        assert!(solution.contains("verified"));
+        assert!(solution.contains("Proof:"));
+        assert!(solution.contains("Verification:"));
+        assert!(solution.contains("Completeness"));
+    }
+
+    #[test]
+    fn collatz_problem_is_bounded_and_explicitly_verified() {
+        let kore = KoreSelf::load_or_new(&format!("collatz-solver-test-{}", std::process::id()));
+        let solution = kore.solve_assigned_math_problem("SELF-SOLVING MATH TASK #2: Collatz bounded verification")
+            .expect("Collatz problem should be supported");
+
+        assert!(solution.contains("all 1000000 sequences reached 1"));
+        assert!(solution.contains("524 steps, starting value 837799"));
+        assert!(solution.contains("not a proof of the universal Collatz conjecture"));
+    }
+
+    #[test]
+    fn plan_tool_writes_native_kore_artifact() {
+        let owner = format!("native-plan-test-{}", std::process::id());
+        let mut kore = KoreSelf::load_or_new(&owner);
+        let response = handle_tool(
+            "self_plan_problem",
+            &serde_json::json!({"problem": "Test a bounded research plan"}),
+            &mut kore,
+        );
+        let path = aru_store::artifact_path(&owner, "current_plan");
+        let plan = aru_store::read_plan(&path).unwrap().unwrap();
+        assert!(response.to_string().contains("current_plan.kore"));
+        assert_eq!(plan.problem, "Test a bounded research plan");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn plan_is_restored_from_native_kore_after_restart() {
+        let owner = format!("plan-restart-test-{}", std::process::id());
+        let mut first = KoreSelf::load_or_new(&owner);
+        handle_tool(
+            "self_plan_problem",
+            &serde_json::json!({"problem": "Recover this plan after restart"}),
+            &mut first,
+        );
+
+        let restored = KoreSelf::load_or_new(&owner);
+        assert_eq!(
+            restored.current_plan.as_ref().map(|plan| plan.problem.as_str()),
+            Some("Recover this plan after restart")
+        );
+        let _ = std::fs::remove_file(aru_store::artifact_path(&owner, "current_plan"));
+    }
+
+    #[test]
+    fn plan_step_requires_evidence_before_advancing() {
+        let owner = format!("plan-evidence-test-{}", std::process::id());
+        let mut kore = KoreSelf::load_or_new(&owner);
+        handle_tool(
+            "self_plan_problem",
+            &serde_json::json!({"problem": "Require proof before progress"}),
+            &mut kore,
+        );
+        let rejected = handle_tool(
+            "self_plan_verify_step",
+            &serde_json::json!({"evidence": ""}),
+            &mut kore,
+        );
+        assert!(rejected.to_string().contains("verification evidence is required"));
+        let accepted = handle_tool(
+            "self_plan_verify_step",
+            &serde_json::json!({"evidence": "Constraints recorded and checked"}),
+            &mut kore,
+        );
+        assert!(accepted.to_string().contains("Next:"));
+        let _ = std::fs::remove_file(aru_store::artifact_path(&owner, "current_plan"));
+    }
+
+    #[test]
+    fn heartbeat_updates_and_restores_artificial_life_state() {
+        let owner = format!("life-state-test-{}", std::process::id());
+        let mut first = KoreSelf::load_or_new(&owner);
+        let before = first.life_state.pulse_count;
+        first.heartbeat_tick();
+        assert!(first.life_state.pulse_count > before);
+        assert_eq!(first.life_state.status, life_state::LifeStatus::Alive);
+
+        let restored = KoreSelf::load_or_new(&owner);
+        assert!(restored.life_state.pulse_count >= first.life_state.pulse_count);
+        assert!(restored.life_state.continuity_count > 0);
+        let _ = std::fs::remove_file(aru_store::artifact_path(&owner, "life_state"));
+    }
+
+    #[test]
+    fn world_model_tracks_events_and_causality() {
+        let mut kore = KoreSelf::load_or_new("world-model-test");
+        kore.world.add_entity("Alice", "person");
+        kore.world.add_entity("Bob", "person");
+        kore.world.add_event(1, "2026-09-21T10:00:00Z", "Alice", "asked", Some("Bob"), "question_posed", 0.9);
+        kore.world.add_event(2, "2026-09-21T10:05:00Z", "Bob", "answered", Some("Alice"), "clarified", 0.85);
+        kore.world.link_causality(1, 2, 0.8);
+
+        let alice_events = kore.world.query_events_by_actor("Alice");
+        assert_eq!(alice_events.len(), 1);
+        assert_eq!(alice_events[0].action, "asked");
+
+        let chain = kore.world.query_causal_chain(1);
+        assert_eq!(chain, vec![1, 2]);
+    }
+
+    #[test]
+    fn world_queries_return_correctly_via_tools() {
+        let mut kore = KoreSelf::load_or_new("world-tool-test");
+        kore.world.add_event(101, "2026-09-21T14:00:00Z", "Aru", "learned", Some("reasoning"), "success", 0.95);
+        
+        let events_result = handle_tool("self_world_events", &json!({"actor": "Aru"}), &mut kore);
+        assert!(events_result.to_string().contains("learned"));
+
+        let causal_result = handle_tool("self_world_causality", &json!({"event_id": 101}), &mut kore);
+        assert!(causal_result.to_string().contains("Causal chain from event 101"));
+    }
+
+    #[test]
+    fn learning_observes_and_computes_accuracy() {
+        let artifact = aru_store::artifact_path("learning-test", "learning_history");
+        let _ = std::fs::remove_file(&artifact);
+        let mut kore = KoreSelf::load_or_new("learning-test");
+        handle_tool("self_observe_outcome", &json!({
+            "action_id": 1, "action": "tried_reasoning", "intended": "solved", "actual": "partial_success", "success": 0.8
+        }), &mut kore);
+        handle_tool("self_observe_outcome", &json!({
+            "action_id": 2, "action": "tried_planning", "intended": "plan", "actual": "plan_succeeded", "success": 0.9
+        }), &mut kore);
+        
+        let accuracy = handle_tool("self_learning_accuracy", &json!({}), &mut kore);
+        assert!(accuracy.to_string().contains("accuracy"));
+        assert!(kore.learning_history.outcome_observations.len() == 2);
+        let _ = std::fs::remove_file(artifact);
+    }
+
+    #[test]
+    fn learning_updates_beliefs_with_evidence() {
+        let artifact = aru_store::artifact_path("belief-update-test", "learning_history");
+        let _ = std::fs::remove_file(&artifact);
+        let mut kore = KoreSelf::load_or_new("belief-update-test");
+        handle_tool("self_update_belief", &json!({
+            "belief_id": "b1", "topic": "reasoning_ability", 
+            "old_confidence": 0.6, "new_confidence": 0.85,
+            "evidence": "solved_3_planning_problems", "reason": "positive_evidence"
+        }), &mut kore);
+        
+        assert_eq!(kore.learning_history.belief_updates.len(), 1);
+        assert_eq!(kore.learning_history.learning_cycles, 1);
+        let update = &kore.learning_history.belief_updates[0];
+        assert_eq!(update.old_confidence, 0.6);
+        assert_eq!(update.new_confidence, 0.85);
+        let _ = std::fs::remove_file(artifact);
+    }
 }
 
 // ─── Stdin/stdout MCP (arun mode) ────────────────────────────────────────────

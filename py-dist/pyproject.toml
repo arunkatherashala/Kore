@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kore"
+version = "0.1.0"
+description = "Python bindings for the KORE columnar engine and the native .kore file format"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "KORE" }]
+keywords = ["kore", "columnar", "sql", "analytics", "dataframe"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: Microsoft :: Windows",
+]
+
+[tool.setuptools]
+packages = ["kore"]
+
+[tool.setuptools.package-data]
+kore = ["*.dll", "*.so", "*.dylib"]
