@@ -77,6 +77,14 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- Parquet reader for ParquetToKore (provided; add parquet+hadoop at runtime) -->
+        <dependency>
+            <groupId>org.apache.parquet</groupId>
+            <artifactId>parquet-hadoop</artifactId>
+            <version>1.13.1</version>
+            <scope>provided</scope>
+        </dependency>
+
         <!-- Spark DataSourceV2 (provided by Spark runtime) -->
         <dependency>
             <groupId>org.apache.spark</groupId>
