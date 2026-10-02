@@ -262,7 +262,7 @@ impl KoreWriter {
             stats_section.extend_from_slice(&checksum.to_le_bytes());
             
             // Column statistics
-            stats_section.push(col_stats.null_count as u8);
+            stats_section.push(col_stats.null_count.min(u8::MAX as usize) as u8); // saturate: layout is 1 byte
             if let Some(m) = col_stats.min_i64 {
                 stats_section.push(1); // has_i64_stats
                 stats_section.extend_from_slice(&m.to_le_bytes());

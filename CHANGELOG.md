@@ -4,6 +4,21 @@ All notable changes to KORE FileFormat will be documented in this file.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+### Added
+- Time travel: append-only version log (`kore-store::versioned`), FFI `kore_version_append/select`, Python `append_version/list_versions/read_at_version`
+- FFI `kore_encrypt_bytes/kore_decrypt_bytes` (AES-256-GCM); Python `encrypt_aes256/decrypt_aes256/get_column_stats/get_bloom_filter`
+- Reader verifies per-column CRC32 when the stats section is present
+- Stress tests: large roundtrip, truncation, bit flips, garbage decoders, concurrency
+
+### Fixed
+- Corrupt or truncated files no longer abort the process (bounds-checked parsing, size limits, column length check)
+- ZSTD decode failure returned zeros; now an error
+- RLE decoder read past the buffer; string decoder panicked on inverted offsets
+- Shuffle `distributed_group_by`: COUNT/AVG were re-aggregated incorrectly
+- Python: strings containing quotes, newlines or backslashes were corrupted; float `None` came back as NaN
+- phase3 BOOL encoder was a generator
+
 ## [1.7.16] - 2026-08-11
 ### Changed
 - Auto-bump version 1.7.15 → 1.7.16

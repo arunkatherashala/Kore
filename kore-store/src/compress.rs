@@ -18,9 +18,9 @@ pub fn rle_encode_i64(vals: &[Option<i64>]) -> Vec<u8> {
 }
 
 pub fn rle_decode_i64(data: &[u8], n: usize) -> Vec<Option<i64>> {
-    let mut out = Vec::with_capacity(n);
+    let mut out = Vec::with_capacity(n.min(1 << 16));
     let mut i = 0;
-    while i + 12 <= data.len() && out.len() < n {
+    while i + 13 <= data.len() && out.len() < n {
         let is_null = data[i]; i += 1;
         let val = i64::from_le_bytes(data[i..i+8].try_into().unwrap()); i += 8;
         let run = u32::from_le_bytes(data[i..i+4].try_into().unwrap()) as usize; i += 4;
@@ -52,7 +52,7 @@ pub fn delta_encode_i64(vals: &[Option<i64>]) -> Vec<u8> {
 }
 
 pub fn delta_decode_i64(data: &[u8], n: usize) -> Vec<Option<i64>> {
-    let mut out = Vec::with_capacity(n);
+    let mut out = Vec::with_capacity(n.min(data.len() / 9 + 1));
     let mut prev = 0i64;
     let mut i = 0;
     while i + 9 <= data.len() && out.len() < n {
@@ -79,7 +79,7 @@ pub fn raw_encode_f64(vals: &[Option<f64>]) -> Vec<u8> {
 }
 
 pub fn raw_decode_f64(data: &[u8], n: usize) -> Vec<Option<f64>> {
-    let mut out = Vec::with_capacity(n);
+    let mut out = Vec::with_capacity(n.min(data.len() / 9 + 1));
     let mut i = 0;
     while i + 9 <= data.len() && out.len() < n {
         let is_null = data[i]; i += 1;
@@ -136,22 +136,21 @@ pub fn decode_strs(data: &[u8]) -> Vec<Option<String>> {
     let n = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
     if n == 0 { return vec![]; }
     let null_end = 4 + n;
-    let off_end = null_end + (n + 1) * 4;
-    if data.len() < off_end { return vec![None; n]; }
+    let off_end = match (n + 1).checked_mul(4).and_then(|o| null_end.checked_add(o)) {
+        Some(e) if e <= data.len() => e,
+        _ => return vec![],
+    };
     let null_flags = &data[4..null_end];
     let off_start  = null_end;
     let data_start = off_end;
+    let offset = |i: usize| u32::from_le_bytes(data[off_start + i*4..off_start + i*4 + 4].try_into().unwrap()) as usize;
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
-        let is_null = null_flags[i] == 1;
-        let o1 = u32::from_le_bytes(data[off_start + i*4..off_start + i*4 + 4].try_into().unwrap()) as usize;
-        let o2 = u32::from_le_bytes(data[off_start + (i+1)*4..off_start + (i+1)*4 + 4].try_into().unwrap()) as usize;
-        if is_null || data_start + o2 > data.len() {
-            out.push(None);
-        } else {
-            let bytes = &data[data_start + o1..data_start + o2];
-            out.push(Some(String::from_utf8_lossy(bytes).into_owned()));
-        }
+        let (o1, o2) = (offset(i), offset(i + 1));
+        let bytes = if null_flags[i] == 1 { None } else {
+            data_start.checked_add(o1).zip(data_start.checked_add(o2)).and_then(|(a, b)| data.get(a..b))
+        };
+        out.push(bytes.map(|b| String::from_utf8_lossy(b).into_owned()));
     }
     out
 }
@@ -165,7 +164,7 @@ pub fn nan_encode_f64(vals: &[Option<f64>]) -> Vec<u8> {
 }
 
 pub fn nan_decode_f64(data: &[u8], n: usize) -> Vec<Option<f64>> {
-    let mut out = Vec::with_capacity(n);
+    let mut out = Vec::with_capacity(n.min(data.len() / 8 + 1));
     for chunk in data.chunks_exact(8).take(n) {
         let f = f64::from_le_bytes(chunk.try_into().unwrap());
         out.push(if f.is_nan() { None } else { Some(f) });
@@ -201,7 +200,7 @@ pub fn dict_encode_f64(vals: &[Option<f64>]) -> Option<Vec<u8>> {
 }
 
 pub fn dict_decode_f64(data: &[u8], n: usize) -> Vec<Option<f64>> {
-    if data.is_empty() { return vec![None; n]; }
+    if data.is_empty() { return vec![]; }
     let dict_len = data[0] as usize;
     let mut dict: Vec<Option<f64>> = Vec::with_capacity(dict_len);
     let mut i = 1;
@@ -210,7 +209,7 @@ pub fn dict_decode_f64(data: &[u8], n: usize) -> Vec<Option<f64>> {
         let f = f64::from_le_bytes(data[i..i+8].try_into().unwrap()); i += 8;
         dict.push(if f.is_nan() { None } else { Some(f) });
     }
-    let mut out = Vec::with_capacity(n);
+    let mut out = Vec::with_capacity(n.min(data.len()));
     while out.len() < n && i < data.len() {
         let code = data[i] as usize; i += 1;
         out.push(dict.get(code).copied().flatten());
@@ -234,7 +233,7 @@ pub fn encode_strdict(codes: &[u8], dict: &[String]) -> Vec<u8> {
 }
 
 pub fn decode_strdict(data: &[u8], n: usize) -> (Vec<u8>, Vec<String>) {
-    if data.len() < 2 { return (vec![u8::MAX; n], vec![]); }
+    if data.len() < 2 { return (vec![], vec![]); }
     let dict_len = u16::from_le_bytes(data[0..2].try_into().unwrap()) as usize;
     let mut dict = Vec::with_capacity(dict_len);
     let mut i = 2;

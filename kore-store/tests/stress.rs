@@ -65,3 +65,26 @@ fn payload_corruption_is_detected() {
     let r = KoreReader::from_bytes(&bytes);
     assert!(r.is_err(), "corrupted payload decoded without error");
 }
+
+#[test]
+fn decoders_survive_garbage() {
+    use kore_store::compress::*;
+    let mut seed = 0x9E3779B97F4A7C15u64;
+    let mut next = || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed };
+    for _ in 0..5000 {
+        let len = (next() % 200) as usize;
+        let data: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+        let n = if next() % 4 == 0 { 1 << 18 } else { (next() % 64) as usize };
+        let r = catch_unwind(|| {
+            let _ = rle_decode_i64(&data, n);
+            let _ = delta_decode_i64(&data, n);
+            let _ = raw_decode_f64(&data, n);
+            let _ = nan_decode_f64(&data, n);
+            let _ = dict_decode_f64(&data, n);
+            let _ = decode_strdict(&data, n);
+            let _ = decode_strs(&data);
+            let _ = raw_decode_bool(&data, n);
+        });
+        assert!(r.is_ok(), "decoder panicked on garbage input");
+    }
+}

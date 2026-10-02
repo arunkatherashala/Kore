@@ -107,6 +107,55 @@ int64_t kore_session_row_count(const KoreSession* sess, const char* table_name);
 /** Free a string returned by kore_session_query. */
 void kore_free_string(char* s);
 
+/* ── File I/O ─────────────────────────────────────────────────────────── */
+
+/** Write a block to a .kore file. Returns 0 on success, -1 on error. */
+int kore_write_file(const char* path, const KoreBlock* block);
+
+/** Read a .kore file. Returns NULL on error. Free with kore_block_free. */
+KoreBlock* kore_read_file(const char* path);
+
+/** Serialise a block to bytes. Free the result with kore_free_bytes. */
+uint8_t* kore_write_bytes(const KoreBlock* block, size_t* out_len);
+
+/** Parse bytes into a block. Returns NULL on corrupt data (kore_last_error has details). */
+KoreBlock* kore_read_bytes(const uint8_t* data, size_t len);
+
+void kore_free_bytes(uint8_t* ptr, size_t len);
+
+uint32_t kore_crc32(const uint8_t* data, size_t len);
+
+/** Column name by index. Free with kore_free_string. */
+char* kore_block_col_name(const KoreBlock* block, size_t idx);
+
+int64_t kore_block_get_i64(const KoreBlock* block, const char* col,
+                           long long* out, uint64_t maxlen);
+
+/* ── Encryption (AES-256-GCM, PBKDF2-HMAC-SHA256 key) ─────────────────── */
+
+/** Returns NULL on error. Free the result with kore_free_bytes. */
+uint8_t* kore_encrypt_bytes(const uint8_t* password, size_t pw_len,
+                            const uint8_t* data, size_t len, size_t* out_len);
+
+/** Returns NULL on wrong password or corrupt data. Free with kore_free_bytes. */
+uint8_t* kore_decrypt_bytes(const uint8_t* password, size_t pw_len,
+                            const uint8_t* data, size_t len, size_t* out_len);
+
+/* ── Time travel (append-only version log) ────────────────────────────── */
+
+/**
+ * Append `entry` (a complete .kore file) as a new version. `existing` may be NULL
+ * (new log), a version log, or a plain .kore file (becomes version 0).
+ * `timestamp` must exceed the latest version's. Free with kore_free_bytes.
+ */
+uint8_t* kore_version_append(const uint8_t* existing, size_t existing_len,
+                             const uint8_t* entry, size_t entry_len,
+                             uint64_t timestamp, size_t* out_len);
+
+/** Newest version with timestamp <= target, or NULL if none. Free with kore_free_bytes. */
+uint8_t* kore_version_select(const uint8_t* data, size_t len,
+                             uint64_t target, size_t* out_len);
+
 #ifdef __cplusplus
 }
 #endif

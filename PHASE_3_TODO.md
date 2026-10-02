@@ -2,6 +2,8 @@
 
 **Status**: ✅ Phase 3A Complete (FFI Wrappers) | 🚀 Phase 3B Ready to Start
 
+> Update: Python wrapper already uses the FFI for `write_file`/`read_file`, and now also encryption, stats, bloom and time travel (`append_version`/`read_at_version`). Items below that mention Python JSON placeholders are done; Node/Go/C#/Ruby/PHP bindings still need the new calls.
+
 **Current Branch**: `feature/phase2-acid-implementation`
 
 ---

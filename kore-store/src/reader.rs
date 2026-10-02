@@ -93,7 +93,7 @@ impl KoreReader {
             *pos = end;
             Ok(s)
         }
-        const MAX_ROWS: usize = 1 << 30;
+        const MAX_ROWS: usize = 1 << 28;
 
         let mut pos = 0;
 
@@ -296,7 +296,7 @@ fn decode_column(raw: &[u8], dtype: DType, comp: Compression, n: usize) -> Resul
         (raw, comp)
     };
 
-    Ok(match dtype {
+    let col = match dtype {
         DType::I64 => {
             let vals = match comp {
                 Compression::Delta  => compress::delta_decode_i64(raw, n),
@@ -356,7 +356,18 @@ fn decode_column(raw: &[u8], dtype: DType, comp: Compression, n: usize) -> Resul
             // Placeholder: Struct decoded as raw bytes (would be structured differently in full impl)
             ColumnData::Str(vec![Some(String::from_utf8_lossy(raw).into_owned())])
         }
-    })
+    };
+    let len = match &col {
+        ColumnData::Int64(v) => v.len(),
+        ColumnData::Float64(v) => v.len(),
+        ColumnData::Bool(v) => v.len(),
+        ColumnData::Str(v) => v.len(),
+        ColumnData::StrDict { codes, .. } => codes.len(),
+    };
+    if len != n && !matches!(dtype, DType::Array | DType::Struct) {
+        return Err(format!("column has {len} values, expected {n}"));
+    }
+    Ok(col)
 }
 
 fn io_err<E: std::fmt::Display>(e: E) -> KoreError {
