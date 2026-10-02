@@ -1119,38 +1119,54 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         if !has_star && stmt.pivot.is_none() && stmt.unpivot.is_none() && stmt.lateral_views.is_empty() {
             Some(used_columns(stmt))
         } else { None };
-    let base_block: DataBlock = match &needed {
-        Some(needed) => DataBlock {
-            num_rows: base_ref.num_rows,
-            columns:  base_ref.columns.iter()
-                .filter(|c| {
-                    let bare = c.name.rsplit('.').next().unwrap_or(&c.name);
-                    needed.contains(bare) || needed.contains(c.name.as_str())
-                })
-                .cloned()
-                .collect(),
-        },
-        None => base_ref.clone(),
-    };
-
-    // Prefix column names with alias
-    let mut result = prefix_columns(base_block, base_alias);
-
     // 2a. Implicit joins (FROM a, b, c): join keys come from equalities in WHERE, single-table
     // predicates are applied before joining, whatever is left stays in WHERE.
     let n_implicit = stmt.joins.iter().take_while(|j| j.join_type == JoinKind::Implicit).count();
     let mut where_pred: Option<Expr> = stmt.where_clause.clone();
-    if n_implicit > 0 {
-        let mut conjuncts = Vec::new();
+
+    // "Planned" queries (one table, or only comma joins, no SELECT *) filter each table while it is still
+    // borrowed from the catalog and copy only the surviving rows of the columns still needed afterwards.
+    // Cloning a whole 6M-row string column just to throw most of it away used to dominate the runtime.
+    let planned = needed.is_some() && stmt.joins.iter().all(|j| j.join_type == JoinKind::Implicit);
+    let needed_wo_where = needed.as_ref().map(|_| used_columns_without_where(stmt));
+    let mut conjuncts: Vec<Expr> = Vec::new();
+    if planned || n_implicit > 0 {
         if let Some(w) = &where_pred { crate::rewrite::split_conjuncts(w, &mut conjuncts); }
-        crate::rewrite::factor_common_from_or(&mut conjuncts);
+        if n_implicit > 0 { crate::rewrite::factor_common_from_or(&mut conjuncts); }
+    }
+
+    let mut result = if planned {
+        load_table(base_ref, base_alias, &mut conjuncts, &needed, &needed_wo_where, ctx)?
+    } else {
+        let base_block: DataBlock = match &needed {
+            Some(needed) => DataBlock {
+                num_rows: base_ref.num_rows,
+                columns:  base_ref.columns.iter()
+                    .filter(|c| {
+                        let bare = c.name.rsplit('.').next().unwrap_or(&c.name);
+                        needed.contains(bare) || needed.contains(c.name.as_str())
+                    })
+                    .cloned()
+                    .collect(),
+            },
+            None => base_ref.clone(),
+        };
+        prefix_columns(base_block, base_alias)
+    };
+
+    if n_implicit > 0 {
         let mut pending: Vec<DataBlock> = Vec::with_capacity(n_implicit);
         for join in &stmt.joins[..n_implicit] {
             let name = &join.table.name;
             let alias = join.table.alias.as_deref().unwrap_or(name.as_str());
-            let block = prune_block(resolve_join_table(&join.table, ctx)?, &needed);
-            let block = prefix_columns(block, alias);
-            pending.push(push_down_conjuncts(&mut conjuncts, block, ctx)?);
+            let src = table_source(&join.table, ctx)?;
+            let block = if planned {
+                load_table(src.get(), alias, &mut conjuncts, &needed, &needed_wo_where, ctx)?
+            } else {
+                let block = prefix_columns(prune_block(src.into_owned(), &needed), alias);
+                push_down_conjuncts(&mut conjuncts, block, ctx)?
+            };
+            pending.push(block);
         }
         result = push_down_conjuncts(&mut conjuncts, result, ctx)?;
         while !pending.is_empty() {
@@ -1188,7 +1204,9 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
             }
             result = push_down_conjuncts(&mut conjuncts, result, ctx)?;
         }
-        where_pred = crate::rewrite::and_all(conjuncts);
+        where_pred = crate::rewrite::and_all(std::mem::take(&mut conjuncts));
+    } else if planned {
+        where_pred = crate::rewrite::and_all(std::mem::take(&mut conjuncts));
     }
 
     // 2. Process JOINs
@@ -1456,6 +1474,94 @@ fn resolve_join_table(table: &TableExpr, ctx: &KqlContext) -> Result<DataBlock, 
     } else {
         Err(KoreError::InvalidArgument(format!("unknown table: {}", table.name)))
     }
+}
+
+/// A joined table's data, borrowed from the catalog when possible.
+enum Src<'a> { B(&'a DataBlock), O(DataBlock) }
+
+impl Src<'_> {
+    fn get(&self) -> &DataBlock { match self { Src::B(b) => b, Src::O(b) => b } }
+    fn into_owned(self) -> DataBlock { match self { Src::B(b) => b.clone(), Src::O(b) => b } }
+}
+
+fn table_source<'a>(table: &TableExpr, ctx: &'a KqlContext) -> Result<Src<'a>, KoreError> {
+    if table.subquery.is_none() {
+        if let Some(b) = ctx.get(&table.name) { return Ok(Src::B(b)); }
+    }
+    resolve_join_table(table, ctx).map(Src::O)
+}
+
+fn has_bare_col(block: &DataBlock, bare: &str) -> bool {
+    block.columns.iter().any(|c| c.name == bare || (c.name.len() > bare.len() && c.name.ends_with(bare)
+        && c.name.as_bytes()[c.name.len() - bare.len() - 1] == b'.'))
+}
+
+/// Build the working copy of one table. Conjuncts that only need this table's columns are evaluated on
+/// the borrowed source (no copy of the full table) and consumed; only the rows that pass and the columns
+/// still needed afterwards are copied. Falls back to prune-then-filter when the predicate is not one the
+/// column-at-a-time evaluator covers.
+fn load_table(
+    src: &DataBlock, alias: &str, conjuncts: &mut Vec<Expr>,
+    needed: &Option<std::collections::HashSet<String>>,
+    needed_wo_where: &Option<std::collections::HashSet<String>>,
+    ctx: &KqlContext,
+) -> Result<DataBlock, KoreError> {
+    let (Some(needed), Some(after_where)) = (needed, needed_wo_where) else {
+        return Ok(prefix_columns(src.clone(), alias));
+    };
+    let prefix = format!("{alias}.");
+    let mut mine = Vec::new();
+    let mut rest = Vec::new();
+    for c in conjuncts.drain(..) {
+        let mut cols = Vec::new();
+        let movable = crate::rewrite::referenced_cols(&c, &mut cols) && !cols.is_empty()
+            && cols.iter().all(|n| match n.strip_prefix(&prefix) {
+                Some(bare) => has_bare_col(src, bare),
+                None => !n.contains('.') && has_bare_col(src, n),
+            });
+        if movable { mine.push(c) } else { rest.push(c) }
+    }
+
+    let keep_cols = |extra: &[Expr]| -> std::collections::HashSet<String> {
+        let mut set = after_where.clone();
+        for e in extra {
+            let mut cols = Vec::new();
+            crate::rewrite::referenced_cols(e, &mut cols);
+            let mut tmp = std::collections::HashSet::new();
+            collect_cols_expr(e, &mut tmp);
+            set.extend(tmp);
+            for c in cols { set.insert(c.rsplit('.').next().unwrap_or(&c).to_string()); }
+        }
+        set
+    };
+
+    let pred = crate::rewrite::and_all(mine.iter().map(|c| crate::rewrite::unqualify(c, alias)).collect());
+    let mask = match &pred {
+        Some(p) => crate::vecexpr::filter_mask(p, src),
+        None => None,
+    };
+    if pred.is_some() && mask.is_none() {
+        // not covered by the fast evaluator: copy what the whole statement needs, filter the copy
+        let block = prefix_columns(prune_block(src.clone(), &Some(needed.clone())), alias);
+        *conjuncts = rest;
+        conjuncts.extend(mine);
+        return push_down_conjuncts(conjuncts, block, ctx);
+    }
+
+    let after = keep_cols(&rest);
+    let idx: Option<Vec<usize>> = mask.map(|m| m.iter().enumerate().filter_map(|(i, &k)| if k { Some(i) } else { None }).collect());
+    let wanted: Vec<&Column> = src.columns.iter().filter(|c| {
+        let bare = c.name.rsplit('.').next().unwrap_or(&c.name);
+        after.contains(bare) || after.contains(c.name.as_str())
+    }).collect();
+    use rayon::prelude::*;
+    let columns: Vec<Column> = wanted.par_iter().map(|c| Column {
+        name: c.name.clone(),
+        data: match &idx { Some(ix) => c.data.take_rows(ix), None => c.data.clone() },
+    }).collect();
+    let num_rows = idx.as_ref().map_or(src.num_rows, |ix| ix.len());
+    *conjuncts = rest;
+    Ok(prefix_columns(DataBlock { columns, num_rows }, alias))
 }
 
 /// Apply (and remove) every conjunct that only needs columns present in `block`.
@@ -3908,10 +4014,22 @@ fn collect_cols_expr(expr: &Expr, set: &mut std::collections::HashSet<String>) {
 
 /// Every column name a statement mentions anywhere (including nested subqueries).
 fn collect_cols_stmt(stmt: &SelectStmt, set: &mut std::collections::HashSet<String>) {
+    collect_cols_stmt_opt(stmt, set, true)
+}
+
+/// Columns still needed once the WHERE clause has been applied (everything except the WHERE itself).
+fn used_columns_without_where(stmt: &SelectStmt) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    collect_cols_stmt_opt(stmt, &mut set, false);
+    set
+}
+
+fn collect_cols_stmt_opt(stmt: &SelectStmt, set: &mut std::collections::HashSet<String>, include_where: bool) {
     for proj in &stmt.projections {
         if let Projection::Expr { expr, .. } = proj { collect_cols_expr(expr, set); }
     }
-    for e in [&stmt.where_clause, &stmt.having, &stmt.qualify].into_iter().flatten() {
+    let wh = if include_where { &stmt.where_clause } else { &None };
+    for e in [wh, &stmt.having, &stmt.qualify].into_iter().flatten() {
         collect_cols_expr(e, set);
     }
     for col in &stmt.group_by { set.insert(col.rsplit('.').next().unwrap_or(col).to_string()); }

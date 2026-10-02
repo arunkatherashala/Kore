@@ -43,6 +43,32 @@ pub fn and_all(mut v: Vec<Expr>) -> Option<Expr> {
     Some(v.into_iter().fold(first, |acc, e| Expr::BinOp { op: BinOpKind::And, left: Box::new(acc), right: Box::new(e) }))
 }
 
+/// Rewrite `alias.col` references to plain `col` so the expression can be evaluated on a table whose
+/// columns are not prefixed yet. Other qualifiers are left alone.
+pub fn unqualify(e: &Expr, alias: &str) -> Expr {
+    let u = |x: &Expr| Box::new(unqualify(x, alias));
+    match e {
+        Expr::QualCol(t, c) if t == alias => Expr::Col(c.clone()),
+        Expr::BinOp { op, left, right } => Expr::BinOp { op: op.clone(), left: u(left), right: u(right) },
+        Expr::Not(x) => Expr::Not(u(x)),
+        Expr::IsNull(x) => Expr::IsNull(u(x)),
+        Expr::IsNotNull(x) => Expr::IsNotNull(u(x)),
+        Expr::Case { operand, branches, else_val } => Expr::Case {
+            operand: operand.as_ref().map(|o| u(o)),
+            branches: branches.iter().map(|(c, v)| (u(c), u(v))).collect(),
+            else_val: else_val.as_ref().map(|x| u(x)),
+        },
+        Expr::In { expr, values, negated } => Expr::In {
+            expr: u(expr), values: values.iter().map(|v| unqualify(v, alias)).collect(), negated: *negated,
+        },
+        Expr::Between { expr, low, high, negated } => Expr::Between { expr: u(expr), low: u(low), high: u(high), negated: *negated },
+        Expr::Like { expr, pattern, negated } => Expr::Like { expr: u(expr), pattern: u(pattern), negated: *negated },
+        Expr::ILike { expr, pattern, negated } => Expr::ILike { expr: u(expr), pattern: u(pattern), negated: *negated },
+        Expr::FuncCall { name, args } => Expr::FuncCall { name: name.clone(), args: args.iter().map(|a| unqualify(a, alias)).collect() },
+        other => other.clone(),
+    }
+}
+
 /// `Col(x)` -> "x", `QualCol(t, c)` -> "t.c".
 pub fn col_ref(e: &Expr) -> Option<String> {
     match e {

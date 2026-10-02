@@ -94,6 +94,48 @@ fn multi_key_comma_join_matches_on_every_equality() {
 }
 
 #[test]
+fn multi_key_order_by_with_limit_is_exact() {
+    // ORDER BY n DESC, name applies two sorts; the second must keep the first one's order among ties
+    let n_rows = 100_000usize;
+    let rows: Vec<(i64, String)> = (0..n_rows).map(|i| ((i % 3) as i64, format!("n{:06}", (i * 7919) % n_rows))).collect();
+    let mut c = KqlContext::new();
+    c.register("big", DataBlock::new(vec![
+        Column::int64("n", rows.iter().map(|r| Some(r.0)).collect()),
+        Column::str_col("name", rows.iter().map(|r| Some(r.1.clone())).collect()),
+    ]).unwrap());
+    let r = c.query("select n, name from big order by n desc, name limit 7").unwrap();
+    let mut expected = rows.clone();
+    expected.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let got_names: Vec<String> = match &r.columns[1].data {
+        ColumnData::Str(v) => v.iter().map(|x| x.clone().unwrap()).collect(),
+        ColumnData::StrDict { codes, dict } => codes.iter().map(|&c| dict[c as usize].clone()).collect(),
+        _ => panic!(),
+    };
+    assert_eq!(got_names, expected.iter().take(7).map(|r| r.1.clone()).collect::<Vec<_>>());
+    assert_eq!(f64s(&r, "n"), vec![2.0; 7]);
+}
+
+#[test]
+fn chunked_evaluation_agrees_with_a_plain_loop_across_chunk_boundaries() {
+    let n = 200_003usize; // not a multiple of the chunk size
+    let vals: Vec<Option<f64>> = (0..n).map(|i| if i % 11 == 0 { None } else { Some((i % 7) as f64 + 0.5) }).collect();
+    let tags: Vec<Option<String>> = (0..n).map(|i| if i % 13 == 0 { None } else { Some(format!("t{}", i % 5)) }).collect();
+    let mut c = KqlContext::new();
+    c.register("chunky", DataBlock::new(vec![
+        Column::float64("v", vals.clone()),
+        Column::str_col("t", tags.clone()),
+    ]).unwrap());
+
+    let r = c.query("select count(*) as n from chunky where v < 3 and t <> 't2'").unwrap();
+    let expected = (0..n).filter(|&i| matches!((vals[i], tags[i].as_deref()), (Some(v), Some(t)) if v < 3.0 && t != "t2")).count();
+    assert_eq!(f64s(&r, "n"), vec![expected as f64]);
+
+    let r = c.query("select sum(case when t = 't1' then v * 2 + 1 else 0 end) as s from chunky").unwrap();
+    let expected: f64 = (0..n).map(|i| match (vals[i], tags[i].as_deref()) { (Some(v), Some("t1")) => v * 2.0 + 1.0, _ => 0.0 }).sum();
+    assert!((f64s(&r, "s")[0] - expected).abs() < 1e-6);
+}
+
+#[test]
 fn aggregate_over_a_case_expression() {
     let c = nums();
     let r = c.query("select sum(case when f > 2 then f * 2 else 0 end) as x from nums").unwrap();

@@ -296,7 +296,7 @@ impl DataBlock {
         // Cache-friendly Schwartzian transform: co-locate key+index so the
         // sort comparator accesses a single contiguous (key, idx) array instead
         // of two separate arrays with scattered random accesses.
-        // Parallel sort: use Rayon par_sort_unstable_by for 8× speedup on 6M+ rows
+        // Parallel sort: use Rayon par_sort_by for 8× speedup on 6M+ rows
         let indices: Vec<usize> = match data {
             ColumnData::Float64(v) => {
                 let mut pairs: Vec<(f64, usize)> = v.par_iter()
@@ -304,9 +304,9 @@ impl DataBlock {
                     .map(|(i, opt)| (opt.unwrap_or(f64::MAX), i))
                     .collect();
                 if ascending {
-                    pairs.par_sort_unstable_by(|(a,_),(b,_)| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+                    pairs.par_sort_by(|(a,_),(b,_)| a.partial_cmp(b).unwrap_or(Ordering::Equal));
                 } else {
-                    pairs.par_sort_unstable_by(|(a,_),(b,_)| b.partial_cmp(a).unwrap_or(Ordering::Equal));
+                    pairs.par_sort_by(|(a,_),(b,_)| b.partial_cmp(a).unwrap_or(Ordering::Equal));
                 }
                 pairs.into_iter().map(|(_,i)| i).collect()
             }
@@ -316,9 +316,9 @@ impl DataBlock {
                     .map(|(i, opt)| (opt.unwrap_or(i64::MIN), i))
                     .collect();
                 if ascending {
-                    pairs.par_sort_unstable_by_key(|&(k,_)| k);
+                    pairs.par_sort_by_key(|&(k,_)| k);
                 } else {
-                    pairs.par_sort_unstable_by(|(a,_),(b,_)| b.cmp(a));
+                    pairs.par_sort_by(|(a,_),(b,_)| b.cmp(a));
                 }
                 pairs.into_iter().map(|(_,i)| i).collect()
             }
@@ -327,13 +327,13 @@ impl DataBlock {
                     .enumerate()
                     .map(|(i, opt)| (opt.map_or(0, |b| b as u8), i))
                     .collect();
-                if ascending { pairs.sort_unstable_by_key(|&(k,_)| k); }
-                else          { pairs.sort_unstable_by(|(a,_),(b,_)| b.cmp(a)); }
+                if ascending { pairs.sort_by_key(|&(k,_)| k); }
+                else          { pairs.sort_by(|(a,_),(b,_)| b.cmp(a)); }
                 pairs.into_iter().map(|(_,i)| i).collect()
             }
             ColumnData::Str(v) => {
                 let mut indices: Vec<usize> = (0..self.num_rows).collect();
-                indices.sort_unstable_by(|&a, &b| {
+                indices.sort_by(|&a, &b| {
                     let sa = v[a].as_deref().unwrap_or("");
                     let sb = v[b].as_deref().unwrap_or("");
                     if ascending { sa.cmp(sb) } else { sb.cmp(sa) }
@@ -342,7 +342,7 @@ impl DataBlock {
             }
             ColumnData::StrDict { codes, dict } => {
                 let mut indices: Vec<usize> = (0..self.num_rows).collect();
-                indices.sort_unstable_by(|&a, &b| {
+                indices.sort_by(|&a, &b| {
                     let ca = codes[a]; let cb = codes[b];
                     let sa = if ca == u8::MAX { "" } else { dict.get(ca as usize).map(|s| s.as_str()).unwrap_or("") };
                     let sb = if cb == u8::MAX { "" } else { dict.get(cb as usize).map(|s| s.as_str()).unwrap_or("") };
