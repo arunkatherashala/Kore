@@ -41,6 +41,17 @@ gem install kore-fileformat
 # com.github.arunkatherashala:kore-fileformat:1.6.7
 ```
 
+**No PyPI / Maven access?** Every [GitHub Release](https://github.com/arunkatherashala/Kore/releases/latest) has the `.whl`, `.jar`, and a `-with-deps.zip` (jar + all runtime jars) under **Assets**.
+
+```bash
+# Python: install the downloaded wheel, or straight from GitHub
+pip install kore_fileformat-<version>-py3-none-any.whl
+pip install "git+https://github.com/arunkatherashala/Kore.git@fileformat"
+
+# Java: unzip kore-fileformat-<version>-with-deps.zip, then
+java -cp "kore-fileformat-<version>.jar:lib/*" YourApp      # Windows: use ; instead of :
+```
+
 ---
 
 ## ⚡ Quick Start

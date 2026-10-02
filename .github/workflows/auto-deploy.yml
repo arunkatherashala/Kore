@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   auto-bump-deploy:
@@ -78,7 +79,7 @@ jobs:
           echo "✅ $VERSION tagged"
 
           # Trigger publish workflows via GitHub API (works with PAT, not GITHUB_TOKEN)
-          for WF in publish-pypi.yml publish-nodejs.yml publish-crates.yml publish-rubygems.yml publish-maven.yml publish-nuget.yml; do
+          for WF in publish-release.yml publish-pypi.yml publish-nodejs.yml publish-crates.yml publish-rubygems.yml publish-maven.yml publish-nuget.yml; do
             echo "Triggering $WF for $VERSION..."
             gh workflow run "$WF" --ref "$VERSION" 2>/dev/null || \
             curl -s -X POST \

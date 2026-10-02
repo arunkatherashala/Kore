@@ -4,9 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  # Tags pushed by GITHUB_TOKEN don't fire push events, so auto-deploy dispatches this on the tag ref.
+  workflow_dispatch:
 
 jobs:
   release:
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -14,6 +17,35 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+
+      - name: Build Python wheel + sdist
+        run: |
+          python -m pip install --upgrade build
+          python -m build --outdir dist/
+
+      - name: Build Java jar + runtime dependencies bundle
+        working-directory: maven
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mvn -B -q versions:set -DnewVersion="$VERSION" -DgenerateBackupPoms=false
+          mvn -B clean package -DskipTests -Dgpg.skip=true
+          mvn -B -q dependency:copy-dependencies -DincludeScope=runtime -DoutputDirectory=target/bundle/lib
+          cp "target/kore-fileformat-${VERSION}.jar" target/bundle/
+          (cd target/bundle && zip -r "../kore-fileformat-${VERSION}-with-deps.zip" .)
+          mkdir -p ../dist
+          cp "target/kore-fileformat-${VERSION}.jar" \
+             "target/kore-fileformat-${VERSION}-sources.jar" \
+             "target/kore-fileformat-${VERSION}-with-deps.zip" ../dist/
+          ls -lh ../dist
 
       - name: Generate changelog
         id: changelog
@@ -40,12 +72,14 @@ jobs:
           # Count commits
           COMMIT_COUNT=$(git log ${PREVIOUS_TAG}..${CURRENT_TAG} --oneline 2>/dev/null | wc -l)
           echo "COMMIT_COUNT=$COMMIT_COUNT" >> $GITHUB_OUTPUT
+          echo "VERSION=${CURRENT_TAG#v}" >> $GITHUB_OUTPUT
 
       - name: Create release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
+          files: dist/*
           body: |
             ## Changelog
             
@@ -54,6 +88,13 @@ jobs:
             ---
             
             **Total Commits:** ${{ steps.changelog.outputs.COMMIT_COUNT }}
+            
+            ## Direct download (no PyPI / Maven needed)
+            Python wheel — download from Assets below, or install straight from this release:
+            ```bash
+            pip install https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/kore_fileformat-${{ steps.changelog.outputs.VERSION }}-py3-none-any.whl
+            ```
+            Java — download `kore-fileformat-${{ steps.changelog.outputs.VERSION }}-with-deps.zip`, unzip, and add the jar plus `lib/*` to your classpath.
             
             ## What's Included
             - **Python Package:** Published to PyPI as `kore-fileformat`
