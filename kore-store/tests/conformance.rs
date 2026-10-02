@@ -118,7 +118,9 @@ fn write_all() {
 fn every_fixture_decodes_to_the_expected_data() {
     if std::env::var("KORE_REGEN_FIXTURES").map(|v| v == "1").unwrap_or(false) { write_all(); }
     let d = dir();
-    let expected = std::fs::read_to_string(d.join("expected.txt")).expect("run with KORE_REGEN_FIXTURES=1 first");
+    // git on Windows may check text files out with CRLF
+    let expected = std::fs::read_to_string(d.join("expected.txt")).expect("run with KORE_REGEN_FIXTURES=1 first")
+        .replace("\r\n", "\n");
     assert_eq!(expected_text(&dataset()), expected, "generator and expected.txt disagree");
 
     for name in ["default", "shuffle", "strlen", "shuffle_strlen", "versions"] {
