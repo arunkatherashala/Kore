@@ -32,19 +32,16 @@ jobs:
           python -m pip install --upgrade build
           python -m build --outdir dist/
 
-      - name: Build Java jar + runtime dependencies bundle
+      - name: Build Java jars (core + single all-in-one)
         working-directory: maven
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           mvn -B -q versions:set -DnewVersion="$VERSION" -DgenerateBackupPoms=false
           mvn -B clean package -DskipTests -Dgpg.skip=true
-          mvn -B -q dependency:copy-dependencies -DincludeScope=runtime -DoutputDirectory=target/bundle/lib
-          cp "target/kore-fileformat-${VERSION}.jar" target/bundle/
-          (cd target/bundle && zip -r "../kore-fileformat-${VERSION}-with-deps.zip" .)
           mkdir -p ../dist
           cp "target/kore-fileformat-${VERSION}.jar" \
-             "target/kore-fileformat-${VERSION}-sources.jar" \
-             "target/kore-fileformat-${VERSION}-with-deps.zip" ../dist/
+             "target/kore-fileformat-${VERSION}-all.jar" \
+             "target/kore-fileformat-${VERSION}-sources.jar" ../dist/
           ls -lh ../dist
 
       - name: Generate changelog
@@ -94,7 +91,7 @@ jobs:
             ```bash
             pip install https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/kore_fileformat-${{ steps.changelog.outputs.VERSION }}-py3-none-any.whl
             ```
-            Java — download `kore-fileformat-${{ steps.changelog.outputs.VERSION }}-with-deps.zip`, unzip, and add the jar plus `lib/*` to your classpath.
+            Java — download `kore-fileformat-${{ steps.changelog.outputs.VERSION }}-all.jar` (one file, all dependencies included) and add it to your classpath / IDE / `lib/` folder.
             
             ## What's Included
             - **Python Package:** Published to PyPI as `kore-fileformat`
