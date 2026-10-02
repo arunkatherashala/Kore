@@ -25,6 +25,7 @@ Thumbs.db
 
 # Benchmark outputs (keep .csv but not binary files)
 *.kore
+!kore-python/fixtures/*.kore
 *.kore.*
 bench_split/
 benchmark.kore.idx/

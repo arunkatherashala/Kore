@@ -134,6 +134,44 @@ int kore_block_col_type(const KoreBlock* block, size_t idx);
 int64_t kore_block_get_i64(const KoreBlock* block, const char* col,
                            long long* out, uint64_t maxlen);
 
+/* ── Typed columns with explicit nulls (NaN stays NaN) ────────────────── */
+/* `validity`: one byte per row (1 = valid, 0 = null), or NULL if every row is valid. */
+
+int kore_block_add_f64_v(KoreBlock* block, const char* name, const double* data,
+                         const uint8_t* validity, uint64_t len);
+int kore_block_add_i64_v(KoreBlock* block, const char* name, const long long* data,
+                         const uint8_t* validity, uint64_t len);
+/** `data`: one byte (0/1) per row. */
+int kore_block_add_bool_v(KoreBlock* block, const char* name, const uint8_t* data,
+                          const uint8_t* validity, uint64_t len);
+/** `offsets`: len + 1 byte offsets into UTF-8 `bytes`. Returns -1 on invalid UTF-8 or bad offsets. */
+int kore_block_add_str_v(KoreBlock* block, const char* name, const uint32_t* offsets,
+                         const uint8_t* bytes, uint64_t bytes_len,
+                         const uint8_t* validity, uint64_t len);
+/** Dictionary strings: `codes` one byte per row (255 = null), at most 254 dictionary entries
+ *  given as dict_len + 1 offsets into UTF-8 `dict_bytes`. */
+int kore_block_add_strdict_v(KoreBlock* block, const char* name, const uint8_t* codes, uint64_t len,
+                             const uint32_t* dict_offsets, const uint8_t* dict_bytes,
+                             uint64_t dict_bytes_len, uint64_t dict_len);
+
+/** Column getters by index; return the row count or -1. Null slots hold NaN (f64) or 0. */
+int64_t kore_block_get_f64_v(const KoreBlock* block, size_t idx, double* out,
+                             uint8_t* validity_out, uint64_t maxlen);
+int64_t kore_block_get_i64_v(const KoreBlock* block, size_t idx, long long* out,
+                             uint8_t* validity_out, uint64_t maxlen);
+int64_t kore_block_get_bool_v(const KoreBlock* block, size_t idx, uint8_t* out,
+                              uint8_t* validity_out, uint64_t maxlen);
+/** Total UTF-8 bytes of a string column, or -1 if it is not one. */
+int64_t kore_block_str_bytes(const KoreBlock* block, size_t idx);
+/** offsets_out needs rows + 1 entries, bytes_out kore_block_str_bytes() bytes. */
+int64_t kore_block_get_str_v(const KoreBlock* block, size_t idx, uint32_t* offsets_out,
+                             uint8_t* bytes_out, uint64_t bytes_cap, uint8_t* validity_out);
+/** Returns 1 (and sizes) for a dictionary string column, 0 for others, -1 if out of range. */
+int kore_block_strdict_info(const KoreBlock* block, size_t idx, uint64_t* dict_len_out,
+                            uint64_t* dict_bytes_out);
+int64_t kore_block_get_strdict_v(const KoreBlock* block, size_t idx, uint8_t* codes_out,
+                                 uint32_t* dict_offsets_out, uint8_t* dict_bytes_out);
+
 /* ── Encryption (AES-256-GCM, PBKDF2-HMAC-SHA256 key) ─────────────────── */
 
 /** Returns NULL on error. Free the result with kore_free_bytes. */

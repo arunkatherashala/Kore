@@ -329,3 +329,112 @@ class TestShuffleCodec:
             got = kore.read_file(shuf)
         assert list(got.get_column('f').data) == list(block.get_column('f').data)
         assert list(got.get_column('q').data) == list(block.get_column('q').data)
+
+
+class TestNativeLayout:
+    FIXTURE = Path(__file__).parent / 'fixtures' / 'legacy_v3.kore'
+
+    @staticmethod
+    def _cols(block):
+        return {c.name: list(c.data) for c in block.columns}
+
+    def test_reads_files_written_by_the_legacy_layout(self):
+        got = self._cols(kore.read_file(self.FIXTURE))
+        assert got['i'] == [1, None, 3, 4, 5]
+        # the legacy layout never stored string nulls: None came back as ''
+        assert got['s'] == ['plain', 'a"b', 'x' + chr(10) + 'y', '', 'caf\u00e9,\U0001f600']
+        assert got['b'] == [True, False, None, True, False]
+        f = got['f']
+        assert f[:3] == [1.5, 2.5, None] and f[3] != f[3] and f[4] == 5.5
+
+    def test_legacy_writer_still_available(self, monkeypatch):
+        block = kore.DataBlock()
+        block.add_column('s', kore.DataType.STR, ['a', None, 'b'])
+        monkeypatch.setenv('KORE_LEGACY_LAYOUT', '1')
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / 'l.kore'
+            kore.write_file(path, block)
+            assert b'StringDictJ' in path.read_bytes()[:400]
+            assert list(kore.read_file(path).get_column('s').data) == ['a', '', 'b']
+
+    def test_native_values_roundtrip(self):
+        big = -(2 ** 63)
+        block = kore.DataBlock()
+        block.add_column('i', kore.DataType.I64, [big, None, 7, 2 ** 63 - 1])
+        block.add_column('f', kore.DataType.F64, [None, float('nan'), -0.0, 1e308])
+        block.add_column('b', kore.DataType.BOOL, [None, True, False, True])
+        block.add_column('s', kore.DataType.STR, ['', None, 'x' * 1000, 'caf\u00e9\U0001f600'])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / 'n.kore'
+            kore.write_file(path, block)
+            assert b'Layout: native-1' in path.read_bytes()[:400]
+            got = self._cols(kore.read_file(path))
+        assert got['i'] == [big, None, 7, 2 ** 63 - 1]
+        assert got['f'][0] is None and got['f'][1] != got['f'][1] and got['f'][3] == 1e308
+        assert got['b'] == [None, True, False, True]
+        assert got['s'] == ['', None, 'x' * 1000, 'caf\u00e9\U0001f600']
+
+    def test_empty_block_and_unique_strings(self):
+        empty = kore.DataBlock()
+        empty.add_column('s', kore.DataType.STR, [])
+        empty.add_column('i', kore.DataType.I64, [])
+        n = 5000
+        uniq = kore.DataBlock()
+        uniq.add_column('s', kore.DataType.STR, [f'user-{i:08d}@example.com' for i in range(n)])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p1, p2 = Path(tmpdir) / 'e.kore', Path(tmpdir) / 'u.kore'
+            kore.write_file(p1, empty)
+            kore.write_file(p2, uniq)
+            assert kore.read_file(p1).num_rows == 0
+            assert list(kore.read_file(p2).get_column('s').data)[4999] == 'user-00004999@example.com'
+            header_len = int(p2.read_bytes()[13:23])
+            assert header_len < 1000  # strings are in the binary section, not the text header
+
+    def test_arrow_from_native(self):
+        pa = pytest.importorskip("pyarrow")
+        block = kore.DataBlock()
+        block.add_column('i', kore.DataType.I64, [1, None, 3])
+        block.add_column('f', kore.DataType.F64, [1.5, None, float('nan')])
+        block.add_column('b', kore.DataType.BOOL, [True, None, False])
+        block.add_column('s', kore.DataType.STR, ['a', None, 'caf\u00e9'])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / 'a.kore'
+            kore.write_file(path, block)
+            t = kore.to_arrow(path)
+        assert t.column('i').to_pylist() == [1, None, 3]
+        assert t.column('b').to_pylist() == [True, None, False]
+        assert t.column('s').to_pylist() == ['a', None, 'caf\u00e9']
+        f = t.column('f').to_pylist()
+        assert f[0] == 1.5 and f[1] is None and f[2] != f[2]
+        assert str(t.schema.field('s').type) == 'string'
+
+
+class TestStringDictionaryPath:
+    @staticmethod
+    def _roundtrip(values):
+        block = kore.DataBlock()
+        block.add_column('s', kore.DataType.STR, values)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / 'd.kore'
+            kore.write_file(path, block)
+            plain = list(kore.read_file(path).get_column('s').data)
+            pa = pytest.importorskip("pyarrow")
+            arrow = kore.to_arrow(path).column('s').to_pylist()
+        return plain, arrow
+
+    def test_low_cardinality_with_nulls_and_empty(self):
+        vals = [['US', None, '', 'EU', 'caf\u00e9'][i % 5] for i in range(3000)]
+        plain, arrow = self._roundtrip(vals)
+        assert plain == vals and arrow == vals
+
+    def test_dictionary_boundary_254_vs_255_distinct(self):
+        for distinct in (254, 255, 256):
+            vals = [f'v{i % distinct}' for i in range(2000)]
+            plain, arrow = self._roundtrip(vals)
+            assert plain == vals and arrow == vals, distinct
+
+    def test_all_null_and_non_string_values(self):
+        plain, arrow = self._roundtrip([None, None, None])
+        assert plain == [None] * 3 and arrow == [None] * 3
+        plain, arrow = self._roundtrip([1, 'a', None, 2.5])
+        assert plain == ['1', 'a', None, '2.5'] and arrow == plain

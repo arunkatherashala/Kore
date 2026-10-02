@@ -10,6 +10,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - FFI `kore_encrypt_bytes/kore_decrypt_bytes` (AES-256-GCM); Python `encrypt_aes256/decrypt_aes256/get_column_stats/get_bloom_filter`
 - Reader verifies per-column CRC32 when the stats section is present
 - Ruby, PHP and C# bindings: `Crypto` (encrypt/decrypt) and `Versions` (append/select) wrappers over the new FFI calls; Ruby finalizers fixed for Ruby 3.3, PHP uses instance `FFI::new` (static form is deprecated in 8.4)
+- Native layout (`# Layout: native-1`): the Python writer stores strings, bools and nulls in the binary section instead of the text header (string dictionaries and null positions used to live there as text, so unique strings made the header huge). String nulls now survive. Files in the old layout are still read; `KORE_LEGACY_LAYOUT=1` writes it. New FFI: `kore_block_add_*_v`, `kore_block_get_*_v`, dictionary variants
+- Rust float codecs keep NaN distinct from NULL (files written before this read exactly as before)
 - Opt-in `KORE_SHUFFLE=1`: byte-plane shuffle + ZSTD (codec 7) on fixed-width columns, about 15% smaller on mixed numeric data. Readers without codec 7 (e.g. other-language native readers) reject such files, so it is off by default
 - Stress tests: large roundtrip, truncation, bit flips, garbage decoders, concurrency
 

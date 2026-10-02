@@ -157,17 +157,37 @@ pub fn decode_strs(data: &[u8]) -> Vec<Option<String>> {
 
 // ── NaN-sentinel Float64 (8 bytes/element, fastest read path) ─────────────────
 // NaN = null; all other f64 values are real data.
+//
+// NULL is the canonical quiet NaN (0x7FF8_0000_0000_0000). A genuine NaN value is stored with a
+// different payload so it survives as NaN; files written before this distinction decode their
+// canonical NaNs as NULL exactly as before.
+const NULL_BITS: u64 = 0x7FF8_0000_0000_0000;
+const REAL_NAN_BITS: u64 = 0x7FF8_0000_0000_0001;
+
+#[inline]
+fn f64_to_stored(v: Option<f64>) -> u64 {
+    match v {
+        None => NULL_BITS,
+        Some(x) if x.is_nan() => REAL_NAN_BITS,
+        Some(x) => x.to_bits(),
+    }
+}
+
+#[inline]
+fn f64_from_stored(bits: u64) -> Option<f64> {
+    if bits == NULL_BITS { None } else { Some(f64::from_bits(bits)) }
+}
+
 pub fn nan_encode_f64(vals: &[Option<f64>]) -> Vec<u8> {
     let mut out = Vec::with_capacity(vals.len() * 8);
-    for &v in vals { out.extend_from_slice(&v.unwrap_or(f64::NAN).to_le_bytes()); }
+    for &v in vals { out.extend_from_slice(&f64_to_stored(v).to_le_bytes()); }
     out
 }
 
 pub fn nan_decode_f64(data: &[u8], n: usize) -> Vec<Option<f64>> {
     let mut out = Vec::with_capacity(n.min(data.len() / 8 + 1));
     for chunk in data.chunks_exact(8).take(n) {
-        let f = f64::from_le_bytes(chunk.try_into().unwrap());
-        out.push(if f.is_nan() { None } else { Some(f) });
+        out.push(f64_from_stored(u64::from_le_bytes(chunk.try_into().unwrap())));
     }
     out
 }
@@ -181,14 +201,14 @@ pub fn dict_encode_f64(vals: &[Option<f64>]) -> Option<Vec<u8>> {
     let mut dict_map: std::collections::HashMap<u64, u8> = std::collections::HashMap::new();
     let mut codes: Vec<u8>                     = Vec::with_capacity(vals.len());
     for &v in vals {
-        let bits = v.unwrap_or(f64::NAN).to_bits();
+        let bits = f64_to_stored(v);
         if let Some(&code) = dict_map.get(&bits) {
             codes.push(code);
         } else {
             if dict.len() >= 255 { return None; }
             let code = dict.len() as u8;
             dict_map.insert(bits, code);
-            dict.push(v.unwrap_or(f64::NAN));
+            dict.push(f64::from_bits(bits));
             codes.push(code);
         }
     }
@@ -206,8 +226,8 @@ pub fn dict_decode_f64(data: &[u8], n: usize) -> Vec<Option<f64>> {
     let mut i = 1;
     for _ in 0..dict_len {
         if i + 8 > data.len() { break; }
-        let f = f64::from_le_bytes(data[i..i+8].try_into().unwrap()); i += 8;
-        dict.push(if f.is_nan() { None } else { Some(f) });
+        let bits = u64::from_le_bytes(data[i..i+8].try_into().unwrap()); i += 8;
+        dict.push(f64_from_stored(bits));
     }
     let mut out = Vec::with_capacity(n.min(data.len()));
     while out.len() < n && i < data.len() {

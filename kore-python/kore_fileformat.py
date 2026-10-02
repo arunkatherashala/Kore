@@ -357,8 +357,8 @@ def _block_from_bytes_ffi(data: bytes) -> 'DataBlock':
 _KORE_V3_MARKER = b'\x00KORE_V3\x00'
 
 
-def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int = 5) -> None:
-    """Write .kore v3 � KORE2 text header + Rust KORE binary (compressed + ACID).
+def _write_file_legacy(path: Union[str, Path], data_block: DataBlock, preview_rows: int = 5) -> None:
+    """Legacy layout: string dictionaries and null positions in the text header. Write .kore v3 � KORE2 text header + Rust KORE binary (compressed + ACID).
     Supports F64, I64, STR columns and None/null values."""
     import datetime, math
     import array as _array
@@ -441,8 +441,347 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
         f.write(kore_bytes)
 
 
+# -----------------------------------------------------------------------------
+# NATIVE LAYOUT: typed columns (incl. strings, bools and nulls) live in the binary section.
+# The text header only carries a preview and a "# Layout: native-1" marker.
+# -----------------------------------------------------------------------------
+import array as _array_mod
+import itertools as _itertools
+import operator as _operator
+
+_NATIVE_LAYOUT = 'native-1'
+_CODE_VALIDITY = bytes(0 if i == 255 else 1 for i in range(256))
+_CODE_NULL_TO_ZERO = bytes(0 if i == 255 else i for i in range(256))
+_NATIVE_DTYPES = ('I64', 'F64', 'BOOL', 'STR', 'STR_DICT')
+
+
+def _dtype_name(col) -> str:
+    return col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
+
+
+def _validity(d):
+    """One byte per row (1 = valid), or None when no value is None."""
+    if isinstance(d, _array_mod.array) or None not in d:
+        return None
+    return bytes(map(_operator.is_not, d, _itertools.repeat(None)))
+
+
+def _bind_native(lib):
+    if getattr(lib, '_kore_native_bound', False):
+        return
+    import ctypes as ct
+    p = ct.POINTER
+    lib.kore_block_new.restype = ct.c_void_p
+    lib.kore_block_free.argtypes = [ct.c_void_p]
+    for fn, ptr_t in (('kore_block_add_f64_v', p(ct.c_double)), ('kore_block_add_i64_v', p(ct.c_longlong))):
+        f = getattr(lib, fn)
+        f.argtypes = [ct.c_void_p, ct.c_char_p, ptr_t, ct.c_char_p, ct.c_uint64]
+        f.restype = ct.c_int
+    lib.kore_block_add_bool_v.argtypes = [ct.c_void_p, ct.c_char_p, ct.c_char_p, ct.c_char_p, ct.c_uint64]
+    lib.kore_block_add_bool_v.restype = ct.c_int
+    lib.kore_block_add_str_v.argtypes = [ct.c_void_p, ct.c_char_p, p(ct.c_uint32), ct.c_char_p,
+                                         ct.c_uint64, ct.c_char_p, ct.c_uint64]
+    lib.kore_block_add_str_v.restype = ct.c_int
+    for fn, ptr_t in (('kore_block_get_f64_v', p(ct.c_double)), ('kore_block_get_i64_v', p(ct.c_longlong)),
+                      ('kore_block_get_bool_v', p(ct.c_ubyte))):
+        f = getattr(lib, fn)
+        f.argtypes = [ct.c_void_p, ct.c_size_t, ptr_t, p(ct.c_ubyte), ct.c_uint64]
+        f.restype = ct.c_int64
+    lib.kore_block_str_bytes.argtypes = [ct.c_void_p, ct.c_size_t]
+    lib.kore_block_str_bytes.restype = ct.c_int64
+    lib.kore_block_get_str_v.argtypes = [ct.c_void_p, ct.c_size_t, p(ct.c_uint32), p(ct.c_ubyte),
+                                         ct.c_uint64, p(ct.c_ubyte)]
+    lib.kore_block_get_str_v.restype = ct.c_int64
+    lib.kore_block_add_strdict_v.argtypes = [ct.c_void_p, ct.c_char_p, ct.c_char_p, ct.c_uint64, p(ct.c_uint32),
+                                             ct.c_char_p, ct.c_uint64, ct.c_uint64]
+    lib.kore_block_add_strdict_v.restype = ct.c_int
+    lib.kore_block_strdict_info.argtypes = [ct.c_void_p, ct.c_size_t, p(ct.c_uint64), p(ct.c_uint64)]
+    lib.kore_block_strdict_info.restype = ct.c_int
+    lib.kore_block_get_strdict_v.argtypes = [ct.c_void_p, ct.c_size_t, p(ct.c_ubyte), p(ct.c_uint32), p(ct.c_ubyte)]
+    lib.kore_block_get_strdict_v.restype = ct.c_int64
+    lib.kore_block_col_type.argtypes = [ct.c_void_p, ct.c_size_t]
+    lib.kore_block_col_type.restype = ct.c_int
+    lib.kore_block_col_name.argtypes = [ct.c_void_p, ct.c_size_t]
+    lib.kore_block_col_name.restype = ct.c_char_p
+    lib.kore_block_num_rows.argtypes = [ct.c_void_p]
+    lib.kore_block_num_rows.restype = ct.c_uint64
+    lib.kore_block_num_cols.argtypes = [ct.c_void_p]
+    lib.kore_block_num_cols.restype = ct.c_uint32
+    lib.kore_write_bytes.argtypes = [ct.c_void_p, p(ct.c_size_t)]
+    lib.kore_write_bytes.restype = ct.c_void_p
+    lib.kore_read_bytes.argtypes = [ct.c_char_p, ct.c_size_t]
+    lib.kore_read_bytes.restype = ct.c_void_p
+    lib.kore_free_bytes.argtypes = [ct.c_void_p, ct.c_size_t]
+    lib.kore_last_error.restype = ct.c_char_p
+    lib._kore_native_bound = True
+
+
+def _native_error(lib, what: str) -> Exception:
+    msg = lib.kore_last_error()
+    return IOError(f"{what}: {msg.decode('utf-8', 'replace')}" if msg else what)
+
+
+def _add_string_column(lib, handle, name, d, valid, n):
+    """Dictionary-encode a string column with at most 254 distinct values. Returns the FFI return
+    code, or None when the column is not a good dictionary candidate."""
+    import ctypes as ct
+    uniq = list(dict.fromkeys(d))
+    values = [u for u in uniq if u is not None]
+    if len(values) > 254:
+        return None
+    if any(type(u) is not str for u in values):
+        d = [None if v is None else str(v) for v in d]
+        uniq = list(dict.fromkeys(d))
+        values = [u for u in uniq if u is not None]
+        if len(values) > 254:
+            return None
+    vid = {u: i for i, u in enumerate(values)}
+    vid[None] = 255
+    codes = bytes(map(vid.__getitem__, d))
+    enc = [u.encode('utf-8') for u in values]
+    offsets = _array_mod.array('I', [0])
+    offsets.extend(_itertools.accumulate(map(len, enc)))
+    dict_bytes = b''.join(enc)
+    return lib.kore_block_add_strdict_v(handle, name, codes, n,
+                                        (ct.c_uint32 * len(offsets)).from_buffer(offsets),
+                                        dict_bytes, len(dict_bytes), len(values))
+
+
+def _native_block_bytes(block: 'DataBlock') -> bytes:
+    """Serialise a DataBlock into Rust KORE bytes with native typed columns."""
+    import ctypes as ct
+    lib = KoreFFI.get_library()
+    _bind_native(lib)
+    handle = lib.kore_block_new()
+    try:
+        for col in block.columns:
+            dn = _dtype_name(col)
+            d = col.data
+            n = len(d)
+            name = col.name.encode('utf-8')
+            valid = _validity(d)
+            if dn == 'I64':
+                if valid is not None:
+                    d = [0 if v is None else v for v in d]
+                a = d if isinstance(d, _array_mod.array) and d.typecode == 'q' else _array_mod.array('q', d)
+                rc = lib.kore_block_add_i64_v(handle, name, (ct.c_longlong * n).from_buffer(a), valid, n)
+            elif dn == 'F64':
+                if valid is not None:
+                    d = [0.0 if v is None else v for v in d]
+                a = d if isinstance(d, _array_mod.array) and d.typecode == 'd' else _array_mod.array('d', d)
+                rc = lib.kore_block_add_f64_v(handle, name, (ct.c_double * n).from_buffer(a), valid, n)
+            elif dn == 'BOOL':
+                rc = lib.kore_block_add_bool_v(handle, name, bytes(map(bool, d)), valid, n)
+            else:  # STR / STR_DICT
+                rc = _add_string_column(lib, handle, name, d, valid, n)
+                if rc is not None:
+                    if rc != 0:
+                        raise _native_error(lib, f"adding column '{col.name}' failed")
+                    continue
+                seq = d if valid is None else ['' if v is None else v for v in d]
+                try:
+                    enc = [s.encode('utf-8') for s in seq]
+                except AttributeError:
+                    enc = [str(s).encode('utf-8') for s in seq]
+                offsets = _array_mod.array('I', [0])
+                offsets.extend(_itertools.accumulate(map(len, enc)))
+                data = b''.join(enc)
+                if len(data) > 0xFFFFFFFF:
+                    raise ValueError(f"string column '{col.name}' exceeds 4 GiB")
+                rc = lib.kore_block_add_str_v(handle, name, (ct.c_uint32 * (n + 1)).from_buffer(offsets),
+                                              data, len(data), valid, n)
+            if rc != 0:
+                raise _native_error(lib, f"adding column '{col.name}' failed")
+        out_len = ct.c_size_t(0)
+        ptr = lib.kore_write_bytes(handle, ct.byref(out_len))
+        if not ptr:
+            raise _native_error(lib, 'kore_write_bytes failed')
+        try:
+            return ct.string_at(ptr, out_len.value)
+        finally:
+            lib.kore_free_bytes(ptr, out_len.value)
+    finally:
+        lib.kore_block_free(handle)
+
+
+def _native_cols(kore_bytes: bytes):
+    """Decode Rust KORE bytes into raw column buffers: a list of
+    (name, kind, values, valid, extra) with kind in i64/f64/bool/str; `valid` is None when every
+    row is valid, else one byte per row. For str, values = uint32 offsets and extra = UTF-8 bytes."""
+    import ctypes as ct
+    lib = KoreFFI.get_library()
+    _bind_native(lib)
+    handle = lib.kore_read_bytes(kore_bytes, len(kore_bytes))
+    if not handle:
+        raise _native_error(lib, 'reading .kore data failed')
+    cols = []
+    try:
+        n = int(lib.kore_block_num_rows(handle))
+        for ci in range(int(lib.kore_block_num_cols(handle))):
+            name = lib.kore_block_col_name(handle, ci).decode('utf-8')
+            ctype = lib.kore_block_col_type(handle, ci)
+            vbuf = (ct.c_ubyte * max(n, 1))()
+            if ctype in (0, 1):
+                ct_elem, typecode, getter, kind = ((ct.c_longlong, 'q', lib.kore_block_get_i64_v, 'i64') if ctype == 0
+                                                  else (ct.c_double, 'd', lib.kore_block_get_f64_v, 'f64'))
+                out = (ct_elem * max(n, 1))()
+                if getter(handle, ci, out, vbuf, n) < 0:
+                    raise _native_error(lib, f"reading column '{name}' failed")
+                arr = _array_mod.array(typecode)
+                arr.frombytes(memoryview(out).cast('B')[:n * arr.itemsize])
+                values, extra = arr, None
+            elif ctype == 2:
+                out = (ct.c_ubyte * max(n, 1))()
+                if lib.kore_block_get_bool_v(handle, ci, out, vbuf, n) < 0:
+                    raise _native_error(lib, f"reading column '{name}' failed")
+                kind, values, extra = 'bool', bytes(out)[:n], None
+            elif ctype == 4:
+                dl, db = ct.c_uint64(0), ct.c_uint64(0)
+                lib.kore_block_strdict_info(handle, ci, ct.byref(dl), ct.byref(db))
+                codes = (ct.c_ubyte * max(n, 1))()
+                doffs = (ct.c_uint32 * (dl.value + 1))()
+                dbuf = (ct.c_ubyte * max(db.value, 1))()
+                if lib.kore_block_get_strdict_v(handle, ci, codes, doffs, dbuf) < 0:
+                    raise _native_error(lib, f"reading column '{name}' failed")
+                code_bytes = bytes(codes)[:n]
+                d_offsets = _array_mod.array('I')
+                d_offsets.frombytes(memoryview(doffs).cast('B'))
+                vb = None if 255 not in code_bytes else code_bytes.translate(_CODE_VALIDITY)
+                cols.append((name, 'dict', code_bytes, vb, (d_offsets, ct.string_at(dbuf, db.value))))
+                continue
+            elif ctype == 3:
+                total = lib.kore_block_str_bytes(handle, ci)
+                if total < 0:
+                    raise _native_error(lib, f"reading column '{name}' failed")
+                offs = (ct.c_uint32 * (n + 1))()
+                sbuf = (ct.c_ubyte * max(total, 1))()
+                if lib.kore_block_get_str_v(handle, ci, offs, sbuf, total, vbuf) < 0:
+                    raise _native_error(lib, f"reading column '{name}' failed")
+                kind = 'str'
+                values = _array_mod.array('I')
+                values.frombytes(memoryview(offs).cast('B'))
+                extra = ct.string_at(sbuf, total)
+            else:
+                raise ValueError(f"unsupported column type {ctype} for '{name}'")
+            vb = bytes(vbuf)[:n]
+            cols.append((name, kind, values, None if 0 not in vb else vb, extra))
+        return n, cols
+    finally:
+        lib.kore_block_free(handle)
+
+
+def _decode_strings(offsets, data: bytes, valid):
+    text = data.decode('utf-8')
+    nxt = _itertools.islice(offsets, 1, None)
+    if len(text) == len(data):  # ASCII: byte offsets are character offsets
+        out = [text[a:b] for a, b in zip(offsets, nxt)]
+    else:
+        out = [data[a:b].decode('utf-8') for a, b in zip(offsets, nxt)]
+    if valid is not None:
+        out = [s if ok else None for s, ok in zip(out, valid)]
+    return out
+
+
+def _block_from_native(kore_bytes: bytes) -> 'DataBlock':
+    n, cols = _native_cols(kore_bytes)
+    block = DataBlock(num_rows=n)
+    for name, kind, values, valid, extra in cols:
+        if kind == 'dict':
+            table = _decode_strings(extra[0], extra[1], None)
+            table += [None] * (256 - len(table))
+            block.add_column(name, DataType.STR, list(map(table.__getitem__, values)))
+        elif kind == 'str':
+            block.add_column(name, DataType.STR, _decode_strings(values, extra, valid))
+        elif kind == 'bool':
+            data = [bool(v) for v in values] if valid is None else [bool(v) if ok else None for v, ok in zip(values, valid)]
+            block.add_column(name, DataType.BOOL, data)
+        else:
+            data = values if valid is None else [v if ok else None for v, ok in zip(values, valid)]
+            block.add_column(name, DataType.I64 if kind == 'i64' else DataType.F64, data)
+    return block
+
+
+def _arrow_from_native(kore_bytes: bytes):
+    import pyarrow as pa
+    n, cols = _native_cols(kore_bytes)
+
+    def bitmap(valid):
+        if valid is None:
+            return None, 0
+        mask = pa.Array.from_buffers(pa.uint8(), n, [None, pa.py_buffer(valid)]).cast(pa.bool_())
+        return mask.buffers()[1], valid.count(0)
+
+    arrays = {}
+    for name, kind, values, valid, extra in cols:
+        bm, nulls = bitmap(valid)
+        if kind in ('i64', 'f64'):
+            arrays[name] = pa.Array.from_buffers(pa.int64() if kind == 'i64' else pa.float64(), n,
+                                                 [bm, pa.py_buffer(values)], null_count=nulls)
+        elif kind == 'dict':
+            strings = pa.array(_decode_strings(extra[0], extra[1], None), type=pa.string())
+            idx = pa.Array.from_buffers(pa.uint8(), n, [bm, pa.py_buffer(values.translate(_CODE_NULL_TO_ZERO))],
+                                        null_count=nulls)
+            arrays[name] = pa.DictionaryArray.from_arrays(idx, strings).dictionary_decode()
+        elif kind == 'bool':
+            bits = pa.Array.from_buffers(pa.uint8(), n, [None, pa.py_buffer(values)]).cast(pa.bool_())
+            arrays[name] = pa.Array.from_buffers(pa.bool_(), n, [bm, bits.buffers()[1]], null_count=nulls)
+        elif len(extra) < 2 ** 31:
+            arrays[name] = pa.Array.from_buffers(pa.string(), n, [bm, pa.py_buffer(values), pa.py_buffer(extra)],
+                                                 null_count=nulls)
+        else:
+            arrays[name] = pa.array(_decode_strings(values, extra, valid), type=pa.large_string())
+    return pa.table(arrays)
+
+
+def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int = 5) -> None:
+    """Write .kore v3: a short text header (schema + preview) followed by the Rust KORE binary,
+    in which strings, bools and nulls are stored natively. Set KORE_LEGACY_LAYOUT=1 to write the
+    older layout that kept string dictionaries and null positions in the text header."""
+    import datetime
+    if os.environ.get('KORE_LEGACY_LAYOUT') == '1' or \
+            any(_dtype_name(c) not in _NATIVE_DTYPES for c in data_block.columns):
+        return _write_file_legacy(path, data_block, preview_rows)
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cols = data_block.columns
+    nrows = data_block.num_rows
+    kore_bytes = _native_block_bytes(data_block)
+
+    def one_line(v):
+        return str(v).replace(chr(10), ' ').replace(chr(13), ' ')
+
+    n_prev = min(preview_rows, nrows)
+    text_lines = [
+        "# KORE Format v3.0",
+        f"# Created: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"# Rows: {nrows:,}  Columns: {len(cols)}",
+        f"# Compressed: {len(kore_bytes):,} bytes (Rust ZSTD/LZ4)",
+        f"# Layout: {_NATIVE_LAYOUT}",
+        "# Schema:",
+    ]
+    for col in cols:
+        text_lines.append(f"#   {one_line(col.name):<20} {_dtype_name(col)}")
+    text_lines.append(f"# Preview (first {n_prev} rows):")
+    for i in range(n_prev):
+        parts = [f"{one_line(col.name)}={one_line(col.data[i])}" for col in cols]
+        text_lines.append(f"#   [{' | '.join(parts)}]")
+    text_lines.append("")
+    text_body = chr(10).join(text_lines).encode('utf-8')
+
+    binary_start = _HKORE_OFFSET_LINE + len(text_body) + len(_KORE_V3_MARKER)
+    offset_line = f"KORE2 offset={binary_start:010d}{chr(10)}".encode('utf-8')
+    assert len(offset_line) == _HKORE_OFFSET_LINE
+
+    with open(str(path), 'wb') as f:
+        f.write(offset_line)
+        f.write(text_body)
+        f.write(_KORE_V3_MARKER)
+        f.write(kore_bytes)
+
+
 def _load_v3(path):
-    """Parse a .kore file into (legacy, kore_bytes, str_dicts, null_positions, bool_cols, schema_order).
+    """Parse a .kore file into (legacy, kore_bytes, str_dicts, null_positions, bool_cols, schema_order, layout).
     For legacy (non-v3) files only kore_bytes is meaningful."""
     with open(str(path), 'rb') as f:
         prefix = f.read(_HKORE_OFFSET_LINE)
@@ -454,15 +793,18 @@ def _load_v3(path):
             kore_bytes = f.read()
         else:
             f.seek(0)
-            return True, f.read(), {}, {}, set(), []
+            return True, f.read(), {}, {}, set(), [], None
 
     import re as _re
     str_dicts = {}
     null_positions = {}  # col_name -> list of null row indices
     bool_cols = set()    # col names to decode as bool
     schema_order = []
+    layout = None
     for line in header_bytes.decode('utf-8', errors='replace').split('\n'):
-        if line.startswith('# StringDictJ '):
+        if line.startswith('# Layout: '):
+            layout = line[10:].strip()
+        elif line.startswith('# StringDictJ '):
             col_name, vals_str = line[14:].split(': ', 1)
             str_dicts[col_name] = json.loads(vals_str)
         elif line.startswith('# StringDict '):
@@ -481,15 +823,19 @@ def _load_v3(path):
             parts = line[4:].split()
             if len(parts) >= 2:
                 schema_order.append((parts[0], parts[1]))
-    return False, kore_bytes, str_dicts, null_positions, bool_cols, schema_order
+    return False, kore_bytes, str_dicts, null_positions, bool_cols, schema_order, layout
 
 
 def read_file(path: Union[str, Path]) -> DataBlock:
     """Read .kore � auto-detects v3 (text header) vs legacy (raw Rust KORE).
     Decodes string columns and restores column order from header."""
-    legacy, kore_bytes, str_dicts, null_positions, bool_cols, schema_order = _load_v3(path)
+    legacy, kore_bytes, str_dicts, null_positions, bool_cols, schema_order, layout = _load_v3(path)
     if legacy:
         return _block_from_bytes_ffi(kore_bytes)
+    if layout is not None:
+        if layout != _NATIVE_LAYOUT:
+            raise ValueError(f"unsupported .kore layout {layout!r}")
+        return _block_from_native(kore_bytes)
 
     raw_block = _block_from_bytes_ffi(kore_bytes)
 
@@ -1358,7 +1704,11 @@ def _read_arrow(path):
     """Read a .kore file straight into an Arrow table: numeric buffers are shared, strings are
     rebuilt from the dictionary without creating Python str objects."""
     import pyarrow as pa
-    legacy, kore_bytes, str_dicts, null_positions, bool_cols, schema_order = _load_v3(path)
+    legacy, kore_bytes, str_dicts, null_positions, bool_cols, schema_order, layout = _load_v3(path)
+    if layout is not None:
+        if layout != _NATIVE_LAYOUT:
+            raise ValueError(f"unsupported .kore layout {layout!r}")
+        return _arrow_from_native(kore_bytes)
     raw = _block_from_bytes_ffi(kore_bytes)
     if legacy or (not str_dicts and not schema_order):
         return to_arrow(raw)

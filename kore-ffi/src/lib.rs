@@ -647,6 +647,264 @@ pub unsafe extern "C" fn kore_block_col_name(
     }
 }
 
+// ── Nullable column import/export (explicit validity, NaN stays NaN) ───────────
+//
+// `validity` is one byte per row (1 = valid, 0 = null) or NULL when every row is valid.
+// Strings are passed as `len + 1` byte offsets into one UTF-8 buffer.
+
+#[inline]
+unsafe fn is_valid(validity: *const u8, i: usize) -> bool {
+    validity.is_null() || *validity.add(i) != 0
+}
+
+unsafe fn col_name_arg(name: *const c_char) -> Option<String> {
+    if name.is_null() { return None; }
+    CStr::from_ptr(name).to_str().ok().map(|s| s.to_string())
+}
+
+unsafe fn push_column(ptr: *mut KoreBlock, name: String, data: ColumnData, rows: usize) -> c_int {
+    (*ptr).inner.columns.push(Column { name, data });
+    (*ptr).inner.num_rows = rows;
+    0
+}
+
+/// Add an f64 column; a zero byte in `validity` marks null, NaN values are kept as NaN.
+#[no_mangle]
+pub unsafe extern "C" fn kore_block_add_f64_v(
+    ptr: *mut KoreBlock, name: *const c_char,
+    data: *const c_double, validity: *const u8, len: u64,
+) -> c_int {
+    if ptr.is_null() || data.is_null() { set_error("kore_block_add_f64_v: null argument"); return -1; }
+    let Some(name) = col_name_arg(name) else { set_error("invalid column name"); return -1 };
+    let v = std::slice::from_raw_parts(data, len as usize);
+    let vals = v.iter().enumerate().map(|(i, &x)| if is_valid(validity, i) { Some(x) } else { None }).collect();
+    push_column(ptr, name, ColumnData::Float64(vals), len as usize)
+}
+
+/// Add an i64 column with explicit validity (i64::MIN is an ordinary value here).
+#[no_mangle]
+pub unsafe extern "C" fn kore_block_add_i64_v(
+    ptr: *mut KoreBlock, name: *const c_char,
+    data: *const c_longlong, validity: *const u8, len: u64,
+) -> c_int {
+    if ptr.is_null() || data.is_null() { set_error("kore_block_add_i64_v: null argument"); return -1; }
+    let Some(name) = col_name_arg(name) else { set_error("invalid column name"); return -1 };
+    let v = std::slice::from_raw_parts(data, len as usize);
+    let vals = v.iter().enumerate().map(|(i, &x)| if is_valid(validity, i) { Some(x) } else { None }).collect();
+    push_column(ptr, name, ColumnData::Int64(vals), len as usize)
+}
+
+/// Add a bool column; `data` holds one byte per row (0 or 1).
+#[no_mangle]
+pub unsafe extern "C" fn kore_block_add_bool_v(
+    ptr: *mut KoreBlock, name: *const c_char,
+    data: *const u8, validity: *const u8, len: u64,
+) -> c_int {
+    if ptr.is_null() || data.is_null() { set_error("kore_block_add_bool_v: null argument"); return -1; }
+    let Some(name) = col_name_arg(name) else { set_error("invalid column name"); return -1 };
+    let v = std::slice::from_raw_parts(data, len as usize);
+    let vals = v.iter().enumerate().map(|(i, &x)| if is_valid(validity, i) { Some(x != 0) } else { None }).collect();
+    push_column(ptr, name, ColumnData::Bool(vals), len as usize)
+}
+
+/// Add a string column from `len + 1` offsets into `bytes` (UTF-8). Null rows ignore their bytes.
+#[no_mangle]
+pub unsafe extern "C" fn kore_block_add_str_v(
+    ptr: *mut KoreBlock, name: *const c_char,
+    offsets: *const u32, bytes: *const u8, bytes_len: u64,
+    validity: *const u8, len: u64,
+) -> c_int {
+    if ptr.is_null() || offsets.is_null() { set_error("kore_block_add_str_v: null argument"); return -1; }
+    let Some(name) = col_name_arg(name) else { set_error("invalid column name"); return -1 };
+    let n = len as usize;
+    let offs = std::slice::from_raw_parts(offsets, n + 1);
+    let buf: &[u8] = if bytes.is_null() { &[] } else { std::slice::from_raw_parts(bytes, bytes_len as usize) };
+    let mut vals = Vec::with_capacity(n);
+    for i in 0..n {
+        if !is_valid(validity, i) { vals.push(None); continue; }
+        let (a, b) = (offs[i] as usize, offs[i + 1] as usize);
+        match buf.get(a..b).filter(|_| a <= b).map(std::str::from_utf8) {
+            Some(Ok(s)) => vals.push(Some(s.to_string())),
+            Some(Err(_)) => { set_error("string column contains invalid UTF-8"); return -1; }
+            None => { set_error("string offsets out of range"); return -1; }
+        }
+    }
+    push_column(ptr, name, ColumnData::Str(vals), n)
+}
+
+unsafe fn nth_column<'a>(ptr: *const KoreBlock, idx: usize) -> Option<&'a Column> {
+    ptr.as_ref()?.inner.columns.get(idx)
+}
+
+unsafe fn write_validity<T>(vals: &[Option<T>], validity_out: *mut u8) {
+    if validity_out.is_null() { return; }
+    for (i, v) in vals.iter().enumerate() { *validity_out.add(i) = v.is_some() as u8; }
+}
+
+/// Copy an f64 column (by index) and its validity. Null slots hold NaN in `out`. Returns row count or -1.
+#[no_mangle]
+pub unsafe extern "C" fn kore_block_get_f64_v(
+    ptr: *const KoreBlock, idx: usize, out: *mut c_double, validity_out: *mut u8, maxlen: u64,
+) -> i64 {
+    let Some(col) = nth_column(ptr, idx) else { set_error("column index out of range"); return -1 };
+    let ColumnData::Float64(v) = &col.data else { set_error("column is not f64"); return -1 };
+    if out.is_null() || (v.len() as u64) > maxlen { set_error("output buffer too small"); return -1; }
+    for (i, x) in v.iter().enumerate() { *out.add(i) = x.unwrap_or(f64::NAN); }
+    write_validity(v, validity_out);
+    v.len() as i64
+}
+
+/// Copy an i64 column (by index) and its validity. Null slots hold 0. Returns row count or -1.
+#[no_mangle]
+pub unsafe extern "C" fn kore_block_get_i64_v(
+    ptr: *const KoreBlock, idx: usize, out: *mut c_longlong, validity_out: *mut u8, maxlen: u64,
+) -> i64 {
+    let Some(col) = nth_column(ptr, idx) else { set_error("column index out of range"); return -1 };
+    let ColumnData::Int64(v) = &col.data else { set_error("column is not i64"); return -1 };
+    if out.is_null() || (v.len() as u64) > maxlen { set_error("output buffer too small"); return -1; }
+    for (i, x) in v.iter().enumerate() { *out.add(i) = x.unwrap_or(0); }
+    write_validity(v, validity_out);
+    v.len() as i64
+}
+
+/// Copy a bool column (by index) as bytes 0/1 and its validity. Returns row count or -1.
+#[no_mangle]
+pub unsafe extern "C" fn kore_block_get_bool_v(
+    ptr: *const KoreBlock, idx: usize, out: *mut u8, validity_out: *mut u8, maxlen: u64,
+) -> i64 {
+    let Some(col) = nth_column(ptr, idx) else { set_error("column index out of range"); return -1 };
+    let ColumnData::Bool(v) = &col.data else { set_error("column is not bool"); return -1 };
+    if out.is_null() || (v.len() as u64) > maxlen { set_error("output buffer too small"); return -1; }
+    for (i, x) in v.iter().enumerate() { *out.add(i) = x.unwrap_or(false) as u8; }
+    write_validity(v, validity_out);
+    v.len() as i64
+}
+
+fn str_at(data: &ColumnData, i: usize) -> Option<&str> {
+    match data {
+        ColumnData::Str(v) => v.get(i).and_then(|o| o.as_deref()),
+        ColumnData::StrDict { codes, dict } => codes.get(i)
+            .and_then(|&c| if c == u8::MAX { None } else { dict.get(c as usize).map(|s| s.as_str()) }),
+        _ => None,
+    }
+}
+
+fn str_rows(data: &ColumnData) -> Option<usize> {
+    match data {
+        ColumnData::Str(v) => Some(v.len()),
+        ColumnData::StrDict { codes, .. } => Some(codes.len()),
+        _ => None,
+    }
+}
+
+/// Total UTF-8 bytes of a string (or string-dict) column, or -1 if it is not a string column.
+#[no_mangle]
+pub unsafe extern "C" fn kore_block_str_bytes(ptr: *const KoreBlock, idx: usize) -> i64 {
+    let Some(col) = nth_column(ptr, idx) else { return -1 };
+    let Some(n) = str_rows(&col.data) else { return -1 };
+    (0..n).map(|i| str_at(&col.data, i).map_or(0, |s| s.len() as i64)).sum()
+}
+
+/// Export a string column: `offsets_out` gets rows + 1 entries, `bytes_out` the concatenated UTF-8
+/// (size it with kore_block_str_bytes), `validity_out` one byte per row. Returns row count or -1.
+#[no_mangle]
+pub unsafe extern "C" fn kore_block_get_str_v(
+    ptr: *const KoreBlock, idx: usize,
+    offsets_out: *mut u32, bytes_out: *mut u8, bytes_cap: u64, validity_out: *mut u8,
+) -> i64 {
+    let Some(col) = nth_column(ptr, idx) else { set_error("column index out of range"); return -1 };
+    let Some(n) = str_rows(&col.data) else { set_error("column is not a string column"); return -1 };
+    if offsets_out.is_null() { set_error("null offsets buffer"); return -1; }
+    let mut pos: usize = 0;
+    *offsets_out = 0;
+    for i in 0..n {
+        let s = str_at(&col.data, i);
+        if let Some(s) = s {
+            if pos + s.len() > bytes_cap as usize || pos + s.len() > u32::MAX as usize {
+                set_error("string buffer too small or column exceeds 4 GiB");
+                return -1;
+            }
+            if !bytes_out.is_null() { std::ptr::copy_nonoverlapping(s.as_ptr(), bytes_out.add(pos), s.len()); }
+            pos += s.len();
+        }
+        if !validity_out.is_null() { *validity_out.add(i) = s.is_some() as u8; }
+        *offsets_out.add(i + 1) = pos as u32;
+    }
+    n as i64
+}
+
+/// Add a dictionary-encoded string column: one `codes` byte per row (255 = null) indexing into a
+/// dictionary of at most 254 strings given as `dict_len + 1` offsets into `dict_bytes` (UTF-8).
+#[no_mangle]
+pub unsafe extern "C" fn kore_block_add_strdict_v(
+    ptr: *mut KoreBlock, name: *const c_char,
+    codes: *const u8, len: u64,
+    dict_offsets: *const u32, dict_bytes: *const u8, dict_bytes_len: u64, dict_len: u64,
+) -> c_int {
+    if ptr.is_null() || codes.is_null() || dict_offsets.is_null() {
+        set_error("kore_block_add_strdict_v: null argument");
+        return -1;
+    }
+    let Some(name) = col_name_arg(name) else { set_error("invalid column name"); return -1 };
+    if dict_len > 254 { set_error("dictionary has more than 254 entries"); return -1; }
+    let offs = std::slice::from_raw_parts(dict_offsets, dict_len as usize + 1);
+    let buf: &[u8] = if dict_bytes.is_null() { &[] } else { std::slice::from_raw_parts(dict_bytes, dict_bytes_len as usize) };
+    let mut dict = Vec::with_capacity(dict_len as usize);
+    for i in 0..dict_len as usize {
+        let (a, b) = (offs[i] as usize, offs[i + 1] as usize);
+        match buf.get(a..b).filter(|_| a <= b).map(std::str::from_utf8) {
+            Some(Ok(s)) => dict.push(s.to_string()),
+            Some(Err(_)) => { set_error("dictionary contains invalid UTF-8"); return -1; }
+            None => { set_error("dictionary offsets out of range"); return -1; }
+        }
+    }
+    let codes = std::slice::from_raw_parts(codes, len as usize).to_vec();
+    if codes.iter().any(|&c| c != u8::MAX && c as usize >= dict.len()) {
+        set_error("string code out of dictionary range");
+        return -1;
+    }
+    push_column(ptr, name, ColumnData::StrDict { codes, dict }, len as usize)
+}
+
+/// For a dictionary-encoded string column returns 1 and writes the entry count and total dictionary
+/// bytes; returns 0 for any other column and -1 if the index is out of range.
+#[no_mangle]
+pub unsafe extern "C" fn kore_block_strdict_info(
+    ptr: *const KoreBlock, idx: usize, dict_len_out: *mut u64, dict_bytes_out: *mut u64,
+) -> c_int {
+    let Some(col) = nth_column(ptr, idx) else { return -1 };
+    match &col.data {
+        ColumnData::StrDict { dict, .. } => {
+            if !dict_len_out.is_null() { *dict_len_out = dict.len() as u64; }
+            if !dict_bytes_out.is_null() { *dict_bytes_out = dict.iter().map(|s| s.len() as u64).sum(); }
+            1
+        }
+        _ => 0,
+    }
+}
+
+/// Export a dictionary-encoded string column: `codes_out` one byte per row (255 = null),
+/// `dict_offsets_out` dict_len + 1 entries, `dict_bytes_out` the concatenated entries.
+/// Size the buffers with kore_block_strdict_info. Returns row count or -1.
+#[no_mangle]
+pub unsafe extern "C" fn kore_block_get_strdict_v(
+    ptr: *const KoreBlock, idx: usize,
+    codes_out: *mut u8, dict_offsets_out: *mut u32, dict_bytes_out: *mut u8,
+) -> i64 {
+    let Some(col) = nth_column(ptr, idx) else { set_error("column index out of range"); return -1 };
+    let ColumnData::StrDict { codes, dict } = &col.data else { set_error("column is not dictionary-encoded"); return -1 };
+    if codes_out.is_null() || dict_offsets_out.is_null() { set_error("null output buffer"); return -1; }
+    std::ptr::copy_nonoverlapping(codes.as_ptr(), codes_out, codes.len());
+    let mut pos = 0usize;
+    *dict_offsets_out = 0;
+    for (i, s) in dict.iter().enumerate() {
+        if !dict_bytes_out.is_null() { std::ptr::copy_nonoverlapping(s.as_ptr(), dict_bytes_out.add(pos), s.len()); }
+        pos += s.len();
+        *dict_offsets_out.add(i + 1) = pos as u32;
+    }
+    codes.len() as i64
+}
+
 /// Column type by index: 0=int64, 1=float64, 2=bool, 3=string, 4=string-dict; -1 if out of range.
 #[no_mangle]
 pub unsafe extern "C" fn kore_block_col_type(block: *const KoreBlock, idx: usize) -> c_int {
@@ -854,3 +1112,155 @@ fn block_to_json_stripped(block: &DataBlock) -> String {
     serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
 }
 
+#[cfg(test)]
+mod native_column_tests {
+    use super::*;
+
+    fn cname(s: &str) -> CString { CString::new(s).unwrap() }
+
+    unsafe fn add_strs(b: *mut KoreBlock, name: &str, vals: &[Option<&str>]) {
+        let mut offs = vec![0u32];
+        let mut bytes = Vec::new();
+        let mut valid = Vec::new();
+        for v in vals {
+            if let Some(s) = v { bytes.extend_from_slice(s.as_bytes()); }
+            valid.push(v.is_some() as u8);
+            offs.push(bytes.len() as u32);
+        }
+        let n = cname(name);
+        assert_eq!(kore_block_add_str_v(b, n.as_ptr(), offs.as_ptr(), bytes.as_ptr(), bytes.len() as u64,
+                                        valid.as_ptr(), vals.len() as u64), 0);
+    }
+
+    unsafe fn read_strs(b: *const KoreBlock, idx: usize) -> Vec<Option<String>> {
+        let total = kore_block_str_bytes(b, idx);
+        assert!(total >= 0);
+        let n = kore_block_num_rows(b) as usize;
+        let mut offs = vec![0u32; n + 1];
+        let mut bytes = vec![0u8; total as usize + 1];
+        let mut valid = vec![0u8; n];
+        assert_eq!(kore_block_get_str_v(b, idx, offs.as_mut_ptr(), bytes.as_mut_ptr(), bytes.len() as u64,
+                                        valid.as_mut_ptr()), n as i64);
+        (0..n).map(|i| if valid[i] == 0 { None } else {
+            Some(String::from_utf8(bytes[offs[i] as usize..offs[i + 1] as usize].to_vec()).unwrap())
+        }).collect()
+    }
+
+    #[test]
+    fn nullable_columns_roundtrip_through_the_file_format() {
+        unsafe {
+            let n = 3000usize;
+            let ints: Vec<i64> = (0..n as i64).map(|i| if i == 5 { i64::MIN } else { i * 3 }).collect();
+            let int_valid: Vec<u8> = (0..n).map(|i| (i % 11 != 0) as u8).collect();
+            let floats: Vec<f64> = (0..n).map(|i| if i % 13 == 1 { f64::NAN } else { i as f64 * 0.5 }).collect();
+            let float_valid: Vec<u8> = (0..n).map(|i| (i % 9 != 0) as u8).collect();
+            let bools: Vec<u8> = (0..n).map(|i| (i % 2) as u8).collect();
+            let bool_valid: Vec<u8> = (0..n).map(|i| (i % 7 != 0) as u8).collect();
+            let unique: Vec<String> = (0..n).map(|i| format!("user-{i}-\u{e9}\u{1f600}")).collect();
+            let uniq_refs: Vec<Option<&str>> = unique.iter().enumerate()
+                .map(|(i, s)| if i % 5 == 0 { None } else { Some(s.as_str()) }).collect();
+            let low_refs: Vec<Option<&str>> = (0..n).map(|i| match i % 5 { 0 => None, 1 => Some("US"), 2 => Some(""), _ => Some("EU") }).collect();
+
+            let b = kore_block_new();
+            assert_eq!(kore_block_add_i64_v(b, cname("i").as_ptr(), ints.as_ptr(), int_valid.as_ptr(), n as u64), 0);
+            assert_eq!(kore_block_add_f64_v(b, cname("f").as_ptr(), floats.as_ptr(), float_valid.as_ptr(), n as u64), 0);
+            assert_eq!(kore_block_add_bool_v(b, cname("b").as_ptr(), bools.as_ptr(), bool_valid.as_ptr(), n as u64), 0);
+            add_strs(b, "uniq", &uniq_refs);
+            add_strs(b, "low", &low_refs);
+
+            let mut len = 0usize;
+            let bytes = kore_write_bytes(b, &mut len);
+            assert!(!bytes.is_null());
+            let r = kore_read_bytes(bytes, len);
+            assert!(!r.is_null());
+            kore_free_bytes(bytes, len);
+            kore_block_free(b);
+
+            let mut iv = vec![0i64; n]; let mut ivalid = vec![0u8; n];
+            assert_eq!(kore_block_get_i64_v(r, 0, iv.as_mut_ptr(), ivalid.as_mut_ptr(), n as u64), n as i64);
+            assert_eq!(ivalid, int_valid);
+            for i in 0..n { if int_valid[i] == 1 { assert_eq!(iv[i], ints[i]); } }
+            assert_eq!(iv[5], i64::MIN, "i64::MIN must be an ordinary value");
+
+            let mut fv = vec![0f64; n]; let mut fvalid = vec![0u8; n];
+            assert_eq!(kore_block_get_f64_v(r, 1, fv.as_mut_ptr(), fvalid.as_mut_ptr(), n as u64), n as i64);
+            assert_eq!(fvalid, float_valid);
+            for i in 0..n {
+                if float_valid[i] == 1 {
+                    if floats[i].is_nan() { assert!(fv[i].is_nan() && fvalid[i] == 1, "row {i}: NaN lost"); }
+                    else { assert_eq!(fv[i], floats[i]); }
+                }
+            }
+
+            let mut bv = vec![0u8; n]; let mut bvalid = vec![0u8; n];
+            assert_eq!(kore_block_get_bool_v(r, 2, bv.as_mut_ptr(), bvalid.as_mut_ptr(), n as u64), n as i64);
+            assert_eq!(bvalid, bool_valid);
+            for i in 0..n { if bool_valid[i] == 1 { assert_eq!(bv[i], bools[i]); } }
+
+            let got_u = read_strs(r, 3);
+            let got_l = read_strs(r, 4);
+            for i in 0..n {
+                assert_eq!(got_u[i].as_deref(), uniq_refs[i], "unique row {i}");
+                assert_eq!(got_l[i].as_deref(), low_refs[i], "low-cardinality row {i}");
+            }
+            kore_block_free(r);
+        }
+    }
+
+    #[test]
+    fn dictionary_strings_roundtrip_through_the_file_format() {
+        unsafe {
+            let n = 5000usize;
+            let dict = ["US", "EU", "", "caf\u{e9}\u{1f600}"];
+            let mut offs = vec![0u32];
+            let mut bytes = Vec::new();
+            for s in dict { bytes.extend_from_slice(s.as_bytes()); offs.push(bytes.len() as u32); }
+            let codes: Vec<u8> = (0..n).map(|i| if i % 6 == 0 { 255 } else { (i % 4) as u8 }).collect();
+
+            let b = kore_block_new();
+            assert_eq!(kore_block_add_strdict_v(b, cname("r").as_ptr(), codes.as_ptr(), n as u64,
+                offs.as_ptr(), bytes.as_ptr(), bytes.len() as u64, dict.len() as u64), 0);
+            // out-of-range code is rejected
+            let bad = [9u8];
+            assert_eq!(kore_block_add_strdict_v(b, cname("x").as_ptr(), bad.as_ptr(), 1,
+                offs.as_ptr(), bytes.as_ptr(), bytes.len() as u64, dict.len() as u64), -1);
+
+            let mut len = 0usize;
+            let out = kore_write_bytes(b, &mut len);
+            let r = kore_read_bytes(out, len);
+            assert!(!r.is_null());
+            kore_free_bytes(out, len);
+            kore_block_free(b);
+
+            let (mut dl, mut db) = (0u64, 0u64);
+            assert_eq!(kore_block_strdict_info(r, 0, &mut dl, &mut db), 1);
+            assert_eq!((dl, db), (4, bytes.len() as u64));
+            let mut got_codes = vec![0u8; n];
+            let mut got_offs = vec![0u32; dl as usize + 1];
+            let mut got_bytes = vec![0u8; db as usize];
+            assert_eq!(kore_block_get_strdict_v(r, 0, got_codes.as_mut_ptr(), got_offs.as_mut_ptr(), got_bytes.as_mut_ptr()), n as i64);
+            assert_eq!(got_codes, codes);
+            assert_eq!(got_offs, offs);
+            assert_eq!(got_bytes, bytes);
+            // the generic string reader sees the same column
+            let rows = read_strs(r, 0);
+            assert_eq!(rows[0], None);
+            assert_eq!(rows[3].as_deref(), Some("caf\u{e9}\u{1f600}"));
+            kore_block_free(r);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_utf8_and_bad_offsets() {
+        unsafe {
+            let b = kore_block_new();
+            let bad = [0xffu8, 0xfe];
+            let offs = [0u32, 2];
+            let n = cname("s");
+            assert_eq!(kore_block_add_str_v(b, n.as_ptr(), offs.as_ptr(), bad.as_ptr(), 2, std::ptr::null(), 1), -1);
+            let offs = [0u32, 99];
+            assert_eq!(kore_block_add_str_v(b, n.as_ptr(), offs.as_ptr(), bad.as_ptr(), 2, std::ptr::null(), 1), -1);
+            kore_block_free(b);
+        }
+    }
+}
