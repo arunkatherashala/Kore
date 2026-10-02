@@ -1211,6 +1211,7 @@ name = "kore-delta"
 version = "0.1.0"
 dependencies = [
  "kore-core",
+ "kore-store",
  "serde",
  "serde_json",
 ]
@@ -1682,7 +1683,7 @@ dependencies = [
 
 [[package]]
 name = "kore_fileformat"
-version = "1.8.12"
+version = "1.8.13"
 
 [[package]]
 name = "libc"

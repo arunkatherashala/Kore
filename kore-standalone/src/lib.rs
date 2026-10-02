@@ -1852,7 +1852,7 @@ impl QueryResult {
 /// - `SELECT col FROM file.kore ORDER BY col DESC`
 ///
 /// Example:
-/// ```
+/// ```ignore
 /// let result = kore_sql("SELECT region, SUM(price) FROM data.kore GROUP BY region")?;
 /// result.print();
 /// ```
@@ -2037,7 +2037,7 @@ pub fn mvcc_write(path: &str, block: &DataBlock) -> io::Result<u32> {
 /// Works with: AWS S3 presigned URLs, GCS signed URLs, Azure SAS URLs, HTTP servers.
 ///
 /// Example:
-/// ```
+/// ```ignore
 /// let block = read_url("https://my-bucket.s3.amazonaws.com/data.kore?X-Amz-...")?;
 /// ```
 pub fn read_url(url: &str) -> io::Result<DataBlock> {

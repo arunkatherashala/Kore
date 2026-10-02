@@ -88,15 +88,16 @@ def main():
         pn = os.path.join(tmp, "null.kore")
         bn = kore.DataBlock()
         bn.add_column('x', kore.DataType.I64, [1, None, 3])
-        bn.add_column('y', kore.DataType.F64, [1.0, None, 3.0])
+        bn.add_column('y', kore.DataType.F64, [1.0, None, float('nan')])
         kore.write_file(pn, bn)
         bn2 = kore.read_file(pn)
         check("I64 None round-trip",
               list(bn2.get_column('x').data) == [1, None, 3],
               str(list(bn2.get_column('x').data)))
-        check("F64 None as NaN preserved",
-              math.isnan(bn2.get_column('y').data[1]),
-              str(list(bn2.get_column('y').data)))
+        y = list(bn2.get_column('y').data)
+        check("F64 None and NaN stay distinct",
+              y[0] == 1.0 and y[1] is None and y[2] is not None and math.isnan(y[2]),
+              str(y))
 
         # ── Phase 6: kore_stats overhead ≤ 1% (realistic dataset) ─────────────
         print("\n--- Phase 6: File size stats ---")
