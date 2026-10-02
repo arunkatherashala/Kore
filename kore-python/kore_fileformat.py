@@ -513,6 +513,15 @@ def _bind_native(lib):
     lib.kore_read_bytes.restype = ct.c_void_p
     lib.kore_read_bytes_columns.argtypes = [ct.c_char_p, ct.c_size_t, p(ct.c_char_p), ct.c_size_t]
     lib.kore_read_bytes_columns.restype = ct.c_void_p
+    lib.kore_write_bytes_groups.argtypes = [ct.c_void_p, ct.c_uint64, p(ct.c_size_t)]
+    lib.kore_write_bytes_groups.restype = ct.c_void_p
+    lib.kore_rowgroup_count.argtypes = [ct.c_char_p, ct.c_size_t]
+    lib.kore_rowgroup_count.restype = ct.c_int64
+    lib.kore_rowgroup_matching.argtypes = [ct.c_char_p, ct.c_size_t, ct.c_char_p, ct.c_double, ct.c_double, ct.c_uint32]
+    lib.kore_rowgroup_matching.restype = ct.c_int64
+    lib.kore_read_bytes_where.argtypes = [ct.c_char_p, ct.c_size_t, p(ct.c_char_p), ct.c_size_t,
+                                          ct.c_char_p, ct.c_double, ct.c_double, ct.c_uint32]
+    lib.kore_read_bytes_where.restype = ct.c_void_p
     lib.kore_free_bytes.argtypes = [ct.c_void_p, ct.c_size_t]
     lib.kore_last_error.restype = ct.c_char_p
     lib._kore_native_bound = True
@@ -549,7 +558,7 @@ def _add_string_column(lib, handle, name, d, valid, n):
                                         dict_bytes, len(dict_bytes), len(values))
 
 
-def _native_block_bytes(block: 'DataBlock') -> bytes:
+def _native_block_bytes(block: 'DataBlock', row_group_rows: Optional[int] = None) -> bytes:
     """Serialise a DataBlock into Rust KORE bytes with native typed columns."""
     import ctypes as ct
     lib = KoreFFI.get_library()
@@ -595,7 +604,10 @@ def _native_block_bytes(block: 'DataBlock') -> bytes:
             if rc != 0:
                 raise _native_error(lib, f"adding column '{col.name}' failed")
         out_len = ct.c_size_t(0)
-        ptr = lib.kore_write_bytes(handle, ct.byref(out_len))
+        if row_group_rows:
+            ptr = lib.kore_write_bytes_groups(handle, int(row_group_rows), ct.byref(out_len))
+        else:
+            ptr = lib.kore_write_bytes(handle, ct.byref(out_len))
         if not ptr:
             raise _native_error(lib, 'kore_write_bytes failed')
         try:
@@ -606,21 +618,28 @@ def _native_block_bytes(block: 'DataBlock') -> bytes:
         lib.kore_block_free(handle)
 
 
-def _native_cols(kore_bytes: bytes, columns=None):
+def _native_cols(kore_bytes: bytes, columns=None, where=None):
     """Decode Rust KORE bytes into raw column buffers: a list of
     (name, kind, values, valid, extra) with kind in i64/f64/bool/str; `valid` is None when every
     row is valid, else one byte per row. For str, values = uint32 offsets and extra = UTF-8 bytes."""
     import ctypes as ct
     lib = KoreFFI.get_library()
     _bind_native(lib)
-    if columns is None:
+    if where is not None:
+        col, lo, hi = where
+        enc = [c.encode('utf-8') for c in columns] if columns is not None else []
+        flags = (1 if lo is not None else 0) | (2 if hi is not None else 0)
+        handle = lib.kore_read_bytes_where(
+            kore_bytes, len(kore_bytes), (ct.c_char_p * len(enc))(*enc) if columns is not None else None,
+            len(enc), col.encode('utf-8'), float(lo if lo is not None else 0), float(hi if hi is not None else 0), flags)
+    elif columns is None:
         handle = lib.kore_read_bytes(kore_bytes, len(kore_bytes))
     else:
         enc = [c.encode('utf-8') for c in columns]
         handle = lib.kore_read_bytes_columns(kore_bytes, len(kore_bytes), (ct.c_char_p * len(enc))(*enc), len(enc))
     if not handle:
         err = lib.kore_last_error()
-        if columns is not None and err and b'column not found' in err:
+        if (columns is not None or where is not None) and err and b'column not found' in err:
             raise KeyError(err.decode('utf-8', 'replace'))
         raise _native_error(lib, 'reading .kore data failed')
     cols = []
@@ -691,8 +710,8 @@ def _decode_strings(offsets, data: bytes, valid):
     return out
 
 
-def _block_from_native(kore_bytes: bytes, columns=None) -> 'DataBlock':
-    n, cols = _native_cols(kore_bytes, columns)
+def _block_from_native(kore_bytes: bytes, columns=None, where=None) -> 'DataBlock':
+    n, cols = _native_cols(kore_bytes, columns, where)
     block = DataBlock(num_rows=n)
     for name, kind, values, valid, extra in cols:
         if kind == 'dict':
@@ -710,9 +729,9 @@ def _block_from_native(kore_bytes: bytes, columns=None) -> 'DataBlock':
     return block
 
 
-def _arrow_from_native(kore_bytes: bytes, columns=None):
+def _arrow_from_native(kore_bytes: bytes, columns=None, where=None):
     import pyarrow as pa
-    n, cols = _native_cols(kore_bytes, columns)
+    n, cols = _native_cols(kore_bytes, columns, where)
 
     def bitmap(valid):
         if valid is None:
@@ -742,11 +761,19 @@ def _arrow_from_native(kore_bytes: bytes, columns=None):
     return pa.table(arrays)
 
 
-def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int = 5) -> None:
+def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int = 5,
+               row_group_rows: Optional[int] = None) -> None:
     """Write .kore v3: a short text header (schema + preview) followed by the Rust KORE binary,
     in which strings, bools and nulls are stored natively. Set KORE_LEGACY_LAYOUT=1 to write the
-    older layout that kept string dictionaries and null positions in the text header."""
+    older layout that kept string dictionaries and null positions in the text header.
+
+    `row_group_rows` (or env KORE_ROW_GROUP_ROWS) splits the table into row groups of that many rows
+    with per-group min/max, so `read_file(..., where=...)` can skip groups. Off by default; readers
+    that predate row groups cannot open such files."""
     import datetime
+    if row_group_rows is None:
+        env = os.environ.get('KORE_ROW_GROUP_ROWS')
+        row_group_rows = int(env) if env and env.isdigit() else None
     if os.environ.get('KORE_LEGACY_LAYOUT') == '1' or \
             any(_dtype_name(c) not in _NATIVE_DTYPES for c in data_block.columns):
         return _write_file_legacy(path, data_block, preview_rows)
@@ -755,7 +782,7 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
     path.parent.mkdir(parents=True, exist_ok=True)
     cols = data_block.columns
     nrows = data_block.num_rows
-    kore_bytes = _native_block_bytes(data_block)
+    kore_bytes = _native_block_bytes(data_block, row_group_rows)
 
     def one_line(v):
         return str(v).replace(chr(10), ' ').replace(chr(13), ' ')
@@ -767,8 +794,10 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
         f"# Rows: {nrows:,}  Columns: {len(cols)}",
         f"# Compressed: {len(kore_bytes):,} bytes (Rust ZSTD/LZ4)",
         f"# Layout: {_NATIVE_LAYOUT}",
-        "# Schema:",
     ]
+    if row_group_rows:
+        text_lines.append(f"# RowGroups: {int(row_group_rows)} rows each")
+    text_lines.append("# Schema:")
     for col in cols:
         text_lines.append(f"#   {one_line(col.name):<20} {_dtype_name(col)}")
     text_lines.append(f"# Preview (first {n_prev} rows):")
@@ -787,6 +816,31 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
         f.write(text_body)
         f.write(_KORE_V3_MARKER)
         f.write(kore_bytes)
+
+
+def row_group_count(path: Union[str, Path]) -> int:
+    """Number of row groups in a file written with row groups (ValueError otherwise)."""
+    lib = KoreFFI.get_library()
+    _bind_native(lib)
+    kore_bytes = _load_v3(path)[1]
+    n = lib.kore_rowgroup_count(kore_bytes, len(kore_bytes))
+    if n < 0:
+        raise ValueError('not a row-group file')
+    return int(n)
+
+
+def row_groups_matching(path: Union[str, Path], where) -> int:
+    """How many row groups `read_file(path, where=where)` would decode."""
+    lib = KoreFFI.get_library()
+    _bind_native(lib)
+    col, lo, hi = where
+    kore_bytes = _load_v3(path)[1]
+    flags = (1 if lo is not None else 0) | (2 if hi is not None else 0)
+    n = lib.kore_rowgroup_matching(kore_bytes, len(kore_bytes), col.encode('utf-8'),
+                                   float(lo if lo is not None else 0), float(hi if hi is not None else 0), flags)
+    if n < 0:
+        raise ValueError('not a row-group file or unknown column')
+    return int(n)
 
 
 def _select_columns(block: 'DataBlock', columns) -> 'DataBlock':
@@ -846,14 +900,21 @@ def _load_v3(path):
     return False, kore_bytes, str_dicts, null_positions, bool_cols, schema_order, layout
 
 
-def read_file(path: Union[str, Path], columns: Optional[List[str]] = None) -> DataBlock:
+def read_file(path: Union[str, Path], columns: Optional[List[str]] = None, where=None) -> DataBlock:
     """With `columns`, only those columns are decoded (native layout; older layouts are read whole
-    and then trimmed). Read .kore � auto-detects v3 (text header) vs legacy (raw Rust KORE).
+    and then trimmed).
+
+    `where=(column, lo, hi)` (lo/hi may be None) skips row groups whose min/max cannot match; it needs a
+    file written with row groups, and rows inside surviving groups are returned unfiltered.
+
+    Read .kore � auto-detects v3 (text header) vs legacy (raw Rust KORE).
     Decodes string columns and restores column order from header."""
-    if columns is not None:
+    if columns is not None or where is not None:
         legacy, kore_bytes, *_rest, layout = _load_v3(path)
-        if not legacy and layout == _NATIVE_LAYOUT:
-            return _block_from_native(kore_bytes, columns)
+        if legacy or layout == _NATIVE_LAYOUT:
+            return _block_from_native(kore_bytes, columns, where)
+        if where is not None:
+            raise ValueError("where= needs the native layout (rewrite the file with write_file)")
         return _select_columns(read_file(path), columns)
     legacy, kore_bytes, str_dicts, null_positions, bool_cols, schema_order, layout = _load_v3(path)
     if legacy:  # raw Rust KORE bytes, no text header: every column type is native
@@ -1776,16 +1837,18 @@ def _read_arrow_all(path):
     return pa.table(arrays)
 
 
-def _read_arrow(path, columns=None):
-    if columns is None:
+def _read_arrow(path, columns=None, where=None):
+    if columns is None and where is None:
         return _read_arrow_all(path)
     legacy, kore_bytes, *_rest, layout = _load_v3(path)
-    if not legacy and layout == _NATIVE_LAYOUT:
-        return _arrow_from_native(kore_bytes, columns)
+    if legacy or layout == _NATIVE_LAYOUT:
+        return _arrow_from_native(kore_bytes, columns, where)
+    if where is not None:
+        raise ValueError("where= needs the native layout (rewrite the file with write_file)")
     return _read_arrow_all(path).select(list(dict.fromkeys(columns)))
 
 
-def to_arrow(path_or_block: Union[str, 'Path', 'DataBlock'], columns: Optional[List[str]] = None):
+def to_arrow(path_or_block: Union[str, 'Path', 'DataBlock'], columns: Optional[List[str]] = None, where=None):
     """Convert .kore file or DataBlock to PyArrow Table.
 
     Requires: pip install pyarrow
@@ -1801,7 +1864,7 @@ def to_arrow(path_or_block: Union[str, 'Path', 'DataBlock'], columns: Optional[L
 
     import array as _array
     if isinstance(path_or_block, (str, Path)):
-        return _read_arrow(path_or_block, columns)
+        return _read_arrow(path_or_block, columns, where)
     block = path_or_block
     arrays = {}
     for col in block.columns:

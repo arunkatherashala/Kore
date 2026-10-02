@@ -236,9 +236,19 @@ impl KoreWriter {
 
     /// Serialize to any `Write` target.
     pub fn write_to<W: Write>(w: &mut W, block: &DataBlock) -> io::Result<()> {
+        Self::write_to_mode(w, block, readable_mode_from_env())
+    }
+
+    /// Serialize without the human-readable text trailer (used for row groups).
+    pub(crate) fn to_bytes_plain(block: &DataBlock) -> Vec<u8> {
+        let mut buf = Vec::new();
+        Self::write_to_mode(&mut buf, block, ReadableMode::None).expect("in-memory write never fails");
+        buf
+    }
+
+    fn write_to_mode<W: Write>(w: &mut W, block: &DataBlock, readable_mode: ReadableMode) -> io::Result<()> {
         let num_cols = block.columns.len() as u32;
         let num_rows = block.num_rows as u64;
-        let readable_mode = readable_mode_from_env();
 
         // ── Header ────────────────────────────────────────────────────────
         w.write_all(MAGIC)?;

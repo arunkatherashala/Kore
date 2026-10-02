@@ -126,6 +126,20 @@ KoreBlock* kore_read_bytes(const uint8_t* data, size_t len);
 KoreBlock* kore_read_bytes_columns(const uint8_t* data, size_t len,
                                    const char* const* names, size_t n_names);
 
+/* ── Row groups (opt-in container; files written this way need a reader that knows it) ── */
+
+/** Serialise as a container of groups of at most group_rows rows. Free with kore_free_bytes. */
+uint8_t* kore_write_bytes_groups(const KoreBlock* block, uint64_t group_rows, size_t* out_len);
+/** Number of row groups, or -1 if `data` is not a row-group container. */
+int64_t kore_rowgroup_count(const uint8_t* data, size_t len);
+/** Groups that may hold values of `col` in [lo, hi]; flags: bit0 = lo set, bit1 = hi set. */
+int64_t kore_rowgroup_matching(const uint8_t* data, size_t len, const char* col,
+                               double lo, double hi, uint32_t flags);
+/** Read only the matching groups (names may be NULL for all columns). Rows in surviving groups are
+ *  not filtered individually. A file without row groups is returned whole. */
+KoreBlock* kore_read_bytes_where(const uint8_t* data, size_t len, const char* const* names,
+                                 size_t n_names, const char* col, double lo, double hi, uint32_t flags);
+
 void kore_free_bytes(uint8_t* ptr, size_t len);
 
 uint32_t kore_crc32(const uint8_t* data, size_t len);

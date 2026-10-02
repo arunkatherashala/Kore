@@ -11,6 +11,7 @@ decodes to the digests in `expected.txt`.
 | `strlen.kore` | codec 8: length-prefixed strings (`KORE_STR_LENGTHS=1`) |
 | `shuffle_strlen.kore` | both |
 | `encrypted.kore` | `KENC` wrapper, AES-256-GCM, PBKDF2-HMAC-SHA256 (100k iterations); password `kore-conformance` |
+| `row_groups.kore` | `KRGP` container: 5 groups of 700 rows, footer index with per-column min/max (layout in `kore-store/src/rowgroups.rs`) |
 | `versions.kore` | `KVLG` version log: version @100 is a 2-row table, version @200 is the table above |
 
 ## Digest

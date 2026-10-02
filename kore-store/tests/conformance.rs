@@ -107,6 +107,7 @@ fn write_all() {
     put("shuffle_strlen.kore", KoreWriter::to_bytes(&b));
     for v in ["KORE_SHUFFLE", "KORE_STR_LENGTHS"] { std::env::remove_var(v); }
     put("encrypted.kore", KoreWriter::to_bytes_encrypted(&b, PASSWORD).unwrap());
+    put("row_groups.kore", kore_store::rowgroups::write(&b, 700).unwrap());
     // a log whose first version is a different, tiny block (timestamp 100) and whose latest is the dataset (200)
     let small = DataBlock::new(vec![Column::int64("only", vec![Some(1), Some(2)])]).unwrap();
     let log = versioned::append_version(None, &small, 100).unwrap();
@@ -123,7 +124,7 @@ fn every_fixture_decodes_to_the_expected_data() {
         .replace("\r\n", "\n");
     assert_eq!(expected_text(&dataset()), expected, "generator and expected.txt disagree");
 
-    for name in ["default", "shuffle", "strlen", "shuffle_strlen", "versions"] {
+    for name in ["default", "shuffle", "strlen", "shuffle_strlen", "versions", "row_groups"] {
         let bytes = std::fs::read(d.join(format!("{name}.kore"))).unwrap();
         let got = KoreReader::from_bytes(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(expected_text(&got), expected, "{name}.kore decodes differently");
@@ -137,6 +138,14 @@ fn every_fixture_decodes_to_the_expected_data() {
     assert_eq!(KoreReader::read_at_version(&log, 150).unwrap().num_rows, 2);
     assert_eq!(KoreReader::read_at_version(&log, 200).unwrap().num_rows, ROWS);
     assert!(KoreReader::read_at_version(&log, 50).is_err());
+
+    // row groups: 3000 rows / 700 = 5 groups; only group 0 holds i64::MAX, so a range above every
+    // other value keeps one group
+    let rg = std::fs::read(d.join("row_groups.kore")).unwrap();
+    let idx = kore_store::rowgroups::index(&rg).unwrap();
+    assert_eq!(idx.groups.len(), 5);
+    let above = kore_store::rowgroups::Range { column: "i".into(), min: Some(15_000_000.0), max: None };
+    assert_eq!(kore_store::rowgroups::matching_groups(&idx, &above).unwrap(), vec![0]);
 
     // projection agrees with the full read
     let bytes = std::fs::read(d.join("shuffle_strlen.kore")).unwrap();

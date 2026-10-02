@@ -635,6 +635,89 @@ pub unsafe extern "C" fn kore_read_bytes_columns(
     }
 }
 
+// ── Row groups (opt-in container with per-group min/max) ──────────────────────
+
+unsafe fn rg_range(col: *const c_char, lo: f64, hi: f64, flags: u32) -> Option<kore_store::rowgroups::Range> {
+    Some(kore_store::rowgroups::Range {
+        column: ptr_to_str(col)?.to_string(),
+        min: if flags & 1 != 0 { Some(lo) } else { None },
+        max: if flags & 2 != 0 { Some(hi) } else { None },
+    })
+}
+
+/// Serialise a block as a row-group container of at most `group_rows` rows per group.
+/// Free the result with kore_free_bytes.
+#[no_mangle]
+pub unsafe extern "C" fn kore_write_bytes_groups(
+    block: *const KoreBlock, group_rows: u64, out_len: *mut usize,
+) -> *mut u8 {
+    let Some(b) = block.as_ref() else { set_error("kore_write_bytes_groups: null block"); return std::ptr::null_mut() };
+    if out_len.is_null() { set_error("kore_write_bytes_groups: null out_len"); return std::ptr::null_mut(); }
+    leak_result(kore_store::rowgroups::write(&b.inner, group_rows as usize).map_err(|e| e.to_string()), out_len)
+}
+
+/// Number of row groups in a container, or -1 if `data` is not one.
+#[no_mangle]
+pub unsafe extern "C" fn kore_rowgroup_count(data: *const u8, len: usize) -> i64 {
+    if data.is_null() { return -1; }
+    match kore_store::rowgroups::index(std::slice::from_raw_parts(data, len)) {
+        Ok(i) => i.groups.len() as i64,
+        Err(e) => { set_error(e.to_string()); -1 }
+    }
+}
+
+/// Number of groups that may contain values of `col` inside [lo, hi] (flags: bit0 = lo set, bit1 = hi set).
+#[no_mangle]
+pub unsafe extern "C" fn kore_rowgroup_matching(
+    data: *const u8, len: usize, col: *const c_char, lo: f64, hi: f64, flags: u32,
+) -> i64 {
+    if data.is_null() { return -1; }
+    let Some(range) = rg_range(col, lo, hi, flags) else { set_error("invalid column name"); return -1 };
+    let idx = match kore_store::rowgroups::index(std::slice::from_raw_parts(data, len)) {
+        Ok(i) => i, Err(e) => { set_error(e.to_string()); return -1; }
+    };
+    match kore_store::rowgroups::matching_groups(&idx, &range) {
+        Ok(g) => g.len() as i64,
+        Err(e) => { set_error(e.to_string()); -1 }
+    }
+}
+
+/// Read a row-group container, skipping groups whose min/max cannot match [lo, hi] on `col`.
+/// `names` may be NULL (all columns). Rows in surviving groups are NOT filtered individually.
+#[no_mangle]
+pub unsafe extern "C" fn kore_read_bytes_where(
+    data: *const u8, len: usize,
+    names: *const *const c_char, n_names: usize,
+    col: *const c_char, lo: f64, hi: f64, flags: u32,
+) -> *mut KoreBlock {
+    if data.is_null() { set_error("kore_read_bytes_where: null data"); return std::ptr::null_mut(); }
+    let Some(range) = rg_range(col, lo, hi, flags) else { set_error("invalid column name"); return std::ptr::null_mut() };
+    let mut wanted: Vec<&str> = Vec::new();
+    if !names.is_null() {
+        for i in 0..n_names {
+            match ptr_to_str(*names.add(i)) {
+                Some(s) => wanted.push(s),
+                None => { set_error("invalid column name"); return std::ptr::null_mut(); }
+            }
+        }
+    }
+    let cols = if names.is_null() { None } else { Some(wanted.as_slice()) };
+    let bytes = std::slice::from_raw_parts(data, len);
+    // a file without row groups is one big group: nothing to prune, return it whole
+    let result = if kore_store::rowgroups::is_row_group_file(bytes) {
+        kore_store::rowgroups::read(bytes, cols, Some(&range))
+    } else {
+        match cols {
+            Some(c) => kore_store::reader::KoreReader::from_bytes_columns(bytes, c),
+            None => kore_store::reader::KoreReader::from_bytes(bytes),
+        }
+    };
+    match result {
+        Ok(block) => Box::into_raw(Box::new(KoreBlock { inner: block })),
+        Err(e) => { set_error(e.to_string()); std::ptr::null_mut() }
+    }
+}
+
 /// Free a byte buffer returned by kore_write_bytes.
 #[no_mangle]
 pub unsafe extern "C" fn kore_free_bytes(ptr: *mut u8, len: usize) {

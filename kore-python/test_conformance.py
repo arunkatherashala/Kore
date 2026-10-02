@@ -46,9 +46,16 @@ def _digest(block):
 EXPECTED = (DIR / 'expected.txt').read_text()
 
 
-@pytest.mark.parametrize('name', ['default', 'shuffle', 'strlen', 'shuffle_strlen', 'versions'])
+@pytest.mark.parametrize('name', ['default', 'shuffle', 'strlen', 'shuffle_strlen', 'versions', 'row_groups'])
 def test_fixture_decodes_to_expected_digest(name):
     assert _digest(kore.read_file(DIR / f'{name}.kore')) == EXPECTED
+
+
+def test_row_group_fixture_pruning():
+    path = DIR / 'row_groups.kore'
+    assert kore.row_group_count(path) == 5
+    assert kore.row_groups_matching(path, ('i', 15_000_000, None)) == 1
+    assert kore.read_file(path, columns=['q'], where=('i', 15_000_000, None)).num_rows == 700
 
 
 def test_encrypted_fixture():

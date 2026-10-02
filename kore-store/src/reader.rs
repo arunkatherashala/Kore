@@ -26,6 +26,9 @@ impl KoreReader {
             let latest = crate::versioned::select_raw(data, u64::MAX)?;
             return Self::from_bytes_columns_opt(latest, wanted);
         }
+        if crate::rowgroups::is_row_group_file(data) {
+            return crate::rowgroups::read(data, wanted, None);
+        }
         // Check for encryption marker
         if data.len() >= 4 && &data[0..4] == b"KENC" {
             return Err(KoreError::InvalidArgument(
