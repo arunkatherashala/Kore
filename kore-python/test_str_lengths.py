@@ -6,7 +6,8 @@ import kore_fileformat as kore
 
 
 def _dates(n):
-    return [f"199{i % 9}-{(i * 7) % 12 + 1:02d}-{(i * 13) % 28 + 1:02d}" if i % 11 else None for i in range(n)]
+    # 3360 distinct values, so the column is not dictionary-encoded
+    return [f"199{i % 10}-{(i // 10) % 12 + 1:02d}-{(i // 120) % 28 + 1:02d}" if i % 11 else None for i in range(n)]
 
 
 def test_length_layout_is_smaller_and_lossless(monkeypatch):
