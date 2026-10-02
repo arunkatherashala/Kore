@@ -161,6 +161,11 @@ jobs:
           KORE_READABLE_MODE: preview
         run: python validate_kore.py
 
+      - name: Run Python test suite (includes the conformance fixtures)
+        run: |
+          pip install pytest pyarrow
+          python -m pytest kore-python -q
+
   # ════════════════════════════════════════════════════════════════════════════
   # JOB 5 — CLIPPY LINT (non-blocking warnings, blocking errors)
   # ════════════════════════════════════════════════════════════════════════════
