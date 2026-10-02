@@ -1,0 +1,29 @@
+TPC-H-shaped data, SF 0.1, 8 cores, best of 2 after a warm-up run
+Spark 4.2.0 local mode, tables cached in memory (cache load 7.56s)
+
+query   Spark ms    KORE ms  KORE/Spark  verdict
+Q1         329.1      334.3       1.02x  ok
+Q2         709.6      error              error: RuntimeError: KORE error: invalid argument: column not found: s_acctba
+Q3         438.8      error              error: RuntimeError: KORE error: invalid argument: column not found: l_orderk
+Q4         448.4    timeout              timeout
+Q5         693.0      error              error: RuntimeError: KORE error: invalid argument: column not found: n_name
+Q6         134.9      200.6       1.49x  ok
+Q7         444.8      error              error: RuntimeError: KORE error: invalid argument: expected RParen, got Comma
+Q8         285.6      error              error: RuntimeError: KORE error: invalid argument: expected RParen, got Comma
+Q9         456.5      error              error: RuntimeError: KORE error: invalid argument: expected RParen, got Comma
+Q10        394.6      error              error: RuntimeError: KORE error: invalid argument: column not found: c_custke
+Q11        311.0      error              error: RuntimeError: KORE error: invalid argument: column not found: ps_partk
+Q12        267.6      error              error: RuntimeError: KORE error: invalid argument: column not found: l_shipmo
+Q13        295.2    timeout              timeout
+Q14        135.7      463.3              MISMATCH (row count 599057 vs 1)
+Q15        321.7      error              error: RuntimeError: KORE error: invalid argument: column not found: total_re
+Q16        320.1      error              error: RuntimeError: KORE error: invalid argument: column not found: p_brand
+Q17        252.2      624.2              MISMATCH (row count 599057 vs 1)
+Q18        348.0      error              error: RuntimeError: KORE error: invalid argument: column not found: c_name
+Q19        128.3       58.7              MISMATCH (row 0 col revenue: 20460449755.175156 vs 199423.533)
+Q20        262.0        0.8              MISMATCH (row count 1000 vs 17)
+Q21        353.3      error              error: RuntimeError: KORE error: invalid argument: column not found: s_name
+Q22        197.9    timeout              timeout
+
+KORE vs Spark: 2 ok, 4 MISMATCH, 13 error, 3 timeout
+KORE/Spark < 1 means KORE was faster. Only queries whose results agree count as comparable.
