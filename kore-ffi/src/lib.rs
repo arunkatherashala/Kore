@@ -529,6 +529,85 @@ pub unsafe extern "C" fn kore_read_bytes(
     }
 }
 
+/// Encrypt bytes with AES-256-GCM (PBKDF2 key). Returns a buffer to free with kore_free_bytes.
+#[no_mangle]
+pub unsafe extern "C" fn kore_encrypt_bytes(
+    password: *const u8, pw_len: usize,
+    data: *const u8, len: usize,
+    out_len: *mut usize,
+) -> *mut u8 {
+    if password.is_null() || data.is_null() || out_len.is_null() {
+        set_error("kore_encrypt_bytes: null argument");
+        return std::ptr::null_mut();
+    }
+    let r = kore_store::KoreWriter::encrypt_blob(
+        std::slice::from_raw_parts(data, len),
+        std::slice::from_raw_parts(password, pw_len));
+    leak_result(r.map_err(|e| e.to_string()), out_len)
+}
+
+/// Decrypt a buffer produced by kore_encrypt_bytes. Returns NULL on wrong password or corrupt data.
+#[no_mangle]
+pub unsafe extern "C" fn kore_decrypt_bytes(
+    password: *const u8, pw_len: usize,
+    data: *const u8, len: usize,
+    out_len: *mut usize,
+) -> *mut u8 {
+    if password.is_null() || data.is_null() || out_len.is_null() {
+        set_error("kore_decrypt_bytes: null argument");
+        return std::ptr::null_mut();
+    }
+    let r = kore_store::reader::KoreReader::decrypt_blob(
+        std::slice::from_raw_parts(data, len),
+        std::slice::from_raw_parts(password, pw_len));
+    leak_result(r.map_err(|e| e.to_string()), out_len)
+}
+
+unsafe fn leak_result(r: Result<Vec<u8>, String>, out_len: *mut usize) -> *mut u8 {
+    match r {
+        Ok(v) => {
+            let mut b = v.into_boxed_slice();
+            *out_len = b.len();
+            let p = b.as_mut_ptr();
+            std::mem::forget(b);
+            p
+        }
+        Err(e) => { set_error(e); std::ptr::null_mut() }
+    }
+}
+
+/// Append `entry` (a complete .kore file) as a new version to a version log.
+/// `existing` may be NULL (new log), a log, or a plain .kore file. Timestamps must increase.
+/// Returns a buffer to free with kore_free_bytes, or NULL on error.
+#[no_mangle]
+pub unsafe extern "C" fn kore_version_append(
+    existing: *const u8, existing_len: usize,
+    entry: *const u8, entry_len: usize,
+    timestamp: u64,
+    out_len: *mut usize,
+) -> *mut u8 {
+    if entry.is_null() || out_len.is_null() {
+        set_error("kore_version_append: null argument");
+        return std::ptr::null_mut();
+    }
+    let ex = if existing.is_null() { None } else { Some(std::slice::from_raw_parts(existing, existing_len)) };
+    let r = kore_store::versioned::append_raw(ex, std::slice::from_raw_parts(entry, entry_len), timestamp);
+    leak_result(r.map_err(|e| e.to_string()), out_len)
+}
+
+/// Copy out the newest version with timestamp <= `target`. Free with kore_free_bytes.
+#[no_mangle]
+pub unsafe extern "C" fn kore_version_select(
+    data: *const u8, len: usize, target: u64, out_len: *mut usize,
+) -> *mut u8 {
+    if data.is_null() || out_len.is_null() {
+        set_error("kore_version_select: null argument");
+        return std::ptr::null_mut();
+    }
+    let r = kore_store::versioned::select_raw(std::slice::from_raw_parts(data, len), target);
+    leak_result(r.map(|b| b.to_vec()).map_err(|e| e.to_string()), out_len)
+}
+
 /// Free a byte buffer returned by kore_write_bytes.
 #[no_mangle]
 pub unsafe extern "C" fn kore_free_bytes(ptr: *mut u8, len: usize) {

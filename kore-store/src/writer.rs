@@ -186,15 +186,17 @@ impl KoreWriter {
 
     /// Serialize with AES-256-GCM encryption on all column data.
     pub fn to_bytes_encrypted(block: &DataBlock, password: &[u8]) -> Result<Vec<u8>, String> {
-        let plain = Self::to_bytes(block);
-        let (ciphertext, meta) = encrypt_column(&plain, password)?;
-        let mut out = Vec::new();
+        Self::encrypt_blob(&Self::to_bytes(block), password)
+    }
+
+    /// Wrap arbitrary bytes as `KENC | salt_len | salt | nonce_len | nonce | ciphertext`.
+    pub fn encrypt_blob(plain: &[u8], password: &[u8]) -> Result<Vec<u8>, String> {
+        let (ciphertext, meta) = encrypt_column(plain, password)?;
+        let mut out = Vec::with_capacity(8 + meta.salt.len() + meta.nonce.len() + ciphertext.len());
         out.extend_from_slice(KORE_ENC_MARKER);
-        let salt_len = meta.salt.len() as u16;
-        let nonce_len = meta.nonce.len() as u16;
-        out.extend_from_slice(&salt_len.to_le_bytes());
+        out.extend_from_slice(&(meta.salt.len() as u16).to_le_bytes());
         out.extend_from_slice(&meta.salt);
-        out.extend_from_slice(&nonce_len.to_le_bytes());
+        out.extend_from_slice(&(meta.nonce.len() as u16).to_le_bytes());
         out.extend_from_slice(&meta.nonce);
         out.extend_from_slice(&ciphertext);
         Ok(out)

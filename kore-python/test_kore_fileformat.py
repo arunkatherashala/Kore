@@ -136,7 +136,7 @@ class TestRoundtrip:
             # Verify columns
             numbers_col = restored.get_column('numbers')
             assert numbers_col is not None
-            assert numbers_col.data == [1, 2, 3, 4, 5]
+            assert list(numbers_col.data) == [1, 2, 3, 4, 5]
             
             names_col = restored.get_column('names')
             assert names_col is not None
@@ -197,3 +197,77 @@ class TestBloomFilters:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+class TestEncryptionAndStats:
+    def test_encrypt_roundtrip(self):
+        blob = kore.encrypt_aes256("pw", b"secret" * 50)
+        assert kore.decrypt_aes256("pw", blob) == b"secret" * 50
+
+    def test_decrypt_rejects_bad_input(self):
+        blob = kore.encrypt_aes256("pw", b"secret")
+        for pw, data in (("wrong", blob), ("pw", blob[:10]), ("pw", b"junk")):
+            with pytest.raises(ValueError):
+                kore.decrypt_aes256(pw, data)
+
+    def test_column_stats(self):
+        block = kore.DataBlock()
+        block.add_column('x', kore.DataType.I64, [3, 1, None, 2])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / 'stats.kore'
+            kore.write_file(path, block)
+            data = path.read_bytes()
+        st = kore.get_column_stats(data, 'x')
+        assert (st.min_value, st.max_value, st.null_count) == (1, 3, 1)
+        assert list(kore.column_stats_from_bytes(data)) == ['x']
+
+
+class TestStringEscaping:
+    def test_special_characters_roundtrip(self):
+        vals = ['plain', 'a"b', 'x\ny', 'back' + chr(92) + 'slash', 'caf\u00e9,\U0001f600', '', 'a","b']
+        block = kore.DataBlock()
+        block.add_column('s', kore.DataType.STR, vals)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / 'esc.kore'
+            kore.write_file(path, block)
+            assert list(kore.read_file(path).get_column('s').data) == vals
+
+
+class TestFloatNulls:
+    def test_none_survives_roundtrip(self):
+        block = kore.DataBlock()
+        block.add_column('f', kore.DataType.F64, [1.5, None, float('nan'), 2.5])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / 'f.kore'
+            kore.write_file(path, block)
+            got = list(kore.read_file(path).get_column('f').data)
+        assert got[0] == 1.5 and got[1] is None and got[3] == 2.5
+        assert got[2] is not None and got[2] != got[2]
+
+
+class TestTimeTravel:
+    def _block(self, vals):
+        b = kore.DataBlock()
+        b.add_column('n', kore.DataType.I64, vals)
+        b.add_column('s', kore.DataType.STR, [f'r{v}' for v in vals])
+        return b
+
+    def test_read_at_version(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / 'log.kore'
+            kore.append_version(path, self._block([1]), timestamp=100)
+            kore.append_version(path, self._block([1, 2]), timestamp=200)
+            kore.append_version(path, self._block([1, 2, 3]), timestamp=300)
+            data = path.read_bytes()
+        assert kore.list_versions(data) == [100, 200, 300]
+        assert kore.read_at_version(data, 250).num_rows == 2
+        assert list(kore.read_at_version(data, 300).get_column('s').data) == ['r1', 'r2', 'r3']
+        with pytest.raises(ValueError):
+            kore.read_at_version(data, 99)
+
+    def test_rejects_non_increasing_timestamp(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / 'log.kore'
+            kore.append_version(path, self._block([1]), timestamp=10)
+            with pytest.raises(ValueError):
+                kore.append_version(path, self._block([2]), timestamp=10)

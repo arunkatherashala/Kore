@@ -370,12 +370,14 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
         dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
         d = col.data
         if dn in ('STR', 'STR_DICT'):
-            unique = list(dict.fromkeys('' if v is None else str(v) for v in d))
-            vid = {v: i for i, v in enumerate(unique)}
-            str_dicts[col.name] = unique
-            encode_block.add_column(f'__str_{col.name}', DataType.I64,
-                                    [vid['' if v is None else str(v)] for v in d])
+            vid = {}
+            ids = [vid.setdefault('' if v is None else str(v), len(vid)) for v in d]
+            str_dicts[col.name] = list(vid)
+            encode_block.add_column(f'__str_{col.name}', DataType.I64, ids)
         elif dn in ('F64', 'FLOAT64', '2'):
+            nulls = [i for i, v in enumerate(d) if v is None]
+            if nulls:
+                null_positions[col.name] = nulls
             encode_block.add_column(col.name, DataType.F64,
                                     [float('nan') if v is None else v for v in d])
         elif dn == 'BOOL':
@@ -407,8 +409,7 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
         text_lines.append(f"#   {col.name:<20} {dn}")
     # Embed string dicts and null position maps in header
     for col_name, strings in str_dicts.items():
-        escaped = ','.join(f'"{s}"' for s in strings)
-        text_lines.append(f"# StringDict {col_name}: {escaped}")
+        text_lines.append(f"# StringDictJ {col_name}: {json.dumps(strings)}")
     for col_name, positions in null_positions.items():
         text_lines.append(f"# NullRows {col_name}: {','.join(map(str, positions))}")
     for col_name in bool_cols:
@@ -453,7 +454,10 @@ def read_file(path: Union[str, Path]) -> DataBlock:
     bool_cols = set()    # col names to decode as bool
     schema_order = []
     for line in header_bytes.decode('utf-8', errors='replace').split('\n'):
-        if line.startswith('# StringDict '):
+        if line.startswith('# StringDictJ '):
+            col_name, vals_str = line[14:].split(': ', 1)
+            str_dicts[col_name] = json.loads(vals_str)
+        elif line.startswith('# StringDict '):
             rest = line[13:]
             col_name, vals_str = rest.split(': ', 1)
             str_dicts[col_name] = _re.findall(r'"((?:[^"\\]|\\.)*)"', vals_str)
@@ -483,8 +487,10 @@ def read_file(path: Union[str, Path]) -> DataBlock:
             id_col = raw_by_name.get(f'__str_{orig_name}')
             if id_col is not None:
                 mapping = str_dicts[orig_name]
-                decoded = [mapping[int(i)] if 0 <= int(i) < len(mapping) else ''
-                           for i in id_col.data]
+                try:
+                    decoded = [mapping[i] for i in id_col.data]
+                except IndexError:
+                    decoded = [mapping[i] if 0 <= i < len(mapping) else '' for i in id_col.data]
                 result.add_column(orig_name, DataType.STR, decoded)
         elif orig_name in raw_by_name:
             col = raw_by_name[orig_name]
@@ -545,101 +551,142 @@ def kore_stats(path: Union[str, Path]) -> dict:
     }
 
 
-def read_at_version(data: bytes, timestamp: int) -> DataBlock:
-    """Read KORE data at specific version (time travel).
-    
-    Args:
-        data: Raw KORE file bytes
-        timestamp: Unix timestamp to read at
-        
-    Returns:
-        DataBlock at specified version
-        
-    Raises:
-        ValueError: If version not found
-    """
+def _version_call(fn_name: str, args: list) -> bytes:
     lib = KoreFFI.get_library()
-    lib.kore_read_at_version.argtypes = [
-        ctypes.c_char_p, ctypes.c_size_t, ctypes.c_uint64
-    ]
-    lib.kore_read_at_version.restype = ctypes.c_char_p
-    
-    # TODO: Implement full FFI marshalling
-    raise NotImplementedError("Phase 3: Time travel API pending")
+    fn = getattr(lib, fn_name)
+    fn.restype = ctypes.c_void_p
+    lib.kore_free_bytes.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.kore_free_bytes.restype = None
+    lib.kore_last_error.restype = ctypes.c_char_p
+    out_len = ctypes.c_size_t(0)
+    ptr = fn(*args, ctypes.byref(out_len))
+    if not ptr:
+        err = lib.kore_last_error()
+        raise ValueError(err.decode('utf-8', 'replace') if err else f"{fn_name} failed")
+    try:
+        return ctypes.string_at(ptr, out_len.value)
+    finally:
+        lib.kore_free_bytes(ptr, out_len.value)
+
+
+def append_version(path: Union[str, Path], block: DataBlock, timestamp: Optional[int] = None) -> int:
+    """Append `block` as a new version in the time-travel log at `path`; returns its timestamp.
+
+    `timestamp` defaults to time.time_ns() and must be greater than the latest version.
+    A plain .kore file at `path` becomes the oldest version (timestamp 0)."""
+    import tempfile, time
+    path = Path(path)
+    ts = time.time_ns() if timestamp is None else int(timestamp)
+    fd, tmp = tempfile.mkstemp(suffix='.kore')
+    os.close(fd)
+    try:
+        write_file(tmp, block)
+        entry = Path(tmp).read_bytes()
+    finally:
+        os.unlink(tmp)
+    existing = path.read_bytes() if path.exists() else None
+    lib = KoreFFI.get_library()
+    lib.kore_version_append.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p,
+                                        ctypes.c_size_t, ctypes.c_uint64, ctypes.POINTER(ctypes.c_size_t)]
+    new = _version_call('kore_version_append',
+                        [existing, len(existing) if existing else 0, entry, len(entry), ts])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_out = path.with_name(path.name + '.tmp')
+    tmp_out.write_bytes(new)
+    os.replace(tmp_out, path)
+    return ts
+
+
+def list_versions(data: bytes) -> List[int]:
+    """Timestamps of every version in a version log, oldest first."""
+    import struct
+    if data[:4] != b'KVLG':
+        raise ValueError("not a version log")
+    count = struct.unpack_from('<I', data, 4)[0]
+    pos, out = 8, []
+    for _ in range(count):
+        ts, ln = struct.unpack_from('<QQ', data, pos)
+        out.append(ts)
+        pos += 16 + ln
+    return out
+
+
+def read_at_version(data: bytes, timestamp: int) -> DataBlock:
+    """Time travel: read the newest version with timestamp <= `timestamp` from a version log.
+
+    Raises ValueError if the log has no version that old."""
+    lib = KoreFFI.get_library()
+    lib.kore_version_select.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_uint64,
+                                        ctypes.POINTER(ctypes.c_size_t)]
+    entry = _version_call('kore_version_select', [bytes(data), len(data), int(timestamp)])
+    return _block_from_kore_bytes(entry)
+
+
+def _ffi_bytes_call(fn_name: str, password: str, data: bytes) -> bytes:
+    lib = KoreFFI.get_library()
+    fn = getattr(lib, fn_name)
+    fn.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t,
+                   ctypes.POINTER(ctypes.c_size_t)]
+    fn.restype = ctypes.c_void_p
+    lib.kore_free_bytes.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.kore_free_bytes.restype = None
+    lib.kore_last_error.restype = ctypes.c_char_p
+    pw = password.encode('utf-8')
+    out_len = ctypes.c_size_t(0)
+    ptr = fn(pw, len(pw), data, len(data), ctypes.byref(out_len))
+    if not ptr:
+        err = lib.kore_last_error()
+        raise ValueError(err.decode('utf-8', 'replace') if err else f"{fn_name} failed")
+    try:
+        return ctypes.string_at(ptr, out_len.value)
+    finally:
+        lib.kore_free_bytes(ptr, out_len.value)
 
 
 def encrypt_aes256(password: str, data: bytes) -> bytes:
-    """Encrypt data with AES-256-GCM.
-    
-    Args:
-        password: Encryption password
-        data: Data to encrypt
-        
-    Returns:
-        Encrypted bytes
-    """
-    lib = KoreFFI.get_library()
-    lib.kore_encrypt_aes256_gcm.argtypes = [
-        ctypes.c_char_p, ctypes.c_size_t,
-        ctypes.c_char_p, ctypes.c_size_t
-    ]
-    lib.kore_encrypt_aes256_gcm.restype = ctypes.c_char_p
-    
-    # TODO: Implement full FFI marshalling
-    raise NotImplementedError("Phase 3: Encryption API pending")
+    """Encrypt bytes with AES-256-GCM (PBKDF2-HMAC-SHA256 key, random salt/nonce)."""
+    return _ffi_bytes_call('kore_encrypt_bytes', password, bytes(data))
 
 
 def decrypt_aes256(password: str, encrypted_data: bytes) -> bytes:
-    """Decrypt data with AES-256-GCM.
-    
-    Args:
-        password: Decryption password
-        encrypted_data: Encrypted bytes
-        
-    Returns:
-        Decrypted bytes
-    """
-    lib = KoreFFI.get_library()
-    lib.kore_decrypt_aes256_gcm.argtypes = [
-        ctypes.c_char_p, ctypes.c_size_t,
-        ctypes.c_char_p, ctypes.c_size_t
-    ]
-    lib.kore_decrypt_aes256_gcm.restype = ctypes.c_char_p
-    
-    # TODO: Implement full FFI marshalling
-    raise NotImplementedError("Phase 3: Decryption API pending")
+    """Decrypt bytes produced by encrypt_aes256. Raises ValueError on wrong password or corrupt data."""
+    return _ffi_bytes_call('kore_decrypt_bytes', password, bytes(encrypted_data))
+
+
+def _block_from_kore_bytes(data: bytes) -> DataBlock:
+    import tempfile
+    fd, tmp = tempfile.mkstemp(suffix='.kore')
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            f.write(data)
+        return read_file(tmp)
+    finally:
+        os.unlink(tmp)
 
 
 def get_column_stats(data: bytes, column_name: str) -> ColumnStats:
-    """Get statistics for a column.
-    
-    Args:
-        data: Raw KORE file bytes
-        column_name: Column name
-        
-    Returns:
-        Column statistics
-    """
-    lib = KoreFFI.get_library()
-    
-    # TODO: Implement FFI call to kore_get_column_stats
-    raise NotImplementedError("Phase 3: Stats API pending")
+    """Compute min/max/null_count/cardinality/crc32 for one column of raw .kore bytes."""
+    col = _block_from_kore_bytes(data).get_column(column_name)
+    if col is None:
+        raise KeyError(column_name)
+    vals = [v for v in col.data if v is not None]
+    numeric = bool(vals) and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in vals)
+    return ColumnStats(
+        min_value=min(vals) if numeric else None,
+        max_value=max(vals) if numeric else None,
+        null_count=len(col.data) - len(vals),
+        cardinality=len(set(vals)),
+        crc32=crc32(repr(col.data).encode('utf-8')),
+    )
 
 
 def get_bloom_filter(data: bytes, column_name: str) -> bytes:
-    """Get Bloom filter for a column.
-    
-    Args:
-        data: Raw KORE file bytes
-        column_name: Column name
-        
-    Returns:
-        Serialized Bloom filter
-    """
-    lib = KoreFFI.get_library()
-    
-    # TODO: Implement FFI call to kore_get_bloom_filter
-    raise NotImplementedError("Phase 3: Bloom filter API pending")
+    """Build a Bloom filter over a column (integers/floats) and return its bit array."""
+    col = _block_from_kore_bytes(data).get_column(column_name)
+    if col is None:
+        raise KeyError(column_name)
+    col.data = [v for v in col.data if v is not None]
+    return bytes(BloomFilter.from_column(col)._bits)
 
 
 # -----------------------------------------------------------------------------
@@ -653,12 +700,14 @@ def create_data_block() -> DataBlock:
 
 def column_stats_from_bytes(data: bytes) -> dict:
     """Extract all column statistics from file."""
-    # TODO: Parse footer JSON from file
-    raise NotImplementedError("Phase 3: Stats extraction pending")
+    block = _block_from_kore_bytes(data)
+    return {c.name: get_column_stats(data, c.name) for c in block.columns}
 
 
 __version__ = "1.7.30"
 __all__ = [
+    'append_version',
+    'list_versions',
     'DataType',
     'Compression',
     'DataBlock',

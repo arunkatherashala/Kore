@@ -17,6 +17,7 @@
 pub mod compress;
 pub mod reader;
 pub mod writer;
+pub mod versioned;
 
 pub use reader::KoreReader;
 pub use writer::KoreWriter;

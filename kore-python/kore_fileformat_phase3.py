@@ -465,16 +465,14 @@ class KoreWriter:
         elif col.data_type == DataType.F64:
             return struct.pack(f'<{len(col.data)}d', *col.data)
         elif col.data_type == DataType.BOOL:
-            packed = 0
-            for i, v in enumerate(col.data):
-                if v:
-                    packed |= (1 << (i % 8))
-                if i % 8 == 7:
-                    yield struct.pack('<B', packed)
-                    packed = 0
-            if len(col.data) % 8:
-                yield struct.pack('<B', packed)
-            return b''.join(b'')
+            out = bytearray()
+            for start in range(0, len(col.data), 8):
+                packed = 0
+                for bit, v in enumerate(col.data[start:start + 8]):
+                    if v:
+                        packed |= 1 << bit
+                out.append(packed)
+            return bytes(out)
         elif col.data_type == DataType.STR:
             result = bytearray()
             for s in col.data:

@@ -141,7 +141,7 @@ pub struct AggSpec {
 /// Two-phase distributed GROUP BY.
 ///
 /// Phase 1: partition by group keys → compute partial aggregates locally per partition.
-/// Phase 2: re-group partial aggregates → compute final result.
+/// Groups never span partitions, so no second aggregation phase is needed.
 ///
 /// This is exactly what Spark's Exchange + HashAgg does.
 pub fn distributed_group_by(
@@ -162,16 +162,9 @@ pub fn distributed_group_by(
 
     if partial.is_empty() { return Ok(DataBlock::empty()); }
 
-    // Phase 2: merge partial results and re-aggregate.
-    // After phase 1, aggregate columns are already named by AggSpec.output,
-    // so we aggregate on those names in phase 2.
-    let merged = DataBlock::concat(partial)?;
-    let phase2_aggs: Vec<AggSpec> = aggs.iter().map(|a| AggSpec {
-        col:    a.output.clone(),  // column produced by phase 1
-        op:     a.op,
-        output: a.output.clone(),
-    }).collect();
-    local_group_by(&merged, group_keys, &phase2_aggs)
+    // Hash partitioning on group keys puts every group wholly in one partition,
+    // so phase-1 results are final. Re-aggregating would be wrong for Count/Avg.
+    DataBlock::concat(partial)
 }
 
 fn local_group_by(
@@ -427,6 +420,38 @@ mod tests {
         ).unwrap();
         // 5 groups, each with 40 rows, sum = 0+5+10+...+(200-5) for each group
         assert_eq!(result.num_rows, 5);
+    }
+
+    #[test]
+    fn test_distributed_group_by_values_match_local() {
+        let b = data_block(200, 5);
+        let keys = ["cat".to_string()];
+        let aggs = [
+            AggSpec { col: "val".into(), op: AggOp::Sum,   output: "s".into() },
+            AggSpec { col: "val".into(), op: AggOp::Count, output: "c".into() },
+            AggSpec { col: "val".into(), op: AggOp::Avg,   output: "a".into() },
+            AggSpec { col: "val".into(), op: AggOp::Min,   output: "mn".into() },
+            AggSpec { col: "val".into(), op: AggOp::Max,   output: "mx".into() },
+        ];
+        let dist  = distributed_group_by(&b, &keys, &aggs, 4).unwrap();
+        let local = local_group_by(&b, &keys, &aggs).unwrap();
+
+        let rows = |blk: &DataBlock| {
+            let mut out: Vec<(String, Vec<Option<f64>>)> = (0..blk.num_rows).map(|r| {
+                let k = match &blk.column("cat").unwrap().data {
+                    ColumnData::Str(v) => v[r].clone().unwrap(),
+                    _ => unreachable!(),
+                };
+                let vals = ["s", "c", "a", "mn", "mx"].iter().map(|n| match &blk.column(n).unwrap().data {
+                    ColumnData::Float64(v) => v[r],
+                    _ => unreachable!(),
+                }).collect();
+                (k, vals)
+            }).collect();
+            out.sort_by(|a, b| a.0.cmp(&b.0));
+            out
+        };
+        assert_eq!(rows(&dist), rows(&local));
     }
 
     #[test]

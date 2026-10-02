@@ -12,6 +12,9 @@ pub struct KoreReader;
 impl KoreReader {
     /// Parse a DataBlock from a byte slice with zero-copy metadata parsing.
     pub fn from_bytes(data: &[u8]) -> Result<DataBlock, KoreError> {
+        if crate::versioned::is_version_log(data) {
+            return crate::versioned::read_latest(data);
+        }
         // Check for encryption marker
         if data.len() >= 4 && &data[0..4] == b"KENC" {
             return Err(KoreError::InvalidArgument(
@@ -23,29 +26,37 @@ impl KoreReader {
 
     /// Parse an encrypted .kore file.
     pub fn from_bytes_decrypt(data: &[u8], password: &[u8]) -> Result<DataBlock, KoreError> {
-        if data.len() < 8 || &data[0..4] != b"KENC" {
+        if data.len() < 4 || &data[0..4] != b"KENC" {
             return Self::from_bytes(data);
         }
-        let mut pos = 4;
-        let salt_len = u16::from_le_bytes(data[pos..pos+2].try_into().unwrap()) as usize;
-        pos += 2;
-        let salt = data[pos..pos+salt_len].to_vec();
-        pos += salt_len;
-        let nonce_len = u16::from_le_bytes(data[pos..pos+2].try_into().unwrap()) as usize;
-        pos += 2;
-        let nonce = data[pos..pos+nonce_len].to_vec();
-        pos += nonce_len;
-        let ciphertext = &data[pos..];
+        let plaintext = Self::decrypt_blob(data, password)?;
+        Self::from_bytes(&plaintext)
+    }
 
+    /// Inverse of `KoreWriter::encrypt_blob`. Never panics on malformed input.
+    pub fn decrypt_blob(data: &[u8], password: &[u8]) -> Result<Vec<u8>, KoreError> {
+        fn bad(m: &str) -> KoreError { KoreError::InvalidArgument(m.into()) }
+        fn take<'a>(data: &'a [u8], pos: &mut usize, n: usize) -> Result<&'a [u8], KoreError> {
+            let end = pos.checked_add(n).filter(|&e| e <= data.len()).ok_or_else(|| bad("truncated encrypted blob"))?;
+            let s = &data[*pos..end];
+            *pos = end;
+            Ok(s)
+        }
+        let mut pos = 0;
+        if take(data, &mut pos, 4)? != b"KENC" { return Err(bad("not an encrypted blob (missing KENC marker)")); }
+        let salt_len = u16::from_le_bytes(take(data, &mut pos, 2)?.try_into().unwrap()) as usize;
+        let salt = take(data, &mut pos, salt_len)?.to_vec();
+        let nonce_len = u16::from_le_bytes(take(data, &mut pos, 2)?.try_into().unwrap()) as usize;
+        if nonce_len != 12 { return Err(bad("invalid nonce length")); }
+        let nonce = take(data, &mut pos, nonce_len)?.to_vec();
         let meta = crate::EncryptionMetadata {
             encrypted_cols: vec![],
             algorithm: "AES-256-GCM".into(),
             kdf: "PBKDF2".into(),
             salt, nonce,
         };
-        let plaintext = crate::writer::decrypt_column(ciphertext, password, &meta)
-            .map_err(|e| KoreError::InvalidArgument(format!("decrypt failed: {e}")))?;
-        Self::from_bytes(&plaintext)
+        crate::writer::decrypt_column(&data[pos..], password, &meta)
+            .map_err(|e| KoreError::InvalidArgument(format!("decrypt failed: {e}")))
     }
 
     /// Read a version snapshot from the KVER footer marker.
@@ -67,38 +78,46 @@ impl KoreReader {
     }
 
     fn parse_binary(binary_data: &[u8]) -> Result<DataBlock, KoreError> {
-        if binary_data.len() < 18 { // 4+2+4+8
-            return Err(KoreError::InvalidArgument("file too small".into()));
+        // Corrupt input must yield Err, never abort the host process.
+        match std::panic::catch_unwind(|| Self::parse_binary_inner(binary_data)) {
+            Ok(r) => r,
+            Err(_) => Err(KoreError::InvalidArgument("corrupt .kore data".into())),
         }
+    }
+
+    fn parse_binary_inner(binary_data: &[u8]) -> Result<DataBlock, KoreError> {
+        fn bad(m: &str) -> KoreError { KoreError::InvalidArgument(m.into()) }
+        fn take<'a>(d: &'a [u8], pos: &mut usize, n: usize) -> Result<&'a [u8], KoreError> {
+            let end = pos.checked_add(n).filter(|&e| e <= d.len()).ok_or_else(|| bad("truncated .kore data"))?;
+            let s = &d[*pos..end];
+            *pos = end;
+            Ok(s)
+        }
+        const MAX_ROWS: usize = 1 << 30;
 
         let mut pos = 0;
 
         // ── Header ────────────────────────────────────────────────────────
-        if &binary_data[pos..pos+4] != MAGIC {
-            return Err(KoreError::InvalidArgument("invalid KORE magic bytes".into()));
+        if take(binary_data, &mut pos, 4)? != MAGIC {
+            return Err(bad("invalid KORE magic bytes"));
         }
-        pos += 4;
-        let version = u16::from_le_bytes(binary_data[pos..pos+2].try_into().unwrap());
-        pos += 2;
+        let version = u16::from_le_bytes(take(binary_data, &mut pos, 2)?.try_into().unwrap());
         if version != crate::VERSION && version != 1 {
             return Err(KoreError::InvalidArgument(format!("unsupported version {version}")));
         }
-        let num_cols = u32::from_le_bytes(binary_data[pos..pos+4].try_into().unwrap()) as usize;
-        pos += 4;
-        let num_rows = u64::from_le_bytes(binary_data[pos..pos+8].try_into().unwrap()) as usize;
-        pos += 8;
+        let num_cols = u32::from_le_bytes(take(binary_data, &mut pos, 4)?.try_into().unwrap()) as usize;
+        let num_rows = u64::from_le_bytes(take(binary_data, &mut pos, 8)?.try_into().unwrap()) as usize;
+        if num_rows > MAX_ROWS { return Err(bad("implausible row count")); }
+        // every column needs at least a name length, dtype byte, codec byte and length field
+        if num_cols > (binary_data.len() - pos) / 3 { return Err(bad("implausible column count")); }
 
         // ── Schema ────────────────────────────────────────────────────────
         let mut schema: Vec<(String, DType)> = Vec::with_capacity(num_cols);
         for _ in 0..num_cols {
-            let name_len = u16::from_le_bytes(binary_data[pos..pos+2].try_into().unwrap()) as usize;
-            pos += 2;
-            let name = String::from_utf8(binary_data[pos..pos+name_len].to_vec())
-                .map_err(|_| KoreError::InvalidArgument("invalid UTF-8 column name".into()))?;
-            pos += name_len;
-            let dtype_byte = binary_data[pos];
-            pos += 1;
-            let dtype = DType::try_from(dtype_byte)?;
+            let name_len = u16::from_le_bytes(take(binary_data, &mut pos, 2)?.try_into().unwrap()) as usize;
+            let name = String::from_utf8(take(binary_data, &mut pos, name_len)?.to_vec())
+                .map_err(|_| bad("invalid UTF-8 column name"))?;
+            let dtype = DType::try_from(take(binary_data, &mut pos, 1)?[0])?;
             schema.push((name, dtype));
         }
 
@@ -114,14 +133,39 @@ impl KoreReader {
 
         let mut chunks = Vec::with_capacity(num_cols);
         for (name, dtype) in schema {
-            let comp_byte = binary_data[pos];
-            pos += 1;
-            let comp = Compression::try_from(comp_byte)?;
-            let data_len = u64::from_le_bytes(binary_data[pos..pos+8].try_into().unwrap()) as usize;
-            pos += 8;
-            let raw = &binary_data[pos..pos+data_len];
-            pos += data_len;
+            let comp = Compression::try_from(take(binary_data, &mut pos, 1)?[0])?;
+            let data_len = u64::from_le_bytes(take(binary_data, &mut pos, 8)?.try_into().unwrap());
+            let data_len = usize::try_from(data_len).map_err(|_| bad("column length overflow"))?;
+            let raw = take(binary_data, &mut pos, data_len)?;
             chunks.push(ColChunk { name, dtype, comp, raw });
+        }
+
+        // Verify per-column CRC32 from the stats section the writer appends after the
+        // column data. Skipped when the section is absent or not exactly parseable (older files).
+        if let Ok(len_bytes) = take(binary_data, &mut pos, 4) {
+            let sec_len = u32::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
+            if let Ok(sec) = take(binary_data, &mut pos, sec_len) {
+                let mut sp = 0usize;
+                let mut crcs = Vec::with_capacity(chunks.len());
+                let mut ok = true;
+                for _ in 0..chunks.len() {
+                    let entry = (|| -> Option<u32> {
+                        let crc = u32::from_le_bytes(sec.get(sp..sp + 4)?.try_into().ok()?);
+                        let has_stats = *sec.get(sp + 5)?;
+                        sp += 6 + if has_stats == 1 { 16 } else { 0 };
+                        (sp <= sec.len()).then_some(crc)
+                    })();
+                    match entry { Some(c) => crcs.push(c), None => { ok = false; break; } }
+                }
+                if ok && sp == sec.len() {
+                    for (chunk, expected) in chunks.iter().zip(&crcs) {
+                        if compress::crc32(chunk.raw) != *expected {
+                            return Err(KoreError::InvalidArgument(
+                                format!("checksum mismatch in column '{}'", chunk.name)));
+                        }
+                    }
+                }
+            }
         }
 
         let columns: Result<Vec<Column>, String> = chunks.into_par_iter()
@@ -153,10 +197,17 @@ impl KoreReader {
         Self::from_bytes(&mmap)
     }
 
-    /// Time travel: Read a specific version by timestamp (MVCC).
-    pub fn read_at_version(data: &[u8], _target_timestamp: u64) -> Result<DataBlock, KoreError> {
-        // Extract version snapshots from footer, find matching timestamp, read that version
-        // For now: returns current version (latest)
+    /// Time travel: newest version with timestamp <= `target_timestamp`.
+    /// Works on version logs (see `versioned`). A plain .kore file is a single version
+    /// stamped by its KVER footer (or timestamp 0 if none).
+    pub fn read_at_version(data: &[u8], target_timestamp: u64) -> Result<DataBlock, KoreError> {
+        if crate::versioned::is_version_log(data) {
+            return crate::versioned::read_at(data, target_timestamp);
+        }
+        let ts = Self::read_version_snapshot(data).map(|v| v.timestamp).unwrap_or(0);
+        if target_timestamp < ts {
+            return Err(KoreError::InvalidArgument("no version at or before the requested timestamp".into()));
+        }
         Self::from_bytes(data)
     }
 
@@ -224,14 +275,22 @@ fn decode_column(raw: &[u8], dtype: DType, comp: Compression, n: usize) -> Resul
         if raw.is_empty() { return Err("empty LZ4 block".into()); }
         let inner_comp = Compression::try_from(raw[0])
             .map_err(|e| format!("LZ4 inner comp: {e}"))?;
-        let decompressed = lz4_flex::decompress_size_prepended(&raw[1..])
+        let body = &raw[1..];
+        if body.len() < 4 { return Err("truncated LZ4 block".into()); }
+        let claimed = u32::from_le_bytes(body[..4].try_into().unwrap()) as usize;
+        // LZ4 cannot expand more than ~255:1; reject larger claims before allocating.
+        if claimed > (body.len() - 4).saturating_mul(256) + 1024 {
+            return Err("LZ4 block claims implausible decompressed size".into());
+        }
+        let decompressed = lz4_flex::decompress_size_prepended(body)
             .map_err(|e| format!("LZ4 decompress: {e}"))?;
         return decode_column(&decompressed, dtype, inner_comp, n);
     } else if comp == Compression::Zstd {
         if raw.is_empty() { return Err("empty ZSTD block".into()); }
         let inner_comp = Compression::try_from(raw[0])
             .map_err(|e| format!("ZSTD inner comp: {e}"))?;
-        let decompressed = compress::zstd_decode(&raw[1..], n * 16); // estimate max size
+        let decompressed = zstd::decode_all(&raw[1..])
+            .map_err(|e| format!("ZSTD decompress: {e}"))?;
         return decode_column(&decompressed, dtype, inner_comp, n);
     } else {
         (raw, comp)
