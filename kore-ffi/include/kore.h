@@ -128,6 +128,9 @@ uint32_t kore_crc32(const uint8_t* data, size_t len);
 /** Column name by index. Free with kore_free_string. */
 char* kore_block_col_name(const KoreBlock* block, size_t idx);
 
+/** Column type by index: 0=int64 1=float64 2=bool 3=string 4=string-dict, -1 if out of range. */
+int kore_block_col_type(const KoreBlock* block, size_t idx);
+
 int64_t kore_block_get_i64(const KoreBlock* block, const char* col,
                            long long* out, uint64_t maxlen);
 

@@ -73,6 +73,13 @@ module Kore
     extern 'void*   kore_session_query(void*, char*)'
     extern 'long long kore_session_row_count(void*, char*)'
     extern 'void    kore_free_string(void*)'
+
+    # Bytes: encryption and time travel
+    extern 'void*   kore_encrypt_bytes(char*, unsigned long long, char*, unsigned long long, void*)'
+    extern 'void*   kore_decrypt_bytes(char*, unsigned long long, char*, unsigned long long, void*)'
+    extern 'void*   kore_version_append(char*, unsigned long long, char*, unsigned long long, unsigned long long, void*)'
+    extern 'void*   kore_version_select(char*, unsigned long long, unsigned long long, void*)'
+    extern 'void    kore_free_bytes(void*, unsigned long long)'
   end
 
   # ---------------------------------------------------------------------------
@@ -107,15 +114,16 @@ module Kore
 
     def initialize(ptr = nil)
       @ptr = ptr || Kore.check_ptr!(FFI.kore_block_new)
-      ObjectSpace.define_finalizer(self, self.class.method(:_finalizer).curry.call(@ptr))
+      ObjectSpace.define_finalizer(self, self.class._finalizer(@ptr))
     end
 
-    def self._finalizer(ptr, _obj_id)
-      FFI.kore_block_free(ptr)
+    def self._finalizer(ptr)
+      proc { |_obj_id| FFI.kore_block_free(ptr) }
     end
 
     def free
       return unless @ptr
+      ObjectSpace.undefine_finalizer(self)
       FFI.kore_block_free(@ptr)
       @ptr = nil
     end
@@ -173,11 +181,11 @@ module Kore
 
     def initialize(type, param1 = 100, param2 = 3)
       @ptr = Kore.check_ptr!(FFI.kore_model_new(type, param1, param2))
-      ObjectSpace.define_finalizer(self, self.class.method(:_finalizer).curry.call(@ptr))
+      ObjectSpace.define_finalizer(self, self.class._finalizer(@ptr))
     end
 
-    def self._finalizer(ptr, _obj_id)
-      FFI.kore_model_free(ptr)
+    def self._finalizer(ptr)
+      proc { |_obj_id| FFI.kore_model_free(ptr) }
     end
 
     # @param x_flat [Array<Float>] row-major, length = n_rows * n_cols
@@ -287,6 +295,57 @@ KoreModel   = Kore::Model
 # ---------------------------------------------------------------------------
 # Smoke test
 # ---------------------------------------------------------------------------
+module Kore
+  # Copy a malloc'd buffer returned by the library into a binary String and free it.
+  def self._take_bytes(ptr, out_len)
+    if ptr.nil? || ptr.to_i == 0
+      msg = FFI.kore_last_error
+      raise RuntimeError, "KORE error: #{msg || 'operation failed'}"
+    end
+    len = out_len[0, Fiddle::SIZEOF_SIZE_T].unpack1('Q')
+    begin
+      ptr[0, len]
+    ensure
+      FFI.kore_free_bytes(ptr, len)
+    end
+  end
+
+  def self._out_len
+    Fiddle::Pointer.malloc(Fiddle::SIZEOF_SIZE_T, Fiddle::RUBY_FREE)
+  end
+
+  # AES-256-GCM with a PBKDF2-derived key.
+  module Crypto
+    def self.encrypt(password, data)
+      pw = password.b; d = data.b; out = Kore._out_len
+      Kore._take_bytes(FFI.kore_encrypt_bytes(pw, pw.bytesize, d, d.bytesize, out), out)
+    end
+
+    # Raises RuntimeError on a wrong password or corrupt data.
+    def self.decrypt(password, data)
+      pw = password.b; d = data.b; out = Kore._out_len
+      Kore._take_bytes(FFI.kore_decrypt_bytes(pw, pw.bytesize, d, d.bytesize, out), out)
+    end
+  end
+
+  # Append-only version log. Entries are complete .kore files.
+  module Versions
+    # Returns the new log bytes. `existing` may be nil (new log), a log, or a plain .kore file.
+    def self.append(existing, entry, timestamp)
+      e = entry.b; out = Kore._out_len
+      ex = existing && existing.b
+      Kore._take_bytes(
+        FFI.kore_version_append(ex, ex ? ex.bytesize : 0, e, e.bytesize, timestamp, out), out)
+    end
+
+    # Newest version with timestamp <= target; raises if none exists.
+    def self.select(log, target)
+      d = log.b; out = Kore._out_len
+      Kore._take_bytes(FFI.kore_version_select(d, d.bytesize, target, out), out)
+    end
+  end
+end
+
 if __FILE__ == $0
   puts "=== KORE Ruby bindings smoke test ===\n\n"
 
@@ -320,6 +379,32 @@ if __FILE__ == $0
   sess2 = Kore::Session.new
   sess2.register_block('blk', blk)
   puts "   SUM(x): #{sess2.query('SELECT SUM(x) AS s FROM blk').inspect}"
+
+  puts "
+5. Encryption"
+  secret = Kore::Crypto.encrypt('pw', 'hello kore')
+  raise 'decrypt mismatch' unless Kore::Crypto.decrypt('pw', secret) == 'hello kore'
+  begin
+    Kore::Crypto.decrypt('wrong', secret)
+    raise 'wrong password was accepted'
+  rescue RuntimeError => e
+    raise unless e.message.include?('decrypt failed')
+  end
+  puts "   roundtrip ok, wrong password rejected"
+
+  puts "
+6. Time travel"
+  log = Kore::Versions.append(nil, 'v1', 100)
+  log = Kore::Versions.append(log, 'v2', 200)
+  raise 'select 150' unless Kore::Versions.select(log, 150) == 'v1'
+  raise 'select 200' unless Kore::Versions.select(log, 200) == 'v2'
+  begin
+    Kore::Versions.select(log, 50)
+    raise 'expected failure'
+  rescue RuntimeError => e
+    raise unless e.message.include?('no version')
+  end
+  puts "   append/select ok"
 
   sess.close
   sess2.close

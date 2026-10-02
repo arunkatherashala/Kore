@@ -288,3 +288,22 @@ class TestArrow:
         b2 = kore.DataBlock()
         b2.add_column('x', kore.DataType.I64, array.array('q', [4, 5, 6]))
         assert kore.to_arrow(b2).column('x').to_pylist() == [4, 5, 6]
+
+
+class TestArrowFileRead:
+    def test_file_to_arrow_matches_read_file(self):
+        pytest.importorskip("pyarrow")
+        block = kore.DataBlock()
+        block.add_column('i', kore.DataType.I64, [1, None, 3, 4])
+        block.add_column('f', kore.DataType.F64, [1.5, 2.5, None, 4.5])
+        block.add_column('s', kore.DataType.STR, ['a', 'b"q', None, 'a'])
+        block.add_column('b', kore.DataType.BOOL, [True, False, None, True])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / 'a.kore'
+            kore.write_file(path, block)
+            t = kore.to_arrow(path)
+            ref = kore.read_file(path)
+        for name in ('i', 'f', 'b'):
+            assert t.column(name).to_pylist() == list(ref.get_column(name).data)
+        assert t.column('s').to_pylist() == list(ref.get_column('s').data)
+        assert t.column('b').to_pylist() == [True, False, None, True]

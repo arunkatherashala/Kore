@@ -316,6 +316,9 @@ def _block_from_bytes_ffi(data: bytes) -> 'DataBlock':
     lib.kore_block_get_f64.argtypes = [ct.c_void_p, ct.c_char_p, ct.POINTER(ct.c_double), ct.c_uint64]; lib.kore_block_get_f64.restype = ct.c_int64
     lib.kore_block_get_i64.argtypes = [ct.c_void_p, ct.c_char_p, ct.POINTER(ct.c_longlong), ct.c_uint64]; lib.kore_block_get_i64.restype = ct.c_int64
     lib.kore_block_free.argtypes = [ct.c_void_p]
+    has_type = hasattr(lib, 'kore_block_col_type')  # older DLLs lack it
+    if has_type:
+        lib.kore_block_col_type.argtypes = [ct.c_void_p, ct.c_size_t]; lib.kore_block_col_type.restype = ct.c_int
 
     buf = ct.create_string_buffer(data, len(data))  # copy data into ctypes buffer
     handle = lib.kore_read_bytes(buf, len(data))
@@ -328,13 +331,16 @@ def _block_from_bytes_ffi(data: bytes) -> 'DataBlock':
         for ci in range(ncols):
             raw_name = lib.kore_block_col_name(handle, ci)
             col_name = raw_name.decode('utf-8') if raw_name else f'col{ci}'
-            f64_buf = (ct.c_double * nrows)()
-            n_f64 = lib.kore_block_get_f64(handle, col_name.encode(), f64_buf, nrows)
-            if n_f64 > 0:
-                a = _array.array('d')
-                a.frombytes((ct.c_byte * (int(n_f64) * 8)).from_buffer(f64_buf))
-                block.add_column(col_name, DataType.F64, a)
-            else:
+            ctype = lib.kore_block_col_type(handle, ci) if has_type else -1
+            if ctype == 1 or ctype == -1:
+                f64_buf = (ct.c_double * nrows)()
+                n_f64 = lib.kore_block_get_f64(handle, col_name.encode(), f64_buf, nrows)
+                if n_f64 > 0:
+                    a = _array.array('d')
+                    a.frombytes((ct.c_byte * (int(n_f64) * 8)).from_buffer(f64_buf))
+                    block.add_column(col_name, DataType.F64, a)
+                    continue
+            if ctype == 0 or ctype == -1:
                 i64_buf = (ct.c_longlong * nrows)()
                 n_i64 = lib.kore_block_get_i64(handle, col_name.encode(), i64_buf, nrows)
                 if n_i64 > 0:
@@ -434,9 +440,9 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
         f.write(kore_bytes)
 
 
-def read_file(path: Union[str, Path]) -> DataBlock:
-    """Read .kore � auto-detects v3 (text header) vs legacy (raw Rust KORE).
-    Decodes string columns and restores column order from header."""
+def _load_v3(path):
+    """Parse a .kore file into (legacy, kore_bytes, str_dicts, null_positions, bool_cols, schema_order).
+    For legacy (non-v3) files only kore_bytes is meaningful."""
     with open(str(path), 'rb') as f:
         prefix = f.read(_HKORE_OFFSET_LINE)
         if len(prefix) == _HKORE_OFFSET_LINE and prefix[:5] == b'KORE2':
@@ -447,12 +453,11 @@ def read_file(path: Union[str, Path]) -> DataBlock:
             kore_bytes = f.read()
         else:
             f.seek(0)
-            return _block_from_bytes_ffi(f.read())
+            return True, f.read(), {}, {}, set(), []
 
-    _I64_NULL = -(2**63)
     import re as _re
     str_dicts = {}
-    null_positions = {}  # col_name ? list of null row indices
+    null_positions = {}  # col_name -> list of null row indices
     bool_cols = set()    # col names to decode as bool
     schema_order = []
     for line in header_bytes.decode('utf-8', errors='replace').split('\n'):
@@ -475,6 +480,15 @@ def read_file(path: Union[str, Path]) -> DataBlock:
             parts = line[4:].split()
             if len(parts) >= 2:
                 schema_order.append((parts[0], parts[1]))
+    return False, kore_bytes, str_dicts, null_positions, bool_cols, schema_order
+
+
+def read_file(path: Union[str, Path]) -> DataBlock:
+    """Read .kore � auto-detects v3 (text header) vs legacy (raw Rust KORE).
+    Decodes string columns and restores column order from header."""
+    legacy, kore_bytes, str_dicts, null_positions, bool_cols, schema_order = _load_v3(path)
+    if legacy:
+        return _block_from_bytes_ffi(kore_bytes)
 
     raw_block = _block_from_bytes_ffi(kore_bytes)
 
@@ -1339,6 +1353,52 @@ def delete_rows(path: Union[str, 'Path'], key_col: str, delete_keys: list) -> No
 # -- Multi-Engine Connectors ---------------------------------------------------
 # Spark, Arrow, DuckDB, Polars � all through kore_fileformat
 
+def _read_arrow(path):
+    """Read a .kore file straight into an Arrow table: numeric buffers are shared, strings are
+    rebuilt from the dictionary without creating Python str objects."""
+    import pyarrow as pa
+    legacy, kore_bytes, str_dicts, null_positions, bool_cols, schema_order = _load_v3(path)
+    raw = _block_from_bytes_ffi(kore_bytes)
+    if legacy or (not str_dicts and not schema_order):
+        return to_arrow(raw)
+    by_name = {c.name: c for c in raw.columns}
+    n = raw.num_rows
+
+    def validity(nulls):
+        bits = bytearray(b'\xff' * ((n + 7) // 8))
+        k = 0
+        for i in nulls:
+            if 0 <= i < n and bits[i >> 3] & (1 << (i & 7)):
+                bits[i >> 3] &= ~(1 << (i & 7)) & 0xff
+                k += 1
+        return pa.py_buffer(bytes(bits)), k
+
+    arrays = {}
+    for name, _dtype in schema_order:
+        if name in str_dicts:
+            ids = by_name.get(f'__str_{name}')
+            if ids is None:
+                continue
+            idx = pa.array(ids.data, type=pa.int64())
+            try:
+                arrays[name] = pa.DictionaryArray.from_arrays(
+                    idx, pa.array(str_dicts[name], type=pa.string())).dictionary_decode()
+            except pa.ArrowInvalid:  # out-of-range ids in a damaged header
+                m = str_dicts[name]
+                arrays[name] = pa.array([m[i] if 0 <= i < len(m) else '' for i in ids.data], type=pa.string())
+        elif name in by_name:
+            col = by_name[name]
+            is_f = col.dtype.name in ('F64', 'FLOAT64')
+            buf = [None, pa.py_buffer(col.data)]
+            nulls = null_positions.get(name)
+            k = 0
+            if nulls:
+                buf[0], k = validity(nulls)
+            arr = pa.Array.from_buffers(pa.float64() if is_f else pa.int64(), n, buf, null_count=k if nulls else 0)
+            arrays[name] = arr.cast(pa.bool_()) if name in bool_cols else arr
+    return pa.table(arrays)
+
+
 def to_arrow(path_or_block: Union[str, 'Path', 'DataBlock']):
     """Convert .kore file or DataBlock to PyArrow Table.
 
@@ -1354,7 +1414,9 @@ def to_arrow(path_or_block: Union[str, 'Path', 'DataBlock']):
         raise ImportError("pyarrow required: pip install pyarrow")
 
     import array as _array
-    block = read_file(str(path_or_block)) if isinstance(path_or_block, (str, Path)) else path_or_block
+    if isinstance(path_or_block, (str, Path)):
+        return _read_arrow(path_or_block)
+    block = path_or_block
     arrays = {}
     for col in block.columns:
         dtype_name = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)

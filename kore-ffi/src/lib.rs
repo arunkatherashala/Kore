@@ -647,6 +647,20 @@ pub unsafe extern "C" fn kore_block_col_name(
     }
 }
 
+/// Column type by index: 0=int64, 1=float64, 2=bool, 3=string, 4=string-dict; -1 if out of range.
+#[no_mangle]
+pub unsafe extern "C" fn kore_block_col_type(block: *const KoreBlock, idx: usize) -> c_int {
+    let block = match block.as_ref() { Some(b) => b, None => return -1 };
+    match block.inner.columns.get(idx).map(|c| &c.data) {
+        Some(ColumnData::Int64(_))   => 0,
+        Some(ColumnData::Float64(_)) => 1,
+        Some(ColumnData::Bool(_))    => 2,
+        Some(ColumnData::Str(_))     => 3,
+        Some(ColumnData::StrDict { .. }) => 4,
+        None => -1,
+    }
+}
+
 /// Get Int64 column data by name.
 /// Returns number of values written, or -1 on error.
 #[no_mangle]
