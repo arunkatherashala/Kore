@@ -608,6 +608,33 @@ pub unsafe extern "C" fn kore_version_select(
     leak_result(r.map(|b| b.to_vec()).map_err(|e| e.to_string()), out_len)
 }
 
+/// Read only the named columns (in the given order) from a byte buffer; other columns are skipped
+/// without being decompressed. Returns NULL on error (including an unknown column name).
+#[no_mangle]
+pub unsafe extern "C" fn kore_read_bytes_columns(
+    data: *const u8,
+    len: usize,
+    names: *const *const c_char,
+    n_names: usize,
+) -> *mut KoreBlock {
+    if data.is_null() || (names.is_null() && n_names > 0) {
+        set_error("kore_read_bytes_columns: null argument");
+        return std::ptr::null_mut();
+    }
+    let mut wanted: Vec<&str> = Vec::with_capacity(n_names);
+    for i in 0..n_names {
+        match ptr_to_str(*names.add(i)) {
+            Some(s) => wanted.push(s),
+            None => { set_error("kore_read_bytes_columns: invalid column name"); return std::ptr::null_mut(); }
+        }
+    }
+    let slice = std::slice::from_raw_parts(data, len);
+    match kore_store::reader::KoreReader::from_bytes_columns(slice, &wanted) {
+        Ok(block) => Box::into_raw(Box::new(KoreBlock { inner: block })),
+        Err(e)    => { set_error(e.to_string()); std::ptr::null_mut() }
+    }
+}
+
 /// Free a byte buffer returned by kore_write_bytes.
 #[no_mangle]
 pub unsafe extern "C" fn kore_free_bytes(ptr: *mut u8, len: usize) {

@@ -121,6 +121,11 @@ uint8_t* kore_write_bytes(const KoreBlock* block, size_t* out_len);
 /** Parse bytes into a block. Returns NULL on corrupt data (kore_last_error has details). */
 KoreBlock* kore_read_bytes(const uint8_t* data, size_t len);
 
+/** Column projection: decode only the named columns (in that order); others are skipped without
+ *  decompression. Returns NULL on error, including an unknown column name. */
+KoreBlock* kore_read_bytes_columns(const uint8_t* data, size_t len,
+                                   const char* const* names, size_t n_names);
+
 void kore_free_bytes(uint8_t* ptr, size_t len);
 
 uint32_t kore_crc32(const uint8_t* data, size_t len);

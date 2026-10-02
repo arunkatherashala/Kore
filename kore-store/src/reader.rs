@@ -12,8 +12,19 @@ pub struct KoreReader;
 impl KoreReader {
     /// Parse a DataBlock from a byte slice with zero-copy metadata parsing.
     pub fn from_bytes(data: &[u8]) -> Result<DataBlock, KoreError> {
+        Self::from_bytes_columns_opt(data, None)
+    }
+
+    /// Column projection: decode only `columns` (returned in the requested order). The other
+    /// columns' bytes are skipped without being checksummed or decompressed.
+    pub fn from_bytes_columns(data: &[u8], columns: &[&str]) -> Result<DataBlock, KoreError> {
+        Self::from_bytes_columns_opt(data, Some(columns))
+    }
+
+    fn from_bytes_columns_opt(data: &[u8], wanted: Option<&[&str]>) -> Result<DataBlock, KoreError> {
         if crate::versioned::is_version_log(data) {
-            return crate::versioned::read_latest(data);
+            let latest = crate::versioned::select_raw(data, u64::MAX)?;
+            return Self::from_bytes_columns_opt(latest, wanted);
         }
         // Check for encryption marker
         if data.len() >= 4 && &data[0..4] == b"KENC" {
@@ -21,7 +32,7 @@ impl KoreReader {
                 "encrypted .kore file — use from_bytes_decrypt(data, password)".into()));
         }
         let binary_data = strip_readable_trailer(data);
-        Self::parse_binary(binary_data)
+        Self::parse_binary(binary_data, wanted)
     }
 
     /// Parse an encrypted .kore file.
@@ -77,15 +88,15 @@ impl KoreReader {
         None
     }
 
-    fn parse_binary(binary_data: &[u8]) -> Result<DataBlock, KoreError> {
+    fn parse_binary(binary_data: &[u8], wanted: Option<&[&str]>) -> Result<DataBlock, KoreError> {
         // Corrupt input must yield Err, never abort the host process.
-        match std::panic::catch_unwind(|| Self::parse_binary_inner(binary_data)) {
+        match std::panic::catch_unwind(|| Self::parse_binary_inner(binary_data, wanted)) {
             Ok(r) => r,
             Err(_) => Err(KoreError::InvalidArgument("corrupt .kore data".into())),
         }
     }
 
-    fn parse_binary_inner(binary_data: &[u8]) -> Result<DataBlock, KoreError> {
+    fn parse_binary_inner(binary_data: &[u8], wanted: Option<&[&str]>) -> Result<DataBlock, KoreError> {
         fn bad(m: &str) -> KoreError { KoreError::InvalidArgument(m.into()) }
         fn take<'a>(d: &'a [u8], pos: &mut usize, n: usize) -> Result<&'a [u8], KoreError> {
             let end = pos.checked_add(n).filter(|&e| e <= d.len()).ok_or_else(|| bad("truncated .kore data"))?;
@@ -140,6 +151,15 @@ impl KoreReader {
             chunks.push(ColChunk { name, dtype, comp, raw });
         }
 
+        if let Some(w) = wanted {
+            for name in w {
+                if !chunks.iter().any(|c| c.name == *name) {
+                    return Err(KoreError::InvalidArgument(format!("column not found: {name}")));
+                }
+            }
+        }
+        let keep = |name: &str| wanted.map_or(true, |w| w.iter().any(|x| *x == name));
+
         // Verify per-column CRC32 from the stats section the writer appends after the
         // column data. Skipped when the section is absent or not exactly parseable (older files).
         if let Ok(len_bytes) = take(binary_data, &mut pos, 4) {
@@ -159,6 +179,7 @@ impl KoreReader {
                 }
                 if ok && sp == sec.len() {
                     for (chunk, expected) in chunks.iter().zip(&crcs) {
+                        if !keep(&chunk.name) { continue; }
                         if compress::crc32(chunk.raw) != *expected {
                             return Err(KoreError::InvalidArgument(
                                 format!("checksum mismatch in column '{}'", chunk.name)));
@@ -170,17 +191,27 @@ impl KoreReader {
 
         let columns: Result<Vec<Column>, String> = chunks.into_par_iter()
             .enumerate()
+            .filter(|(_, chunk)| keep(&chunk.name))
             .map(|(i, chunk)| {
                 let col_data = decode_column(chunk.raw, chunk.dtype, chunk.comp, num_rows)
                     .map_err(|e| format!("col {}: {}", i, e))?;
                 Ok(Column { name: chunk.name, data: col_data })
             })
             .collect();
+        let mut columns = columns.map_err(|e| KoreError::InvalidArgument(e))?;
 
-        Ok(DataBlock { 
-            columns: columns.map_err(|e| KoreError::InvalidArgument(e))?, 
-            num_rows 
-        })
+        if let Some(w) = wanted {
+            // requested order; a name listed twice yields one column
+            let mut ordered = Vec::with_capacity(w.len());
+            for name in w {
+                if ordered.iter().any(|c: &Column| c.name == *name) { continue; }
+                if let Some(pos) = columns.iter().position(|c| c.name == *name) {
+                    ordered.push(columns.swap_remove(pos));
+                }
+            }
+            columns = ordered;
+        }
+        Ok(DataBlock { columns, num_rows })
     }
 
     /// Read from any `Read` source (no zero-copy slicing).
@@ -195,6 +226,13 @@ impl KoreReader {
         let file = std::fs::File::open(path).map_err(io_err)?;
         let mmap = unsafe { Mmap::map(&file).map_err(io_err)? };
         Self::from_bytes(&mmap)
+    }
+
+    /// Memory-mapped file read of selected columns only (see `from_bytes_columns`).
+    pub fn read_file_columns(path: &std::path::Path, columns: &[&str]) -> Result<DataBlock, KoreError> {
+        let file = std::fs::File::open(path).map_err(io_err)?;
+        let mmap = unsafe { Mmap::map(&file).map_err(io_err)? };
+        Self::from_bytes_columns(&mmap, columns)
     }
 
     /// Time travel: newest version with timestamp <= `target_timestamp`.

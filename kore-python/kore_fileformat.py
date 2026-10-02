@@ -511,6 +511,8 @@ def _bind_native(lib):
     lib.kore_write_bytes.restype = ct.c_void_p
     lib.kore_read_bytes.argtypes = [ct.c_char_p, ct.c_size_t]
     lib.kore_read_bytes.restype = ct.c_void_p
+    lib.kore_read_bytes_columns.argtypes = [ct.c_char_p, ct.c_size_t, p(ct.c_char_p), ct.c_size_t]
+    lib.kore_read_bytes_columns.restype = ct.c_void_p
     lib.kore_free_bytes.argtypes = [ct.c_void_p, ct.c_size_t]
     lib.kore_last_error.restype = ct.c_char_p
     lib._kore_native_bound = True
@@ -604,15 +606,22 @@ def _native_block_bytes(block: 'DataBlock') -> bytes:
         lib.kore_block_free(handle)
 
 
-def _native_cols(kore_bytes: bytes):
+def _native_cols(kore_bytes: bytes, columns=None):
     """Decode Rust KORE bytes into raw column buffers: a list of
     (name, kind, values, valid, extra) with kind in i64/f64/bool/str; `valid` is None when every
     row is valid, else one byte per row. For str, values = uint32 offsets and extra = UTF-8 bytes."""
     import ctypes as ct
     lib = KoreFFI.get_library()
     _bind_native(lib)
-    handle = lib.kore_read_bytes(kore_bytes, len(kore_bytes))
+    if columns is None:
+        handle = lib.kore_read_bytes(kore_bytes, len(kore_bytes))
+    else:
+        enc = [c.encode('utf-8') for c in columns]
+        handle = lib.kore_read_bytes_columns(kore_bytes, len(kore_bytes), (ct.c_char_p * len(enc))(*enc), len(enc))
     if not handle:
+        err = lib.kore_last_error()
+        if columns is not None and err and b'column not found' in err:
+            raise KeyError(err.decode('utf-8', 'replace'))
         raise _native_error(lib, 'reading .kore data failed')
     cols = []
     try:
@@ -682,8 +691,8 @@ def _decode_strings(offsets, data: bytes, valid):
     return out
 
 
-def _block_from_native(kore_bytes: bytes) -> 'DataBlock':
-    n, cols = _native_cols(kore_bytes)
+def _block_from_native(kore_bytes: bytes, columns=None) -> 'DataBlock':
+    n, cols = _native_cols(kore_bytes, columns)
     block = DataBlock(num_rows=n)
     for name, kind, values, valid, extra in cols:
         if kind == 'dict':
@@ -701,9 +710,9 @@ def _block_from_native(kore_bytes: bytes) -> 'DataBlock':
     return block
 
 
-def _arrow_from_native(kore_bytes: bytes):
+def _arrow_from_native(kore_bytes: bytes, columns=None):
     import pyarrow as pa
-    n, cols = _native_cols(kore_bytes)
+    n, cols = _native_cols(kore_bytes, columns)
 
     def bitmap(valid):
         if valid is None:
@@ -780,6 +789,17 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
         f.write(kore_bytes)
 
 
+def _select_columns(block: 'DataBlock', columns) -> 'DataBlock':
+    """Keep `columns` (in that order) of an already decoded block."""
+    by_name = {c.name: c for c in block.columns}
+    out = DataBlock(num_rows=block.num_rows)
+    for name in dict.fromkeys(columns):
+        if name not in by_name:
+            raise KeyError(f'column not found: {name}')
+        out.add_column(name, by_name[name].dtype, by_name[name].data)
+    return out
+
+
 def _load_v3(path):
     """Parse a .kore file into (legacy, kore_bytes, str_dicts, null_positions, bool_cols, schema_order, layout).
     For legacy (non-v3) files only kore_bytes is meaningful."""
@@ -826,16 +846,22 @@ def _load_v3(path):
     return False, kore_bytes, str_dicts, null_positions, bool_cols, schema_order, layout
 
 
-def read_file(path: Union[str, Path]) -> DataBlock:
-    """Read .kore � auto-detects v3 (text header) vs legacy (raw Rust KORE).
+def read_file(path: Union[str, Path], columns: Optional[List[str]] = None) -> DataBlock:
+    """With `columns`, only those columns are decoded (native layout; older layouts are read whole
+    and then trimmed). Read .kore � auto-detects v3 (text header) vs legacy (raw Rust KORE).
     Decodes string columns and restores column order from header."""
+    if columns is not None:
+        legacy, kore_bytes, *_rest, layout = _load_v3(path)
+        if not legacy and layout == _NATIVE_LAYOUT:
+            return _block_from_native(kore_bytes, columns)
+        return _select_columns(read_file(path), columns)
     legacy, kore_bytes, str_dicts, null_positions, bool_cols, schema_order, layout = _load_v3(path)
-    if legacy:
-        return _block_from_bytes_ffi(kore_bytes)
+    if legacy:  # raw Rust KORE bytes, no text header: every column type is native
+        return _block_from_native(kore_bytes)
     if layout is not None:
         if layout != _NATIVE_LAYOUT:
             raise ValueError(f"unsupported .kore layout {layout!r}")
-        return _block_from_native(kore_bytes)
+        return _block_from_native(kore_bytes, columns)
 
     raw_block = _block_from_bytes_ffi(kore_bytes)
 
@@ -1700,7 +1726,7 @@ def delete_rows(path: Union[str, 'Path'], key_col: str, delete_keys: list) -> No
 # -- Multi-Engine Connectors ---------------------------------------------------
 # Spark, Arrow, DuckDB, Polars � all through kore_fileformat
 
-def _read_arrow(path):
+def _read_arrow_all(path):
     """Read a .kore file straight into an Arrow table: numeric buffers are shared, strings are
     rebuilt from the dictionary without creating Python str objects."""
     import pyarrow as pa
@@ -1750,7 +1776,16 @@ def _read_arrow(path):
     return pa.table(arrays)
 
 
-def to_arrow(path_or_block: Union[str, 'Path', 'DataBlock']):
+def _read_arrow(path, columns=None):
+    if columns is None:
+        return _read_arrow_all(path)
+    legacy, kore_bytes, *_rest, layout = _load_v3(path)
+    if not legacy and layout == _NATIVE_LAYOUT:
+        return _arrow_from_native(kore_bytes, columns)
+    return _read_arrow_all(path).select(list(dict.fromkeys(columns)))
+
+
+def to_arrow(path_or_block: Union[str, 'Path', 'DataBlock'], columns: Optional[List[str]] = None):
     """Convert .kore file or DataBlock to PyArrow Table.
 
     Requires: pip install pyarrow
@@ -1766,7 +1801,7 @@ def to_arrow(path_or_block: Union[str, 'Path', 'DataBlock']):
 
     import array as _array
     if isinstance(path_or_block, (str, Path)):
-        return _read_arrow(path_or_block)
+        return _read_arrow(path_or_block, columns)
     block = path_or_block
     arrays = {}
     for col in block.columns:
@@ -1783,7 +1818,8 @@ def to_arrow(path_or_block: Union[str, 'Path', 'DataBlock']):
             arrays[col.name] = pa.array(d, type=pa.bool_())
         else:
             arrays[col.name] = pa.array(d, type=pa.string())
-    return pa.table(arrays)
+    table = pa.table(arrays)
+    return table if columns is None else table.select(list(dict.fromkeys(columns)))
 
 
 def from_arrow(path: Union[str, 'Path'], table) -> None:

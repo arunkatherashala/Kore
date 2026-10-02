@@ -1,4 +1,4 @@
-# Build artifacts
+﻿# Build artifacts
 target/
 **/*.pdb
 
@@ -25,7 +25,9 @@ Thumbs.db
 
 # Benchmark outputs (keep .csv but not binary files)
 *.kore
+!conformance/*.kore
 !kore-python/fixtures/*.kore
+!conformance/*.kore
 *.kore.*
 bench_split/
 benchmark.kore.idx/
