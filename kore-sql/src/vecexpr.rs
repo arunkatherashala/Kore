@@ -1,0 +1,257 @@
+//! Column-at-a-time evaluation of filters and numeric expressions.
+//!
+//! The row interpreter (`executor::eval_expr`) allocates a `String` for every string cell it touches and
+//! dispatches on the expression tree for every row. These routines walk the tree once per column and loop
+//! over the raw column data, with SQL three-valued logic for predicates. They return `None` for anything
+//! they do not cover, and the caller falls back to the row interpreter.
+
+use kore_core::{ColumnData, DataBlock};
+use crate::ast::*;
+
+const FALSE: u8 = 0;
+const TRUE: u8 = 1;
+const NULL: u8 = 2;
+
+fn find_col<'a>(block: &'a DataBlock, name: &str) -> Option<&'a ColumnData> {
+    block.columns.iter().find(|c| {
+        c.name == name || {
+            let (cn, nm) = (c.name.len(), name.len());
+            cn > nm && c.name.as_bytes()[cn - nm - 1] == b'.' && &c.name[cn - nm..] == name
+        }
+    }).map(|c| &c.data)
+}
+
+fn col_of<'a>(e: &Expr, block: &'a DataBlock) -> Option<&'a ColumnData> {
+    match e {
+        Expr::Col(c) => find_col(block, c),
+        Expr::QualCol(t, c) => find_col(block, &format!("{t}.{c}")),
+        _ => None,
+    }
+}
+
+/// A numeric or string operand, borrowing column data where possible.
+enum Val<'a> {
+    I(&'a [Option<i64>]),
+    F(&'a [Option<f64>]),
+    Num(f64),
+    Owned(Vec<Option<f64>>),
+    S(&'a [Option<String>]),
+    D(&'a [u8], &'a [String]),
+    Text(&'a str),
+}
+
+impl Val<'_> {
+    #[inline]
+    fn num(&self, i: usize) -> Option<f64> {
+        match self {
+            Val::I(v) => v[i].map(|x| x as f64),
+            Val::F(v) => v[i],
+            Val::Num(c) => Some(*c),
+            Val::Owned(v) => v[i],
+            _ => None,
+        }
+    }
+    #[inline]
+    fn text(&self, i: usize) -> Option<&str> {
+        match self {
+            Val::S(v) => v[i].as_deref(),
+            Val::D(codes, dict) => if codes[i] == u8::MAX { None } else { dict.get(codes[i] as usize).map(|s| s.as_str()) },
+            Val::Text(t) => Some(t),
+            _ => None,
+        }
+    }
+    fn is_num(&self) -> bool { matches!(self, Val::I(_) | Val::F(_) | Val::Num(_) | Val::Owned(_)) }
+    fn is_text(&self) -> bool { matches!(self, Val::S(_) | Val::D(..) | Val::Text(_)) }
+}
+
+fn operand<'a>(e: &'a Expr, block: &'a DataBlock) -> Option<Val<'a>> {
+    match e {
+        Expr::Int(i) => Some(Val::Num(*i as f64)),
+        Expr::Float(f) => Some(Val::Num(*f)),
+        Expr::Str(s) => Some(Val::Text(s.as_str())),
+        Expr::Col(_) | Expr::QualCol(..) => match col_of(e, block)? {
+            ColumnData::Int64(v) => Some(Val::I(v)),
+            ColumnData::Float64(v) => Some(Val::F(v)),
+            ColumnData::Str(v) => Some(Val::S(v)),
+            ColumnData::StrDict { codes, dict } => Some(Val::D(codes, dict)),
+            ColumnData::Bool(_) => None,
+        },
+        Expr::BinOp { op: BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul | BinOpKind::Div | BinOpKind::Mod, .. }
+        | Expr::Case { .. } => num_vec(e, block).map(Val::Owned),
+        _ => None,
+    }
+}
+
+fn cmp_ok(op: &BinOpKind, a: f64, b: f64) -> bool {
+    match op {
+        BinOpKind::Eq => (a - b).abs() < 1e-10,
+        BinOpKind::Ne => (a - b).abs() >= 1e-10,
+        BinOpKind::Lt => a < b,
+        BinOpKind::Le => a <= b,
+        BinOpKind::Gt => a > b,
+        BinOpKind::Ge => a >= b,
+        _ => false,
+    }
+}
+
+fn cmp_text(op: &BinOpKind, a: &str, b: &str) -> bool {
+    match op {
+        BinOpKind::Eq => a == b,
+        BinOpKind::Ne => a != b,
+        BinOpKind::Lt => a < b,
+        BinOpKind::Le => a <= b,
+        BinOpKind::Gt => a > b,
+        BinOpKind::Ge => a >= b,
+        _ => false,
+    }
+}
+
+fn compare(op: &BinOpKind, l: &Val, r: &Val, n: usize) -> Option<Vec<u8>> {
+    if l.is_num() && r.is_num() {
+        Some((0..n).map(|i| match (l.num(i), r.num(i)) {
+            (Some(a), Some(b)) => if cmp_ok(op, a, b) { TRUE } else { FALSE },
+            _ => NULL,
+        }).collect())
+    } else if l.is_text() && r.is_text() {
+        Some((0..n).map(|i| match (l.text(i), r.text(i)) {
+            (Some(a), Some(b)) => if cmp_text(op, a, b) { TRUE } else { FALSE },
+            _ => NULL,
+        }).collect())
+    } else {
+        None
+    }
+}
+
+fn not(v: Vec<u8>) -> Vec<u8> {
+    v.into_iter().map(|x| match x { TRUE => FALSE, FALSE => TRUE, o => o }).collect()
+}
+
+/// Three-valued truth value of `e` for every row, or None if the expression is not covered.
+fn tri<'a>(e: &'a Expr, block: &'a DataBlock) -> Option<Vec<u8>> {
+    let n = block.num_rows;
+    match e {
+        Expr::Bool(b) => Some(vec![if *b { TRUE } else { FALSE }; n]),
+        Expr::Not(x) => Some(not(tri(x, block)?)),
+        Expr::BinOp { op: BinOpKind::And, left, right } => {
+            let (l, r) = (tri(left, block)?, tri(right, block)?);
+            Some(l.iter().zip(&r).map(|(&a, &b)| if a == FALSE || b == FALSE { FALSE } else if a == TRUE && b == TRUE { TRUE } else { NULL }).collect())
+        }
+        Expr::BinOp { op: BinOpKind::Or, left, right } => {
+            let (l, r) = (tri(left, block)?, tri(right, block)?);
+            Some(l.iter().zip(&r).map(|(&a, &b)| if a == TRUE || b == TRUE { TRUE } else if a == FALSE && b == FALSE { FALSE } else { NULL }).collect())
+        }
+        Expr::BinOp { op: op @ (BinOpKind::Eq | BinOpKind::Ne | BinOpKind::Lt | BinOpKind::Le | BinOpKind::Gt | BinOpKind::Ge), left, right } => {
+            let (l, r) = (operand(left, block)?, operand(right, block)?);
+            compare(op, &l, &r, n)
+        }
+        Expr::Between { expr, low, high, negated } => {
+            let (v, lo, hi) = (operand(expr, block)?, operand(low, block)?, operand(high, block)?);
+            let ge = compare(&BinOpKind::Ge, &v, &lo, n)?;
+            let le = compare(&BinOpKind::Le, &v, &hi, n)?;
+            let both: Vec<u8> = ge.iter().zip(&le).map(|(&a, &b)| if a == FALSE || b == FALSE { FALSE } else if a == TRUE && b == TRUE { TRUE } else { NULL }).collect();
+            Some(if *negated { not(both) } else { both })
+        }
+        Expr::In { expr, values, negated } => {
+            let v = operand(expr, block)?;
+            let out: Vec<u8> = if v.is_num() {
+                let mut set = Vec::with_capacity(values.len());
+                for x in values {
+                    match x { Expr::Int(i) => set.push(*i as f64), Expr::Float(f) => set.push(*f), _ => return None }
+                }
+                (0..n).map(|i| match v.num(i) {
+                    None => NULL,
+                    Some(a) => if set.iter().any(|b| (a - b).abs() < 1e-10) { TRUE } else { FALSE },
+                }).collect()
+            } else if v.is_text() {
+                let mut set = std::collections::HashSet::with_capacity(values.len());
+                for x in values {
+                    match x { Expr::Str(s) => { set.insert(s.as_str()); } _ => return None }
+                }
+                (0..n).map(|i| match v.text(i) {
+                    None => NULL,
+                    Some(a) => if set.contains(a) { TRUE } else { FALSE },
+                }).collect()
+            } else {
+                return None;
+            };
+            Some(if *negated { not(out) } else { out })
+        }
+        Expr::Like { expr, pattern, negated } => {
+            let (Expr::Str(p), v) = (pattern.as_ref(), operand(expr, block)?) else { return None };
+            if !v.is_text() { return None; }
+            let out: Vec<u8> = (0..n).map(|i| match v.text(i) {
+                None => NULL,
+                Some(s) => if crate::executor::like_match(s, p) { TRUE } else { FALSE },
+            }).collect();
+            Some(if *negated { not(out) } else { out })
+        }
+        Expr::IsNull(x) | Expr::IsNotNull(x) => {
+            let nulls: Vec<bool> = match col_of(x, block)? {
+                ColumnData::Int64(v) => v.iter().map(|c| c.is_none()).collect(),
+                ColumnData::Float64(v) => v.iter().map(|c| c.is_none()).collect(),
+                ColumnData::Bool(v) => v.iter().map(|c| c.is_none()).collect(),
+                ColumnData::Str(v) => v.iter().map(|c| c.is_none()).collect(),
+                ColumnData::StrDict { codes, .. } => codes.iter().map(|&c| c == u8::MAX).collect(),
+            };
+            let want_null = matches!(e, Expr::IsNull(_));
+            Some(nulls.into_iter().map(|b| if b == want_null { TRUE } else { FALSE }).collect())
+        }
+        _ => None,
+    }
+}
+
+/// Rows for which the predicate is TRUE (NULL counts as not matching), or None when not covered.
+pub fn filter_mask(pred: &Expr, block: &DataBlock) -> Option<Vec<bool>> {
+    Some(tri(pred, block)?.into_iter().map(|v| v == TRUE).collect())
+}
+
+/// Numeric value of `e` for every row (NULL = None), or None when the expression is not covered.
+/// Mirrors the row interpreter: arithmetic yields floats and propagates NULL.
+pub fn num_vec(e: &Expr, block: &DataBlock) -> Option<Vec<Option<f64>>> {
+    let n = block.num_rows;
+    match e {
+        Expr::Int(i) => Some(vec![Some(*i as f64); n]),
+        Expr::Float(f) => Some(vec![Some(*f); n]),
+        Expr::Null => Some(vec![None; n]),
+        Expr::Col(_) | Expr::QualCol(..) => match col_of(e, block)? {
+            ColumnData::Int64(v) => Some(v.iter().map(|x| x.map(|i| i as f64)).collect()),
+            ColumnData::Float64(v) => Some(v.clone()),
+            _ => None,
+        },
+        Expr::BinOp { op: op @ (BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul | BinOpKind::Div | BinOpKind::Mod), left, right } => {
+            let (l, r) = (num_vec(left, block)?, num_vec(right, block)?);
+            Some(l.iter().zip(&r).map(|(a, b)| match (a, b) {
+                (Some(a), Some(b)) => Some(match op {
+                    BinOpKind::Add => a + b,
+                    BinOpKind::Sub => a - b,
+                    BinOpKind::Mul => a * b,
+                    BinOpKind::Div => a / b,
+                    _ => a % b,
+                }),
+                _ => None,
+            }).collect())
+        }
+        Expr::Case { operand: None, branches, else_val } => {
+            let mut out: Vec<Option<f64>> = vec![None; n];
+            let mut decided = vec![false; n];
+            for (cond, val) in branches {
+                let c = tri(cond, block)?;
+                let v = num_vec(val, block)?;
+                for i in 0..n {
+                    if !decided[i] && c[i] == TRUE {
+                        decided[i] = true;
+                        out[i] = v[i];
+                    }
+                }
+            }
+            if let Some(ev) = else_val {
+                let v = num_vec(ev, block)?;
+                for i in 0..n {
+                    if !decided[i] { out[i] = v[i]; }
+                }
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}

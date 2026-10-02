@@ -35,6 +35,55 @@ fn f64s(b: &DataBlock, name: &str) -> Vec<f64> {
     }
 }
 
+fn nums() -> KqlContext {
+    let mut c = KqlContext::new();
+    c.register("nums", DataBlock::new(vec![
+        Column::int64("i", (1..=5).map(Some).collect()),
+        Column::float64("f", vec![Some(1.0), Some(2.5), None, Some(4.0), Some(5.5)]),
+        Column::str_col("s", vec![Some("apple".into()), Some("banana".into()), None, Some("cherry".into()), Some("apple".into())]),
+    ]).unwrap());
+    c
+}
+
+fn count(c: &KqlContext, where_clause: &str) -> f64 {
+    let r = c.query(&format!("select count(*) as n from nums where {where_clause}")).unwrap();
+    f64s(&r, "n")[0]
+}
+
+#[test]
+fn predicates_follow_sql_null_semantics_and_compare_mixed_numeric_types() {
+    let c = nums();
+    // BETWEEN / IN / CASE with an Int literal against a Float column (used to match nothing)
+    assert_eq!(count(&c, "f between 2 and 5"), 2.0);
+    assert_eq!(count(&c, "i between 1.5 and 3.5"), 2.0);
+    assert_eq!(count(&c, "i in (1.0, 3, 5)"), 3.0);
+    assert_eq!(count(&c, "f in (4, 1)"), 2.0);
+    let r = c.query("select sum(case f when 4 then 1 else 0 end) as x from nums").unwrap();
+    assert_eq!(f64s(&r, "x"), vec![1.0]);
+    // NULL never matches a comparison, and NOT / OR use three-valued logic
+    assert_eq!(count(&c, "not (f > 3)"), 2.0);
+    assert_eq!(count(&c, "f > 3 or s = 'banana'"), 3.0);
+    assert_eq!(count(&c, "f is not null"), 4.0);
+    assert_eq!(count(&c, "s is null"), 1.0);
+    // strings: comparison, LIKE, IN
+    assert_eq!(count(&c, "s <> 'apple'"), 2.0);
+    assert_eq!(count(&c, "s >= 'banana'"), 2.0);
+    assert_eq!(count(&c, "s like 'a%'"), 2.0);
+    assert_eq!(count(&c, "s not like 'a%'"), 2.0);
+    assert_eq!(count(&c, "s in ('apple', 'cherry')"), 3.0);
+    assert_eq!(count(&c, "s not in ('apple')"), 2.0);
+}
+
+#[test]
+fn aggregate_over_a_case_expression() {
+    let c = nums();
+    let r = c.query("select sum(case when f > 2 then f * 2 else 0 end) as x from nums").unwrap();
+    assert_eq!(f64s(&r, "x"), vec![24.0]);
+    let r = c.query("select s, sum(f * 2 + 1) as y from nums where s is not null group by s order by s").unwrap();
+    // apple: (1.0*2+1) + (5.5*2+1) = 15, banana: 6, cherry: 9
+    assert_eq!(f64s(&r, "y"), vec![15.0, 6.0, 9.0]);
+}
+
 #[test]
 fn trailing_tokens_are_an_error_not_silently_dropped() {
     let c = ctx();

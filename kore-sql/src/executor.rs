@@ -929,21 +929,29 @@ pub fn execute(sql: &str, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
 
 /// Execute a full Query (with CTEs and set operations).
 pub fn execute_query(query: &Query, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
-    // 1. Register CTEs in an extended context
-    let mut local = ctx.clone();
-    for cte in &query.ctes {
-        let result = execute_select(&cte.body, &local)?;
-        local.register(cte.name.clone(), result);
-    }
+    // 1. Register CTEs in an extended context. Cloning the context copies every registered table,
+    // so only do it when the query actually defines CTEs.
+    let extended;
+    let local: &KqlContext = if query.ctes.is_empty() {
+        ctx
+    } else {
+        let mut l = ctx.clone();
+        for cte in &query.ctes {
+            let result = execute_select(&cte.body, &l)?;
+            l.register(cte.name.clone(), result);
+        }
+        extended = l;
+        &extended
+    };
 
     // 2. Execute main body
     let body = query.body.as_ref()
         .ok_or_else(|| KoreError::InvalidArgument("empty query body".into()))?;
-    let mut result = execute_select(body, &local)?;
+    let mut result = execute_select(body, local)?;
 
     // 3. Set operations (UNION ALL, UNION, INTERSECT, EXCEPT)
     for (kind, stmt) in &query.set_ops {
-        let other = execute_select(stmt, &local)?;
+        let other = execute_select(stmt, local)?;
         result = apply_set_op(result, other, kind)?;
     }
 
@@ -1720,6 +1728,12 @@ fn filter_block_ctx(block: DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<D
     // Pre-compute all IN subqueries ONCE into value sets (avoids O(n*m) re-execution per row)
     let pred = precompute_in_subqueries(pred, ctx);
     let pred = &pred;
+    // Column-at-a-time path (no per-row String allocation, SQL three-valued logic); the row
+    // interpreter below handles whatever it does not cover (subqueries, scalar functions, ...).
+    if let Some(mask) = crate::vecexpr::filter_mask(pred, &block) {
+        let keep: Vec<usize> = mask.iter().enumerate().filter_map(|(i, &k)| if k { Some(i) } else { None }).collect();
+        return Ok(block.select_rows(&keep));
+    }
     let n = block.num_rows;
     let keep: Vec<bool> = if n >= 100_000 {
         use rayon::prelude::*;
@@ -2716,10 +2730,12 @@ fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
                         let rhs = eval_expr(cond, block, row);
                         let eq = match (&lhs, &rhs) {
                             (ExprVal::Int(a),   ExprVal::Int(b))   => a == b,
-                            (ExprVal::Float(a), ExprVal::Float(b)) => (a-b).abs() < 1e-10,
                             (ExprVal::Str(a),   ExprVal::Str(b))   => a == b,
                             (ExprVal::Bool(a),  ExprVal::Bool(b))  => a == b,
-                            _ => false,
+                            _ => match (num_only(&lhs), num_only(&rhs)) {
+                                (Some(a), Some(b)) => (a - b).abs() < 1e-10,
+                                _ => false,
+                            },
                         };
                         if eq { return eval_expr(val, block, row); }
                     }
@@ -2754,10 +2770,13 @@ fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
                 let rv = eval_expr(v, block, row);
                 match (&lv, &rv) {
                     (ExprVal::Int(a),   ExprVal::Int(b))   => a == b,
-                    (ExprVal::Float(a), ExprVal::Float(b)) => (a-b).abs() < 1e-10,
                     (ExprVal::Str(a),   ExprVal::Str(b))   => a == b,
                     (ExprVal::Bool(a),  ExprVal::Bool(b))  => a == b,
-                    _ => false,
+                    // Int vs Float (and Float vs Float) compare as numbers
+                    _ => match (num_only(&lv), num_only(&rv)) {
+                        (Some(a), Some(b)) => (a - b).abs() < 1e-10,
+                        _ => false,
+                    },
                 }
             });
             ExprVal::Bool(if *negated { !found } else { found })
@@ -2768,10 +2787,12 @@ fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
             let lo = eval_expr(low, block, row);
             let hi = eval_expr(high, block, row);
             let in_range = match (&v, &lo, &hi) {
-                (ExprVal::Int(v),   ExprVal::Int(lo),   ExprVal::Int(hi))   => v >= lo && v <= hi,
-                (ExprVal::Float(v), ExprVal::Float(lo), ExprVal::Float(hi)) => v >= lo && v <= hi,
-                (ExprVal::Str(v),   ExprVal::Str(lo),   ExprVal::Str(hi))   => v.as_str() >= lo.as_str() && v.as_str() <= hi.as_str(),
-                _ => false,
+                (ExprVal::Str(v), ExprVal::Str(lo), ExprVal::Str(hi)) => v.as_str() >= lo.as_str() && v.as_str() <= hi.as_str(),
+                // numbers compare as numbers whatever their storage type (Int column BETWEEN 0.5 AND 2, ...)
+                _ => match (num_only(&v), num_only(&lo), num_only(&hi)) {
+                    (Some(v), Some(lo), Some(hi)) => v >= lo && v <= hi,
+                    _ => false,
+                },
             };
             ExprVal::Bool(if *negated { !in_range } else { in_range })
         }
@@ -3333,6 +3354,15 @@ fn eval_binop(op: &BinOpKind, l: ExprVal, r: ExprVal) -> ExprVal {
     }
 
     ExprVal::Null
+}
+
+/// Int or Float as f64 (unlike `to_f64`, booleans are not numbers).
+fn num_only(v: &ExprVal) -> Option<f64> {
+    match v {
+        ExprVal::Int(i)   => Some(*i as f64),
+        ExprVal::Float(f) => Some(*f),
+        _                 => None,
+    }
 }
 
 fn to_f64(v: &ExprVal) -> Option<f64> {
@@ -3902,6 +3932,8 @@ fn global_agg(block: DataBlock, projections: &[Projection]) -> Result<DataBlock,
             // Direct col: fast column-at-a-time; complex expr: row-at-a-time
             let vals: Vec<f64> = if is_direct {
                 agg_col.map(|c| extract_f64_all(c)).unwrap_or_default()
+            } else if let Some(v) = crate::vecexpr::num_vec(inner, &block) {
+                v.into_iter().flatten().collect()
             } else {
                 (0..block.num_rows).filter_map(|r| match eval_expr(inner, &block, r) {
                     ExprVal::Float(f) => Some(f),
@@ -4128,12 +4160,15 @@ fn group_by_agg(
                         };
                         // Pre-find the column once (not per group)
                         let agg_col = if is_direct { find_col(&block, &col_name) } else { None };
+                        // Arbitrary expression (e.g. col*col): evaluate it once for the whole block
+                        let pre_vals = if is_direct { None } else { crate::vecexpr::num_vec(inner, &block) };
                         let mut agg_vals: Vec<Option<f64>> = Vec::new();
                         for (_, idxs) in &groups {
                             // Direct column ref: fast column-at-a-time extraction.
-                            // Arbitrary expression (e.g. col*col): row-at-a-time eval.
                             let vals: Vec<f64> = if is_direct {
                                 agg_col.map(|c| extract_f64_at(c, idxs)).unwrap_or_default()
+                            } else if let Some(pv) = &pre_vals {
+                                idxs.iter().filter_map(|&r| pv[r]).collect()
                             } else {
                                 idxs.iter().filter_map(|&r| match eval_expr(inner, &block, r) {
                                     ExprVal::Float(f) => Some(f),
@@ -4292,7 +4327,7 @@ fn expr_vals_eq(a: &[ExprVal], b: &[ExprVal]) -> bool {
 // ── LIKE pattern matching ─────────────────────────────────────────────────────
 
 /// SQL LIKE: `%` = any chars, `_` = single char, `\` = escape char.
-fn like_match(value: &str, pattern: &str) -> bool {
+pub(crate) fn like_match(value: &str, pattern: &str) -> bool {
     like_recursive(value.as_bytes(), pattern.as_bytes())
 }
 
