@@ -67,17 +67,34 @@ enum ReadableMode {
 fn try_best_compression(comp: Compression, data: Vec<u8>) -> (Compression, Vec<u8>) {
     if data.len() < 64 { return (comp, data); }  // not worth it for tiny cols
     
-    let (lz4, zstd) = rayon::join(
+    // Opt-in (KORE_SHUFFLE=1): also try byte-plane shuffling on fixed-width records. Files that use
+    // it carry codec 7, which readers older than this feature reject.
+    let stride = match comp { Compression::Delta => 9, Compression::Rle => 13, Compression::NanRaw => 8, _ => 0 };
+    let try_shuffle = stride > 0 && data.len() % stride == 0
+        && std::env::var("KORE_SHUFFLE").map(|v| v == "1").unwrap_or(false);
+
+    let (lz4, (zstd, shuffled)) = rayon::join(
         || lz4_flex::compress_prepend_size(&data),
-        || compress::zstd_encode(&data),
+        || rayon::join(
+            || compress::zstd_encode(&data),
+            || if try_shuffle { Some(compress::zstd_encode(&compress::byte_shuffle(&data, stride))) } else { None },
+        ),
     );
-    
+
     // Pick best compression ratio
-    let (final_codec, final_data) = if lz4.len() < zstd.len() {
+    let (mut final_codec, mut final_data) = if lz4.len() < zstd.len() {
         (Compression::Lz4, lz4)
     } else {
         (Compression::Zstd, zstd)
     };
+    if let Some(sh) = shuffled {
+        if sh.len() + 1 < final_data.len() {
+            let mut payload = vec![stride as u8];
+            payload.extend_from_slice(&sh);
+            final_codec = Compression::ZstdShuffle;
+            final_data = payload;
+        }
+    }
     
     if final_data.len() < data.len() {
         // Encode the original comp type in first byte so reader can round-trip

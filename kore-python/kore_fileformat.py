@@ -68,6 +68,7 @@ class Compression(IntEnum):
     NAN_RAW = 4       # Special NaN handling
     DEFLATE = 5       # Deflate/LZ4
     ZSTD = 6          # ZSTD compression
+    ZSTD_SHUFFLE = 7  # ZSTD over byte-shuffled records (opt-in: KORE_SHUFFLE=1)
 
 
 # -----------------------------------------------------------------------------

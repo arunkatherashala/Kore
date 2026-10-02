@@ -285,6 +285,18 @@ fn decode_column(raw: &[u8], dtype: DType, comp: Compression, n: usize) -> Resul
         let decompressed = lz4_flex::decompress_size_prepended(body)
             .map_err(|e| format!("LZ4 decompress: {e}"))?;
         return decode_column(&decompressed, dtype, inner_comp, n);
+    } else if comp == Compression::ZstdShuffle {
+        if raw.len() < 2 { return Err("truncated shuffled ZSTD block".into()); }
+        let inner_comp = Compression::try_from(raw[0])
+            .map_err(|e| format!("ZSTD-shuffle inner comp: {e}"))?;
+        if matches!(inner_comp, Compression::Lz4 | Compression::Zstd | Compression::ZstdShuffle) {
+            return Err("invalid nested compression".into());
+        }
+        let stride = raw[1] as usize;
+        if !(2..=16).contains(&stride) { return Err("invalid shuffle stride".into()); }
+        let planes = zstd::decode_all(&raw[2..]).map_err(|e| format!("ZSTD decompress: {e}"))?;
+        if planes.len() % stride != 0 { return Err("shuffled block length not a multiple of stride".into()); }
+        return decode_column(&compress::byte_unshuffle(&planes, stride), dtype, inner_comp, n);
     } else if comp == Compression::Zstd {
         if raw.is_empty() { return Err("empty ZSTD block".into()); }
         let inner_comp = Compression::try_from(raw[0])

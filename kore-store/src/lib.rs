@@ -37,7 +37,7 @@ pub enum DType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum Compression { Raw = 0, Rle = 1, Delta = 2, Dict = 3, NanRaw = 4, Lz4 = 5, Zstd = 6 }
+pub enum Compression { Raw = 0, Rle = 1, Delta = 2, Dict = 3, NanRaw = 4, Lz4 = 5, Zstd = 6, ZstdShuffle = 7 }
 
 impl TryFrom<u8> for DType {
     type Error = KoreError;
@@ -112,6 +112,7 @@ impl TryFrom<u8> for Compression {
             2 => Ok(Compression::Delta), 3 => Ok(Compression::Dict),
             4 => Ok(Compression::NanRaw), 5 => Ok(Compression::Lz4),
             6 => Ok(Compression::Zstd),
+            7 => Ok(Compression::ZstdShuffle),
             _ => Err(KoreError::InvalidArgument(format!("unknown compression {v}"))),
         }
     }

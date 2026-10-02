@@ -307,3 +307,25 @@ class TestArrowFileRead:
             assert t.column(name).to_pylist() == list(ref.get_column(name).data)
         assert t.column('s').to_pylist() == list(ref.get_column('s').data)
         assert t.column('b').to_pylist() == [True, False, None, True]
+
+
+class TestShuffleCodec:
+    def test_opt_in_shuffle_roundtrip_and_smaller(self, monkeypatch):
+        import array, random
+        random.seed(1)
+        n = 20000
+        block = kore.DataBlock()
+        block.add_column('f', kore.DataType.F64, array.array('d', [random.uniform(1, 1000) for _ in range(n)]))
+        block.add_column('q', kore.DataType.I64, array.array('q', [random.randint(1, 10000) for _ in range(n)]))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plain = Path(tmpdir) / 'plain.kore'
+            shuf = Path(tmpdir) / 'shuf.kore'
+            monkeypatch.delenv('KORE_SHUFFLE', raising=False)
+            kore.write_file(plain, block)
+            monkeypatch.setenv('KORE_SHUFFLE', '1')
+            kore.write_file(shuf, block)
+            monkeypatch.delenv('KORE_SHUFFLE', raising=False)
+            assert shuf.stat().st_size < plain.stat().st_size
+            got = kore.read_file(shuf)
+        assert list(got.get_column('f').data) == list(block.get_column('f').data)
+        assert list(got.get_column('q').data) == list(block.get_column('q').data)

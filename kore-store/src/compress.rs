@@ -252,6 +252,27 @@ pub fn zstd_encode(data: &[u8]) -> Vec<u8> {
     zstd::encode_all(data, 3).unwrap_or_else(|_| data.to_vec())
 }
 
+/// Transpose fixed-width records into byte planes (all byte 0s, then all byte 1s, ...).
+/// `data.len()` must be a multiple of `width`.
+pub fn byte_shuffle(data: &[u8], width: usize) -> Vec<u8> {
+    let n = data.len() / width;
+    let mut out = vec![0u8; data.len()];
+    for i in 0..n {
+        for j in 0..width { out[j * n + i] = data[i * width + j]; }
+    }
+    out
+}
+
+/// Inverse of `byte_shuffle`.
+pub fn byte_unshuffle(data: &[u8], width: usize) -> Vec<u8> {
+    let n = data.len() / width;
+    let mut out = vec![0u8; data.len()];
+    for i in 0..n {
+        for j in 0..width { out[i * width + j] = data[j * n + i]; }
+    }
+    out
+}
+
 pub fn zstd_decode(data: &[u8], n: usize) -> Vec<u8> {
     zstd::decode_all(data).unwrap_or_else(|_| vec![0; n])
 }
