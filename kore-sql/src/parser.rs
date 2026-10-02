@@ -46,6 +46,13 @@ pub fn parse_query(sql: &str) -> Result<Query, KoreError> {
         set_ops.push((kind, p.parse_select()?));
     }
 
+    // Never silently drop the tail of a statement: whatever the grammar did not consume is an error.
+    p.consume_if(&Token::Semicolon);
+    if p.peek() != &Token::Eof {
+        return Err(KoreError::InvalidArgument(format!(
+            "unexpected {:?} after the end of the statement", p.peek())));
+    }
+
     Ok(Query { ctes, body, set_ops })
 }
 
@@ -154,6 +161,19 @@ impl Parser {
             TableExpr { name: "__dual__".to_string(), alias: None, subquery: None, values: None, push_filter: None }
         };
 
+        // FROM a, b, c — comma-separated tables are implicit inner joins; the join keys are taken
+        // from equality predicates in WHERE when the statement is executed.
+        let mut joins = Vec::new();
+        while self.consume_if(&Token::Comma) {
+            let table = self.parse_table_expr()?;
+            joins.push(JoinClause {
+                join_type: JoinKind::Implicit,
+                table,
+                on: JoinOn { left_col: String::new(), right_col: String::new(), expr: None },
+                push_filter: None,
+            });
+        }
+
         // PIVOT / UNPIVOT (after FROM, before JOINs)
         let pivot = if self.peek() == &Token::Pivot {
             Some(self.parse_pivot()?)
@@ -169,7 +189,6 @@ impl Parser {
         }
 
         // JOINs
-        let mut joins = Vec::new();
         while self.is_join_keyword() {
             joins.push(self.parse_join()?);
         }

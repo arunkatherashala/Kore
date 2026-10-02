@@ -197,7 +197,11 @@ pub struct JoinOn {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum JoinKind { Inner, Left, Right, Full, Cross }
+pub enum JoinKind {
+    Inner, Left, Right, Full, Cross,
+    /// `FROM a, b, c`: an inner join whose keys come from equalities in the WHERE clause.
+    Implicit,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderByItem {

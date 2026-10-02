@@ -163,9 +163,17 @@ def main():
     names = [q.strip() for q in a.only.split(",") if q.strip()] or list(queries(a.sf))
     engines = a.engines.split(",")
     spark = kore = None
+    cache = os.path.join(a.out, f"spark_cache_sf{a.sf}.json")
     if "spark" in engines:
         print("Running Spark (live)...", flush=True)
         spark = run_spark(data, a.sf, names, a.repeats)
+        os.makedirs(a.out, exist_ok=True)
+        old = json.load(open(cache, encoding="utf-8")) if os.path.exists(cache) else {}
+        old.update(spark)  # merge, so a subset run does not lose the other queries
+        json.dump(old, open(cache, "w", encoding="utf-8"), default=str)
+    elif os.path.exists(cache):
+        spark = json.load(open(cache, encoding="utf-8"))
+        print(f"Using Spark results cached in {cache} (measured earlier on this machine)", flush=True)
     if "kore" in engines:
         print("Running KORE...", flush=True)
         kore = run_kore(data, a.sf, names, a.repeats, a.kore_timeout)

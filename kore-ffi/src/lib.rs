@@ -416,6 +416,43 @@ unsafe fn ptr_to_str<'a>(p: *const c_char) -> Option<&'a str> {
     CStr::from_ptr(p).to_str().ok()
 }
 
+/// Split one CSV record. Fields may be double-quoted (commas inside, `""` for a quote); unquoted
+/// fields are trimmed. Records do not span lines.
+fn split_csv<'a>(line: &'a str, out: &mut Vec<std::borrow::Cow<'a, str>>) {
+    use std::borrow::Cow;
+    out.clear();
+    let b = line.as_bytes();
+    let mut i = 0;
+    loop {
+        if i < b.len() && b[i] == b'"' {
+            let mut j = i + 1;
+            let mut escaped = false;
+            loop {
+                match b[j.min(b.len())..].iter().position(|&c| c == b'"') {
+                    None => { j = b.len(); break; }
+                    Some(p) => {
+                        j += p;
+                        if j + 1 < b.len() && b[j + 1] == b'"' { escaped = true; j += 2; continue; }
+                        break;
+                    }
+                }
+            }
+            let inner = &line[i + 1..j.min(b.len())];
+            out.push(if escaped { Cow::Owned(inner.replace("\"\"", "\"")) } else { Cow::Borrowed(inner) });
+            let mut k = (j + 1).min(b.len());
+            while k < b.len() && b[k] != b',' { k += 1; }
+            i = k;
+        } else {
+            let end = b[i.min(b.len())..].iter().position(|&c| c == b',').map_or(b.len(), |p| i + p);
+            out.push(Cow::Borrowed(line[i.min(b.len())..end].trim()));
+            i = end;
+        }
+        if i >= b.len() { break; }
+        i += 1;
+        if i == b.len() { out.push(Cow::Borrowed("")); break; }
+    }
+}
+
 fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(), String> {
     use std::io::{BufRead, BufReader};
     use std::collections::HashMap;
@@ -426,15 +463,18 @@ fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(
 
     let mut hdr = String::new();
     r1.read_line(&mut hdr).map_err(|e| e.to_string())?;
-    let headers: Vec<String> = hdr.trim_end().split(',')
-        .map(|h| h.trim().trim_matches('"').to_string()).collect();
+    let headers: Vec<String> = {
+        let mut f = Vec::new();
+        split_csv(hdr.trim_end(), &mut f);
+        f.iter().map(|h| h.to_string()).collect()
+    };
     let nc = headers.len();
 
     const SAMPLE: usize = 2_000;
     // For each column: track if all non-empty values parse as i64, f64, and cardinality.
     let mut all_i64:   Vec<bool> = vec![true; nc];
     let mut all_f64:   Vec<bool> = vec![true; nc];
-    let mut seen:      Vec<HashMap<[u8; 16], ()>> = (0..nc).map(|_| HashMap::new()).collect();
+    let mut seen:      Vec<std::collections::HashSet<u64>> = (0..nc).map(|_| Default::default()).collect();
     let mut seen_many: Vec<bool> = vec![false; nc];  // >255 unique
     let mut any_val:   Vec<bool> = vec![false; nc];
     let mut nsampled = 0usize;
@@ -445,21 +485,19 @@ fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(
         if r1.read_line(&mut line).map_err(|e| e.to_string())? == 0 { break; }
         let trimmed = line.trim_end();
         if trimmed.is_empty() { continue; }
-        let vals: Vec<&str> = trimmed.splitn(nc, ',').collect();
+        let mut vals = Vec::with_capacity(nc);
+        split_csv(trimmed, &mut vals);
         for i in 0..nc {
-            let v = vals.get(i).map(|s| s.trim().trim_matches('"')).unwrap_or("");
+            let v: &str = vals.get(i).map(|s| s.as_ref()).unwrap_or("");
             if v.is_empty() { continue; }
             any_val[i] = true;
             if all_i64[i] && v.parse::<i64>().is_err() { all_i64[i] = false; }
             if all_f64[i] && v.parse::<f64>().is_err() { all_f64[i] = false; }
             if !seen_many[i] {
-                // cheap 16-byte key from first 16 bytes of value
-                let mut key = [0u8; 16];
-                let b = v.as_bytes();
-                let n = b.len().min(16);
-                key[..n].copy_from_slice(&b[..n]);
-                key[15] = b.len() as u8;
-                seen[i].insert(key, ());
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                v.hash(&mut h);
+                seen[i].insert(h.finish());
                 if seen[i].len() > 255 { seen_many[i] = true; }
             }
         }
@@ -468,7 +506,7 @@ fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(
 
     #[derive(Clone, PartialEq)]
     enum CT { Int64, Float64, StrDict, Str }
-    let col_types: Vec<CT> = (0..nc).map(|i| {
+    let mut col_types: Vec<CT> = (0..nc).map(|i| {
         if !any_val[i]       { return CT::Str; }
         if all_i64[i]        { return CT::Int64; }
         if all_f64[i]        { return CT::Float64; }
@@ -500,9 +538,10 @@ fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(
         let trimmed = line2.trim_end();
         if trimmed.is_empty() { continue; }
         nr += 1;
-        let vals: Vec<&str> = trimmed.splitn(nc, ',').collect();
+        let mut vals = Vec::with_capacity(nc);
+        split_csv(trimmed, &mut vals);
         for i in 0..nc {
-            let v = vals.get(i).map(|s| s.trim().trim_matches('"')).unwrap_or("");
+            let v: &str = vals.get(i).map(|s| s.as_ref()).unwrap_or("");
             match col_types[i] {
                 CT::Int64   => i64_cols[i].push(if v.is_empty() { None } else { v.parse().ok() }),
                 CT::Float64 => f64_cols[i].push(if v.is_empty() { None } else { v.parse().ok() }),
@@ -518,8 +557,17 @@ fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(
                         sd_dict[i].push(v.to_string());
                         sd_codes[i].push(code);
                     } else {
-                        // cardinality overflowed sample estimate — treat as plain Str
-                        sd_codes[i].push(0);
+                        // more distinct values than the sample suggested: this column is plain text after all.
+                        // Rebuild what was read so far as strings and carry on in Str mode (never reuse a code).
+                        let mut all: Vec<Option<String>> = sd_codes[i].iter()
+                            .map(|&c| if c == u8::MAX { None } else { Some(sd_dict[i][c as usize].clone()) })
+                            .collect();
+                        all.push(Some(v.to_string()));
+                        str_cols[i] = all;
+                        sd_codes[i] = Vec::new();
+                        sd_dict[i].clear();
+                        sd_map[i].clear();
+                        col_types[i] = CT::Str;
                     }
                 }
             }
@@ -565,5 +613,46 @@ fn block_to_json_stripped(block: &DataBlock) -> String {
         rows.push(serde_json::Value::Object(obj));
     }
     serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
+}
+
+#[cfg(test)]
+mod csv_loader_tests {
+    use super::*;
+
+    #[test]
+    fn csv_loader_never_replaces_values_and_handles_quoting() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!("kore_csv_loader_{}.csv", std::process::id()));
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "id,name,grp,note").unwrap();
+            for i in 1..=3000 {
+                // names share a 16-byte prefix; grp looks low-cardinality for 2500 rows, then explodes
+                let grp = if i <= 2500 { format!("g{}", i % 5) } else { format!("late-{i}") };
+                let note = match i % 3 { 0 => "\"a, b\"".to_string(), 1 => "\"say \"\"hi\"\"\"".to_string(), _ => String::new() };
+                writeln!(f, "{i},\"Customer#{i:09}\",{grp},{note}").unwrap();
+            }
+        }
+        let mut ctx = KqlContext::new();
+        load_csv_into(&mut ctx, "t", path.to_str().unwrap()).unwrap();
+        let text = |sql: &str| -> Option<String> {
+            let b = ctx.query(sql).unwrap();
+            match &b.columns[0].data {
+                ColumnData::Str(v) => v[0].clone(),
+                ColumnData::StrDict { codes, dict } => dict.get(codes[0] as usize).cloned(),
+                other => panic!("unexpected column type {other:?}"),
+            }
+        };
+        assert_eq!(text("select name from t where id = 1").as_deref(), Some("Customer#000000001"));
+        assert_eq!(text("select name from t where id = 2999").as_deref(), Some("Customer#000002999"));
+        let distinct = ctx.query("select count(distinct name) as d from t").unwrap();
+        assert!(matches!(&distinct.columns[0].data, ColumnData::Float64(v) if v[0] == Some(3000.0)),
+                "all 3000 names must stay distinct");
+        assert_eq!(text("select grp from t where id = 2999").as_deref(), Some("late-2999"));
+        assert_eq!(text("select grp from t where id = 7").as_deref(), Some("g2"));
+        assert_eq!(text("select note from t where id = 3").as_deref(), Some("a, b"));
+        assert_eq!(text("select note from t where id = 4").as_deref(), Some("say \"hi\""));
+        std::fs::remove_file(path).ok();
+    }
 }
 

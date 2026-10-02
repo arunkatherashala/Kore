@@ -15,6 +15,7 @@ pub mod ast;
 pub mod lexer;
 pub mod parser;
 pub mod executor;
+pub mod rewrite;
 pub mod vec_path;
 
 pub use ast::*;
@@ -25,6 +26,7 @@ use kore_core::KoreError;
 
 /// One-shot: parse + execute SQL against a context.
 pub fn query(sql: &str, ctx: &KqlContext) -> Result<kore_core::DataBlock, KoreError> {
-    let stmt = parse(sql)?;
-    executor::execute_select(&stmt, ctx)
+    // Same entry point as every other caller, so WITH clauses, UNION/INTERSECT/EXCEPT and the
+    // vectorized fast path are not silently skipped.
+    ctx.query(sql)
 }

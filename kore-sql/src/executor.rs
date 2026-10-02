@@ -1024,6 +1024,12 @@ fn filter_rows(block: &DataBlock, indices: &[usize]) -> DataBlock {
 }
 
 pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
+    // Aggregates nested in larger expressions (100 * SUM(a) / SUM(b)) run as an aggregate subquery
+    // plus an outer projection over its hidden outputs.
+    if let Some(lifted) = crate::rewrite::lift_aggregates(stmt) {
+        return execute_select(&lifted, ctx);
+    }
+
     // 1. Resolve FROM table (or execute FROM subquery / VALUES / __dual__)
     let base_name   = &stmt.from.name;
     let base_alias  = stmt.from.alias.as_deref().unwrap_or(base_name.as_str());
@@ -1118,8 +1124,47 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     // Prefix column names with alias
     let mut result = prefix_columns(base_block, base_alias);
 
+    // 2a. Implicit joins (FROM a, b, c): join keys come from equalities in WHERE, single-table
+    // predicates are applied before joining, whatever is left stays in WHERE.
+    let n_implicit = stmt.joins.iter().take_while(|j| j.join_type == JoinKind::Implicit).count();
+    let mut where_pred: Option<Expr> = stmt.where_clause.clone();
+    if n_implicit > 0 {
+        let mut conjuncts = Vec::new();
+        if let Some(w) = &where_pred { crate::rewrite::split_conjuncts(w, &mut conjuncts); }
+        crate::rewrite::factor_common_from_or(&mut conjuncts);
+        let mut pending: Vec<DataBlock> = Vec::with_capacity(n_implicit);
+        for join in &stmt.joins[..n_implicit] {
+            let name = &join.table.name;
+            let alias = join.table.alias.as_deref().unwrap_or(name.as_str());
+            let block = resolve_join_table(&join.table, ctx)?;
+            let block = prefix_columns(block, alias);
+            pending.push(push_down_conjuncts(&mut conjuncts, block, ctx)?);
+        }
+        result = push_down_conjuncts(&mut conjuncts, result, ctx)?;
+        while !pending.is_empty() {
+            let link = pending.iter().enumerate()
+                .find_map(|(pi, pb)| find_link(&conjuncts, &result, pb).map(|l| (pi, l)));
+            match link {
+                Some((pi, (ci, lk, rk))) => {
+                    let pb = pending.remove(pi);
+                    conjuncts.remove(ci);
+                    let cfg = JoinConfig { left_key: lk, right_key: rk, join_type: JoinType::Inner };
+                    result = HashJoin::join(&result, &pb, &cfg)?;
+                }
+                None => {
+                    // no equality connects the remaining tables: fall back to a cross product (smallest first)
+                    let pi = pending.iter().enumerate().min_by_key(|(_, b)| b.num_rows).map(|(i, _)| i).unwrap();
+                    let pb = pending.remove(pi);
+                    result = cross_join(&result, &pb);
+                }
+            }
+            result = push_down_conjuncts(&mut conjuncts, result, ctx)?;
+        }
+        where_pred = crate::rewrite::and_all(conjuncts);
+    }
+
     // 2. Process JOINs
-    for join in &stmt.joins {
+    for join in stmt.joins.iter().skip(n_implicit) {
         // Pre-cap the probe side when LIMIT is set with no ORDER BY/WHERE.
         let probe = if let Some(lim) = stmt.limit {
             let has_win = stmt.projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Window { .. }, .. }));
@@ -1159,9 +1204,14 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
             continue;
         }
 
-        // Non-equi join: use nested-loop fallback
+        // ON with more than one condition: hash-join on an equality and apply the rest as a residual;
+        // only genuinely non-equi joins fall back to the nested loop.
         if let Some(ref on_expr) = join.on.expr {
-            result = nested_loop_join(&probe, &right_block, on_expr, &join.join_type);
+            if let Some(done) = hash_join_with_residual(&probe, &right_block, on_expr, &join.join_type, ctx)? {
+                result = done;
+            } else {
+                result = nested_loop_join(&probe, &right_block, on_expr, &join.join_type);
+            }
             continue;
         }
 
@@ -1170,7 +1220,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
             JoinKind::Left  => JoinType::Left,
             JoinKind::Right => JoinType::Left,
             JoinKind::Full  => JoinType::Full,
-            JoinKind::Cross => unreachable!(),
+            JoinKind::Cross | JoinKind::Implicit => unreachable!(),
         };
 
         // Resolve join keys
@@ -1219,13 +1269,36 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     }
 
     // 3. WHERE filter
-    if let Some(pred) = &stmt.where_clause {
-        let resolved = resolve_subqueries(pred, ctx);
-        // Decorrelate correlated scalar subqueries → O(n²) to O(n)
-        let (new_pred, new_block) = decorrelate_scalar_subqueries(&resolved, result, ctx);
-        // Decorrelate correlated EXISTS → hash semi-join (O(1) per outer row)
-        let (new_pred2, new_block2) = decorrelate_exists(&new_pred, new_block, ctx);
-        result = filter_block_ctx(new_block2, &new_pred2, ctx)?;
+    if let Some(pred) = &where_pred {
+        // Top-level EXISTS / NOT EXISTS conjuncts run as hash semi/anti joins, after the cheap predicates
+        // have shrunk the input. Shapes the semi-join cannot handle fall back to the older path below.
+        let mut conj = Vec::new();
+        crate::rewrite::split_conjuncts(pred, &mut conj);
+        let (exists_conj, plain): (Vec<Expr>, Vec<Expr>) = conj.into_iter().partition(|c| matches!(c, Expr::Exists { .. }));
+        let mut leftovers: Vec<Expr> = Vec::new();
+        let mut run_old_path = |pred: Expr, result: DataBlock| -> Result<DataBlock, KoreError> {
+            let mut result = result;
+            let mut corr_counter = 0usize;
+            let pred = decorrelate_principled(&pred, &mut result, ctx, &mut corr_counter);
+            let resolved = resolve_subqueries(&pred, ctx);
+            // Decorrelate correlated scalar subqueries → O(n²) to O(n)
+            let (new_pred, new_block) = decorrelate_scalar_subqueries(&resolved, result, ctx);
+            // Decorrelate correlated EXISTS → IN list
+            let (new_pred2, new_block2) = decorrelate_exists(&new_pred, new_block, ctx);
+            filter_block_ctx(new_block2, &new_pred2, ctx)
+        };
+        if let Some(p) = crate::rewrite::and_all(plain) { result = run_old_path(p, result)?; }
+        for e in exists_conj {
+            let Expr::Exists { subquery, negated } = &e else { unreachable!() };
+            match semi_join_mask(&result, subquery, *negated, ctx)? {
+                Some(mask) => {
+                    let keep: Vec<usize> = mask.iter().enumerate().filter_map(|(i, &k)| if k { Some(i) } else { None }).collect();
+                    result = result.select_rows(&keep);
+                }
+                None => leftovers.push(e),
+            }
+        }
+        if let Some(p) = crate::rewrite::and_all(leftovers) { result = run_old_path(p, result)?; }
     }
 
     // 4. GROUP BY  (or global aggregation if no GROUP BY but has aggregates)
@@ -1279,7 +1352,15 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     // 5. Projection — done BEFORE ORDER BY so ORDER BY can reference SELECT aliases
     // (especially important when GROUP BY uses CASE expression aliases)
     let has_order = !stmt.order_by.is_empty();
-    if !has_order || !stmt.group_by.is_empty() {
+    // ORDER BY <select alias> needs the projected columns, unless the alias is also a real input column
+    let order_needs_projection = has_order && stmt.order_by.iter().any(|o| {
+        let bare = o.col.rsplit('.').next().unwrap_or(&o.col);
+        !o.col.is_empty()
+            && stmt.projections.iter().any(|p| matches!(p, Projection::Expr { alias: Some(a), .. } if a.eq_ignore_ascii_case(bare)))
+            && find_col_in_block(&o.col, &result).is_none()
+    });
+    let project_first = !has_order || !stmt.group_by.is_empty() || order_needs_projection;
+    if project_first {
         result = project(result, &stmt.projections)?;
     }
 
@@ -1322,7 +1403,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     }
 
     // 8. Projection (only if not already done above)
-    if has_order && stmt.group_by.is_empty() {
+    if !project_first {
         result = project(result, &stmt.projections)?;
     }
 
@@ -1332,6 +1413,204 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     }
 
     Ok(result)
+}
+
+// ─── Implicit-join helpers ────────────────────────────────────────────────────
+
+/// The data behind a joined table reference: a FROM-subquery, a registered table or a view.
+fn resolve_join_table(table: &TableExpr, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
+    if let Some(subq) = &table.subquery {
+        execute_select(subq, ctx)
+    } else if let Some(b) = ctx.get(&table.name) {
+        Ok(b.clone())
+    } else if let Some(sql) = ctx.views.get(table.name.as_str()) {
+        ctx.query(&sql.clone())
+    } else {
+        Err(KoreError::InvalidArgument(format!("unknown table: {}", table.name)))
+    }
+}
+
+/// Apply (and remove) every conjunct that only needs columns present in `block`.
+fn push_down_conjuncts(conjuncts: &mut Vec<Expr>, block: DataBlock, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
+    let mut mine = Vec::new();
+    let mut rest = Vec::new();
+    for c in conjuncts.drain(..) {
+        let mut cols = Vec::new();
+        let movable = crate::rewrite::referenced_cols(&c, &mut cols)
+            && !cols.is_empty()
+            && cols.iter().all(|n| find_col_in_block(n, &block).is_some());
+        if movable { mine.push(c) } else { rest.push(c) }
+    }
+    *conjuncts = rest;
+    match crate::rewrite::and_all(mine) {
+        Some(pred) => filter_block_ctx(block, &pred, ctx),
+        None => Ok(block),
+    }
+}
+
+/// An equality conjunct `a = b` whose sides live in `left` and `right` respectively:
+/// (conjunct index, key in left, key in right).
+fn find_link(conjuncts: &[Expr], left: &DataBlock, right: &DataBlock) -> Option<(usize, String, String)> {
+    for (i, c) in conjuncts.iter().enumerate() {
+        if let Expr::BinOp { op: BinOpKind::Eq, left: a, right: b } = c {
+            if let (Some(x), Some(y)) = (crate::rewrite::col_ref(a), crate::rewrite::col_ref(b)) {
+                if let (Some(lk), Some(rk)) = (find_col_in_block(&x, left), find_col_in_block(&y, right)) {
+                    return Some((i, lk, rk));
+                }
+                if let (Some(lk), Some(rk)) = (find_col_in_block(&y, left), find_col_in_block(&x, right)) {
+                    return Some((i, lk, rk));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// `JOIN ... ON a = b AND <more>`: hash join on the equality, then the remaining conditions.
+/// For a LEFT join the extra conditions must only touch the right side (they then filter the right
+/// input, which is equivalent); anything else returns None so the caller uses the nested loop.
+fn hash_join_with_residual(
+    left: &DataBlock, right: &DataBlock, on: &Expr, kind: &JoinKind, ctx: &KqlContext,
+) -> Result<Option<DataBlock>, KoreError> {
+    if !matches!(kind, JoinKind::Inner | JoinKind::Left) { return Ok(None); }
+    let mut conjuncts = Vec::new();
+    crate::rewrite::split_conjuncts(on, &mut conjuncts);
+    let Some((ci, lk, rk)) = find_link(&conjuncts, left, right) else { return Ok(None) };
+    conjuncts.remove(ci);
+
+    let mut right_only = Vec::new();
+    let mut other = Vec::new();
+    for c in conjuncts {
+        let mut cols = Vec::new();
+        let ok = crate::rewrite::referenced_cols(&c, &mut cols) && !cols.is_empty();
+        if ok && cols.iter().all(|n| find_col_in_block(n, right).is_some()) { right_only.push(c) } else { other.push(c) }
+    }
+    if *kind == JoinKind::Left && !other.is_empty() { return Ok(None); }
+
+    let right = match crate::rewrite::and_all(right_only) {
+        Some(p) => filter_block_ctx(right.clone(), &p, ctx)?,
+        None => right.clone(),
+    };
+    let jt = if *kind == JoinKind::Left { JoinType::Left } else { JoinType::Inner };
+    let mut joined = HashJoin::join(left, &right, &JoinConfig { left_key: lk, right_key: rk, join_type: jt })?;
+    if let Some(p) = crate::rewrite::and_all(other) {
+        joined = filter_block_ctx(joined, &p, ctx)?;
+    }
+    Ok(Some(joined))
+}
+
+/// Hash-encode join-key values; false when any value is NULL (NULL never equals anything).
+fn key_bytes(vals: &[ExprVal], out: &mut Vec<u8>) -> bool {
+    for v in vals {
+        match v {
+            ExprVal::Int(i)   => { out.push(1); out.extend_from_slice(&(*i as f64).to_bits().to_le_bytes()); }
+            ExprVal::Float(f) => { out.push(1); out.extend_from_slice(&(if *f == 0.0 { 0.0f64 } else { *f }).to_bits().to_le_bytes()); }
+            ExprVal::Str(s)   => { out.push(2); out.extend_from_slice(&(s.len() as u32).to_le_bytes()); out.extend_from_slice(s.as_bytes()); }
+            ExprVal::Bool(b)  => { out.push(3); out.push(*b as u8); }
+            ExprVal::Null     => return false,
+        }
+    }
+    true
+}
+
+/// EXISTS / NOT EXISTS as a hash semi/anti join. Supports one table in the subquery, any number of
+/// correlated equalities, inner-only filters and at most one correlated `<>`.
+/// Returns one flag per outer row, or None when the subquery has a shape this does not cover.
+fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlContext) -> Result<Option<Vec<bool>>, KoreError> {
+    use std::collections::HashMap;
+    if !sub.joins.is_empty() || sub.from.subquery.is_some() || sub.from.values.is_some()
+        || !sub.group_by.is_empty() || sub.having.is_some() || sub.limit.is_some() || sub.offset.is_some()
+    {
+        return Ok(None);
+    }
+    let Some(w) = &sub.where_clause else { return Ok(None) };
+    let alias = sub.from.alias.as_deref().unwrap_or(sub.from.name.as_str()).to_string();
+    let inner = match resolve_join_table(&sub.from, ctx) {
+        Ok(b) => prefix_columns(b, &alias),
+        Err(_) => return Ok(None),
+    };
+
+    // 0 = no columns, 1 = inner only, 2 = outer only, 3 = both; None = cannot tell
+    let side = |e: &Expr| -> Option<u8> {
+        let mut cols = Vec::new();
+        if !crate::rewrite::referenced_cols(e, &mut cols) { return None; }
+        let (mut i, mut o) = (false, false);
+        for c in cols {
+            // inner scope wins when both could provide the name (SQL scoping rule)
+            match (find_col_in_block(&c, &inner).is_some(), find_col_in_block(&c, outer).is_some()) {
+                (true, _) => i = true,
+                (false, true) => o = true,
+                (false, false) => return None,
+            }
+        }
+        Some(match (i, o) { (false, false) => 0, (true, false) => 1, (false, true) => 2, (true, true) => 3 })
+    };
+
+    let mut conj = Vec::new();
+    crate::rewrite::split_conjuncts(w, &mut conj);
+    let mut inner_filters = Vec::new();
+    let mut eqs: Vec<(Expr, Expr)> = Vec::new();  // (inner expr, outer expr)
+    let mut nes: Vec<(Expr, Expr)> = Vec::new();
+    for c in conj {
+        match side(&c) {
+            Some(0) | Some(1) => inner_filters.push(c),
+            Some(3) => {
+                let Expr::BinOp { op, left, right } = &c else { return Ok(None) };
+                if !matches!(op, BinOpKind::Eq | BinOpKind::Ne) { return Ok(None); }
+                let pair = match (side(left), side(right)) {
+                    (Some(1), Some(2)) => ((**left).clone(), (**right).clone()),
+                    (Some(2), Some(1)) => ((**right).clone(), (**left).clone()),
+                    _ => return Ok(None),
+                };
+                if *op == BinOpKind::Eq { eqs.push(pair) } else { nes.push(pair) }
+            }
+            _ => return Ok(None),
+        }
+    }
+    if eqs.is_empty() || nes.len() > 1 { return Ok(None); }
+
+    let inner = match crate::rewrite::and_all(inner_filters) {
+        Some(p) => filter_block_ctx(inner, &p, ctx)?,
+        None => inner,
+    };
+
+    struct Group { first: Option<Vec<u8>>, multi: bool }
+    let mut map: HashMap<Vec<u8>, Group> = HashMap::with_capacity(inner.num_rows.min(1 << 20));
+    let mut kb = Vec::new();
+    for r in 0..inner.num_rows {
+        let vals: Vec<ExprVal> = eqs.iter().map(|(ie, _)| eval_expr(ie, &inner, r)).collect();
+        kb.clear();
+        if !key_bytes(&vals, &mut kb) { continue; }
+        let g = map.entry(kb.clone()).or_insert(Group { first: None, multi: false });
+        if let Some((ine, _)) = nes.first() {
+            let mut vb = Vec::new();
+            if key_bytes(&[eval_expr(ine, &inner, r)], &mut vb) {
+                match &g.first {
+                    None => g.first = Some(vb),
+                    Some(f) if *f != vb => g.multi = true,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let mut mask = Vec::with_capacity(outer.num_rows);
+    for r in 0..outer.num_rows {
+        let vals: Vec<ExprVal> = eqs.iter().map(|(_, oe)| eval_expr(oe, outer, r)).collect();
+        kb.clear();
+        let exists = key_bytes(&vals, &mut kb) && match map.get(&kb) {
+            None => false,
+            Some(g) => match nes.first() {
+                None => true,
+                Some((_, oe)) => {
+                    let mut vb = Vec::new();
+                    key_bytes(&[eval_expr(oe, outer, r)], &mut vb) && (g.multi || g.first.as_ref().map_or(false, |f| *f != vb))
+                }
+            },
+        };
+        mask.push(if negated { !exists } else { exists });
+    }
+    Ok(Some(mask))
 }
 
 // ─── Column prefix helper ─────────────────────────────────────────────────────
@@ -1602,6 +1881,170 @@ fn decorrelate_expr(
         Expr::Not(inner) => Expr::Not(Box::new(decorrelate_expr(inner, outer_block, ctx, counter))),
         other => other.clone(),
     }
+}
+
+/// Replace correlated scalar aggregate subqueries (see `correlated_scalar_values`) by a per-row column.
+/// Must run BEFORE `resolve_subqueries`, which would otherwise evaluate them standalone and, because an
+/// unknown outer column evaluates to NULL instead of failing, bake a wrong constant into the predicate.
+fn decorrelate_principled(expr: &Expr, outer: &mut DataBlock, ctx: &KqlContext, counter: &mut usize) -> Expr {
+    match expr {
+        Expr::ScalarSubquery(sq) => match correlated_scalar_values(outer, sq, ctx) {
+            Ok(Some(values)) => {
+                let name = format!("__corr_{}__", counter);
+                *counter += 1;
+                outer.columns.push(Column { name: name.clone(), data: ColumnData::Float64(values) });
+                Expr::Col(name)
+            }
+            _ => expr.clone(),
+        },
+        Expr::BinOp { op, left, right } => Expr::BinOp {
+            op: op.clone(),
+            left: Box::new(decorrelate_principled(left, outer, ctx, counter)),
+            right: Box::new(decorrelate_principled(right, outer, ctx, counter)),
+        },
+        Expr::Not(inner) => Expr::Not(Box::new(decorrelate_principled(inner, outer, ctx, counter))),
+        other => other.clone(),
+    }
+}
+
+/// Value of a correlated scalar aggregate subquery for every outer row:
+/// `(SELECT <expr of aggregates> FROM t1 [, t2 ...] WHERE <inner filters> AND inner_expr = outer_expr ...)`.
+/// Returns None when the subquery is not of that shape (the caller then uses the older heuristic path).
+fn correlated_scalar_values(outer: &DataBlock, sq: &SelectStmt, ctx: &KqlContext) -> Result<Option<Vec<Option<f64>>>, KoreError> {
+    use std::collections::HashMap;
+    if !sq.group_by.is_empty() || sq.having.is_some() || sq.limit.is_some() || sq.offset.is_some()
+        || sq.distinct || sq.projections.len() != 1
+        || sq.from.subquery.is_some() || sq.from.values.is_some()
+        || sq.joins.iter().any(|j| j.join_type != JoinKind::Implicit || j.table.subquery.is_some())
+    {
+        return Ok(None);
+    }
+    let Some(w) = &sq.where_clause else { return Ok(None) };
+    let Projection::Expr { expr: proj, .. } = &sq.projections[0] else { return Ok(None) };
+    if !crate::rewrite::contains_agg(proj) { return Ok(None); }
+
+    // the real columns of the subquery's own tables
+    let mut inner_cols: Vec<(String, String)> = Vec::new();
+    for t in std::iter::once(&sq.from).chain(sq.joins.iter().map(|j| &j.table)) {
+        let alias = t.alias.as_deref().unwrap_or(t.name.as_str()).to_string();
+        let Some(b) = ctx.get(&t.name) else { return Ok(None) };
+        for c in &b.columns {
+            inner_cols.push((alias.clone(), c.name.rsplit('.').next().unwrap_or(&c.name).to_string()));
+        }
+    }
+    let in_inner = |c: &str| match c.split_once('.') {
+        Some((a, n)) => inner_cols.iter().any(|(ia, ic)| ia == a && ic == n),
+        None => inner_cols.iter().any(|(_, ic)| ic == c),
+    };
+    // 0 = no columns, 1 = inner only, 2 = outer only, 3 = both
+    let side = |e: &Expr| -> Option<u8> {
+        let mut cols = Vec::new();
+        if !crate::rewrite::referenced_cols(e, &mut cols) { return None; }
+        let (mut i, mut o) = (false, false);
+        for c in cols {
+            // SQL scoping: a name that the subquery's own tables provide binds to them, even when the
+            // outer query has a table with the same column.
+            match (in_inner(&c), find_col_in_block(&c, outer).is_some()) {
+                (true, _) => i = true,
+                (false, true) => o = true,
+                (false, false) => return None,
+            }
+        }
+        Some(match (i, o) { (false, false) => 0, (true, false) => 1, (false, true) => 2, (true, true) => 3 })
+    };
+
+    let mut conj = Vec::new();
+    crate::rewrite::split_conjuncts(w, &mut conj);
+    let mut inner_filters = Vec::new();
+    let mut corr: Vec<(Expr, Expr)> = Vec::new(); // (inner expr, outer expr)
+    for c in conj {
+        match side(&c) {
+            Some(0) | Some(1) => inner_filters.push(c),
+            Some(3) => {
+                let Expr::BinOp { op: BinOpKind::Eq, left, right } = &c else { return Ok(None) };
+                match (side(left), side(right)) {
+                    (Some(1), Some(2)) => corr.push(((**left).clone(), (**right).clone())),
+                    (Some(2), Some(1)) => corr.push(((**right).clone(), (**left).clone())),
+                    _ => return Ok(None),
+                }
+            }
+            _ => return Ok(None),
+        }
+    }
+    if corr.is_empty() { return Ok(None); }
+
+    let (rewritten, aggs) = crate::rewrite::extract_aggs(proj);
+    let mut projections: Vec<Projection> = corr.iter().enumerate()
+        .map(|(i, (ie, _))| Projection::Expr { expr: ie.clone(), alias: Some(format!("__k{i}")) })
+        .collect();
+    let mut funcs: Vec<AggFunc> = Vec::new();
+    for (j, (_, a)) in aggs.iter().enumerate() {
+        let Expr::Agg { func, expr: arg } = a else { return Ok(None) };
+        if !matches!(func, AggFunc::Sum | AggFunc::Avg | AggFunc::Min | AggFunc::Max | AggFunc::Count) { return Ok(None); }
+        let arg_expr = if matches!(arg.as_ref(), Expr::Col(c) if c == "*") { Expr::Int(1) } else { (**arg).clone() };
+        projections.push(Projection::Expr { expr: arg_expr, alias: Some(format!("__a{j}")) });
+        funcs.push(func.clone());
+    }
+    let inner = SelectStmt {
+        distinct: false, projections,
+        from: sq.from.clone(), joins: sq.joins.clone(),
+        where_clause: crate::rewrite::and_all(inner_filters),
+        group_by: Vec::new(), having: None, qualify: None, order_by: Vec::new(),
+        limit: None, offset: None, scan_limit: None,
+        lateral_views: Vec::new(), pivot: None, unpivot: None, hints: Vec::new(),
+    };
+    let rows = execute_select(&inner, ctx)?;
+
+    #[derive(Clone, Default)]
+    struct Acc { sum: f64, count: u64, min: Option<f64>, max: Option<f64> }
+    let mut groups: HashMap<Vec<u8>, Vec<Acc>> = HashMap::new();
+    let mut kb = Vec::new();
+    for r in 0..rows.num_rows {
+        let keys: Vec<ExprVal> = (0..corr.len()).map(|i| get_cell(&rows, &format!("__k{i}"), r)).collect();
+        kb.clear();
+        if !key_bytes(&keys, &mut kb) { continue; }
+        let accs = groups.entry(kb.clone()).or_insert_with(|| vec![Acc::default(); funcs.len()]);
+        for (j, acc) in accs.iter_mut().enumerate() {
+            let v = get_cell(&rows, &format!("__a{j}"), r);
+            if matches!(v, ExprVal::Null) { continue; }
+            acc.count += 1;
+            if let Some(x) = to_f64(&v) {
+                acc.sum += x;
+                acc.min = Some(acc.min.map_or(x, |m| m.min(x)));
+                acc.max = Some(acc.max.map_or(x, |m| m.max(x)));
+            }
+        }
+    }
+
+    // evaluate the surrounding expression (e.g. 0.2 * AVG(x)) once per key
+    let keys: Vec<&Vec<u8>> = groups.keys().collect();
+    let mut cols: Vec<Column> = Vec::new();
+    for (j, func) in funcs.iter().enumerate() {
+        let vals: Vec<Option<f64>> = keys.iter().map(|k| {
+            let a = &groups[*k][j];
+            match func {
+                AggFunc::Count => Some(a.count as f64),
+                AggFunc::Sum   => if a.count == 0 { None } else { Some(a.sum) },
+                AggFunc::Avg   => if a.count == 0 { None } else { Some(a.sum / a.count as f64) },
+                AggFunc::Min   => a.min,
+                _              => a.max,
+            }
+        }).collect();
+        cols.push(Column { name: aggs[j].0.clone(), data: ColumnData::Float64(vals) });
+    }
+    let agg_block = DataBlock { columns: cols, num_rows: keys.len() };
+    let mut value_of: HashMap<Vec<u8>, Option<f64>> = HashMap::with_capacity(keys.len());
+    for (i, k) in keys.iter().enumerate() {
+        value_of.insert((*k).clone(), to_f64(&eval_expr(&rewritten, &agg_block, i)));
+    }
+
+    let mut out = Vec::with_capacity(outer.num_rows);
+    for r in 0..outer.num_rows {
+        let vals: Vec<ExprVal> = corr.iter().map(|(_, oe)| eval_expr(oe, outer, r)).collect();
+        kb.clear();
+        out.push(if key_bytes(&vals, &mut kb) { value_of.get(&kb).copied().flatten() } else { None });
+    }
+    Ok(Some(out))
 }
 
 /// Decompose a WHERE clause into correlation conditions (inner.key = outer.expr)
@@ -3323,16 +3766,15 @@ fn collect_cols_expr(expr: &Expr, set: &mut std::collections::HashSet<String>) {
             if let Some(ev) = else_val { collect_cols_expr(ev, set); }
         }
         Expr::FuncCall { args, .. } => { for a in args { collect_cols_expr(a, set); } }
-        // Subquery expressions — collect outer column references
-        Expr::InSubquery { expr: e, .. } => collect_cols_expr(e, set),
-        // For EXISTS and ScalarSubquery: scan inner WHERE for outer table references (QualCol)
-        // These are the correlated outer columns that the outer query must keep.
-        Expr::ScalarSubquery(stmt) => {
-            if let Some(pred) = &stmt.where_clause { collect_outer_quals(pred, set); }
+        Expr::ILike { expr: e, pattern, .. } => {
+            collect_cols_expr(e, set);
+            collect_cols_expr(pattern, set);
         }
-        Expr::Exists { subquery, .. } => {
-            if let Some(pred) = &subquery.where_clause { collect_outer_quals(pred, set); }
-        }
+        // A subquery may refer to the outer row through qualified OR unqualified names, so keep every
+        // column it mentions (over-approximating only costs a few extra column clones).
+        Expr::InSubquery { expr: e, subquery, .. } => { collect_cols_expr(e, set); collect_cols_stmt(subquery, set); }
+        Expr::ScalarSubquery(stmt) => collect_cols_stmt(stmt, set),
+        Expr::Exists { subquery, .. } => collect_cols_stmt(subquery, set),
         Expr::Window { func, spec } => {
             match func {
                 WindowFn::Agg { expr: e, .. } => collect_cols_expr(e, set),
@@ -3352,15 +3794,33 @@ fn collect_cols_expr(expr: &Expr, set: &mut std::collections::HashSet<String>) {
     }
 }
 
+/// Every column name a statement mentions anywhere (including nested subqueries).
+fn collect_cols_stmt(stmt: &SelectStmt, set: &mut std::collections::HashSet<String>) {
+    for proj in &stmt.projections {
+        if let Projection::Expr { expr, .. } = proj { collect_cols_expr(expr, set); }
+    }
+    for e in [&stmt.where_clause, &stmt.having, &stmt.qualify].into_iter().flatten() {
+        collect_cols_expr(e, set);
+    }
+    for col in &stmt.group_by { set.insert(col.rsplit('.').next().unwrap_or(col).to_string()); }
+    for item in &stmt.order_by {
+        set.insert(item.col.rsplit('.').next().unwrap_or(&item.col).to_string());
+        collect_cols_expr(&item.expr, set);
+    }
+    if let Some(sub) = &stmt.from.subquery { collect_cols_stmt(sub, set); }
+    for j in &stmt.joins {
+        for c in [&j.on.left_col, &j.on.right_col] {
+            if !c.is_empty() { set.insert(c.rsplit('.').next().unwrap_or(c).to_string()); }
+        }
+        if let Some(e) = &j.on.expr { collect_cols_expr(e, set); }
+        if let Some(sub) = &j.table.subquery { collect_cols_stmt(sub, set); }
+    }
+}
+
 /// Return the set of bare column names (without table prefix) used by a SELECT statement.
 fn used_columns(stmt: &SelectStmt) -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
-    for proj in &stmt.projections {
-        if let Projection::Expr { expr, .. } = proj { collect_cols_expr(expr, &mut set); }
-    }
-    if let Some(pred) = &stmt.where_clause { collect_cols_expr(pred, &mut set); }
-    for col in &stmt.group_by  { set.insert(col.rsplit('.').next().unwrap_or(col).to_string()); }
-    for item in &stmt.order_by { set.insert(item.col.rsplit('.').next().unwrap_or(&item.col).to_string()); }
+    collect_cols_stmt(stmt, &mut set);
     set
 }
 
@@ -3401,6 +3861,28 @@ fn extract_f64_all(col: &Column) -> Vec<f64> {
     }
 }
 
+fn is_null_at(c: &Column, r: usize) -> bool {
+    match &c.data {
+        ColumnData::Int64(v)   => v.get(r).map_or(true, |x| x.is_none()),
+        ColumnData::Float64(v) => v.get(r).map_or(true, |x| x.is_none()),
+        ColumnData::Bool(v)    => v.get(r).map_or(true, |x| x.is_none()),
+        ColumnData::Str(v)     => v.get(r).map_or(true, |x| x.is_none()),
+        ColumnData::StrDict { codes, .. } => codes.get(r).map_or(true, |&c| c == u8::MAX),
+    }
+}
+
+/// COUNT(x) counts rows where x is not NULL; COUNT(*) counts rows.
+fn count_non_null(
+    inner: &Expr, block: &DataBlock, direct: Option<&Column>, rows: impl Iterator<Item = usize>,
+) -> f64 {
+    // the parser represents COUNT(*) as Col("*")
+    if matches!(inner, Expr::Star) || matches!(inner, Expr::Col(c) if c == "*") { return rows.count() as f64; }
+    match direct {
+        Some(col) => rows.filter(|&r| !is_null_at(col, r)).count() as f64,
+        None => rows.filter(|&r| !matches!(eval_expr(inner, block, r), ExprVal::Null)).count() as f64,
+    }
+}
+
 // ─── Global aggregation (no GROUP BY) ────────────────────────────────────────
 
 /// Aggregate the entire block into a single row.
@@ -3428,7 +3910,7 @@ fn global_agg(block: DataBlock, projections: &[Projection]) -> Result<DataBlock,
                 }).collect()
             };
             let v: Option<f64> = match func {
-                AggFunc::Count => Some(block.num_rows as f64),
+                AggFunc::Count => Some(count_non_null(inner, &block, agg_col, 0..block.num_rows)),
                 AggFunc::CountDistinct => {
                     use std::collections::HashSet;
                     let seen: HashSet<u64> = agg_col.map(|col| match &col.data {
@@ -3660,7 +4142,7 @@ fn group_by_agg(
                                 }).collect()
                             };
                             let v = match func {
-                                AggFunc::Count => Some(idxs.len() as f64),
+                                AggFunc::Count => Some(count_non_null(inner, &block, agg_col, idxs.iter().copied())),
                                 AggFunc::CountDistinct => {
                                     use std::collections::HashSet;
                                     let seen: HashSet<u64> = if is_direct {
