@@ -155,6 +155,42 @@ pub fn decode_strs(data: &[u8]) -> Vec<Option<String>> {
     out
 }
 
+/// Strings as `[count:4] [null flags: count] [byte length per string: count*4] [bytes...]`.
+/// Lengths repeat far more than the absolute offsets of `encode_strs`, so they compress much better.
+pub fn encode_strs_len(vals: &[Option<String>]) -> Vec<u8> {
+    let total: usize = vals.iter().map(|v| v.as_ref().map_or(0, |s| s.len())).sum();
+    let mut out = Vec::with_capacity(4 + vals.len() * 5 + total);
+    out.extend_from_slice(&(vals.len() as u32).to_le_bytes());
+    out.extend(vals.iter().map(|v| v.is_none() as u8));
+    for v in vals {
+        out.extend_from_slice(&(v.as_ref().map_or(0, |s| s.len()) as u32).to_le_bytes());
+    }
+    for s in vals.iter().flatten() { out.extend_from_slice(s.as_bytes()); }
+    out
+}
+
+/// Inverse of `encode_strs_len`; malformed input yields an empty vector (length mismatch is
+/// reported by the caller).
+pub fn decode_strs_len(data: &[u8]) -> Vec<Option<String>> {
+    if data.len() < 4 { return vec![]; }
+    let n = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+    let Some(len_end) = n.checked_mul(5).and_then(|x| x.checked_add(4)) else { return vec![] };
+    if n == 0 || len_end > data.len() { return vec![]; }
+    let flags = &data[4..4 + n];
+    let lens = &data[4 + n..len_end];
+    let mut pos = len_end;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let l = u32::from_le_bytes(lens[i * 4..i * 4 + 4].try_into().unwrap()) as usize;
+        if flags[i] == 1 { out.push(None); continue; }
+        match pos.checked_add(l).and_then(|e| data.get(pos..e)) {
+            Some(b) => { out.push(Some(String::from_utf8_lossy(b).into_owned())); pos += l; }
+            None => return vec![],
+        }
+    }
+    out
+}
+
 // ── NaN-sentinel Float64 (8 bytes/element, fastest read path) ─────────────────
 // NaN = null; all other f64 values are real data.
 //

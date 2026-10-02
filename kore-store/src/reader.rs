@@ -352,6 +352,8 @@ fn decode_column(raw: &[u8], dtype: DType, comp: Compression, n: usize) -> Resul
             if comp == Compression::Dict {
                 let (codes, dict) = compress::decode_strdict(raw, n);
                 ColumnData::StrDict { codes, dict }
+            } else if comp == Compression::StrLen {
+                ColumnData::Str(compress::decode_strs_len(raw))
             } else {
                 ColumnData::Str(compress::decode_strs(raw))
             }

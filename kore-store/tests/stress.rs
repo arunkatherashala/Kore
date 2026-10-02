@@ -83,6 +83,7 @@ fn decoders_survive_garbage() {
             let _ = dict_decode_f64(&data, n);
             let _ = decode_strdict(&data, n);
             let _ = decode_strs(&data);
+            let _ = decode_strs_len(&data);
             let _ = raw_decode_bool(&data, n);
         });
         assert!(r.is_ok(), "decoder panicked on garbage input");

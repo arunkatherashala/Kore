@@ -12,6 +12,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - Ruby, PHP and C# bindings: `Crypto` (encrypt/decrypt) and `Versions` (append/select) wrappers over the new FFI calls; Ruby finalizers fixed for Ruby 3.3, PHP uses instance `FFI::new` (static form is deprecated in 8.4)
 - Native layout (`# Layout: native-1`): the Python writer stores strings, bools and nulls in the binary section instead of the text header (string dictionaries and null positions used to live there as text, so unique strings made the header huge). String nulls now survive. Files in the old layout are still read; `KORE_LEGACY_LAYOUT=1` writes it. New FFI: `kore_block_add_*_v`, `kore_block_get_*_v`, dictionary variants
 - Rust float codecs keep NaN distinct from NULL (files written before this read exactly as before)
+- Opt-in `KORE_STR_LENGTHS=1`: length-prefixed string layout (codec 8) instead of absolute offsets. On TPC-H lineitem (60k rows) the file shrinks from 1922 KB to 1250 KB (Parquet ZSTD: 1331 KB). Readers without codec 8 reject such files, so it is off by default
 - Opt-in `KORE_SHUFFLE=1`: byte-plane shuffle + ZSTD (codec 7) on fixed-width columns, about 15% smaller on mixed numeric data. Readers without codec 7 (e.g. other-language native readers) reject such files, so it is off by default
 - Stress tests: large roundtrip, truncation, bit flips, garbage decoders, concurrency
 

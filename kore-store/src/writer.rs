@@ -486,7 +486,12 @@ fn encode_column(data: &ColumnData) -> (Compression, Vec<u8>) {
                     return (Compression::Dict, compress::encode_strdict(&codes, &dict));
                 }
             }
-            (Compression::Raw, compress::encode_strs(v))
+            // Opt-in (KORE_STR_LENGTHS=1): length-prefixed layout, codec 8 — readers without it reject the file.
+            if std::env::var("KORE_STR_LENGTHS").map(|x| x == "1").unwrap_or(false) {
+                (Compression::StrLen, compress::encode_strs_len(v))
+            } else {
+                (Compression::Raw, compress::encode_strs(v))
+            }
         },
         // StrDict: store codes directly (1 byte/row) + tiny dict — no string explosion.
         ColumnData::StrDict { codes, dict } => {
