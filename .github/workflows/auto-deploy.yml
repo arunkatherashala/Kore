@@ -56,8 +56,10 @@ jobs:
           done
           # C# has x.x.x.x pattern
           sed -i "s/${OLD}\.0/${NEW}.0/g; s/$OLD/$NEW/g" "csharp/Kore.FileFormat/Kore.FileFormat.csproj"
-          # Java pom.xml
-          sed -i "s|<version>${OLD}</version>|<version>${NEW}</version>|g" "maven/pom.xml"
+          # Set (not replace) the package version, since these drifted from pyproject.toml
+          sed -i -E "0,/<version>[^<]+<\/version>/s//<version>${NEW}<\/version>/" "maven/pom.xml"
+          sed -i -E "0,/\"version\": *\"[^\"]+\"/s//\"version\": \"${NEW}\"/" "kore-node/package.json"
+          sed -i -E "0,/^version *= *\"[^\"]+\"/s//version     = \"${NEW}\"/" "kore-standalone/Cargo.toml"
 
       - name: Commit version bump
         run: |
