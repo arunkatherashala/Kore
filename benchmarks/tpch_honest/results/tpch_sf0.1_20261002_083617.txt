@@ -1,0 +1,29 @@
+TPC-H-shaped data, SF 0.1, 8 cores, best of 3 after a warm-up run
+Spark 4.2.0 local mode, tables cached in memory (cache load 8.12s)
+
+query   Spark ms    KORE ms  KORE/Spark  verdict
+Q1         295.2      831.6       2.82x  ok
+Q2         460.3      508.5       1.10x  ok
+Q3         381.4      900.4       2.36x  ok
+Q4         464.7      970.5       2.09x  ok
+Q5         511.2     1013.4       1.98x  ok
+Q6          99.4      648.9       6.53x  ok
+Q7         307.6     2651.1       8.62x  ok
+Q8         296.0      693.1       2.34x  ok
+Q9         396.9     6085.8      15.33x  ok
+Q10        418.9      839.1       2.00x  ok
+Q11        408.0      427.7       1.05x  ok
+Q12        366.5      927.3       2.53x  ok
+Q13        471.2      597.5       1.27x  ok
+Q14        134.7      742.1       5.51x  ok
+Q15        530.2      484.6       0.91x  ok
+Q16        477.7      698.0       1.46x  ok
+Q17        260.6      755.6       2.90x  ok
+Q18        530.0     2646.2       4.99x  ok
+Q19        179.8     1026.0       5.71x  ok
+Q20        364.2     1364.7       3.75x  ok
+Q21        520.7     3183.7       6.11x  ok
+Q22        282.4      389.8       1.38x  ok
+
+KORE vs Spark: 22 ok, 0 MISMATCH, 0 error, 0 timeout
+KORE/Spark < 1 means KORE was faster. Only queries whose results agree count as comparable.
