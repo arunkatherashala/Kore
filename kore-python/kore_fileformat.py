@@ -354,6 +354,7 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
     """Write .kore v3 � KORE2 text header + Rust KORE binary (compressed + ACID).
     Supports F64, I64, STR columns and None/null values."""
     import datetime, math
+    import array as _array
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -370,16 +371,18 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
         dn = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
         d = col.data
         if dn in ('STR', 'STR_DICT'):
-            vid = {}
-            ids = [vid.setdefault('' if v is None else str(v), len(vid)) for v in d]
-            str_dicts[col.name] = list(vid)
-            encode_block.add_column(f'__str_{col.name}', DataType.I64, ids)
+            unique = list(dict.fromkeys(d))
+            if any(type(u) is not str for u in unique):  # None / non-str values: normalise
+                d = ['' if v is None else str(v) for v in d]
+                unique = list(dict.fromkeys(d))
+            vid = {v: i for i, v in enumerate(unique)}
+            str_dicts[col.name] = unique
+            encode_block.add_column(f'__str_{col.name}', DataType.I64, list(map(vid.__getitem__, d)))
         elif dn in ('F64', 'FLOAT64', '2'):
-            nulls = [i for i, v in enumerate(d) if v is None]
-            if nulls:
-                null_positions[col.name] = nulls
-            encode_block.add_column(col.name, DataType.F64,
-                                    [float('nan') if v is None else v for v in d])
+            if not isinstance(d, _array.array) and None in d:
+                null_positions[col.name] = [i for i, v in enumerate(d) if v is None]
+                d = [float('nan') if v is None else v for v in d]
+            encode_block.add_column(col.name, DataType.F64, d)
         elif dn == 'BOOL':
             bool_cols.add(col.name)  # store as I64 0/1, restore on read
             nulls = [i for i, v in enumerate(d) if v is None]
@@ -388,11 +391,10 @@ def write_file(path: Union[str, Path], data_block: DataBlock, preview_rows: int 
             encode_block.add_column(col.name, DataType.I64,
                                     [0 if v is None else int(bool(v)) for v in d])
         else:
-            nulls = [i for i, v in enumerate(d) if v is None]
-            if nulls:
-                null_positions[col.name] = nulls
-            encode_block.add_column(col.name, col.dtype,
-                                    [0 if v is None else v for v in d])
+            if not isinstance(d, _array.array) and None in d:
+                null_positions[col.name] = [i for i, v in enumerate(d) if v is None]
+                d = [0 if v is None else v for v in d]
+            encode_block.add_column(col.name, col.dtype, d)
     encode_block.num_rows = nrows
 
     kore_bytes = _block_to_bytes_ffi(encode_block)
@@ -1351,18 +1353,23 @@ def to_arrow(path_or_block: Union[str, 'Path', 'DataBlock']):
     except ImportError:
         raise ImportError("pyarrow required: pip install pyarrow")
 
+    import array as _array
     block = read_file(str(path_or_block)) if isinstance(path_or_block, (str, Path)) else path_or_block
     arrays = {}
     for col in block.columns:
         dtype_name = col.dtype.name if hasattr(col.dtype, 'name') else str(col.dtype)
-        if dtype_name in ('F64', 'FLOAT64'):
-            arrays[col.name] = pa.array([float(v) for v in col.data], type=pa.float64())
-        elif dtype_name in ('I64', 'INT64'):
-            arrays[col.name] = pa.array([int(v) for v in col.data], type=pa.int64())
-        elif dtype_name in ('BOOL',):
-            arrays[col.name] = pa.array([bool(v) for v in col.data], type=pa.bool_())
+        d = col.data
+        if dtype_name in ('F64', 'FLOAT64', 'I64', 'INT64'):
+            is_f = dtype_name in ('F64', 'FLOAT64')
+            pa_type = pa.float64() if is_f else pa.int64()
+            if isinstance(d, _array.array) and d.typecode == ('d' if is_f else 'q'):
+                arrays[col.name] = pa.Array.from_buffers(pa_type, len(d), [None, pa.py_buffer(d)])  # zero-copy
+            else:
+                arrays[col.name] = pa.array(d, type=pa_type)  # None -> null
+        elif dtype_name == 'BOOL':
+            arrays[col.name] = pa.array(d, type=pa.bool_())
         else:
-            arrays[col.name] = pa.array([str(v) for v in col.data], type=pa.string())
+            arrays[col.name] = pa.array(d, type=pa.string())
     return pa.table(arrays)
 
 

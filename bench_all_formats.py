@@ -7,7 +7,7 @@ import os, sys, time, json, csv, tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "kore-python"))
 
-def bench(fn, repeats=3):
+def bench(fn, repeats=10):
     times = []
     for _ in range(repeats):
         start = time.perf_counter()
@@ -29,14 +29,22 @@ def bench_kore(data, tmp_dir):
     import kore_fileformat as kf
     path = os.path.join(tmp_dir, "bench.kore")
     block = kf.DataBlock()
-    block.add_column("id", kf.DataType.I64, data["id"])
-    block.add_column("price", kf.DataType.F64, data["price"])
-    block.add_column("qty", kf.DataType.I64, data["qty"])
+    # Columns are prebuilt as typed arrays (like the prebuilt Arrow table used for Parquet),
+    # so the timing excludes list -> buffer conversion for both formats.
+    import array
+    block.add_column("id", kf.DataType.I64, array.array("q", data["id"]))
+    block.add_column("price", kf.DataType.F64, array.array("d", data["price"]))
+    block.add_column("qty", kf.DataType.I64, array.array("q", data["qty"]))
     block.add_column("region", kf.DataType.STR, data["region"])
     write_ms = bench(lambda: kf.write_file(path, block))
     read_ms = bench(lambda: kf.read_file(path))
     size_kb = os.path.getsize(path) / 1024
-    return {"format": "KORE", "write_ms": round(write_ms, 1), "read_ms": round(read_ms, 1), "size_kb": round(size_kb)}
+    try:
+        arrow_ms = round(bench(lambda: kf.to_arrow(path)), 1)
+    except ImportError:
+        arrow_ms = "N/A"
+    return {"format": "KORE", "write_ms": round(write_ms, 1), "read_ms": round(read_ms, 1),
+            "read_arrow_ms": arrow_ms, "size_kb": round(size_kb)}
 
 def bench_csv_fmt(data, tmp_dir):
     path = os.path.join(tmp_dir, "bench.csv")
@@ -72,9 +80,11 @@ def bench_parquet(data, tmp_dir):
     path = os.path.join(tmp_dir, "bench.parquet")
     table = pa.table(data)
     write_ms = bench(lambda: pq.write_table(table, path, compression="zstd"))
-    read_ms = bench(lambda: pq.read_table(path))
+    arrow_ms = bench(lambda: pq.read_table(path))
+    read_ms = bench(lambda: pq.read_table(path).to_pydict())  # Python objects, like the other rows
     size_kb = os.path.getsize(path) / 1024
-    return {"format": "Parquet (ZSTD)", "write_ms": round(write_ms, 1), "read_ms": round(read_ms, 1), "size_kb": round(size_kb)}
+    return {"format": "Parquet (ZSTD)", "write_ms": round(write_ms, 1), "read_ms": round(read_ms, 1),
+            "read_arrow_ms": round(arrow_ms, 1), "size_kb": round(size_kb)}
 
 def main():
     n = 100_000
@@ -82,10 +92,11 @@ def main():
     data = generate_data(n)
     with tempfile.TemporaryDirectory() as tmp:
         results = [bench_kore(data, tmp), bench_parquet(data, tmp), bench_csv_fmt(data, tmp), bench_json_fmt(data, tmp)]
-    print(f"{'Format':<20} {'Write (ms)':>12} {'Read (ms)':>12} {'Size (KB)':>12}")
-    print("-" * 58)
+    print("Read (Python) = columns materialised as Python objects; Read (Arrow) = Arrow table.\n")
+    print(f"{'Format':<20} {'Write (ms)':>12} {'Read Python':>12} {'Read Arrow':>12} {'Size (KB)':>12}")
+    print("-" * 72)
     for r in results:
-        print(f"{r['format']:<20} {str(r['write_ms']):>12} {str(r['read_ms']):>12} {str(r['size_kb']):>12}")
+        print(f"{r['format']:<20} {str(r['write_ms']):>12} {str(r['read_ms']):>12} {str(r.get('read_arrow_ms', '-')):>12} {str(r['size_kb']):>12}")
     with open("bench_all_formats_results.json", "w") as f:
         json.dump({"rows": n, "columns": 4, "results": results}, f, indent=2)
     print(f"\nSaved to bench_all_formats_results.json")

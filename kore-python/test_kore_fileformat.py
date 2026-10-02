@@ -271,3 +271,20 @@ class TestTimeTravel:
             kore.append_version(path, self._block([1]), timestamp=10)
             with pytest.raises(ValueError):
                 kore.append_version(path, self._block([2]), timestamp=10)
+
+
+class TestArrow:
+    def test_to_arrow_with_nulls_and_zero_copy(self):
+        pa = pytest.importorskip("pyarrow")
+        block = kore.DataBlock()
+        block.add_column('i', kore.DataType.I64, [1, None, 3])
+        block.add_column('f', kore.DataType.F64, [1.5, 2.5, None])
+        block.add_column('s', kore.DataType.STR, ['a', None, 'c'])
+        t = kore.to_arrow(block)
+        assert t.column('i').to_pylist() == [1, None, 3]
+        assert t.column('f').to_pylist() == [1.5, 2.5, None]
+        assert t.column('s').to_pylist() == ['a', None, 'c']
+        import array
+        b2 = kore.DataBlock()
+        b2.add_column('x', kore.DataType.I64, array.array('q', [4, 5, 6]))
+        assert kore.to_arrow(b2).column('x').to_pylist() == [4, 5, 6]

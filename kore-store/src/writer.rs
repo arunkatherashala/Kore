@@ -67,8 +67,10 @@ enum ReadableMode {
 fn try_best_compression(comp: Compression, data: Vec<u8>) -> (Compression, Vec<u8>) {
     if data.len() < 64 { return (comp, data); }  // not worth it for tiny cols
     
-    let lz4 = lz4_flex::compress_prepend_size(&data);
-    let zstd = compress::zstd_encode(&data);
+    let (lz4, zstd) = rayon::join(
+        || lz4_flex::compress_prepend_size(&data),
+        || compress::zstd_encode(&data),
+    );
     
     // Pick best compression ratio
     let (final_codec, final_data) = if lz4.len() < zstd.len() {
