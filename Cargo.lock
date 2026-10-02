@@ -1682,7 +1682,7 @@ dependencies = [
 
 [[package]]
 name = "kore_fileformat"
-version = "1.7.30"
+version = "1.8.12"
 
 [[package]]
 name = "libc"
