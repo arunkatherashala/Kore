@@ -1113,9 +1113,14 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     // actually referenced by projections/WHERE/GROUP BY/ORDER BY.
     // Avoids cloning expensive high-cardinality Str columns (e.g. l_comment) unnecessarily.
     let has_star = stmt.projections.iter().any(|p| matches!(p, Projection::Star));
-    let base_block: DataBlock = if !has_star && stmt.joins.is_empty() {
-        let needed = used_columns(stmt);
-        DataBlock {
+    // Pruning also applies to joined tables: joins copy every column of both sides into the output,
+    // so a wide table (lineitem, 16 columns incl. a text comment) must be trimmed first.
+    let needed: Option<std::collections::HashSet<String>> =
+        if !has_star && stmt.pivot.is_none() && stmt.unpivot.is_none() && stmt.lateral_views.is_empty() {
+            Some(used_columns(stmt))
+        } else { None };
+    let base_block: DataBlock = match &needed {
+        Some(needed) => DataBlock {
             num_rows: base_ref.num_rows,
             columns:  base_ref.columns.iter()
                 .filter(|c| {
@@ -1124,9 +1129,8 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                 })
                 .cloned()
                 .collect(),
-        }
-    } else {
-        base_ref.clone()
+        },
+        None => base_ref.clone(),
     };
 
     // Prefix column names with alias
@@ -1144,20 +1148,36 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         for join in &stmt.joins[..n_implicit] {
             let name = &join.table.name;
             let alias = join.table.alias.as_deref().unwrap_or(name.as_str());
-            let block = resolve_join_table(&join.table, ctx)?;
+            let block = prune_block(resolve_join_table(&join.table, ctx)?, &needed);
             let block = prefix_columns(block, alias);
             pending.push(push_down_conjuncts(&mut conjuncts, block, ctx)?);
         }
         result = push_down_conjuncts(&mut conjuncts, result, ctx)?;
         while !pending.is_empty() {
-            let link = pending.iter().enumerate()
-                .find_map(|(pi, pb)| find_link(&conjuncts, &result, pb).map(|l| (pi, l)));
+            let link = pending.iter().enumerate().find_map(|(pi, pb)| {
+                let links = find_links(&conjuncts, &result, pb);
+                if links.is_empty() { None } else { Some((pi, links)) }
+            });
             match link {
-                Some((pi, (ci, lk, rk))) => {
+                Some((pi, links)) if links.len() == 1 => {
+                    let (ci, lk, rk) = links.into_iter().next().unwrap();
                     let pb = pending.remove(pi);
                     conjuncts.remove(ci);
                     let cfg = JoinConfig { left_key: lk, right_key: rk, join_type: JoinType::Inner };
                     result = HashJoin::join(&result, &pb, &cfg)?;
+                }
+                Some((pi, links)) => {
+                    // Several equalities connect the two sides (e.g. ps_partkey = l_partkey AND
+                    // ps_suppkey = l_suppkey): hash on all of them at once. A hash collision only adds
+                    // a candidate row; the equalities stay in `conjuncts` and are applied exactly below.
+                    let mut pb = pending.remove(pi);
+                    let lcols: Vec<String> = links.iter().map(|l| l.1.clone()).collect();
+                    let rcols: Vec<String> = links.iter().map(|l| l.2.clone()).collect();
+                    add_composite_key(&mut result, &lcols, "__jkL");
+                    add_composite_key(&mut pb, &rcols, "__jkR");
+                    let cfg = JoinConfig { left_key: "__jkL".into(), right_key: "__jkR".into(), join_type: JoinType::Inner };
+                    result = HashJoin::join(&result, &pb, &cfg)?;
+                    result.columns.retain(|c| c.name != "__jkL" && c.name != "__jkR");
                 }
                 None => {
                     // no equality connects the remaining tables: fall back to a cross product (smallest first)
@@ -1204,7 +1224,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         } else {
             return Err(KoreError::InvalidArgument(format!("unknown table: {right_name}")));
         };
-        let right_block = prefix_columns(right_block, right_alias);
+        let right_block = prefix_columns(prune_block(right_block, &needed), right_alias);
 
         // CROSS JOIN: Cartesian product (no ON condition)
         if join.join_type == JoinKind::Cross {
@@ -1454,6 +1474,68 @@ fn push_down_conjuncts(conjuncts: &mut Vec<Expr>, block: DataBlock, ctx: &KqlCon
         Some(pred) => filter_block_ctx(block, &pred, ctx),
         None => Ok(block),
     }
+}
+
+/// Keep only the columns the statement mentions (see `used_columns`).
+fn prune_block(block: DataBlock, needed: &Option<std::collections::HashSet<String>>) -> DataBlock {
+    let Some(needed) = needed else { return block };
+    let num_rows = block.num_rows;
+    DataBlock {
+        num_rows,
+        columns: block.columns.into_iter()
+            .filter(|c| needed.contains(c.name.rsplit('.').next().unwrap_or(&c.name)) || needed.contains(c.name.as_str()))
+            .collect(),
+    }
+}
+
+/// Every equality conjunct linking `left` and `right`: (conjunct index, key in left, key in right).
+fn find_links(conjuncts: &[Expr], left: &DataBlock, right: &DataBlock) -> Vec<(usize, String, String)> {
+    let mut out: Vec<(usize, String, String)> = Vec::new();
+    for (i, c) in conjuncts.iter().enumerate() {
+        if let Expr::BinOp { op: BinOpKind::Eq, left: a, right: b } = c {
+            if let (Some(x), Some(y)) = (crate::rewrite::col_ref(a), crate::rewrite::col_ref(b)) {
+                let pair = match (find_col_in_block(&x, left), find_col_in_block(&y, right)) {
+                    (Some(lk), Some(rk)) => Some((lk, rk)),
+                    _ => match (find_col_in_block(&y, left), find_col_in_block(&x, right)) {
+                        (Some(lk), Some(rk)) => Some((lk, rk)),
+                        _ => None,
+                    },
+                };
+                if let Some((lk, rk)) = pair { out.push((i, lk, rk)); }
+            }
+        }
+    }
+    out
+}
+
+/// Add an Int64 column holding a hash of the given key columns, row by row.
+fn add_composite_key(block: &mut DataBlock, cols: &[String], name: &str) {
+    const K: u64 = 0x9E37_79B9_7F4A_7C15;
+    let n = block.num_rows;
+    let mut h = vec![0xcbf2_9ce4_8422_2325u64; n];
+    for c in cols {
+        let Some(col) = block.columns.iter().find(|x| x.name == *c) else { continue };
+        let mix = |acc: &mut u64, v: u64| { *acc = (*acc ^ v).wrapping_mul(K).rotate_left(29); };
+        match &col.data {
+            ColumnData::Int64(v)   => for (acc, x) in h.iter_mut().zip(v) { mix(acc, x.map_or(u64::MAX, |i| (i as f64).to_bits())); },
+            ColumnData::Float64(v) => for (acc, x) in h.iter_mut().zip(v) { mix(acc, x.map_or(u64::MAX, |f| f.to_bits())); },
+            ColumnData::Bool(v)    => for (acc, x) in h.iter_mut().zip(v) { mix(acc, x.map_or(2, |b| b as u64)); },
+            ColumnData::Str(v)     => for (acc, x) in h.iter_mut().zip(v) {
+                let mut s = 0xcbf2_9ce4_8422_2325u64;
+                if let Some(t) = x { for b in t.bytes() { s = (s ^ b as u64).wrapping_mul(0x100_0000_01b3); } } else { s = u64::MAX; }
+                mix(acc, s);
+            },
+            ColumnData::StrDict { codes, dict } => for (acc, &code) in h.iter_mut().zip(codes) {
+                let mut s = 0xcbf2_9ce4_8422_2325u64;
+                match dict.get(code as usize).filter(|_| code != u8::MAX) {
+                    Some(t) => for b in t.bytes() { s = (s ^ b as u64).wrapping_mul(0x100_0000_01b3); },
+                    None => s = u64::MAX,
+                }
+                mix(acc, s);
+            },
+        }
+    }
+    block.columns.push(Column { name: name.to_string(), data: ColumnData::Int64(h.into_iter().map(|x| Some(x as i64)).collect()) });
 }
 
 /// An equality conjunct `a = b` whose sides live in `left` and `right` respectively:

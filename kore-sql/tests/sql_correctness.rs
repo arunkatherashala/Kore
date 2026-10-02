@@ -75,6 +75,25 @@ fn predicates_follow_sql_null_semantics_and_compare_mixed_numeric_types() {
 }
 
 #[test]
+fn multi_key_comma_join_matches_on_every_equality() {
+    let mut c = KqlContext::new();
+    c.register("ta", DataBlock::new(vec![
+        Column::int64("a_k1", [1, 1, 2, 3].iter().map(|&x| Some(x)).collect()),
+        Column::str_col("a_k2", ["x", "y", "x", "z"].iter().map(|s| Some(s.to_string())).collect()),
+        Column::float64("a_v", [10.0, 20.0, 30.0, 40.0].iter().map(|&x| Some(x)).collect()),
+    ]).unwrap());
+    c.register("tb", DataBlock::new(vec![
+        Column::int64("b_k1", [1, 1, 1, 2, 9].iter().map(|&x| Some(x)).collect()),
+        Column::str_col("b_k2", ["x", "x", "y", "q", "z"].iter().map(|s| Some(s.to_string())).collect()),
+        Column::float64("b_w", [1.0, 2.0, 3.0, 4.0, 5.0].iter().map(|&x| Some(x)).collect()),
+    ]).unwrap());
+    // pairs: (1,x) matches two b rows, (1,y) one; (2,x) and (3,z) match nothing
+    let r = c.query("select count(*) as n, sum(a_v * b_w) as s from ta, tb where a_k1 = b_k1 and a_k2 = b_k2").unwrap();
+    assert_eq!(f64s(&r, "n"), vec![3.0]);
+    assert_eq!(f64s(&r, "s"), vec![10.0 * 1.0 + 10.0 * 2.0 + 20.0 * 3.0]);
+}
+
+#[test]
 fn aggregate_over_a_case_expression() {
     let c = nums();
     let r = c.query("select sum(case when f > 2 then f * 2 else 0 end) as x from nums").unwrap();
