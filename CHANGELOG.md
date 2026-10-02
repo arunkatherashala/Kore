@@ -9,6 +9,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - Time travel: append-only version log (`kore-store::versioned`), FFI `kore_version_append/select`, Python `append_version/list_versions/read_at_version`
 - FFI `kore_encrypt_bytes/kore_decrypt_bytes` (AES-256-GCM); Python `encrypt_aes256/decrypt_aes256/get_column_stats/get_bloom_filter`
 - Reader verifies per-column CRC32 when the stats section is present
+- Ruby, PHP and C# bindings: `Crypto` (encrypt/decrypt) and `Versions` (append/select) wrappers over the new FFI calls; Ruby finalizers fixed for Ruby 3.3, PHP uses instance `FFI::new` (static form is deprecated in 8.4)
 - Opt-in `KORE_SHUFFLE=1`: byte-plane shuffle + ZSTD (codec 7) on fixed-width columns, about 15% smaller on mixed numeric data. Readers without codec 7 (e.g. other-language native readers) reject such files, so it is off by default
 - Stress tests: large roundtrip, truncation, bit flips, garbage decoders, concurrency
 

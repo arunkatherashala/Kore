@@ -107,6 +107,25 @@ internal static partial class Native
     internal static partial long kore_session_row_count(IntPtr sess, string tableName);
 
     [LibraryImport(Lib)] internal static partial void kore_free_string(IntPtr s);
+
+    // -- Bytes: encryption and time travel
+    [LibraryImport(Lib)]
+    internal static partial IntPtr kore_encrypt_bytes(byte[] password, nuint pwLen,
+        byte[] data, nuint len, out nuint outLen);
+
+    [LibraryImport(Lib)]
+    internal static partial IntPtr kore_decrypt_bytes(byte[] password, nuint pwLen,
+        byte[] data, nuint len, out nuint outLen);
+
+    [LibraryImport(Lib)]
+    internal static partial IntPtr kore_version_append(byte[]? existing, nuint existingLen,
+        byte[] entry, nuint entryLen, ulong timestamp, out nuint outLen);
+
+    [LibraryImport(Lib)]
+    internal static partial IntPtr kore_version_select(byte[] data, nuint len,
+        ulong target, out nuint outLen);
+
+    [LibraryImport(Lib)] internal static partial void kore_free_bytes(IntPtr ptr, nuint len);
 }
 
 // =============================================================================
@@ -341,6 +360,64 @@ public sealed class KoreSession : IDisposable
 
     public override string ToString() =>
         $"KoreSession(handle={_handle})";
+}
+
+// =============================================================================
+// Encryption and time travel (byte buffers)
+// =============================================================================
+
+internal static class KoreBytes
+{
+    // Copy a buffer returned by the library into managed memory and free it.
+    internal static byte[] Take(IntPtr ptr, nuint len)
+    {
+        if (ptr == IntPtr.Zero)
+            throw new InvalidOperationException(KoreError.Last() ?? "KORE operation failed");
+        try
+        {
+            var buf = new byte[(int)len];
+            Marshal.Copy(ptr, buf, 0, buf.Length);
+            return buf;
+        }
+        finally { Native.kore_free_bytes(ptr, len); }
+    }
+}
+
+/// <summary>AES-256-GCM with a PBKDF2-derived key.</summary>
+public static class KoreCrypto
+{
+    public static byte[] Encrypt(byte[] password, byte[] data)
+    {
+        var p = Native.kore_encrypt_bytes(password, (nuint)password.Length, data, (nuint)data.Length, out var n);
+        return KoreBytes.Take(p, n);
+    }
+
+    /// <exception cref="InvalidOperationException">Wrong password or corrupt data.</exception>
+    public static byte[] Decrypt(byte[] password, byte[] data)
+    {
+        var p = Native.kore_decrypt_bytes(password, (nuint)password.Length, data, (nuint)data.Length, out var n);
+        return KoreBytes.Take(p, n);
+    }
+}
+
+/// <summary>Append-only version log. Entries are complete .kore files; timestamps must strictly increase.</summary>
+public static class KoreVersions
+{
+    /// <param name="existing">null (new log), a version log, or a plain .kore file.</param>
+    public static byte[] Append(byte[]? existing, byte[] entry, ulong timestamp)
+    {
+        var p = Native.kore_version_append(existing, (nuint)(existing?.Length ?? 0),
+            entry, (nuint)entry.Length, timestamp, out var n);
+        return KoreBytes.Take(p, n);
+    }
+
+    /// <summary>Newest version with timestamp &lt;= target.</summary>
+    /// <exception cref="InvalidOperationException">No version that old exists.</exception>
+    public static byte[] Select(byte[] log, ulong target)
+    {
+        var p = Native.kore_version_select(log, (nuint)log.Length, target, out var n);
+        return KoreBytes.Take(p, n);
+    }
 }
 
 // =============================================================================

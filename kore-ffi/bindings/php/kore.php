@@ -93,6 +93,18 @@ function _loadFfi(): \FFI
         int64_t     kore_session_row_count(const void* sess,
                                            const char* table_name);
         void        kore_free_string(char* s);
+
+        /* Bytes: encryption and time travel */
+        uint8_t*    kore_encrypt_bytes(const uint8_t* password, size_t pw_len,
+                                       const uint8_t* data, size_t len, size_t* out_len);
+        uint8_t*    kore_decrypt_bytes(const uint8_t* password, size_t pw_len,
+                                       const uint8_t* data, size_t len, size_t* out_len);
+        uint8_t*    kore_version_append(const uint8_t* existing, size_t existing_len,
+                                        const uint8_t* entry, size_t entry_len,
+                                        uint64_t timestamp, size_t* out_len);
+        uint8_t*    kore_version_select(const uint8_t* data, size_t len,
+                                        uint64_t target, size_t* out_len);
+        void        kore_free_bytes(uint8_t* ptr, size_t len);
     C, $lib);
 }
 
@@ -165,7 +177,7 @@ class Block
     public function addF64(string $name, array $data): static
     {
         $n   = count($data);
-        $buf = \FFI::new("double[$n]");
+        $buf = ffi()->new("double[$n]");
         foreach ($data as $i => $v) $buf[$i] = (float) $v;
         _checkRc(ffi()->kore_block_add_f64($this->ptr, $name, $buf, $n));
         return $this;
@@ -175,7 +187,7 @@ class Block
     public function addI64(string $name, array $data): static
     {
         $n   = count($data);
-        $buf = \FFI::new("int64_t[$n]");
+        $buf = ffi()->new("int64_t[$n]");
         foreach ($data as $i => $v) $buf[$i] = (int) $v;
         _checkRc(ffi()->kore_block_add_i64($this->ptr, $name, $buf, $n));
         return $this;
@@ -185,7 +197,7 @@ class Block
     public function getF64(string $col): array
     {
         $n   = $this->numRows();
-        $buf = \FFI::new("double[$n]");
+        $buf = ffi()->new("double[$n]");
         $rc  = ffi()->kore_block_get_f64($this->ptr, $col, $buf, $n);
         if ($rc < 0) throw new \RuntimeException('kore_block_get_f64: ' . ffi()->kore_last_error());
         $out = [];
@@ -237,9 +249,9 @@ class Model
     public function fit(array $xFlat, int $nRows, int $nCols, array $y): static
     {
         $nx = count($xFlat);
-        $xb = \FFI::new("double[$nx]");
+        $xb = ffi()->new("double[$nx]");
         foreach ($xFlat as $i => $v) $xb[$i] = (float) $v;
-        $yb = \FFI::new("double[$nRows]");
+        $yb = ffi()->new("double[$nRows]");
         foreach ($y as $i => $v) $yb[$i] = (float) $v;
         _checkRc(ffi()->kore_model_fit($this->ptr, $xb, $nRows, $nCols, $yb));
         return $this;
@@ -249,9 +261,9 @@ class Model
     public function predict(array $xFlat, int $nRows, int $nCols): array
     {
         $nx = count($xFlat);
-        $xb = \FFI::new("double[$nx]");
+        $xb = ffi()->new("double[$nx]");
         foreach ($xFlat as $i => $v) $xb[$i] = (float) $v;
-        $ob = \FFI::new("double[$nRows]");
+        $ob = ffi()->new("double[$nRows]");
         _checkRc(ffi()->kore_model_predict($this->ptr, $xb, $nRows, $nCols, $ob));
         $out = [];
         for ($i = 0; $i < $nRows; $i++) $out[] = (float) $ob[$i];
@@ -393,6 +405,76 @@ class Engine
 // Top-level convenience alias
 // =============================================================================
 
+// =============================================================================
+// Bytes helpers: encryption (AES-256-GCM, PBKDF2 key) and append-only version log
+// =============================================================================
+
+/** Copy a PHP string into a native uint8_t buffer. */
+function _bytesIn(string $s): \FFI\CData
+{
+    $n = max(strlen($s), 1);
+    $buf = ffi()->new("uint8_t[$n]");
+    if ($s !== '') \FFI::memcpy($buf, $s, strlen($s));
+    return $buf;
+}
+
+/** Take ownership of a buffer returned by the library: copy to a string and free it. */
+function _takeBytes(mixed $ptr, \FFI\CData $outLen): string
+{
+    if ($ptr === null || \FFI::isNull($ptr)) {
+        $msg = ffi()->kore_last_error();
+        throw new \RuntimeException('KORE: ' . ($msg !== null ? $msg : 'operation failed'));
+    }
+    $len = $outLen->cdata;
+    try {
+        return \FFI::string($ptr, $len);
+    } finally {
+        ffi()->kore_free_bytes($ptr, $len);
+    }
+}
+
+final class Crypto
+{
+    public static function encrypt(string $password, string $data): string
+    {
+        $out = ffi()->new('size_t');
+        $ptr = ffi()->kore_encrypt_bytes(_bytesIn($password), strlen($password),
+                                         _bytesIn($data), strlen($data), \FFI::addr($out));
+        return _takeBytes($ptr, $out);
+    }
+
+    /** @throws \RuntimeException on a wrong password or corrupt data */
+    public static function decrypt(string $password, string $data): string
+    {
+        $out = ffi()->new('size_t');
+        $ptr = ffi()->kore_decrypt_bytes(_bytesIn($password), strlen($password),
+                                         _bytesIn($data), strlen($data), \FFI::addr($out));
+        return _takeBytes($ptr, $out);
+    }
+}
+
+/** Entries are complete .kore files; timestamps must strictly increase. */
+final class Versions
+{
+    /** $existing: null (new log), a version log, or a plain .kore file. Returns the new log bytes. */
+    public static function append(?string $existing, string $entry, int $timestamp): string
+    {
+        $out = ffi()->new('size_t');
+        $ptr = ffi()->kore_version_append(
+            $existing === null ? null : _bytesIn($existing), $existing === null ? 0 : strlen($existing),
+            _bytesIn($entry), strlen($entry), $timestamp, \FFI::addr($out));
+        return _takeBytes($ptr, $out);
+    }
+
+    /** Newest version with timestamp <= $target. @throws \RuntimeException if none exists */
+    public static function select(string $log, int $target): string
+    {
+        $out = ffi()->new('size_t');
+        $ptr = ffi()->kore_version_select(_bytesIn($log), strlen($log), $target, \FFI::addr($out));
+        return _takeBytes($ptr, $out);
+    }
+}
+
 // Provide \KoreSession as a convenience outside of namespace
 class_alias(Session::class, 'KoreSession');
 
@@ -437,6 +519,30 @@ if (basename(__FILE__) === basename($_SERVER['PHP_SELF'] ?? '')) {
     $sess2->registerBlock('blk', $blk);
     $result = $sess2->query('SELECT SUM(x) AS s FROM blk');
     echo '   SUM(x): ' . print_r($result, true);
+
+    echo PHP_EOL . "5. Encryption" . PHP_EOL;
+    $secret = Crypto::encrypt('pw', "hello kore");
+    if (Crypto::decrypt('pw', $secret) !== "hello kore") throw new \RuntimeException('decrypt mismatch');
+    try {
+        Crypto::decrypt('wrong', $secret);
+        throw new \LogicException('wrong password was accepted');
+    } catch (\RuntimeException $e) {
+        if (strpos($e->getMessage(), 'decrypt failed') === false) throw $e;
+    }
+    echo "   roundtrip ok, wrong password rejected" . PHP_EOL;
+
+    echo PHP_EOL . "6. Time travel" . PHP_EOL;
+    $log = Versions::append(null, 'v1', 100);
+    $log = Versions::append($log, "v2\0binary", 200);
+    if (Versions::select($log, 150) !== 'v1') throw new \RuntimeException('select 150');
+    if (Versions::select($log, 200) !== "v2\0binary") throw new \RuntimeException('select 200');
+    try {
+        Versions::select($log, 50);
+        throw new \LogicException('expected failure');
+    } catch (\RuntimeException $e) {
+        if (strpos($e->getMessage(), 'no version') === false) throw $e;
+    }
+    echo "   append/select ok" . PHP_EOL;
 
     echo "\nAll tests passed.\n";
 }
