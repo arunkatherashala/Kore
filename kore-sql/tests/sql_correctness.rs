@@ -136,6 +136,32 @@ fn chunked_evaluation_agrees_with_a_plain_loop_across_chunk_boundaries() {
 }
 
 #[test]
+fn group_by_integer_and_string_keys_with_nulls() {
+    let mut c = KqlContext::new();
+    c.register("g", DataBlock::new(vec![
+        Column::int64("k1", vec![Some(1), Some(1), Some(2), Some(2), Some(2), None]),
+        Column::str_col("k2", ["a", "b", "a", "a", "", "a"].iter().enumerate()
+            .map(|(i, s)| if i == 4 { None } else { Some(s.to_string()) }).collect()),
+        Column::float64("v", [1.0, 2.0, 3.0, 4.0, 5.0, 6.0].iter().map(|&x| Some(x)).collect()),
+    ]).unwrap());
+    let r = c.query("select k1, count(*) as n, sum(v) as s, avg(v) as a, min(v) as mn, max(v) as mx from g where k1 is not null group by k1 order by k1").unwrap();
+    assert_eq!(f64s(&r, "k1"), vec![1.0, 2.0]);
+    assert_eq!(f64s(&r, "n"), vec![2.0, 3.0]);
+    assert_eq!(f64s(&r, "s"), vec![3.0, 12.0]);
+    assert_eq!(f64s(&r, "a"), vec![1.5, 4.0]);
+    assert_eq!(f64s(&r, "mn"), vec![1.0, 3.0]);
+    assert_eq!(f64s(&r, "mx"), vec![2.0, 5.0]);
+    // two keys, NULL is its own group on either side: (1,a) (1,b) (2,a) (2,NULL) (NULL,a)
+    let r = c.query("select k1, k2, count(*) as n, sum(v * 2) as s from g group by k1, k2").unwrap();
+    assert_eq!(r.num_rows, 5);
+    assert_eq!(f64s(&r, "n").iter().sum::<f64>(), 6.0);
+    assert_eq!(f64s(&r, "s").iter().sum::<f64>(), 42.0);
+    // COUNT(col) skips NULLs per group
+    let r = c.query("select k1, count(k2) as n from g where k1 is not null group by k1 order by k1").unwrap();
+    assert_eq!(f64s(&r, "n"), vec![2.0, 2.0]);
+}
+
+#[test]
 fn aggregate_over_a_case_expression() {
     let c = nums();
     let r = c.query("select sum(case when f > 2 then f * 2 else 0 end) as x from nums").unwrap();
@@ -301,4 +327,28 @@ fn left_join_with_extra_on_condition_keeps_unmatched_rows() {
     // cust 1: orders 10 (ok), 11 (special) -> 1; 2: 1; 3: 1; 4: 14 special, 15 ok -> 1; 5: none -> 0
     assert_eq!(f64s(&r, "c_id"), vec![1.0, 2.0, 3.0, 4.0, 5.0]);
     assert_eq!(f64s(&r, "n"), vec![1.0, 1.0, 1.0, 1.0, 0.0]);
+}
+
+#[test]
+fn uncorrelated_in_subquery_filters_before_the_join() {
+    let c = ctx();
+    let r = c.query("select o_id from cust, ord where c_id = o_cust and o_id in \
+        (select l_ord from line group by l_ord having sum(l_qty) > 3) order by o_id").unwrap();
+    assert_eq!(f64s(&r, "o_id"), vec![12.0, 13.0, 14.0, 15.0]);
+}
+
+#[test]
+fn long_in_lists_use_exact_set_membership_and_skip_nulls() {
+    let c = nums();
+    assert_eq!(count(&c, "i in (1,2,3,4,5,6,7,8,9,10)"), 5.0);
+    assert_eq!(count(&c, "f in (2.5,5.5,11,12,13,14,15,16,17,18)"), 2.0);
+    assert_eq!(count(&c, "f not in (2.5,5.5,11,12,13,14,15,16,17,18)"), 2.0);
+}
+
+#[test]
+fn correlated_scalar_subquery_with_outer_filter() {
+    let c = ctx();
+    let r = c.query("select l_qty from line where l_ord <= 11 and l_qty > \
+        (select avg(l2.l_qty) from line l2 where l2.l_ord = line.l_ord)").unwrap();
+    assert_eq!(f64s(&r, "l_qty"), vec![2.0]);
 }

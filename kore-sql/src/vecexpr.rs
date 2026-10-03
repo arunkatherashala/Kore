@@ -170,10 +170,20 @@ fn tri<'a>(e: &'a Expr, block: &'a DataBlock, w: Win) -> Option<Vec<u8>> {
                 for x in values {
                     match x { Expr::Int(i) => set.push(*i as f64), Expr::Float(f) => set.push(*f), _ => return None }
                 }
-                (0..n).map(|i| match v.num(i) {
-                    None => NULL,
-                    Some(a) => if set.iter().any(|b| (a - b).abs() < 1e-10) { TRUE } else { FALSE },
-                }).collect()
+                if set.len() > 8 {
+                    // long lists (decorrelated IN subqueries): exact-value hash set instead of a linear scan
+                    let key = |f: f64| if f == 0.0 { 0.0f64.to_bits() } else { f.to_bits() };
+                    let hs: std::collections::HashSet<u64> = set.iter().map(|&f| key(f)).collect();
+                    (0..n).map(|i| match v.num(i) {
+                        None => NULL,
+                        Some(a) => if hs.contains(&key(a)) { TRUE } else { FALSE },
+                    }).collect()
+                } else {
+                    (0..n).map(|i| match v.num(i) {
+                        None => NULL,
+                        Some(a) => if set.iter().any(|b| (a - b).abs() < 1e-10) { TRUE } else { FALSE },
+                    }).collect()
+                }
             } else if v.is_text() {
                 let mut set = std::collections::HashSet::with_capacity(values.len());
                 for x in values {

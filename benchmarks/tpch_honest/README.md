@@ -37,10 +37,10 @@ noisy by roughly +/-20% between runs.
 
 | SF 1 (6M lineitem rows) | |
 |---|---|
-| KORE faster than Spark | 14 of 22 (largest: Q15 12x, Q16 11x, Q12 8x, Q6 5x, Q14 5x, Q10/Q11 3x) |
-| about equal (within 10%) | Q4, Q5, Q13, Q20 |
-| KORE slower | Q1 1.4x, Q7 3.1x, Q8 1.2x, Q9 1.2x, Q17 2.3x, Q18 2.5x, Q21 2.2x |
-| geometric mean | KORE about 1.7x faster |
+| KORE faster than Spark | 16 of 22 (largest: Q2 14x, Q15 9x, Q12 8x, Q17 7x, Q16 7x, Q6 6x, Q11 6x) |
+| about equal (within 15%) | Q1, Q8, Q9, Q13 |
+| KORE slower | Q7 2.4x, Q21 1.6x |
+| all 22 results agree with Spark | yes |
 
 Full tables: `results/`. Read these numbers with care:
 

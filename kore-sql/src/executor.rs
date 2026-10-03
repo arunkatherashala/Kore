@@ -1481,6 +1481,21 @@ fn resolve_join_table(table: &TableExpr, ctx: &KqlContext) -> Result<DataBlock, 
     }
 }
 
+/// True when every column the subquery mentions comes from its own tables (or is one of its own aliases).
+fn is_uncorrelated(sub: &SelectStmt, ctx: &KqlContext) -> bool {
+    let mut avail: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for t in std::iter::once(&sub.from).chain(sub.joins.iter().map(|j| &j.table)) {
+        if t.subquery.is_some() || t.values.is_some() { return false; }
+        let Some(b) = ctx.get(&t.name) else { return false };
+        avail.extend(b.columns.iter().map(|c| c.name.rsplit('.').next().unwrap_or(&c.name).to_string()));
+    }
+    let aliases: std::collections::HashSet<&String> = sub.projections.iter()
+        .filter_map(|p| if let Projection::Expr { alias: Some(a), .. } = p { Some(a) } else { None }).collect();
+    let mut used = std::collections::HashSet::new();
+    collect_cols_stmt(sub, &mut used);
+    used.iter().all(|c| c == "*" || avail.contains(c) || aliases.contains(c))
+}
+
 /// A joined table's data, borrowed from the catalog when possible.
 enum Src<'a> { B(&'a DataBlock), O(DataBlock) }
 
@@ -1518,6 +1533,12 @@ fn load_table(
     let mut mine = Vec::new();
     let mut rest = Vec::new();
     for c in conjuncts.drain(..) {
+        // `x IN (uncorrelated subquery)` becomes `x IN (values)` once, so it can filter this table
+        // before any join instead of the joined result afterwards.
+        let c = match &c {
+            Expr::InSubquery { subquery, .. } if is_uncorrelated(subquery, ctx) => precompute_in_subqueries(&c, ctx),
+            _ => c,
+        };
         let mut cols = Vec::new();
         let movable = crate::rewrite::referenced_cols(&c, &mut cols) && !cols.is_empty()
             && cols.iter().all(|n| match n.strip_prefix(&prefix) {
@@ -2244,6 +2265,22 @@ fn correlated_scalar_values(outer: &DataBlock, sq: &SelectStmt, ctx: &KqlContext
         }
     }
     if corr.is_empty() { return Ok(None); }
+
+    // Only the keys that occur in the outer rows matter: aggregating every group of a big inner table
+    // (all 200k parts when the outer query kept 2k of them) is wasted work.
+    if corr.len() == 1 {
+        if let Some(ok) = crate::vecexpr::num_vec(&corr[0].1, outer) {
+            let mut seen = std::collections::HashSet::new();
+            let mut list: Vec<Expr> = Vec::new();
+            for v in ok.iter().flatten() {
+                if seen.insert(v.to_bits()) { list.push(Expr::Float(*v)); }
+                if list.len() > 2_000_000 { list.clear(); break; }
+            }
+            if !list.is_empty() {
+                inner_filters.push(Expr::In { expr: Box::new(corr[0].0.clone()), values: list, negated: false });
+            }
+        }
+    }
 
     let (rewritten, aggs) = crate::rewrite::extract_aggs(proj);
     let mut projections: Vec<Projection> = corr.iter().enumerate()
@@ -4345,6 +4382,156 @@ fn global_agg(block: DataBlock, projections: &[Projection]) -> Result<DataBlock,
 
 // ─── GROUP BY (aggregate) ─────────────────────────────────────────────────────
 
+/// Multiplicative hasher for small integer keys (std's SipHash dominates a 6M-row group-by otherwise).
+#[derive(Default, Clone, Copy)]
+struct FxHasher(u64);
+
+impl std::hash::Hasher for FxHasher {
+    fn finish(&self) -> u64 { self.0 }
+    fn write(&mut self, bytes: &[u8]) { for &b in bytes { self.write_u64(b as u64); } }
+    fn write_u8(&mut self, i: u8) { self.write_u64(i as u64); }
+    fn write_u32(&mut self, i: u32) { self.write_u64(i as u64); }
+    fn write_i64(&mut self, i: i64) { self.write_u64(i as u64); }
+    fn write_isize(&mut self, i: isize) { self.write_u64(i as u64); }
+    fn write_usize(&mut self, i: usize) { self.write_u64(i as u64); }
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+/// GROUP BY over up to three integer / string columns with SUM, AVG, COUNT, MIN, MAX of numeric
+/// expressions. Rows get a group id in one hashed pass, then every aggregate is a straight loop over
+/// flat accumulator arrays. Returns None for anything else (the general path then runs).
+fn group_by_fast(block: &DataBlock, group_cols: &[String], projections: &[Projection]) -> Option<DataBlock> {
+    use std::collections::HashMap;
+    use std::hash::BuildHasherDefault;
+    let n = block.num_rows;
+    if group_cols.is_empty() || group_cols.len() > 3 || n == 0 { return None; }
+
+    // key columns -> one Option<i64> per row (strings are interned to ids)
+    let mut key_cols: Vec<&Column> = Vec::new();
+    let mut parts: Vec<Vec<Option<i64>>> = Vec::new();
+    for g in group_cols {
+        let col = find_col(block, g)?;
+        key_cols.push(col);
+        parts.push(match &col.data {
+            ColumnData::Int64(v) => v.clone(),
+            ColumnData::StrDict { codes, .. } => codes.iter().map(|&c| if c == u8::MAX { None } else { Some(c as i64) }).collect(),
+            ColumnData::Str(v) => {
+                let mut ids: HashMap<&str, i64, BuildHasherDefault<FxHasher>> = HashMap::default();
+                v.iter().map(|s| s.as_deref().map(|t| { let next = ids.len() as i64; *ids.entry(t).or_insert(next) })).collect()
+            }
+            _ => return None,
+        });
+    }
+
+    // projections: group-key columns and numeric aggregates only
+    enum Out<'a> { Key(&'a Column, Option<&'a String>), Agg { func: &'a AggFunc, vals: Option<Vec<Option<f64>>>, count_col: Option<&'a Column>, name: String } }
+    let mut outs: Vec<Out> = Vec::new();
+    for p in projections {
+        let Projection::Expr { expr, alias } = p else { return None };
+        match expr {
+            Expr::Col(_) | Expr::QualCol(..) => {
+                let c = match expr { Expr::Col(c) => c.clone(), Expr::QualCol(t, c) => format!("{t}.{c}"), _ => unreachable!() };
+                let col = find_col(block, &c)?;
+                // must be one of the grouping columns
+                if !key_cols.iter().any(|k| std::ptr::eq(*k, col)) { return None; }
+                outs.push(Out::Key(col, alias.as_ref()));
+            }
+            Expr::Agg { func, expr: inner } => {
+                if !matches!(func, AggFunc::Sum | AggFunc::Avg | AggFunc::Count | AggFunc::Min | AggFunc::Max) { return None; }
+                let star = matches!(inner.as_ref(), Expr::Star) || matches!(inner.as_ref(), Expr::Col(c) if c == "*");
+                let col_name = match inner.as_ref() {
+                    Expr::Col(c) => c.clone(),
+                    Expr::QualCol(t, c) => format!("{t}.{c}"),
+                    _ => String::new(),
+                };
+                let name = alias.clone().unwrap_or_else(|| format!("{:?}({})", func, col_name));
+                if star {
+                    if !matches!(func, AggFunc::Count) { return None; }
+                    outs.push(Out::Agg { func, vals: None, count_col: None, name });
+                } else if matches!(func, AggFunc::Count) {
+                    match inner.as_ref() {
+                        Expr::Col(_) | Expr::QualCol(..) => outs.push(Out::Agg { func, vals: None, count_col: Some(find_col(block, &col_name)?), name }),
+                        other => outs.push(Out::Agg { func, vals: Some(crate::vecexpr::num_vec(other, block)?), count_col: None, name }),
+                    }
+                } else {
+                    outs.push(Out::Agg { func, vals: Some(crate::vecexpr::num_vec(inner, block)?), count_col: None, name });
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    if !outs.iter().any(|o| matches!(o, Out::Agg { .. })) { return None; }
+
+    // pass 1: row -> group id
+    let mut index: HashMap<[Option<i64>; 3], u32, BuildHasherDefault<FxHasher>> =
+        HashMap::with_capacity_and_hasher((n / 4).clamp(16, 1 << 22), Default::default());
+    let mut gid: Vec<u32> = Vec::with_capacity(n);
+    let mut first_rows: Vec<usize> = Vec::new();
+    for r in 0..n {
+        let mut key = [None; 3];
+        for (i, p) in parts.iter().enumerate() { key[i] = p[r]; }
+        let next = first_rows.len() as u32;
+        let id = *index.entry(key).or_insert_with(|| { first_rows.push(r); next });
+        gid.push(id);
+    }
+    let ng = first_rows.len();
+
+    // pass 2: one loop per aggregate over flat accumulator arrays
+    let mut columns: Vec<Column> = Vec::with_capacity(outs.len());
+    for o in &outs {
+        match o {
+            Out::Key(col, alias) => {
+                let mut c = Column { name: col.name.clone(), data: col.data.take_rows(&first_rows) };
+                if let Some(a) = alias { c.name = (*a).clone(); }
+                columns.push(c);
+            }
+            Out::Agg { func, vals, count_col, name } => {
+                let mut count = vec![0u64; ng];
+                let data: Vec<Option<f64>> = match (func, vals) {
+                    (AggFunc::Count, None) => {
+                        match count_col {
+                            Some(c) => for r in 0..n { if !is_null_at(c, r) { count[gid[r] as usize] += 1; } },
+                            None => for r in 0..n { count[gid[r] as usize] += 1; },
+                        }
+                        count.iter().map(|&c| Some(c as f64)).collect()
+                    }
+                    (_, Some(v)) => {
+                        let mut acc = vec![0.0f64; ng];
+                        match func {
+                            AggFunc::Min => acc.iter_mut().for_each(|a| *a = f64::INFINITY),
+                            AggFunc::Max => acc.iter_mut().for_each(|a| *a = f64::NEG_INFINITY),
+                            _ => {}
+                        }
+                        for r in 0..n {
+                            if let Some(x) = v[r] {
+                                let g = gid[r] as usize;
+                                count[g] += 1;
+                                match func {
+                                    AggFunc::Min => if x < acc[g] { acc[g] = x },
+                                    AggFunc::Max => if x > acc[g] { acc[g] = x },
+                                    _ => acc[g] += x,
+                                }
+                            }
+                        }
+                        (0..ng).map(|g| match func {
+                            AggFunc::Count => Some(count[g] as f64),
+                            _ if count[g] == 0 => None,
+                            AggFunc::Avg => Some(acc[g] / count[g] as f64),
+                            _ => Some(acc[g]),
+                        }).collect()
+                    }
+                    _ => return None,
+                };
+                columns.push(Column { name: name.clone(), data: ColumnData::Float64(data) });
+            }
+        }
+    }
+    Some(DataBlock { columns, num_rows: ng })
+}
+
 fn group_by_agg(
     block: DataBlock,
     group_cols: &[String],
@@ -4352,6 +4539,8 @@ fn group_by_agg(
 ) -> Result<DataBlock, KoreError> {
     use rayon::prelude::*;
     use std::collections::HashMap;
+
+    if let Some(done) = group_by_fast(&block, group_cols, projections) { return Ok(done); }
 
     // Pre-locate group-by columns once
     let gcols: Vec<&Column> = group_cols.iter()
