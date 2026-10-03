@@ -8,6 +8,8 @@ use kore_join::{HashJoin, JoinConfig};
 use kore_core::JoinType;
 use kore_window::{WindowFn as WinFn, WinOrder, apply_window};
 use crate::ast::*;
+use crate::spill::{estimate_bytes, SpillStats, SpillStatsSnapshot};
+use crate::spill_ops::{self, SpillCtx};
 // Parquet and KORE store for LOAD TABLE support
 use kore_parquet;
 use kore_store;
@@ -30,10 +32,36 @@ pub struct KqlContext {
     udfs:       HashMap<String, std::sync::Arc<dyn Fn(&[ExprVal]) -> ExprVal + Send + Sync>>,
     /// Row count stats collected on register
     stats:      HashMap<String, usize>,
+    /// Soft working-memory budget (bytes) for ORDER BY / GROUP BY / JOIN.
+    /// `None` (default) = unlimited: the regular in-memory code paths run unchanged.
+    memory_limit: Option<usize>,
+    /// Directory for spill files (default: OS temp dir).
+    spill_dir:  Option<std::path::PathBuf>,
+    spill_stats: Arc<SpillStats>,
 }
 
 impl KqlContext {
     pub fn new() -> Self { Self::default() }
+
+    /// Set the per-operator working-memory budget in bytes. When an operator's input is
+    /// estimated to exceed it, that operator spills to temp files and works partition by
+    /// partition. Soft target; only operator working state is bounded (see `spill_ops`).
+    pub fn set_memory_limit(&mut self, bytes: usize) { self.memory_limit = Some(bytes); }
+
+    /// Remove the memory limit (back to purely in-memory execution).
+    pub fn clear_memory_limit(&mut self) { self.memory_limit = None; }
+
+    pub fn memory_limit(&self) -> Option<usize> { self.memory_limit }
+
+    /// Directory where spill files are created (default: OS temp dir).
+    pub fn set_spill_dir(&mut self, dir: impl Into<std::path::PathBuf>) { self.spill_dir = Some(dir.into()); }
+
+    /// How many times each operator spilled so far (shared by clones of this context).
+    pub fn spill_stats(&self) -> SpillStatsSnapshot { self.spill_stats.snapshot() }
+
+    fn spill_ctx(&self, limit: usize) -> SpillCtx<'_> {
+        SpillCtx { limit, dir: self.spill_dir.as_deref(), stats: &self.spill_stats }
+    }
 
     /// Register a named table (replaces if already registered).
     /// Automatically collects basic row-count stats (auto-ANALYZE).
@@ -1036,6 +1064,17 @@ fn filter_rows(block: &DataBlock, indices: &[usize]) -> DataBlock {
     DataBlock { num_rows: indices.len(), columns }
 }
 
+/// Hash join; when a memory limit is set and the inputs exceed it, a grace-hash join
+/// that partitions both sides to disk. Unlimited (default) = plain `HashJoin::join`.
+fn join_blocks(ctx: &KqlContext, left: &DataBlock, right: &DataBlock, cfg: &JoinConfig) -> Result<DataBlock, KoreError> {
+    match ctx.memory_limit {
+        Some(lim) if left.num_rows + right.num_rows > 0
+            && estimate_bytes(left) + estimate_bytes(right) > lim =>
+            spill_ops::partitioned_join(left, right, cfg, &ctx.spill_ctx(lim)),
+        _ => HashJoin::join(left, right, cfg),
+    }
+}
+
 pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
     if stmt.grouping != Grouping::Plain && !stmt.group_by.is_empty() {
         return execute_grouping_sets(stmt, ctx);
@@ -1202,7 +1241,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                     let pb = pending.remove(pi);
                     conjuncts.remove(ci);
                     let cfg = JoinConfig { left_key: lk, right_key: rk, join_type: JoinType::Inner };
-                    result = HashJoin::join(&result, &pb, &cfg)?;
+                    result = join_blocks(ctx, &result, &pb, &cfg)?;
                 }
                 Some((pi, links)) => {
                     // Several equalities connect the two sides (e.g. ps_partkey = l_partkey AND
@@ -1214,7 +1253,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                     add_composite_key(&mut result, &lcols, "__jkL");
                     add_composite_key(&mut pb, &rcols, "__jkR");
                     let cfg = JoinConfig { left_key: "__jkL".into(), right_key: "__jkR".into(), join_type: JoinType::Inner };
-                    result = HashJoin::join(&result, &pb, &cfg)?;
+                    result = join_blocks(ctx, &result, &pb, &cfg)?;
                     result.columns.retain(|c| c.name != "__jkL" && c.name != "__jkR");
                 }
                 None => {
@@ -1313,9 +1352,9 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         let cfg = JoinConfig { left_key: lk.clone(), right_key: rk, join_type: jtype };
 
         if join.join_type == JoinKind::Right {
-            result = HashJoin::join(&right_block, &probe, &cfg)?;
+            result = join_blocks(ctx, &right_block, &probe, &cfg)?;
         } else {
-            result = HashJoin::join(&probe, &right_block, &cfg)?;
+            result = join_blocks(ctx, &probe, &right_block, &cfg)?;
         }
     }
 
@@ -1375,7 +1414,11 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         // Materialize any GROUP BY columns that are SELECT expression aliases
         // e.g. GROUP BY l_year where l_year is alias for CASE WHEN ... END
         result = materialize_groupby_aliases(result, &stmt.group_by, &stmt.projections);
-        result = group_by_agg(result, &stmt.group_by, &stmt.projections)?;
+        result = match ctx.memory_limit {
+            Some(lim) if result.num_rows > 0 && estimate_bytes(&result) > lim =>
+                spill_ops::partitioned_group_by(result, &stmt.group_by, &stmt.projections, &ctx.spill_ctx(lim))?,
+            _ => group_by_agg(result, &stmt.group_by, &stmt.projections)?,
+        };
     } else if has_agg {
         result = global_agg(result, &stmt.projections)?;
     }
@@ -1437,7 +1480,30 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     }
 
     // 6. ORDER BY — resolve column names, also checking SELECT aliases
-    for item in stmt.order_by.iter().rev() {
+    // Over-budget plain-column ORDER BY: one stable external multi-key sort.
+    let mut spill_sorted = false;
+    if let Some(lim) = ctx.memory_limit {
+        if !stmt.order_by.is_empty()
+            && stmt.order_by.iter().all(|o| !o.col.is_empty() && o.nulls_first.is_none())
+            && result.num_rows > 0 && estimate_bytes(&result) > lim
+        {
+            let mut keys: Vec<(usize, bool)> = Vec::new();
+            for item in &stmt.order_by {
+                let col_raw = resolve_col_name(&item.col, "");
+                let col = find_order_col_in_result(&col_raw, &result, &stmt.projections).unwrap_or(col_raw);
+                match sort_col_name(&result, &col).and_then(|n| result.columns.iter().position(|c| c.name == n)) {
+                    Some(i) => keys.push((i, item.desc)),
+                    None => break,
+                }
+            }
+            if keys.len() == stmt.order_by.len() {
+                result = spill_ops::external_sort(&result, &keys, &ctx.spill_ctx(lim))?;
+                spill_sorted = true;
+            }
+        }
+    }
+    let order_items = if spill_sorted { &stmt.order_by[..0] } else { &stmt.order_by[..] };
+    for item in order_items.iter().rev() {
         if !item.col.is_empty() {
             let col_raw = resolve_col_name(&item.col, "");
             let col = find_order_col_in_result(&col_raw, &result, &stmt.projections)
@@ -3838,14 +3904,11 @@ fn sort_block(block: DataBlock, col: &str, desc: bool) -> Result<DataBlock, Kore
     sort_block_nulls(block, col, desc, None)
 }
 
-fn sort_block_nulls(block: DataBlock, col: &str, desc: bool, nulls_first: Option<bool>) -> Result<DataBlock, KoreError> {
-    // NULLS FIRST/LAST: default is NULLs last for ASC, NULLs first for DESC
-    let nf = nulls_first.unwrap_or(desc);
-
-    // Find the column name (handles qualified names)
+/// Resolve an ORDER BY column reference to an actual column name (handles qualified names).
+fn sort_col_name(block: &DataBlock, col: &str) -> Option<String> {
     let col_short  = col.rsplit('.').next().unwrap_or(col);
     let col_prefix = if col.contains('.') { col.split('.').next() } else { None };
-    let col_name = block.columns.iter()
+    block.columns.iter()
         .find(|c| c.name == col || {
             let cn = c.name.len(); let m = col.len();
             cn > m && c.name.as_bytes()[cn - m - 1] == b'.' && &c.name[cn - m..] == col
@@ -3866,6 +3929,13 @@ fn sort_block_nulls(block: DataBlock, col: &str, desc: bool, nulls_first: Option
             if matches.len() == 1 { Some(matches[0]) } else { None }
         })
         .map(|c| c.name.clone())
+}
+
+fn sort_block_nulls(block: DataBlock, col: &str, desc: bool, nulls_first: Option<bool>) -> Result<DataBlock, KoreError> {
+    // NULLS FIRST/LAST: default is NULLs last for ASC, NULLs first for DESC
+    let nf = nulls_first.unwrap_or(desc);
+
+    let col_name = sort_col_name(&block, col)
         .ok_or_else(|| KoreError::InvalidArgument(format!("ORDER BY column not found: {col}")))?;
 
     // If NULLS FIRST/LAST is non-default, do a custom sort with null sentinels
@@ -4324,7 +4394,7 @@ fn used_columns(stmt: &SelectStmt) -> std::collections::HashSet<String> {
 }
 
 /// Find a column by exact name or table-prefix suffix match.
-fn find_col<'a>(block: &'a DataBlock, name: &str) -> Option<&'a Column> {
+pub(crate) fn find_col<'a>(block: &'a DataBlock, name: &str) -> Option<&'a Column> {
     // Hot path: avoid format!() allocation by doing suffix check inline.
     block.columns.iter().find(|c| {
         c.name == name || {
@@ -4647,10 +4717,73 @@ fn group_by_agg(
     group_cols: &[String],
     projections: &[Projection],
 ) -> Result<DataBlock, KoreError> {
+    if let Some(done) = group_by_fast(&block, group_cols, projections) { return Ok(done); }
+    group_by_agg_ex(block, group_cols, projections).map(|r| r.0)
+}
+
+/// FNV-1a over bytes.
+#[inline(always)]
+fn fnv64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 14695981039346656037;
+    for &b in bytes { h ^= b as u64; h = h.wrapping_mul(1099511628211); }
+    h
+}
+
+/// u128 grouping key of one row (no String allocation). This DEFINES group equality
+/// for the general GROUP BY path; the spilling grace-hash GROUP BY partitions on it so
+/// both agree on which rows form a group.
+#[inline(always)]
+fn grp_row_key(block: &DataBlock, group_cols: &[String], gcols: &[&Column], fallback: bool, row: usize) -> u128 {
+    let mut k: u128 = 0xcbf29ce484222325_cbf29ce484222325u128;
+    if fallback {
+        for (i, gc) in group_cols.iter().enumerate() {
+            let v = match get_cell(block, gc, row) {
+                ExprVal::Int(x)   => x as u64,
+                ExprVal::Float(x) => x.to_bits(),
+                ExprVal::Str(ref s) => fnv64(s.as_bytes()),
+                ExprVal::Bool(x)  => x as u64,
+                ExprVal::Null     => 0xFFFF_FFFF_FFFF_FFFF,
+            };
+            k = k.wrapping_add(v as u128)
+                 .wrapping_mul(0x9e3779b97f4a7c15_f39cc0605cedc835u128)
+                 .rotate_left((i as u32 * 11 + 7) % 127);
+        }
+    } else {
+        for (i, col) in gcols.iter().enumerate() {
+            let v: u64 = match &col.data {
+                ColumnData::Int64(v)   => v.get(row).and_then(|x| *x).unwrap_or(i64::MIN) as u64,
+                ColumnData::Float64(v) => v.get(row).and_then(|x| *x).map(|f| f.to_bits()).unwrap_or(0),
+                ColumnData::Bool(v)    => v.get(row).and_then(|x| *x).unwrap_or(false) as u64,
+                ColumnData::Str(v)     => fnv64(v.get(row).and_then(|x| x.as_deref()).unwrap_or("").as_bytes()),
+                ColumnData::StrDict { codes, dict } => {
+                    let c = codes.get(row).copied().unwrap_or(u8::MAX);
+                    if c == u8::MAX { 0 } else { fnv64(dict.get(c as usize).map(|s| s.as_bytes()).unwrap_or(b"")) }
+                }
+            };
+            k = k.wrapping_add(v as u128)
+                 .wrapping_mul(0x9e3779b97f4a7c15_f39cc0605cedc835u128)
+                 .rotate_left((i as u32 * 11 + 7) % 127);
+        }
+    }
+    k
+}
+
+/// Partitioning key of `row` (same equivalence as the general GROUP BY).
+pub(crate) fn group_partition_key(block: &DataBlock, group_cols: &[String], row: usize) -> u128 {
+    let gcols: Vec<&Column> = group_cols.iter().filter_map(|c| find_col(block, c)).collect();
+    let fallback = gcols.len() < group_cols.len();
+    grp_row_key(block, group_cols, &gcols, fallback, row)
+}
+
+/// General (non-fast-path) GROUP BY returning the result plus, for every output row,
+/// the index (in `block`) of the first input row of that group.
+pub(crate) fn group_by_agg_ex(
+    block: DataBlock,
+    group_cols: &[String],
+    projections: &[Projection],
+) -> Result<(DataBlock, Vec<usize>), KoreError> {
     use rayon::prelude::*;
     use std::collections::HashMap;
-
-    if let Some(done) = group_by_fast(&block, group_cols, projections) { return Ok(done); }
 
     // Pre-locate group-by columns once
     let gcols: Vec<&Column> = group_cols.iter()
@@ -4664,16 +4797,6 @@ fn group_by_agg(
     let nchunks  = if n >= 50_000 { (nthreads * 2).max(1) } else { 1 };
     let chunk_sz = ((n + nchunks - 1) / nchunks).max(1);
 
-    // ── Fast u128 key (no String allocation per row) ──────────────────────────
-    // FNV-1a hashed per column, combined with position-aware rotation.
-    // u128 space (2^128) makes hash collisions practically impossible.
-    #[inline(always)]
-    fn fnv64(bytes: &[u8]) -> u64 {
-        let mut h: u64 = 14695981039346656037;
-        for &b in bytes { h ^= b as u64; h = h.wrapping_mul(1099511628211); }
-        h
-    }
-
     // ── build_chunk: no-allocation hot loop ───────────────────────────────────
     type LocalMap = Vec<(u128, Vec<usize>)>;
     let build_chunk = |c: usize| -> LocalMap {
@@ -4685,41 +4808,7 @@ fn group_by_agg(
         let mut order: Vec<u128>                 = Vec::new();
 
         for row in start..end {
-            // Compute u128 key: mix per-column values without String allocation
-            let key: u128 = if fallback {
-                let mut k: u128 = 0xcbf29ce484222325_cbf29ce484222325u128;
-                for (i, gc) in group_cols.iter().enumerate() {
-                    let v = match get_cell(&block, gc, row) {
-                        ExprVal::Int(x)   => x as u64,
-                        ExprVal::Float(x) => x.to_bits(),
-                        ExprVal::Str(ref s) => fnv64(s.as_bytes()),
-                        ExprVal::Bool(x)  => x as u64,
-                        ExprVal::Null     => 0xFFFF_FFFF_FFFF_FFFF,
-                    };
-                    k = k.wrapping_add(v as u128)
-                         .wrapping_mul(0x9e3779b97f4a7c15_f39cc0605cedc835u128)
-                         .rotate_left((i as u32 * 11 + 7) % 127);
-                }
-                k
-            } else {
-                let mut k: u128 = 0xcbf29ce484222325_cbf29ce484222325u128;
-                for (i, col) in gcols.iter().enumerate() {
-                    let v: u64 = match &col.data {
-                        ColumnData::Int64(v)   => v.get(row).and_then(|x| *x).unwrap_or(i64::MIN) as u64,
-                        ColumnData::Float64(v) => v.get(row).and_then(|x| *x).map(|f| f.to_bits()).unwrap_or(0),
-                        ColumnData::Bool(v)    => v.get(row).and_then(|x| *x).unwrap_or(false) as u64,
-                        ColumnData::Str(v)     => fnv64(v.get(row).and_then(|x| x.as_deref()).unwrap_or("").as_bytes()),
-                        ColumnData::StrDict { codes, dict } => {
-                            let c = codes.get(row).copied().unwrap_or(u8::MAX);
-                            if c == u8::MAX { 0 } else { fnv64(dict.get(c as usize).map(|s| s.as_bytes()).unwrap_or(b"")) }
-                        }
-                    };
-                    k = k.wrapping_add(v as u128)
-                         .wrapping_mul(0x9e3779b97f4a7c15_f39cc0605cedc835u128)
-                         .rotate_left((i as u32 * 11 + 7) % 127);
-                }
-                k
-            };
+            let key: u128 = grp_row_key(&block, group_cols, &gcols, fallback, row);
 
             if !local.contains_key(&key) { order.push(key); }
             local.entry(key).or_default().push(row);
@@ -4761,7 +4850,7 @@ fn group_by_agg(
 
     // Handle SUM/COUNT/AVG/MIN/MAX in projections
     let has_agg = projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Agg { .. }, .. }));
-    if !has_agg { return Ok(agg_block); }
+    if !has_agg { return Ok((agg_block, first_rows)); }
 
     let mut new_cols: Vec<Column> = Vec::new();
     for proj in projections {
@@ -4928,7 +5017,7 @@ fn group_by_agg(
     }
 
     let num_rows = groups.len();
-    Ok(DataBlock { columns: new_cols, num_rows })
+    Ok((DataBlock { columns: new_cols, num_rows }, first_rows))
 }
 
 #[allow(dead_code)]

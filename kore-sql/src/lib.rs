@@ -19,6 +19,8 @@ pub mod rewrite;
 pub mod vecexpr;
 pub mod window;
 pub mod vec_path;
+pub mod spill;
+pub(crate) mod spill_ops;
 
 pub use ast::*;
 pub use executor::{KqlContext, ExprVal, execute, execute_query};
