@@ -183,6 +183,21 @@ pub fn aggregate(inp: &AggInput, rows: &[usize]) -> Result<V, KoreError> {
             let pool: &Vec<usize> = if ignore { &live } else { &rows };
             pool.last().map(|&r| arg(0, r).clone()).unwrap_or(V::Null)
         }
+        "MODE" => {
+            // most frequent value; ties go to the one seen first
+            let mut counts: Vec<(V, usize)> = Vec::new();
+            let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            for &r in &live {
+                let k = row_key(&[arg(0, r).clone()]);
+                match index.get(&k) {
+                    Some(&i) => counts[i].1 += 1,
+                    None => { index.insert(k, counts.len()); counts.push((arg(0, r).clone(), 1)); }
+                }
+            }
+            let mut best: Option<&(V, usize)> = None;
+            for c in &counts { if best.map_or(true, |b| c.1 > b.1) { best = Some(c); } }
+            best.map(|b| b.0.clone()).unwrap_or(V::Null)
+        }
         "COUNT_IF" => V::Int(rows.iter().filter(|&&r| matches!(arg(0, r), V::Bool(true))).count() as i64),
         "BOOL_AND" | "BOOL_OR" => {
             let bs: Vec<bool> = live.iter().filter_map(|&r| match arg(0, r) { V::Bool(b) => Some(*b), V::Int(i) => Some(*i != 0), _ => None }).collect();

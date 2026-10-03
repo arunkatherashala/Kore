@@ -14,6 +14,11 @@ use kore_io;
 
 // Thread-local UDF registry populated before query execution
 thread_local! {
+    /// Set when an uncorrelated scalar subquery returned more than one row while a predicate was being prepared.
+    static SUBQ_ERROR: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+}
+
+thread_local! {
     static CURRENT_UDFS: std::cell::RefCell<HashMap<String, Arc<dyn Fn(&[ExprVal]) -> ExprVal + Send + Sync>>> = std::cell::RefCell::new(HashMap::new());
 }
 
@@ -938,8 +943,28 @@ fn validate_functions(q: &Query, ctx: &KqlContext) -> Result<(), KoreError> {
             }
         }
     });
-    match unknown {
-        Some(n) => Err(KoreError::InvalidArgument(format!("unknown function: {}", n.to_ascii_lowercase()))),
+    if let Some(n) = unknown {
+        return Err(KoreError::InvalidArgument(format!("unknown function: {}", n.to_ascii_lowercase())));
+    }
+    // ARRAY / MAP / SPLIT values exist only as the argument of element_at, size, array_contains and [i]
+    let mut allowed: std::collections::HashSet<*const Expr> = std::collections::HashSet::new();
+    crate::ast_walk::walk_query(q, true, &mut |e| {
+        if let Expr::FuncCall { name, args } = e {
+            if matches!(name.as_str(), "ELEMENT_AT" | "SIZE" | "CARDINALITY" | "ARRAY_CONTAINS") {
+                if let Some(a) = args.first() { allowed.insert(a as *const Expr); }
+            }
+        }
+    });
+    let mut complex: Option<String> = None;
+    crate::ast_walk::walk_query(q, true, &mut |e| {
+        let is_complex = matches!(e, Expr::Array(_)) || matches!(e, Expr::FuncCall { name, .. } if matches!(name.as_str(), "SPLIT" | "MAP" | "ARRAY"));
+        if is_complex && complex.is_none() && !allowed.contains(&(e as *const Expr)) {
+            complex = Some(match e { Expr::FuncCall { name, .. } => name.to_ascii_lowercase(), _ => "array".to_string() });
+        }
+    });
+    match complex {
+        Some(n) => Err(KoreError::InvalidArgument(format!(
+            "array/map values are not supported as results ({n}); they can only be used inside element_at, size, array_contains or [i]"))),
         None => Ok(()),
     }
 }
@@ -1053,8 +1078,8 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         return crate::general::execute_compound(stmt, ctx);
     }
     // quantified comparisons, semi/anti joins, USING / NATURAL joins become forms the code below handles
-    if let Some(rewritten) = crate::desugar::rewrite_stmt(stmt, ctx)? {
-        return execute_select(&rewritten, ctx);
+    if let Some((rewritten, local)) = crate::desugar::rewrite_stmt(stmt, ctx)? {
+        return execute_select(&rewritten, local.as_ref().unwrap_or(ctx));
     }
     // shapes outside the specialised paths below (see general.rs) are run by the general tail
     let use_general = crate::general::needs_general(stmt);
@@ -1182,7 +1207,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                 columns:  base_ref.columns.iter()
                     .filter(|c| {
                         let bare = c.name.rsplit('.').next().unwrap_or(&c.name);
-                        needed.contains(bare) || needed.contains(c.name.as_str())
+                        needs_col(needed, bare) || needs_col(needed, c.name.as_str())
                     })
                     .cloned()
                     .collect(),
@@ -1382,7 +1407,11 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
             let (new_pred, new_block) = decorrelate_scalar_subqueries(&resolved, result, ctx);
             // Decorrelate correlated EXISTS → IN list
             let (new_pred2, new_block2) = decorrelate_exists(&new_pred, new_block, ctx);
-            filter_block_ctx(new_block2, &new_pred2, ctx)
+            let filtered = filter_block_ctx(new_block2, &new_pred2, ctx);
+            if let Some(m) = SUBQ_ERROR.with(|e| e.borrow_mut().take()) {
+                return Err(KoreError::InvalidArgument(m));
+            }
+            filtered
         };
         if let Some(p) = crate::rewrite::and_all(plain) { result = run_old_path(p, result)?; }
         for e in exists_conj {
@@ -1597,7 +1626,7 @@ fn load_table(
     let idx: Option<Vec<usize>> = mask.map(|m| m.iter().enumerate().filter_map(|(i, &k)| if k { Some(i) } else { None }).collect());
     let wanted: Vec<&Column> = src.columns.iter().filter(|c| {
         let bare = c.name.rsplit('.').next().unwrap_or(&c.name);
-        after.contains(bare) || after.contains(c.name.as_str())
+        needs_col(&after, bare) || needs_col(&after, c.name.as_str())
     }).collect();
     use rayon::prelude::*;
     let columns: Vec<Column> = wanted.par_iter().map(|c| Column {
@@ -1634,7 +1663,7 @@ fn prune_block(block: DataBlock, needed: &Option<std::collections::HashSet<Strin
     DataBlock {
         num_rows,
         columns: block.columns.into_iter()
-            .filter(|c| needed.contains(c.name.rsplit('.').next().unwrap_or(&c.name)) || needed.contains(c.name.as_str()))
+            .filter(|c| needs_col(needed, c.name.rsplit('.').next().unwrap_or(&c.name)) || needs_col(needed, c.name.as_str()))
             .collect(),
     }
 }
@@ -2005,6 +2034,12 @@ fn find_order_col_in_result(col: &str, result: &DataBlock, projections: &[Projec
         .collect();
     if matches.len() == 1 { return Some(matches[0].name.clone()); }
 
+    // 6. identifiers are case-insensitive
+    let ci: Vec<_> = result.columns.iter()
+        .filter(|c| c.name.rsplit('.').next().unwrap_or(&c.name).eq_ignore_ascii_case(col_short))
+        .collect();
+    if ci.len() == 1 { return Some(ci[0].name.clone()); }
+
     None
 }
 
@@ -2013,7 +2048,8 @@ fn find_order_col_in_result(col: &str, result: &DataBlock, projections: &[Projec
 fn find_col_in_block(bare: &str, block: &DataBlock) -> Option<String> {
     if bare.contains('.') {
         // Already qualified — check it exists
-        return if block.columns.iter().any(|c| c.name == bare) { Some(bare.to_string()) } else { None };
+        return if block.columns.iter().any(|c| c.name == bare) { Some(bare.to_string()) }
+        else { block.columns.iter().find(|c| c.name.eq_ignore_ascii_case(bare)).map(|c| c.name.clone()) };
     }
     // Try exact match first
     if let Some(col) = block.columns.iter().find(|c| c.name == bare) {
@@ -2022,6 +2058,7 @@ fn find_col_in_block(bare: &str, block: &DataBlock) -> Option<String> {
     // Try "table.bare" match — find a column whose suffix matches bare
     let suffix = format!(".{}", bare);
     block.columns.iter().find(|c| c.name.ends_with(&suffix)).map(|c| c.name.clone())
+        .or_else(|| ci_find_col(block, bare).map(|c| c.name.clone()))
 }
 
 // ─── Filter (WHERE) ───────────────────────────────────────────────────────────
@@ -2770,11 +2807,9 @@ fn eval_expr_ctx(expr: &Expr, block: &DataBlock, row: usize, ctx: &KqlContext) -
                 if let Some(outer_block) = ctx.get(table.as_str()) {
                     if outer_block.num_rows > 0 {
                         let val = get_cell(outer_block, col.as_str(), 0);
-                        if row == 0 { eprintln!("[QualCol] {}.{} → {:?} (from ctx, {} rows)", table, col, val, outer_block.num_rows); }
                         return val;
                     }
                 }
-                if row == 0 { eprintln!("[QualCol] {}.{} → Null (not in block or ctx)", table, col); }
             }
             v
         }
@@ -2950,6 +2985,9 @@ fn resolve_subqueries(expr: &Expr, ctx: &KqlContext) -> Expr {
             // Try to evaluate — if succeeds and not correlated, replace with literal
             match execute_select(stmt, ctx) {
                 Ok(result) => {
+                    if result.num_rows > 1 {
+                        SUBQ_ERROR.with(|e| *e.borrow_mut() = Some("scalar subquery returned more than one row".to_string()));
+                    }
                     if result.num_rows > 0 && !result.columns.is_empty() {
                         let v = result.columns[0].data.get_value(0);
                         match v {
@@ -2962,7 +3000,7 @@ fn resolve_subqueries(expr: &Expr, ctx: &KqlContext) -> Expr {
                     } else { expr.clone() }
                 }
                 Err(e) => {
-                    eprintln!("[resolve_subqueries] subquery error: {e}");
+                    SUBQ_ERROR.with(|slot| *slot.borrow_mut() = Some(e.to_string()));
                     expr.clone()
                 }
             }
@@ -3274,7 +3312,7 @@ pub(crate) fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
 // ─── Scalar function evaluation ───────────────────────────────────────────────
 
 /// Items of an array-valued expression (`ARRAY(..)`, `SPLIT(str, regex)`), when it is one of those.
-fn array_items(e: &Expr, block: &DataBlock, row: usize) -> Option<Vec<ExprVal>> {
+pub(crate) fn array_items(e: &Expr, block: &DataBlock, row: usize) -> Option<Vec<ExprVal>> {
     match e {
         Expr::Array(items) => Some(items.iter().map(|i| eval_expr(i, block, row)).collect()),
         Expr::FuncCall { name, args } if name == "SPLIT" && args.len() >= 2 => {
@@ -3311,6 +3349,16 @@ fn eval_func(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> ExprVa
             let n = items.len() as i64;
             let pos = if i > 0 { i - 1 } else if i < 0 { n + i } else { return ExprVal::Null };
             if pos < 0 || pos >= n { ExprVal::Null } else { items[pos as usize].clone() }
+        }
+        "ARRAY_CONTAINS" => {
+            let Some(items) = args.first().and_then(|a| array_items(a, block, row)) else { return ExprVal::Null };
+            let needle = arg(1);
+            if matches!(needle, ExprVal::Null) { return ExprVal::Null; }
+            let mut unknown = false;
+            for it in &items {
+                match crate::scalar::eq_vals(it, &needle) { Some(true) => return ExprVal::Bool(true), None => unknown = true, _ => {} }
+            }
+            if unknown { ExprVal::Null } else { ExprVal::Bool(false) }
         }
         "SIZE" | "CARDINALITY" => match args.first().and_then(|a| array_items(a, block, row)) {
             Some(items) => ExprVal::Int(items.len() as i64),
@@ -3426,7 +3474,7 @@ fn get_cell(block: &DataBlock, col_name: &str, row: usize) -> ExprVal {    // Tr
             let cn = c.name.len(); let nm = col_name.len();
             cn > nm && c.name.as_bytes()[cn - nm - 1] == b'.' && &c.name[cn - nm..] == col_name
         }
-    });
+    }).or_else(|| ci_find_col(block, col_name));
     match col {
         None => ExprVal::Null,
         Some(c) => match &c.data {
@@ -3549,9 +3597,6 @@ fn sort_block(block: DataBlock, col: &str, desc: bool) -> Result<DataBlock, Kore
 }
 
 fn sort_block_nulls(block: DataBlock, col: &str, desc: bool, nulls_first: Option<bool>) -> Result<DataBlock, KoreError> {
-    // NULLS FIRST/LAST: default is NULLs last for ASC, NULLs first for DESC
-    let nf = nulls_first.unwrap_or(desc);
-
     // Find the column name (handles qualified names)
     let col_short  = col.rsplit('.').next().unwrap_or(col);
     let col_prefix = if col.contains('.') { col.split('.').next() } else { None };
@@ -3575,36 +3620,54 @@ fn sort_block_nulls(block: DataBlock, col: &str, desc: bool, nulls_first: Option
                 .collect();
             if matches.len() == 1 { Some(matches[0]) } else { None }
         })
+        .or_else(|| ci_find_col(&block, col).or_else(|| ci_find_col(&block, col_short)))
         .map(|c| c.name.clone())
         .ok_or_else(|| KoreError::InvalidArgument(format!("ORDER BY column not found: {col}")))?;
 
-    // If NULLS FIRST/LAST is non-default, do a custom sort with null sentinels
-    if nulls_first.is_some() {
-        // Build sort keys: (is_null, value) with null sentinel controlled by nf
-        let n = block.num_rows;
+    // The core sort puts NULL at a type-dependent end (sentinels). Spark: NULLS FIRST ascending, NULLS LAST
+    // descending, unless the query says otherwise; so a column with NULLs (or an explicit NULLS clause) is
+    // ordered by a comparator that knows about NULL. Integer columns without a NULLS clause already match.
+    {
         let col_data = block.columns.iter().find(|c| c.name == col_name).unwrap();
-        let mut indices: Vec<usize> = (0..n).collect();
-        let keys: Vec<(bool, f64)> = (0..n).map(|i| {
-            match &col_data.data {
-                ColumnData::Int64(v)   => match v.get(i).and_then(|x| *x) { Some(x) => (false, x as f64), None => (true, 0.0) },
-                ColumnData::Float64(v) => match v.get(i).and_then(|x| *x) { Some(x) => (false, x), None => (true, 0.0) },
-                ColumnData::Str(v)     => match v.get(i).and_then(|x| x.as_deref()) {
-                    Some(s) => (false, s.as_bytes().first().copied().unwrap_or(0) as f64),
-                    None    => (true, 0.0)
-                },
-                _ => (true, 0.0),
-            }
-        }).collect();
-        indices.sort_by(|&a, &b| {
-            let (an, av) = keys[a]; let (bn, bv) = keys[b];
-            match (an, bn) {
-                (true, false) => if nf { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater },
-                (false, true) => if nf { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Less },
-                _ => if desc { bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal) }
-                     else    { av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal) },
-            }
-        });
-        return Ok(block.select_rows(&indices));
+        let has_nulls = match &col_data.data {
+            ColumnData::Int64(v) => v.iter().any(|x| x.is_none()),
+            ColumnData::Float64(v) => v.iter().any(|x| x.is_none()),
+            ColumnData::Bool(v) => v.iter().any(|x| x.is_none()),
+            ColumnData::Str(v) => v.iter().any(|x| x.is_none()),
+            ColumnData::StrDict { codes, .. } => codes.iter().any(|&c| c == u8::MAX),
+        };
+        if has_nulls && (nulls_first.is_some() || !matches!(col_data.data, ColumnData::Int64(_))) {
+            let nulls_first = nulls_first.unwrap_or(!desc);
+            let n = block.num_rows;
+            let is_null = |i: usize| -> bool {
+                match &col_data.data {
+                    ColumnData::Int64(v) => v[i].is_none(),
+                    ColumnData::Float64(v) => v[i].is_none(),
+                    ColumnData::Bool(v) => v[i].is_none(),
+                    ColumnData::Str(v) => v[i].is_none(),
+                    ColumnData::StrDict { codes, .. } => codes[i] == u8::MAX,
+                }
+            };
+            let cmp_cells = |a: usize, b: usize| -> std::cmp::Ordering {
+                match &col_data.data {
+                    ColumnData::Int64(v) => v[a].cmp(&v[b]),
+                    ColumnData::Float64(v) => v[a].unwrap_or(0.0).total_cmp(&v[b].unwrap_or(0.0)),
+                    ColumnData::Bool(v) => v[a].cmp(&v[b]),
+                    ColumnData::Str(v) => v[a].cmp(&v[b]),
+                    ColumnData::StrDict { codes, dict } => dict[codes[a] as usize].cmp(&dict[codes[b] as usize]),
+                }
+            };
+            let mut indices: Vec<usize> = (0..n).collect();
+            indices.sort_by(|&a, &b| {
+                match (is_null(a), is_null(b)) {
+                    (true, true) => std::cmp::Ordering::Equal,
+                    (true, false) => if nulls_first { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater },
+                    (false, true) => if nulls_first { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Less },
+                    (false, false) => { let o = cmp_cells(a, b); if desc { o.reverse() } else { o } }
+                }
+            });
+            return Ok(block.select_rows(&indices));
+        }
     }
 
     let estimated = kore_spill::SpillManager::estimate_bytes(&block);
@@ -3697,18 +3760,26 @@ fn nested_loop_join(left: &DataBlock, right: &DataBlock, on_expr: &Expr, join_ty
             right_matches.push(usize::MAX); // sentinel for NULL right
         }
     }
+    // RIGHT / FULL: right rows that matched nothing, with a NULL left side
+    if matches!(join_type, JoinKind::Right | JoinKind::Full) {
+        let mut seen = vec![false; rn];
+        for &ri in &right_matches { if ri != usize::MAX { seen[ri] = true; } }
+        for ri in 0..rn {
+            if !seen[ri] { left_matches.push(usize::MAX); right_matches.push(ri); }
+        }
+    }
 
     // Build output
     let total = left_matches.len();
     let mut columns = Vec::new();
     for col in &left.columns {
         let data = match &col.data {
-            ColumnData::Int64(v) => ColumnData::Int64(left_matches.iter().map(|&i| v[i]).collect()),
-            ColumnData::Float64(v) => ColumnData::Float64(left_matches.iter().map(|&i| v[i]).collect()),
-            ColumnData::Str(v) => ColumnData::Str(left_matches.iter().map(|&i| v[i].clone()).collect()),
-            ColumnData::Bool(v) => ColumnData::Bool(left_matches.iter().map(|&i| v[i]).collect()),
+            ColumnData::Int64(v) => ColumnData::Int64(left_matches.iter().map(|&i| if i == usize::MAX { None } else { v[i] }).collect()),
+            ColumnData::Float64(v) => ColumnData::Float64(left_matches.iter().map(|&i| if i == usize::MAX { None } else { v[i] }).collect()),
+            ColumnData::Str(v) => ColumnData::Str(left_matches.iter().map(|&i| if i == usize::MAX { None } else { v[i].clone() }).collect()),
+            ColumnData::Bool(v) => ColumnData::Bool(left_matches.iter().map(|&i| if i == usize::MAX { None } else { v[i] }).collect()),
             ColumnData::StrDict { codes, dict } => ColumnData::StrDict {
-                codes: left_matches.iter().map(|&i| codes[i]).collect(),
+                codes: left_matches.iter().map(|&i| if i == usize::MAX { u8::MAX } else { codes[i] }).collect(),
                 dict: dict.clone(),
             },
         };
@@ -3827,7 +3898,8 @@ fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, Ko
                             let cn = col.name.len(); let nm = col_name.len();
                             col.name == col_name ||
                             (cn > nm && col.name.as_bytes()[cn-nm-1] == b'.' && &col.name[cn-nm..] == col_name)
-                        }).ok_or_else(|| KoreError::InvalidArgument(format!("column not found: {col_name}")))?;
+                        }).or_else(|| ci_find_col(&block, &col_name))
+                        .ok_or_else(|| KoreError::InvalidArgument(format!("column not found: {col_name}")))?;
                         let mut nc = src.clone();
                         if let Some(a) = alias { nc.name = a.clone(); }
                         new_cols.push(nc);
@@ -4039,6 +4111,22 @@ fn used_columns(stmt: &SelectStmt) -> std::collections::HashSet<String> {
 }
 
 /// Find a column by exact name or table-prefix suffix match.
+
+/// Case-insensitive column lookup (Spark resolves identifiers case-insensitively); only used after an exact match failed.
+pub(crate) fn ci_find_col<'a>(block: &'a DataBlock, name: &str) -> Option<&'a Column> {
+    block.columns.iter().find(|c| {
+        c.name.eq_ignore_ascii_case(name) || {
+            let (cn, nm) = (c.name.len(), name.len());
+            cn > nm && c.name.as_bytes()[cn - nm - 1] == b'.' && c.name[cn - nm..].eq_ignore_ascii_case(name)
+        }
+    })
+}
+
+/// Is `name` one of the needed column names (case-insensitively)?
+fn needs_col(set: &std::collections::HashSet<String>, name: &str) -> bool {
+    set.contains(name) || set.iter().any(|n| n.eq_ignore_ascii_case(name))
+}
+
 fn find_col<'a>(block: &'a DataBlock, name: &str) -> Option<&'a Column> {
     // Hot path: avoid format!() allocation by doing suffix check inline.
     block.columns.iter().find(|c| {
@@ -4047,7 +4135,7 @@ fn find_col<'a>(block: &'a DataBlock, name: &str) -> Option<&'a Column> {
             let nm = name.len();
             cn > nm && c.name.as_bytes()[cn - nm - 1] == b'.' && &c.name[cn - nm..] == name
         }
-    })
+    }).or_else(|| ci_find_col(block, name))
 }
 
 /// Extract f64 values for a subset of rows — column-at-a-time, no per-row dispatch.
@@ -4662,24 +4750,40 @@ fn expr_vals_eq(a: &[ExprVal], b: &[ExprVal]) -> bool {
 
 // ── LIKE pattern matching ─────────────────────────────────────────────────────
 
-/// SQL LIKE: `%` = any chars, `_` = single char, `\` = escape char.
+/// SQL LIKE: `%` = any run of characters, `_` = exactly one character, `\` escapes the next pattern character.
+/// Iterative with a single backtrack point for the last `%` (no exponential blow-up on `%a%b%c`).
 pub(crate) fn like_match(value: &str, pattern: &str) -> bool {
-    like_recursive(value.as_bytes(), pattern.as_bytes())
-}
-
-fn like_recursive(s: &[u8], p: &[u8]) -> bool {
-    match (s, p) {
-        (_, [])           => s.is_empty(),
-        (_, [b'%', rest @ ..]) => {
-            // % matches 0 or more characters
-            if like_recursive(s, rest) { return true; }
-            if let [_, tail @ ..] = s { return like_recursive(tail, p); }
-            false
+    let (s, p) = (value.as_bytes(), pattern.as_bytes());
+    let char_len = |b: u8| -> usize { if b < 0x80 { 1 } else if b >= 0xF0 { 4 } else if b >= 0xE0 { 3 } else { 2 } };
+    let (mut i, mut j) = (0usize, 0usize);
+    let mut star: Option<(usize, usize)> = None; // (pattern index after the %, string index to retry from)
+    loop {
+        if j < p.len() {
+            match p[j] {
+                b'%' => { star = Some((j + 1, i)); j += 1; continue; }
+                b'_' => {
+                    if i < s.len() { i += char_len(s[i]).min(s.len() - i); j += 1; continue; }
+                }
+                b'\\' if j + 1 < p.len() => {
+                    if i < s.len() && s[i] == p[j + 1] { i += 1; j += 2; continue; }
+                }
+                c => {
+                    if i < s.len() && s[i] == c { i += 1; j += 1; continue; }
+                }
+            }
+        } else if i == s.len() {
+            return true;
         }
-        ([], _) => false,
-        ([_, st @ ..], [b'_', pt @ ..]) => like_recursive(st, pt),  // _ matches any one
-        ([sc, st @ ..], [pc, pt @ ..]) if sc == pc => like_recursive(st, pt),
-        _ => false,
+        // mismatch: retry after the last % consuming one more character
+        match star {
+            Some((pj, si)) if si < s.len() => {
+                let ni = si + char_len(s[si]).min(s.len() - si);
+                star = Some((pj, ni));
+                i = ni;
+                j = pj;
+            }
+            _ => return false,
+        }
     }
 }
 

@@ -21,7 +21,7 @@ fn find_col<'a>(block: &'a DataBlock, name: &str) -> Option<&'a ColumnData> {
             let (cn, nm) = (c.name.len(), name.len());
             cn > nm && c.name.as_bytes()[cn - nm - 1] == b'.' && &c.name[cn - nm..] == name
         }
-    }).map(|c| &c.data)
+    }).or_else(|| crate::executor::ci_find_col(block, name)).map(|c| &c.data)
 }
 
 fn col_of<'a>(e: &Expr, block: &'a DataBlock) -> Option<&'a ColumnData> {
@@ -45,6 +45,8 @@ enum Val<'a> {
     I(&'a [Option<i64>]),
     F(&'a [Option<f64>]),
     Num(f64),
+    /// integer literal (kept exact: BIGINT keys above 2^53 do not survive a trip through f64)
+    NumI(i64),
     Owned(Vec<Option<f64>>),
     S(&'a [Option<String>]),
     D(&'a [u8], &'a [String]),
@@ -58,6 +60,7 @@ impl Val<'_> {
             Val::I(v) => v[i].map(|x| x as f64),
             Val::F(v) => v[i],
             Val::Num(c) => Some(*c),
+            Val::NumI(c) => Some(*c as f64),
             Val::Owned(v) => v[i],
             _ => None,
         }
@@ -71,13 +74,19 @@ impl Val<'_> {
             _ => None,
         }
     }
-    fn is_num(&self) -> bool { matches!(self, Val::I(_) | Val::F(_) | Val::Num(_) | Val::Owned(_)) }
+    fn is_num(&self) -> bool { matches!(self, Val::I(_) | Val::F(_) | Val::Num(_) | Val::NumI(_) | Val::Owned(_)) }
+    /// exact integer value of an integer column / literal
+    #[inline]
+    fn int(&self, i: usize) -> Option<i64> {
+        match self { Val::I(v) => v[i], Val::NumI(c) => Some(*c), _ => None }
+    }
+    fn is_int(&self) -> bool { matches!(self, Val::I(_) | Val::NumI(_)) }
     fn is_text(&self) -> bool { matches!(self, Val::S(_) | Val::D(..) | Val::Text(_)) }
 }
 
 fn operand<'a>(e: &'a Expr, block: &'a DataBlock, w: Win) -> Option<Val<'a>> {
     match e {
-        Expr::Int(i) => Some(Val::Num(*i as f64)),
+        Expr::Int(i) => Some(Val::NumI(*i)),
         Expr::Float(f) => Some(Val::Num(*f)),
         Expr::Str(s) => Some(Val::Text(s.as_str())),
         Expr::Col(_) | Expr::QualCol(..) => match col_of(e, block)? {
@@ -117,7 +126,20 @@ fn cmp_text(op: &BinOpKind, a: &str, b: &str) -> bool {
     }
 }
 
+fn cmp_int(op: &BinOpKind, a: i64, b: i64) -> bool {
+    match op {
+        BinOpKind::Eq => a == b, BinOpKind::Ne => a != b, BinOpKind::Lt => a < b,
+        BinOpKind::Le => a <= b, BinOpKind::Gt => a > b, BinOpKind::Ge => a >= b, _ => false,
+    }
+}
+
 fn compare(op: &BinOpKind, l: &Val, r: &Val, n: usize) -> Option<Vec<u8>> {
+    if l.is_int() && r.is_int() {
+        return Some((0..n).map(|i| match (l.int(i), r.int(i)) {
+            (Some(a), Some(b)) => if cmp_int(op, a, b) { TRUE } else { FALSE },
+            _ => NULL,
+        }).collect());
+    }
     if l.is_num() && r.is_num() {
         Some((0..n).map(|i| match (l.num(i), r.num(i)) {
             (Some(a), Some(b)) => if cmp_ok(op, a, b) { TRUE } else { FALSE },
@@ -165,7 +187,11 @@ fn tri<'a>(e: &'a Expr, block: &'a DataBlock, w: Win) -> Option<Vec<u8>> {
         }
         Expr::In { expr, values, negated } => {
             let v = operand(expr, block, w)?;
-            let out: Vec<u8> = if v.is_num() {
+            let int_set: Option<Vec<i64>> = if v.is_int() { values.iter().map(|x| if let Expr::Int(i) = x { Some(*i) } else { None }).collect() } else { None };
+            let out: Vec<u8> = if let Some(set) = int_set {
+                let hs: std::collections::HashSet<i64> = set.into_iter().collect();
+                (0..n).map(|i| match v.int(i) { None => NULL, Some(a) => if hs.contains(&a) { TRUE } else { FALSE } }).collect()
+            } else if v.is_num() {
                 let mut set = Vec::with_capacity(values.len());
                 for x in values {
                     match x { Expr::Int(i) => set.push(*i as f64), Expr::Float(f) => set.push(*f), _ => return None }

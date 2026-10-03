@@ -29,7 +29,14 @@ fn map_bound(b: &FrameBound, f: &mut dyn FnMut(&Expr) -> Option<Expr>) -> FrameB
 }
 
 pub fn map_order(o: &OrderByItem, f: &mut dyn FnMut(&Expr) -> Option<Expr>) -> OrderByItem {
-    OrderByItem { expr: map_expr(&o.expr, f), col: o.col.clone(), desc: o.desc, nulls_first: o.nulls_first }
+    let expr = map_expr(&o.expr, f);
+    // `col` is the plain-column spelling of `expr` that the fast sort uses; it must follow a rewrite
+    let col = if expr == o.expr {
+        o.col.clone()
+    } else {
+        match &expr { Expr::Col(c) => c.clone(), Expr::QualCol(t, c) => format!("{t}.{c}"), _ => String::new() }
+    };
+    OrderByItem { expr, col, desc: o.desc, nulls_first: o.nulls_first }
 }
 
 fn map_wfn(w: &WindowFn, f: &mut dyn FnMut(&Expr) -> Option<Expr>) -> WindowFn {

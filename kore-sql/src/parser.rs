@@ -347,7 +347,20 @@ impl Parser {
         // every GROUP BY element contributes a list of alternative sets; the final sets are their product
         let mut elements: Vec<Vec<Vec<Expr>>> = Vec::new();
         let mut kinds: Vec<Option<Grouping>> = Vec::new();
+        // GROUP BY ALL: every select item that is not an aggregate
+        let all_mode = self.peek() == &Token::All;
+        if all_mode {
+            self.pos += 1;
+            for p in projections {
+                if let Projection::Expr { expr, .. } = p {
+                    let has_agg = crate::ast_walk::any_node(expr, &|x| matches!(x, Expr::Agg { .. } | Expr::AggX { .. } | Expr::Window { .. }));
+                    if !has_agg { elements.push(vec![vec![expr.clone()]]); kinds.push(None); }
+                }
+            }
+            if elements.is_empty() { return Ok((Vec::new(), Grouping::Plain, Vec::new(), vec![Vec::new()])); }
+        }
         loop {
+            if all_mode { break; }
             let kw = self.peek_ident_upper();
             let next_is_paren = self.peek2() == &Token::LParen;
             if (kw == "ROLLUP" || kw == "CUBE") && next_is_paren {
@@ -461,10 +474,18 @@ impl Parser {
         let mut ctes = vec![];
         loop {
             let name = self.expect_ident()?;
+            let col_aliases = self.parse_col_aliases()?;
             self.expect(&Token::As)?;
             self.expect(&Token::LParen)?;
-            let body = self.parse_compound()?;
+            let mut body = self.parse_compound()?;
             self.expect(&Token::RParen)?;
+            if !col_aliases.is_empty() {
+                // WITH c(a, b) AS (..): rename the body's output columns
+                body = SelectStmt::star_from(TableExpr {
+                    name: name.clone(), alias: Some(name.clone()), subquery: Some(Box::new(body)),
+                    values: None, push_filter: None, col_aliases,
+                });
+            }
             ctes.push(CteClause { name, body });
             if !self.consume_if(&Token::Comma) { break; }
         }
@@ -891,9 +912,40 @@ impl Parser {
         // Accept a string literal as table name (e.g. FROM 'data/file.parquet')
         let name = if matches!(self.peek(), Token::Str(_)) {
             match self.advance() { Token::Str(s) => s, _ => unreachable!() }
+        } else if self.peek() == &Token::Range {
+            // `range` is a window-frame keyword for the lexer; as a FROM item it is the table function
+            self.pos += 1;
+            "range".to_string()
         } else {
             self.expect_ident()?
         };
+        // table-valued function: range(n) / range(start, end[, step])
+        if name.eq_ignore_ascii_case("range") && self.peek() == &Token::LParen {
+            self.pos += 1;
+            let mut nums: Vec<i64> = Vec::new();
+            loop {
+                let neg = self.consume_if(&Token::Minus);
+                match self.advance() {
+                    Token::Int(n) => nums.push(if neg { -n } else { n }),
+                    other => return Err(KoreError::InvalidArgument(format!("range() takes integer literals, got {:?}", other))),
+                }
+                if !self.consume_if(&Token::Comma) { break; }
+            }
+            self.expect(&Token::RParen)?;
+            let (start, end, step) = match nums.as_slice() {
+                [n] => (0, *n, 1),
+                [a, b] => (*a, *b, 1),
+                [a, b, c] => (*a, *b, *c),
+                _ => return Err(KoreError::InvalidArgument("range() takes 1 to 3 arguments".into())),
+            };
+            if step == 0 { return Err(KoreError::InvalidArgument("range(): step cannot be 0".into())); }
+            let count = if (step > 0 && end > start) || (step < 0 && end < start) { ((end - start).abs() + step.abs() - 1) / step.abs() } else { 0 };
+            if count > 10_000_000 { return Err(KoreError::InvalidArgument("range() is limited to 10 million rows".into())); }
+            let rows: Vec<Vec<Expr>> = (0..count).map(|i| vec![Expr::Int(start + i * step)]).collect();
+            let (alias, mut col_aliases) = self.parse_derived_alias("range")?;
+            if col_aliases.is_empty() { col_aliases = vec!["id".into()]; }
+            return Ok(TableExpr { name: alias.clone(), alias: Some(alias), subquery: None, values: Some(rows), push_filter: None, col_aliases });
+        }
         // schema-qualified names: db.table
         let name = if self.peek() == &Token::Dot && matches!(self.tokens.get(self.pos + 1), Some(Token::Ident(_))) {
             self.pos += 1;
@@ -1439,7 +1491,7 @@ impl Parser {
                             self.pos += 1;
                             if let Some(special) = self.parse_special_call(&up)? { return Ok(special); }
                             // Scalar function call: UPPER(x), ROUND(x,2), etc.
-                            let args = if self.peek() != &Token::RParen {
+                            let mut args = if self.peek() != &Token::RParen {
                                 let first = self.parse_expr(0)?;
                                 let mut a = vec![first];
                                 while self.consume_if(&Token::Comma) {
@@ -1448,6 +1500,12 @@ impl Parser {
                                 a
                             } else { vec![] };
                             self.expect(&Token::RParen)?;
+                            // DATEADD(day, 5, d) / TIMESTAMPDIFF(month, a, b): the unit is a bare word
+                            if args.len() == 3 && matches!(up.as_str(), "DATEADD" | "DATE_ADD" | "TIMESTAMPADD" | "DATEDIFF" | "DATE_DIFF" | "TIMESTAMPDIFF") {
+                                if let Expr::Col(c) = &args[0] {
+                                    if crate::datetime::norm_unit(c).is_some() { args[0] = Expr::Str(c.clone()); }
+                                }
+                            }
                             Ok(Expr::FuncCall { name: up, args })
                         } else if (up == "TRUE" || up == "FALSE") && self.peek() != &Token::Dot {
                             Ok(Expr::Bool(up == "TRUE"))
@@ -1597,7 +1655,7 @@ fn is_agg_name(up: &str) -> bool {
         "STDDEV" | "STDDEV_SAMP" | "STDDEV_POP" | "STD" | "VARIANCE" | "VAR_SAMP" | "VAR_POP" | "MEDIAN"
         | "PERCENTILE" | "PERCENTILE_APPROX" | "APPROX_PERCENTILE" | "PERCENTILE_CONT" | "PERCENTILE_DISC"
         | "STRING_AGG" | "LISTAGG" | "GROUP_CONCAT" | "COLLECT_LIST" | "COLLECT_SET" | "ARRAY_AGG"
-        | "FIRST" | "LAST" | "ANY_VALUE" | "COUNT_IF" | "BOOL_AND" | "BOOL_OR" | "EVERY" | "SOME" | "ANY"
+        | "FIRST" | "LAST" | "ANY_VALUE" | "MODE" | "COUNT_IF" | "BOOL_AND" | "BOOL_OR" | "EVERY" | "SOME" | "ANY"
         | "MAX_BY" | "MIN_BY" | "APPROX_COUNT_DISTINCT" | "CORR" | "COVAR_POP" | "COVAR_SAMP"
         | "SKEWNESS" | "KURTOSIS" | "SUM_DISTINCT")
 }

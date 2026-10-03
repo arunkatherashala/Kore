@@ -20,6 +20,7 @@ pub mod ast_walk;
 pub mod general;
 pub mod aggs;
 pub mod desugar;
+pub mod hashes;
 pub mod vecexpr;
 pub mod window;
 pub mod scalar;

@@ -48,9 +48,20 @@ fn table_columns(t: &TableExpr, ctx: &KqlContext) -> Result<Vec<String>, KoreErr
 }
 
 /// `Some(rewritten)` when the statement uses a form this module desugars.
-pub fn rewrite_stmt(stmt: &SelectStmt, ctx: &KqlContext) -> Result<Option<SelectStmt>, KoreError> {
+pub fn rewrite_stmt(stmt: &SelectStmt, ctx: &KqlContext) -> Result<Option<(SelectStmt, Option<KqlContext>)>, KoreError> {
     let mut cur = stmt.clone();
     let mut changed = false;
+    let mut local_ctx: Option<KqlContext> = None;
+
+    // PIVOT / UNPIVOT / LATERAL VIEW / EXPLODE in the select list
+    if cur.pivot.is_some() { cur = rewrite_pivot(cur, ctx)?; changed = true; }
+    if cur.unpivot.is_some() { cur = rewrite_unpivot(cur, ctx)?; changed = true; }
+    if !cur.lateral_views.is_empty() || cur.projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Explode(_), .. })) {
+        let (rewritten, c2) = rewrite_lateral(cur, ctx)?;
+        cur = rewritten;
+        local_ctx = Some(c2);
+        changed = true;
+    }
 
     // quantified comparisons
     let mut has_quant = false;
@@ -75,7 +86,7 @@ pub fn rewrite_stmt(stmt: &SelectStmt, ctx: &KqlContext) -> Result<Option<Select
         cur = rewrite_joins(cur, ctx)?;
         changed = true;
     }
-    Ok(if changed { Some(cur) } else { None })
+    Ok(if changed { Some((cur, local_ctx)) } else { None })
 }
 
 /// `x op ANY|ALL (sub)` as IN / NOT IN / a comparison with a MIN or MAX scalar subquery.
@@ -243,4 +254,114 @@ fn rewrite_joins(mut s: SelectStmt, ctx: &KqlContext) -> Result<SelectStmt, Kore
         s.projections = out;
     }
     Ok(s)
+}
+
+// ─── PIVOT / UNPIVOT ──────────────────────────────────────────────────────────
+
+fn pivot_label(e: &Expr) -> String {
+    match e {
+        Expr::Str(s) => s.clone(),
+        Expr::Int(i) => i.to_string(),
+        Expr::Float(f) => crate::scalar::fmt_f64(*f),
+        Expr::Bool(b) => b.to_string(),
+        Expr::Null => "null".to_string(),
+        other => format!("{:?}", other),
+    }
+}
+
+/// `FROM src PIVOT (agg(c) FOR p IN (v1, v2))` = group by every other column, one FILTERed aggregate per value.
+fn rewrite_pivot(mut s: SelectStmt, ctx: &KqlContext) -> Result<SelectStmt, KoreError> {
+    let p = s.pivot.take().unwrap();
+    if !s.joins.is_empty() { return Err(err("PIVOT after a join is not supported; pivot a subquery instead")); }
+    let cols = table_columns(&s.from, ctx)?;
+    for needed in [&p.for_col, &p.agg_col] {
+        if !cols.iter().any(|c| c.eq_ignore_ascii_case(needed)) { return Err(err(format!("PIVOT column '{needed}' not found"))); }
+    }
+    let group_cols: Vec<String> = cols.iter()
+        .filter(|c| !c.eq_ignore_ascii_case(&p.for_col) && !c.eq_ignore_ascii_case(&p.agg_col))
+        .cloned().collect();
+    let agg_name = match p.agg_func {
+        AggFunc::Sum => "SUM", AggFunc::Avg => "AVG", AggFunc::Count | AggFunc::CountDistinct => "COUNT",
+        AggFunc::Min => "MIN", AggFunc::Max => "MAX", _ => return Err(err("unsupported PIVOT aggregate")),
+    };
+    let mut inner = SelectStmt::star_from(s.from.clone());
+    inner.projections = group_cols.iter().map(|c| Projection::Expr { expr: Expr::Col(c.clone()), alias: None }).collect();
+    for v in &p.in_values {
+        let cond = if matches!(v, Expr::Null) {
+            Expr::IsNull(Box::new(Expr::Col(p.for_col.clone())))
+        } else {
+            Expr::BinOp { op: BinOpKind::Eq, left: Box::new(Expr::Col(p.for_col.clone())), right: Box::new(v.clone()) }
+        };
+        inner.projections.push(Projection::Expr {
+            expr: Expr::AggX { name: agg_name.into(), args: vec![Expr::Col(p.agg_col.clone())], distinct: false, filter: Some(Box::new(cond)) },
+            alias: Some(pivot_label(v)),
+        });
+    }
+    inner.group_by = group_cols;
+    let alias = s.from.alias.clone().unwrap_or_else(|| "__pivot".to_string());
+    s.from = TableExpr { name: alias.clone(), alias: Some(alias), subquery: Some(Box::new(inner)), values: None, push_filter: None, col_aliases: Vec::new() };
+    Ok(s)
+}
+
+/// `FROM src UNPIVOT (value FOR key IN (c1, c2))` = UNION ALL of one SELECT per column, NULL values excluded.
+fn rewrite_unpivot(mut s: SelectStmt, ctx: &KqlContext) -> Result<SelectStmt, KoreError> {
+    let u = s.unpivot.take().unwrap();
+    if !s.joins.is_empty() { return Err(err("UNPIVOT after a join is not supported; unpivot a subquery instead")); }
+    let cols = table_columns(&s.from, ctx)?;
+    let keep: Vec<String> = cols.iter().filter(|c| !u.in_cols.iter().any(|x| x.eq_ignore_ascii_case(c))).cloned().collect();
+    let arm = |c: &str| {
+        let mut a = SelectStmt::star_from(s.from.clone());
+        a.projections = keep.iter().map(|k| Projection::Expr { expr: Expr::Col(k.clone()), alias: None }).collect();
+        a.projections.push(Projection::Expr { expr: Expr::Str(c.to_string()), alias: Some(u.key_col.clone()) });
+        a.projections.push(Projection::Expr { expr: Expr::Col(c.to_string()), alias: Some(u.value_col.clone()) });
+        a.where_clause = Some(Expr::IsNotNull(Box::new(Expr::Col(c.to_string()))));
+        a
+    };
+    let mut head = arm(&u.in_cols[0]);
+    head.set_ops = u.in_cols[1..].iter().map(|c| (SetOpKind::UnionAll, arm(c))).collect();
+    let alias = s.from.alias.clone().unwrap_or_else(|| "__unpivot".to_string());
+    s.from = TableExpr { name: alias.clone(), alias: Some(alias), subquery: Some(Box::new(head)), values: None, push_filter: None, col_aliases: Vec::new() };
+    Ok(s)
+}
+
+// ─── LATERAL VIEW EXPLODE / EXPLODE in the select list ────────────────────────
+
+fn rewrite_lateral(mut s: SelectStmt, ctx: &KqlContext) -> Result<(SelectStmt, KqlContext), KoreError> {
+    let mut views = std::mem::take(&mut s.lateral_views);
+    // SELECT explode(x) ...  ==  LATERAL VIEW explode(x) __gen AS col
+    let mut projections = Vec::new();
+    for p in std::mem::take(&mut s.projections) {
+        match p {
+            Projection::Expr { expr: Expr::Explode(inner), alias } => {
+                let n = views.len();
+                let (talias, calias) = (format!("__gen{n}"), alias.clone().unwrap_or_else(|| "col".to_string()));
+                views.push(LateralView { expr: Expr::Explode(inner), table_alias: talias.clone(), col_alias: calias.clone() });
+                projections.push(Projection::Expr { expr: Expr::QualCol(talias, calias.clone()), alias: Some(calias) });
+            }
+            other => projections.push(other),
+        }
+    }
+    s.projections = projections;
+
+    // evaluate FROM + JOINs, then fan every row out over the array items
+    let mut base = SelectStmt::star_from(s.from.clone());
+    base.joins = std::mem::take(&mut s.joins);
+    let mut block = execute_select(&base, ctx)?;
+    for v in &views {
+        let Expr::Explode(arr) = &v.expr else { return Err(err("LATERAL VIEW needs EXPLODE(..)")) };
+        let mut rows: Vec<usize> = Vec::new();
+        let mut items: Vec<crate::executor::ExprVal> = Vec::new();
+        for r in 0..block.num_rows {
+            let vals = crate::executor::array_items(arr, &block, r)
+                .ok_or_else(|| err("EXPLODE is only supported over ARRAY(..) and SPLIT(..) expressions"))?;
+            for it in vals { rows.push(r); items.push(it); }
+        }
+        let mut next = block.select_rows(&rows);
+        next.columns.push(crate::general::vals_to_column(format!("{}.{}", v.table_alias, v.col_alias), items, None));
+        block = next;
+    }
+    let mut c2 = ctx.clone();
+    c2.register("__lateral", block);
+    s.from = TableExpr { name: "__lateral".into(), alias: Some("__lateral".into()), subquery: None, values: None, push_filter: None, col_aliases: Vec::new() };
+    Ok((s, c2))
 }

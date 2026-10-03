@@ -385,7 +385,7 @@ fn group3(digits: &str) -> String {
 
 /// Functions that must see their arguments unevaluated (handled by the executor).
 pub fn is_lazy(name: &str) -> bool {
-    matches!(name, "COALESCE" | "NVL" | "IFNULL" | "IF" | "IIF" | "NVL2" | "ELEMENT_AT" | "SIZE" | "CARDINALITY" | "INTERVAL" | "GROUPING" | "GROUPING_ID")
+    matches!(name, "COALESCE" | "NVL" | "IFNULL" | "IF" | "IIF" | "NVL2" | "ELEMENT_AT" | "SIZE" | "CARDINALITY" | "ARRAY_CONTAINS" | "INTERVAL" | "GROUPING" | "GROUPING_ID")
 }
 
 /// Evaluate a pure scalar function. None = not a function of this library.
@@ -408,8 +408,9 @@ pub fn call(name: &str, a: &[V]) -> Option<V> {
         "OCTET_LENGTH" => { nn!(0); V::Int(get!(s(0)).len() as i64) }
         "BIT_LENGTH" => { nn!(0); V::Int(get!(s(0)).len() as i64 * 8) }
         "TRIM" | "BTRIM" => { nn!(0); if n >= 2 { nn!(1); V::Str(trim_chars(&get!(s(0)), &get!(s(1)), true, true)) } else { V::Str(trim_chars(&get!(s(0)), " ", true, true)) } }
-        "LTRIM" => { nn!(0); let set = if n >= 2 { get!(s(1)) } else { " ".into() }; V::Str(trim_chars(&get!(s(0)), &set, true, false)) }
-        "RTRIM" => { nn!(0); let set = if n >= 2 { get!(s(1)) } else { " ".into() }; V::Str(trim_chars(&get!(s(0)), &set, false, true)) }
+        // Spark: ltrim(trimStr, str) / rtrim(trimStr, str), btrim(str, trimStr)
+        "LTRIM" => { nn!(0); if n >= 2 { nn!(1); V::Str(trim_chars(&get!(s(1)), &get!(s(0)), true, false)) } else { V::Str(trim_chars(&get!(s(0)), " ", true, false)) } }
+        "RTRIM" => { nn!(0); if n >= 2 { nn!(1); V::Str(trim_chars(&get!(s(1)), &get!(s(0)), false, true)) } else { V::Str(trim_chars(&get!(s(0)), " ", false, true)) } }
         "__TRIM_BOTH" | "__TRIM_LEADING" | "__TRIM_TRAILING" => {
             // TRIM(BOTH|LEADING|TRAILING chars FROM str) is rewritten by the parser to (str, chars)
             nn!(0, 1);
@@ -591,6 +592,18 @@ pub fn call(name: &str, a: &[V]) -> Option<V> {
             }
         }
         "DIV" => { nn!(0, 1); let (x, y) = (get!(f(0)), get!(f(1))); if y == 0.0 { V::Null } else { V::Int((x / y).trunc() as i64) } }
+        "TRY_DIVIDE" => { nn!(0, 1); let (x, y) = (get!(f(0)), get!(f(1))); if y == 0.0 { V::Null } else { V::Float(x / y) } }
+        "TRY_ADD" | "TRY_SUBTRACT" | "TRY_MULTIPLY" => {
+            nn!(0, 1);
+            match (arg(0), arg(1)) {
+                (V::Int(x), V::Int(y)) => match name { "TRY_ADD" => x.checked_add(*y), "TRY_SUBTRACT" => x.checked_sub(*y), _ => x.checked_mul(*y) }.map(V::Int).unwrap_or(V::Null),
+                _ => { let (x, y) = (get!(f(0)), get!(f(1))); V::Float(match name { "TRY_ADD" => x + y, "TRY_SUBTRACT" => x - y, _ => x * y }) }
+            }
+        }
+        "MD5" => { nn!(0); V::Str(crate::hashes::md5(get!(s(0)).as_bytes())) }
+        "SHA1" | "SHA" => { nn!(0); V::Str(crate::hashes::sha1(get!(s(0)).as_bytes())) }
+        "SHA2" => { nn!(0, 1); match crate::hashes::sha2(get!(s(0)).as_bytes(), get!(k(1))) { Some(h) => V::Str(h), None => V::Null } }
+        "CRC32" => { nn!(0); V::Int(crate::hashes::crc32(get!(s(0)).as_bytes()) as i64) }
         "BITAND" => { nn!(0, 1); V::Int(get!(k(0)) & get!(k(1))) }
         "BITOR" => { nn!(0, 1); V::Int(get!(k(0)) | get!(k(1))) }
         "BITXOR" => { nn!(0, 1); V::Int(get!(k(0)) ^ get!(k(1))) }
@@ -731,7 +744,7 @@ pub fn is_known(name: &str) -> bool {
         | "RLIKE" | "REGEXP" | "REGEXP_COUNT" | "REGEXP_INSTR" | "ABS" | "SIGN" | "SIGNUM" | "ROUND" | "BROUND" | "FLOOR" | "CEIL" | "CEILING"
         | "TRUNC" | "TRUNCATE" | "SQRT" | "CBRT" | "EXP" | "EXPM1" | "LN" | "LOG" | "LOG10" | "LOG2" | "LOG1P" | "POWER" | "POW" | "SIN" | "COS"
         | "TAN" | "ASIN" | "ACOS" | "ATAN" | "SINH" | "COSH" | "TANH" | "COT" | "DEGREES" | "RADIANS" | "ATAN2" | "HYPOT" | "PI" | "E" | "FACTORIAL"
-        | "MOD" | "PMOD" | "REMAINDER" | "DIV" | "BITAND" | "BITOR" | "BITXOR" | "BITNOT" | "SHIFTLEFT" | "SHIFTRIGHT" | "BIT_COUNT" | "WIDTH_BUCKET" | "RAND" | "RANDOM" | "UUID" | "GREATEST" | "LEAST" | "NULLIF" | "ISNULL"
+        | "MD5" | "SHA1" | "SHA" | "SHA2" | "CRC32" | "TRY_DIVIDE" | "TRY_ADD" | "TRY_SUBTRACT" | "TRY_MULTIPLY" | "MOD" | "PMOD" | "REMAINDER" | "DIV" | "BITAND" | "BITOR" | "BITXOR" | "BITNOT" | "SHIFTLEFT" | "SHIFTRIGHT" | "BIT_COUNT" | "WIDTH_BUCKET" | "RAND" | "RANDOM" | "UUID" | "GREATEST" | "LEAST" | "NULLIF" | "ISNULL"
         | "ISNOTNULL" | "ISNAN" | "NANVL" | "TYPEOF" | "ASSERT_TRUE" | "YEAR" | "MONTH" | "DAY" | "DAYOFMONTH" | "DAYOFWEEK" | "DAYOFYEAR"
         | "QUARTER" | "WEEKOFYEAR" | "HOUR" | "MINUTE" | "SECOND" | "WEEK" | "WEEKDAY" | "EXTRACT" | "DATE_PART" | "DATEPART" | "LAST_DAY"
         | "ADD_MONTHS" | "DATE_ADD" | "DATEADD" | "TIMESTAMPADD" | "DAYS_ADD" | "ADDDATE" | "DATE_SUB" | "SUBDATE" | "DATEDIFF" | "TIMESTAMPDIFF"

@@ -39,16 +39,70 @@ pub fn needs_general(s: &SelectStmt) -> bool {
     if !s.group_exprs.is_empty() || !s.windows.is_empty() || s.qualify.is_some() { return true; }
     if s.grouping != Grouping::Plain && !s.group_by.is_empty() { return true; }
     if s.distinct && (s.limit.is_some() || s.offset.is_some()) { return true; }
+    if ungrouped_projection(s) { return true; }
     let special = |e: &Expr| any_node(e, &|x| matches!(x, Expr::AggX { .. } | Expr::Window { .. }) || is_grouping_fn(x) || is_subq(x));
     for p in &s.projections {
         if let Projection::Expr { expr, .. } = p {
             if special(expr) || matches!(expr, Expr::QualCol(_, c) if c == "*") { return true; }
         }
     }
-    if let Some(h) = &s.having { if special(h) { return true; } }
+    if let Some(h) = &s.having {
+        // a HAVING with aggregates *and* subqueries is handled by lift_aggregates (outer WHERE with a context)
+        let only_agg_x = any_node(h, &|x| matches!(x, Expr::AggX { .. } | Expr::Window { .. }) || is_grouping_fn(x));
+        let subq_without_agg = any_node(h, &is_subq) && !any_node(h, &is_agg);
+        if only_agg_x || subq_without_agg { return true; }
+    }
     for o in &s.order_by {
         if matches!(o.expr, Expr::Int(_)) { return true; }
         if special(&o.expr) || any_node(&o.expr, &is_agg) { return true; }
+        // an expression over a select alias (ORDER BY -x) can only be evaluated against the output
+        if !matches!(o.expr, Expr::Col(_) | Expr::QualCol(..)) {
+            let aliases: Vec<&String> = s.projections.iter().filter_map(|p| match p { Projection::Expr { alias: Some(a), .. } => Some(a), _ => None }).collect();
+            if any_node(&o.expr, &|x| matches!(x, Expr::Col(c) if aliases.iter().any(|a| a.eq_ignore_ascii_case(c)))) { return true; }
+        }
+    }
+    false
+}
+
+/// Bare names of the columns an expression reads (aggregate arguments and subqueries excluded).
+fn plain_columns(e: &Expr, out: &mut Vec<String>) {
+    match e {
+        Expr::Col(c) | Expr::QualCol(_, c) => out.push(c.clone()),
+        Expr::Agg { .. } | Expr::AggX { .. } | Expr::Window { .. } | Expr::ScalarSubquery(_) | Expr::InSubquery { .. }
+        | Expr::Exists { .. } | Expr::QuantSubquery { .. } => {}
+        other => {
+            // children only
+            crate::ast_walk::map_expr(other, &mut |x| {
+                if std::ptr::eq(x, other) { return None; }
+                plain_columns(x, out);
+                Some(x.clone())
+            });
+        }
+    }
+}
+
+/// A select item that is neither aggregated nor grouped (`SELECT id, COUNT(*) FROM t`, `SELECT g, v ... GROUP BY g`):
+/// Spark rejects it; the fast paths would silently drop or invent a value. Items that merely alias a GROUP BY name
+/// are the fast path's own convention and stay where they are.
+fn ungrouped_projection(s: &SelectStmt) -> bool {
+    let has_agg = s.projections.iter().any(|p| matches!(p, Projection::Expr { expr, .. } if any_node(expr, &is_agg)));
+    if !has_agg && s.group_by.is_empty() { return false; }
+    let grouped = |c: &str| s.group_by.iter().any(|g| bare_name(g).eq_ignore_ascii_case(c));
+    for p in &s.projections {
+        let Projection::Expr { expr, alias } = p else { continue };
+        if any_node(expr, &is_agg) { continue; }
+        if alias.as_ref().map_or(false, |a| s.group_by.iter().any(|g| g.eq_ignore_ascii_case(a))) { continue; }
+        let mut cols = Vec::new();
+        plain_columns(expr, &mut cols);
+        if cols.iter().all(|c| grouped(c)) { continue; }
+        return true;
+    }
+    // HAVING may only use grouped columns, aggregates and select aliases
+    if let Some(h) = &s.having {
+        let aliases: Vec<&String> = s.projections.iter().filter_map(|p| match p { Projection::Expr { alias: Some(a), .. } => Some(a), _ => None }).collect();
+        let mut cols = Vec::new();
+        plain_columns(h, &mut cols);
+        if cols.iter().any(|c| !grouped(c) && !aliases.iter().any(|a| a.eq_ignore_ascii_case(c))) { return true; }
     }
     false
 }
@@ -145,6 +199,13 @@ fn find_col_idx(block: &DataBlock, name: &str) -> Option<usize> {
     block.columns.iter().position(|c| c.name == name).or_else(|| {
         let suffix = format!(".{name}");
         block.columns.iter().position(|c| c.name.ends_with(&suffix))
+    }).or_else(|| {
+        // identifiers are case-insensitive
+        let lower = name.to_ascii_lowercase();
+        block.columns.iter().position(|c| {
+            let cl = c.name.to_ascii_lowercase();
+            cl == lower || cl.ends_with(&format!(".{lower}"))
+        })
     })
 }
 

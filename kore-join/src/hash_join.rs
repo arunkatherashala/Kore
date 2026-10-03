@@ -255,4 +255,29 @@ mod tests {
         let result = HashJoin::join(&l, &r, &cfg).unwrap();
         assert_eq!(result.num_rows, 4); // alice(unmatched) + bob+carol(matched) + 4(unmatched)
     }
+
+    #[test]
+    fn null_keys_never_match_but_outer_joins_keep_the_row() {
+        // integer keys (fast path)
+        let l = DataBlock::new(vec![Column::int64("k", vec![Some(1), None, Some(3)])]).unwrap();
+        let r = DataBlock::new(vec![Column::int64("k", vec![None, Some(3)]), Column::int64("v", vec![Some(10), Some(30)])]).unwrap();
+        assert_eq!(HashJoin::join(&l, &r, &JoinConfig::inner("k", "k")).unwrap().num_rows, 1);
+        // LEFT keeps the NULL-key row and the unmatched row: 1 -> none, NULL -> none, 3 -> 30
+        assert_eq!(HashJoin::join(&l, &r, &JoinConfig::left("k", "k")).unwrap().num_rows, 3);
+        // string keys (generic path): NULL = NULL is not a match
+        let l = DataBlock::new(vec![Column::str_col("k", vec![Some("a".into()), None])]).unwrap();
+        let r = DataBlock::new(vec![Column::str_col("k", vec![None, Some("a".into())])]).unwrap();
+        assert_eq!(HashJoin::join(&l, &r, &JoinConfig::inner("k", "k")).unwrap().num_rows, 1);
+        assert_eq!(HashJoin::join(&l, &r, &JoinConfig::new("k", "k", JoinType::Full)).unwrap().num_rows, 3);
+    }
+
+    #[test]
+    fn float_keys_join_on_value_and_against_integers() {
+        let l = DataBlock::new(vec![Column::float64("k", vec![Some(1.0), Some(2.5), Some(3.0)])]).unwrap();
+        let r = DataBlock::new(vec![Column::float64("k", vec![Some(2.5), Some(9.0)])]).unwrap();
+        // previously every float key hashed to NULL, which made this a cross join
+        assert_eq!(HashJoin::join(&l, &r, &JoinConfig::inner("k", "k")).unwrap().num_rows, 1);
+        let ri = DataBlock::new(vec![Column::int64("k", vec![Some(1), Some(3)])]).unwrap();
+        assert_eq!(HashJoin::join(&l, &ri, &JoinConfig::inner("k", "k")).unwrap().num_rows, 2);
+    }
 }
