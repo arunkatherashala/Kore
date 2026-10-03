@@ -646,7 +646,9 @@ mod csv_loader_tests {
         assert_eq!(text("select name from t where id = 1").as_deref(), Some("Customer#000000001"));
         assert_eq!(text("select name from t where id = 2999").as_deref(), Some("Customer#000002999"));
         let distinct = ctx.query("select count(distinct name) as d from t").unwrap();
-        assert!(matches!(&distinct.columns[0].data, ColumnData::Float64(v) if v[0] == Some(3000.0)),
+        // COUNT is a whole number (BIGINT in Spark); older builds returned it as DOUBLE
+        assert!(matches!(&distinct.columns[0].data, ColumnData::Int64(v) if v[0] == Some(3000))
+                || matches!(&distinct.columns[0].data, ColumnData::Float64(v) if v[0] == Some(3000.0)),
                 "all 3000 names must stay distinct");
         assert_eq!(text("select grp from t where id = 2999").as_deref(), Some("late-2999"));
         assert_eq!(text("select grp from t where id = 7").as_deref(), Some("g2"));
