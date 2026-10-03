@@ -1140,7 +1140,10 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     let mut conjuncts: Vec<Expr> = Vec::new();
     if planned || n_implicit > 0 {
         if let Some(w) = &where_pred { crate::rewrite::split_conjuncts(w, &mut conjuncts); }
-        if n_implicit > 0 { crate::rewrite::factor_common_from_or(&mut conjuncts); }
+        if n_implicit > 0 {
+            crate::rewrite::factor_common_from_or(&mut conjuncts);
+            crate::rewrite::derive_table_filters_from_or(&mut conjuncts);
+        }
     }
 
     let mut result = if planned {
@@ -1178,10 +1181,21 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         }
         result = push_down_conjuncts(&mut conjuncts, result, ctx)?;
         while !pending.is_empty() {
-            let link = pending.iter().enumerate().find_map(|(pi, pb)| {
+            // Tables that join on a unique key can only shrink or keep the result (a lookup), so those
+            // go first, smallest first: selective dimension tables then cut the fact tables down before
+            // they are joined. Everything else keeps FROM order (a bad order can blow the result up).
+            let linked: Vec<(usize, Vec<(usize, String, String)>)> = pending.iter().enumerate().filter_map(|(pi, pb)| {
                 let links = find_links(&conjuncts, &result, pb);
                 if links.is_empty() { None } else { Some((pi, links)) }
-            });
+            }).collect();
+            let lookup = linked.iter()
+                .filter(|(pi, links)| links.len() == 1 && pending[*pi].num_rows <= 2_000_000
+                    && is_unique_key(&pending[*pi], &links[0].2))
+                .min_by_key(|(pi, _)| pending[*pi].num_rows).map(|(pi, _)| *pi);
+            let link = match lookup {
+                Some(pi) => linked.into_iter().find(|(i, _)| *i == pi),
+                None => linked.into_iter().next(),
+            };
             match link {
                 Some((pi, links)) if links.len() == 1 => {
                     let (ci, lk, rk) = links.into_iter().next().unwrap();
@@ -1625,6 +1639,15 @@ fn prune_block(block: DataBlock, needed: &Option<std::collections::HashSet<Strin
             .filter(|c| needed.contains(c.name.rsplit('.').next().unwrap_or(&c.name)) || needed.contains(c.name.as_str()))
             .collect(),
     }
+}
+
+/// True when an integer key column has no NULLs and no repeated value (a primary-key style column).
+fn is_unique_key(block: &DataBlock, key: &str) -> bool {
+    let Some(col) = find_col_in_block(key, block).and_then(|k| block.columns.iter().find(|c| c.name == k)) else { return false };
+    let ColumnData::Int64(v) = &col.data else { return false };
+    let mut seen: std::collections::HashSet<i64, std::hash::BuildHasherDefault<FxHasher>> =
+        std::collections::HashSet::with_capacity_and_hasher(v.len(), Default::default());
+    v.iter().all(|x| matches!(x, Some(k) if seen.insert(*k)))
 }
 
 /// Every equality conjunct linking `left` and `right`: (conjunct index, key in left, key in right).

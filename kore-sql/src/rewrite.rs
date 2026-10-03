@@ -38,6 +38,48 @@ pub fn factor_common_from_or(conjuncts: &mut Vec<Expr>) {
     conjuncts.extend(extra);
 }
 
+/// `(a.x = 1 AND b.y = 2) OR (a.x = 3 AND b.y = 4)` implies `a.x = 1 OR a.x = 3` and `b.y = 2 OR b.y = 4`.
+/// For every qualified table alias that has a single-alias condition in each OR branch, append the OR of
+/// those conditions so the table can be filtered before joining (TPC-H Q7). The original OR stays.
+pub fn derive_table_filters_from_or(conjuncts: &mut Vec<Expr>) {
+    fn branches(e: &Expr, out: &mut Vec<Expr>) {
+        match e {
+            Expr::BinOp { op: BinOpKind::Or, left, right } => { branches(left, out); branches(right, out); }
+            other => out.push(other.clone()),
+        }
+    }
+    // Some(alias) when every column in `e` is `alias.col` for the same alias
+    fn only_alias(e: &Expr) -> Option<String> {
+        let mut cols = Vec::new();
+        if !referenced_cols(e, &mut cols) || cols.is_empty() { return None; }
+        let alias = cols[0].split_once('.')?.0.to_string();
+        cols.iter().all(|c| c.split_once('.').map(|(a, _)| a == alias).unwrap_or(false)).then_some(alias)
+    }
+    let mut extra: Vec<Expr> = Vec::new();
+    for c in conjuncts.iter() {
+        if !matches!(c, Expr::BinOp { op: BinOpKind::Or, .. }) { continue; }
+        let mut bs = Vec::new();
+        branches(c, &mut bs);
+        // per branch: alias -> conjuncts that touch only that alias
+        let per_branch: Vec<std::collections::BTreeMap<String, Vec<Expr>>> = bs.iter().map(|b| {
+            let mut parts = Vec::new();
+            split_conjuncts(b, &mut parts);
+            let mut m: std::collections::BTreeMap<String, Vec<Expr>> = Default::default();
+            for p in parts { if let Some(a) = only_alias(&p) { m.entry(a).or_default().push(p); } }
+            m
+        }).collect();
+        for alias in per_branch[0].keys() {
+            if !per_branch.iter().all(|m| m.contains_key(alias)) { continue; }
+            let ors: Vec<Expr> = per_branch.iter().filter_map(|m| and_all(m[alias].clone())).collect();
+            let Some(first) = ors.first().cloned() else { continue };
+            let derived = ors.into_iter().skip(1).fold(first, |acc, e| Expr::BinOp { op: BinOpKind::Or, left: Box::new(acc), right: Box::new(e) });
+            // a single-branch or already-present filter adds nothing
+            if !conjuncts.contains(&derived) && !extra.contains(&derived) && &derived != c { extra.push(derived); }
+        }
+    }
+    conjuncts.extend(extra);
+}
+
 pub fn and_all(mut v: Vec<Expr>) -> Option<Expr> {
     let first = if v.is_empty() { return None } else { v.remove(0) };
     Some(v.into_iter().fold(first, |acc, e| Expr::BinOp { op: BinOpKind::And, left: Box::new(acc), right: Box::new(e) }))
