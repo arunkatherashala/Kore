@@ -287,7 +287,7 @@ impl Parser {
             return Ok(first);
         }
         // the first arm keeps its own ORDER BY / LIMIT only when it is parenthesised: isolate it
-        if !first.order_by.is_empty() || first.limit.is_some() || first.offset.is_some() {
+        if !first.order_by.is_empty() || first.limit.is_some() || first.offset.is_some() || !first.set_ops.is_empty() {
             first = SelectStmt::wrap(first);
         }
         first.set_ops = arms;
@@ -301,7 +301,7 @@ impl Parser {
     fn parse_select_arm(&mut self) -> Result<SelectStmt, KoreError> {
         if self.peek() == &Token::LParen {
             self.pos += 1;
-            let mut inner = self.parse_select_arm()?;
+            let mut inner = self.parse_compound()?;
             self.expect(&Token::RParen)?;
             inner.parenthesized = true;
             return Ok(inner);

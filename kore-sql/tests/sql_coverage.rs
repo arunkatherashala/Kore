@@ -1060,6 +1060,32 @@ fn like_escape_decimal_literals_json_sequence_interval_frames() {
     ]);
 }
 
+/// INTERSECT binds tighter than UNION / EXCEPT; parenthesised compound arms.
+#[test]
+fn set_operation_precedence() {
+    check(&[
+        (r#"select 1 as x union select 2 intersect select 2 order by x"#, r#"1|2"#),
+        (r#"select 1 as x union all select 2 intersect select 3 order by x"#, r#"1"#),
+        (r#"select 1 as x except select 1 union select 5 order by x"#, r#"5"#),
+        (r#"select 1 as x union select 1 except select 1 union select 7 order by x"#, r#"7"#),
+        (r#"select id from t where id < 4 intersect select id from u union select x from nn where x is not null order by id"#, r#"1|2"#),
+        (r#"(select 1 as x union select 2) intersect select 2"#, r#"2"#),
+        (r#"select id from t where id < 4 union select id from u except select id from t where id = 1 intersect select id from u order by id"#, r#"2|3|7"#),
+    ]);
+}
+
+/// Result names and ORDER BY after chains of set operations.
+#[test]
+fn set_operations_with_order_by() {
+    check(&[
+        (r#"select id from t where id < 4 intersect select id from u"#, r#"1|2"#),
+        (r#"select id from t where id < 4 intersect select id from u order by id"#, r#"1|2"#),
+        (r#"select id from t where id < 4 union select x from nn where x is not null order by id"#, r#"1|2|3"#),
+        (r#"select id from t where id < 4 intersect select id from u union select x from nn where x is not null order by id"#, r#"1|2"#),
+        (r#"select id from t where id < 4 union select id from u order by id"#, r#"1|2|3|7"#),
+    ]);
+}
+
 /// ARRAY values: constructors, split, collect_list/set, size, element_at, sort_array, array_join, set operations, explode.
 #[test]
 fn array_functions() {

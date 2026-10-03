@@ -1033,9 +1033,10 @@ pub fn execute_query(query: &Query, ctx: &KqlContext) -> Result<DataBlock, KoreE
     let mut result = execute_select(body, local)?;
 
     // 3. Set operations (UNION ALL, UNION, INTERSECT, EXCEPT), then the ORDER BY / LIMIT that follow them
-    for (kind, stmt) in &query.set_ops {
-        let other = execute_select(stmt, local)?;
-        result = apply_set_op(result, other, kind)?;
+    if !query.set_ops.is_empty() {
+        let mut arms = Vec::with_capacity(query.set_ops.len());
+        for (kind, stmt) in &query.set_ops { arms.push((kind.clone(), execute_select(stmt, local)?)); }
+        result = crate::general::combine_set_ops(result, arms)?;
     }
     if !query.set_ops.is_empty() {
         result = crate::general::order_limit(result, &query.order_by, query.limit, query.offset)?;

@@ -992,6 +992,27 @@ pub fn apply_set_op(left: DataBlock, right: DataBlock, kind: &SetOpKind) -> Resu
     Ok(block_of(&names, rows, &hints))
 }
 
+/// `first op1 b op2 c ...` with SQL precedence: INTERSECT binds tighter than UNION and EXCEPT, which then
+/// combine left to right.
+pub fn combine_set_ops(first: DataBlock, arms: Vec<(SetOpKind, DataBlock)>) -> Result<DataBlock, KoreError> {
+    let is_intersect = |k: &SetOpKind| matches!(k, SetOpKind::Intersect | SetOpKind::IntersectAll);
+    let mut operands: Vec<DataBlock> = vec![first];
+    let mut ops: Vec<SetOpKind> = Vec::new();
+    for (kind, block) in arms {
+        if is_intersect(&kind) {
+            let last = operands.pop().unwrap();
+            operands.push(apply_set_op(last, block, &kind)?);
+        } else {
+            ops.push(kind);
+            operands.push(block);
+        }
+    }
+    let mut it = operands.into_iter();
+    let mut acc = it.next().unwrap();
+    for (kind, block) in ops.iter().zip(it) { acc = apply_set_op(acc, block, kind)?; }
+    Ok(acc)
+}
+
 /// ORDER BY / OFFSET / LIMIT on an already computed result (set operations): columns are found by name,
 /// ordinals are positions, anything else is evaluated against the result's columns.
 pub fn order_limit(block: DataBlock, order_by: &[OrderByItem], limit: Option<u64>, offset: Option<u64>) -> Result<DataBlock, KoreError> {
@@ -1040,11 +1061,10 @@ pub fn execute_compound(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
     head.order_by = Vec::new();
     head.limit = None;
     head.offset = None;
-    let mut acc = execute_select(&head, ctx)?;
-    for (kind, arm) in &stmt.set_ops {
-        let other = execute_select(arm, ctx)?;
-        acc = apply_set_op(acc, other, kind)?;
-    }
+    let first = execute_select(&head, ctx)?;
+    let mut arms = Vec::with_capacity(stmt.set_ops.len());
+    for (kind, arm) in &stmt.set_ops { arms.push((kind.clone(), execute_select(arm, ctx)?)); }
+    let acc = combine_set_ops(first, arms)?;
     order_limit(acc, &stmt.order_by, stmt.limit, stmt.offset)
 }
 
