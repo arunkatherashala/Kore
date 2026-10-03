@@ -21,9 +21,9 @@ thread_local! {
 /// Registry of named tables — both read-only and mutable.
 #[derive(Default, Clone)]
 pub struct KqlContext {
-    tables:     HashMap<String, DataBlock>,
+    tables:     HashMap<String, Arc<DataBlock>>,
     /// Mutable tables: INSERT/UPDATE/DELETE operate on these.
-    mut_tables: HashMap<String, DataBlock>,
+    mut_tables: HashMap<String, Arc<DataBlock>>,
     /// Views: name -> SQL text
     views:      HashMap<String, String>,
     /// User-defined functions (stored as Arc for Clone-ability)
@@ -40,7 +40,7 @@ impl KqlContext {
     pub fn register(&mut self, name: impl Into<String>, block: DataBlock) {
         let n = name.into();
         let row_count = block.num_rows;
-        self.tables.insert(n.clone(), block);
+        self.tables.insert(n.clone(), Arc::new(block));
         self.stats.insert(n, row_count);
     }
 
@@ -48,7 +48,7 @@ impl KqlContext {
     pub fn register_mut(&mut self, name: impl Into<String>, block: DataBlock) {
         let n = name.into();
         self.stats.insert(n.clone(), block.num_rows);
-        self.mut_tables.insert(n, block);
+        self.mut_tables.insert(n, Arc::new(block));
     }
 
     /// Register a view (SQL text executed on demand).
@@ -85,8 +85,8 @@ impl KqlContext {
     pub fn load_from_kore(&mut self, name: impl Into<String>, path: impl AsRef<Path>) -> Result<(), KoreError> {
         let block = kore_store::KoreReader::read_file(path.as_ref())?;
         let n = name.into();
-        self.tables.insert(n.clone(), block.clone());
-        self.mut_tables.insert(n, block);
+        self.tables.insert(n.clone(), Arc::new(block.clone()));
+        self.mut_tables.insert(n, Arc::new(block));
         Ok(())
     }
 
@@ -113,7 +113,7 @@ impl KqlContext {
         )
             .map_err(|e| e.into_kore())?;
         let snapshot = dt.read().map_err(|e| e.into_kore())?;
-        self.tables.insert(name.to_string(), snapshot);
+        self.tables.insert(name.to_string(), Arc::new(snapshot));
         Ok(())
     }
 
@@ -122,7 +122,7 @@ impl KqlContext {
         let dt = kore_delta::DeltaTable::open(path.as_ref())
             .map_err(|e| e.into_kore())?;
         let snapshot = dt.read().map_err(|e| e.into_kore())?;
-        self.tables.insert(name.to_string(), snapshot);
+        self.tables.insert(name.to_string(), Arc::new(snapshot));
         Ok(())
     }
 
@@ -375,14 +375,15 @@ impl KqlContext {
 
         let rows_added = new_rows.num_rows;
         // Append to existing table — if table doesn't exist yet, just create it
-        let entry = self.mut_tables.entry(table_name.to_string()).or_insert_with(DataBlock::empty);
-        *entry = if entry.columns.is_empty() {
+        let entry = self.mut_tables.entry(table_name.to_string()).or_insert_with(|| Arc::new(DataBlock::empty()));
+        let combined = if entry.columns.is_empty() {
             // First INSERT: table doesn't exist — just set it
             new_rows
         } else {
             // Subsequent INSERT: append rows (schema must match)
-            DataBlock::concat(vec![entry.clone(), new_rows])?
+            DataBlock::concat(vec![(**entry).clone(), new_rows])?
         };
+        *entry = Arc::new(combined);
         // Also update read-only view
         self.tables.insert(table_name.to_string(), entry.clone());
         Ok(("INSERT".into(), rows_added))
@@ -420,7 +421,7 @@ impl KqlContext {
         let rows_updated = matching.num_rows;
 
         // Parse assignments: col=val (simple literal values only)
-        let mut updated = block.clone();
+        let mut updated = (*block).clone();
         for assignment in assignments_str.split(',') {
             let parts: Vec<&str> = assignment.splitn(2, '=').collect();
             if parts.len() != 2 { continue; }
@@ -445,6 +446,7 @@ impl KqlContext {
             }
         }
 
+        let updated = Arc::new(updated);
         self.mut_tables.insert(table_name.to_string(), updated.clone());
         self.tables.insert(table_name.to_string(), updated);
         Ok(("UPDATE".into(), rows_updated))
@@ -472,7 +474,7 @@ impl KqlContext {
             format!("SELECT * FROM {table_name} WHERE NOT ({w})")
         } else {
             // DELETE FROM t (no WHERE) = truncate
-            let empty = DataBlock::empty();
+            let empty = Arc::new(DataBlock::empty());
             self.mut_tables.insert(table_name.to_string(), empty.clone());
             self.tables.insert(table_name.to_string(), empty);
             return Ok(("DELETE".into(), rows_before));
@@ -482,6 +484,7 @@ impl KqlContext {
         read_ctx.tables.insert(table_name.to_string(), block);
         let kept = read_ctx.query(&keep_sql)?;
         let deleted = rows_before.saturating_sub(kept.num_rows);
+        let kept = Arc::new(kept);
         self.mut_tables.insert(table_name.to_string(), kept.clone());
         self.tables.insert(table_name.to_string(), kept);
         Ok(("DELETE".into(), deleted))
@@ -718,7 +721,7 @@ impl KqlContext {
     }
 
     pub fn get(&self, name: &str) -> Option<&DataBlock> {
-        self.tables.get(name).or_else(|| self.mut_tables.get(name))
+        self.tables.get(name).or_else(|| self.mut_tables.get(name)).map(|b| b.as_ref())
     }
 
     pub fn table_names(&self) -> Vec<String> {
@@ -853,9 +856,9 @@ impl KqlContext {
             (lhs.to_string(), rhs.to_string())
         };
 
-        let target = match self.mut_tables.get(target_name).cloned() {
+        let target = match self.mut_tables.get(target_name).map(|a| (**a).clone()) {
             Some(t) => t,
-            None => match self.tables.get(target_name).cloned() {
+            None => match self.tables.get(target_name).map(|a| (**a).clone()) {
                 Some(t) => t,
                 None => return Err(KoreError::InvalidArgument(format!("MERGE: target table '{}' not found", target_name))),
             },
@@ -882,7 +885,7 @@ impl KqlContext {
                         matched += 1;
                         if has_update {
                             // Apply UPDATE SET assignments
-                            let mut new_target = self.mut_tables.get(target_name).cloned().unwrap_or(target.clone());
+                            let mut new_target = self.mut_tables.get(target_name).map(|a| (**a).clone()).unwrap_or(target.clone());
                             for (col, val_str) in &update_pairs {
                                 if let Some(col_idx) = new_target.columns.iter().position(|c| &c.name == col || c.name.ends_with(&format!(".{}", col))) {
                                     let new_val = if let Ok(i) = val_str.parse::<i64>() { ExprVal::Int(i) }
@@ -891,6 +894,7 @@ impl KqlContext {
                                     set_col_val(&mut new_target, col_idx, ti, new_val);
                                 }
                             }
+                            let new_target = Arc::new(new_target);
                             self.mut_tables.insert(target_name.to_string(), new_target.clone());
                             self.tables.insert(target_name.to_string(), new_target);
                         }
@@ -909,9 +913,10 @@ impl KqlContext {
                     });
                     if !is_matched {
                         // Insert source row into target
-                        let mut new_target = self.mut_tables.get(target_name).cloned().unwrap_or(target.clone());
+                        let mut new_target = self.mut_tables.get(target_name).map(|a| (**a).clone()).unwrap_or(target.clone());
                         append_row(&mut new_target, &source, si);
                         inserted += 1;
+                        let new_target = Arc::new(new_target);
                         self.mut_tables.insert(target_name.to_string(), new_target.clone());
                         self.tables.insert(target_name.to_string(), new_target);
                     }
@@ -1713,7 +1718,7 @@ fn key_bytes(vals: &[ExprVal], out: &mut Vec<u8>) -> bool {
 /// correlated equalities, inner-only filters and at most one correlated `<>`.
 /// Returns one flag per outer row, or None when the subquery has a shape this does not cover.
 fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlContext) -> Result<Option<Vec<bool>>, KoreError> {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     if !sub.joins.is_empty() || sub.from.subquery.is_some() || sub.from.values.is_some()
         || !sub.group_by.is_empty() || sub.having.is_some() || sub.limit.is_some() || sub.offset.is_some()
     {
@@ -1721,9 +1726,17 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
     }
     let Some(w) = &sub.where_clause else { return Ok(None) };
     let alias = sub.from.alias.as_deref().unwrap_or(sub.from.name.as_str()).to_string();
-    let inner = match resolve_join_table(&sub.from, ctx) {
-        Ok(b) => prefix_columns(b, &alias),
+    let src = match table_source(&sub.from, ctx) {
+        Ok(s) => s,
         Err(_) => return Ok(None),
+    };
+    // names only (no data): enough to decide which side every column belongs to
+    let names = DataBlock {
+        num_rows: 0,
+        columns: src.get().columns.iter().map(|c| Column {
+            name: format!("{alias}.{}", c.name.rsplit('.').next().unwrap_or(&c.name)),
+            data: ColumnData::Int64(Vec::new()),
+        }).collect(),
     };
 
     // 0 = no columns, 1 = inner only, 2 = outer only, 3 = both; None = cannot tell
@@ -1733,7 +1746,7 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
         let (mut i, mut o) = (false, false);
         for c in cols {
             // inner scope wins when both could provide the name (SQL scoping rule)
-            match (find_col_in_block(&c, &inner).is_some(), find_col_in_block(&c, outer).is_some()) {
+            match (find_col_in_block(&c, &names).is_some(), find_col_in_block(&c, outer).is_some()) {
                 (true, _) => i = true,
                 (false, true) => o = true,
                 (false, false) => return None,
@@ -1765,10 +1778,67 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
     }
     if eqs.is_empty() || nes.len() > 1 { return Ok(None); }
 
-    let inner = match crate::rewrite::and_all(inner_filters) {
-        Some(p) => filter_block_ctx(inner, &p, ctx)?,
-        None => inner,
-    };
+    // Filter the inner table where it lives and copy only the key columns of the rows that survive.
+    let bare = |c: &String| c.rsplit('.').next().unwrap_or(c).to_string();
+    let mut key_cols: HashSet<String> = HashSet::new();
+    for e in eqs.iter().map(|p| &p.0).chain(nes.iter().map(|p| &p.0)) {
+        let mut cols = Vec::new();
+        crate::rewrite::referenced_cols(e, &mut cols);
+        key_cols.extend(cols.iter().map(&bare));
+    }
+    let mut all_cols = key_cols.clone();
+    for f in &inner_filters {
+        let mut cols = Vec::new();
+        crate::rewrite::referenced_cols(f, &mut cols);
+        all_cols.extend(cols.iter().map(&bare));
+    }
+    let inner = load_table(src.get(), &alias, &mut inner_filters, &Some(all_cols), &Some(key_cols), ctx)?;
+    if !inner_filters.is_empty() { return Ok(None); }
+
+    // Fast path: one or two numeric keys (the usual surrogate-key joins), no per-row allocation.
+    let inner_keys: Option<Vec<Vec<Option<f64>>>> = eqs.iter().map(|(ie, _)| crate::vecexpr::num_vec(ie, &inner)).collect();
+    let outer_keys: Option<Vec<Vec<Option<f64>>>> = eqs.iter().map(|(_, oe)| crate::vecexpr::num_vec(oe, outer)).collect();
+    let ne_cols = nes.first().map(|(ie, oe)| (crate::vecexpr::num_vec(ie, &inner), crate::vecexpr::num_vec(oe, outer)));
+    if let (Some(ik), Some(ok)) = (&inner_keys, &outer_keys) {
+        let ne_ok = match &ne_cols { None => true, Some((a, b)) => a.is_some() && b.is_some() };
+        if eqs.len() <= 2 && ne_ok {
+            let bits = |f: f64| if f == 0.0 { 0.0f64.to_bits() } else { f.to_bits() };
+            let key = |cols: &Vec<Vec<Option<f64>>>, r: usize| -> Option<(u64, u64)> {
+                let a = bits(cols[0][r]?);
+                let b = if cols.len() > 1 { bits(cols[1][r]?) } else { 0 };
+                Some((a, b))
+            };
+            let ne_inner = ne_cols.as_ref().and_then(|(a, _)| a.as_ref());
+            let ne_outer = ne_cols.as_ref().and_then(|(_, b)| b.as_ref());
+            // per key: first non-null <> value seen and whether a second distinct one exists
+            let mut map: HashMap<(u64, u64), (Option<u64>, bool)> = HashMap::with_capacity(inner.num_rows.min(1 << 22));
+            for r in 0..inner.num_rows {
+                let Some(k) = key(ik, r) else { continue };
+                let g = map.entry(k).or_insert((None, false));
+                if let Some(v) = ne_inner.and_then(|c| c[r]) {
+                    match g.0 {
+                        None => g.0 = Some(bits(v)),
+                        Some(f) if f != bits(v) => g.1 = true,
+                        _ => {}
+                    }
+                }
+            }
+            let mask = (0..outer.num_rows).map(|r| {
+                let exists = match key(ok, r).and_then(|k| map.get(&k)) {
+                    None => false,
+                    Some(g) => match ne_outer {
+                        None => true,
+                        Some(c) => match c[r] {
+                            None => false,
+                            Some(v) => g.1 || g.0.map_or(false, |f| f != bits(v)),
+                        },
+                    },
+                };
+                if negated { !exists } else { exists }
+            }).collect();
+            return Ok(Some(mask));
+        }
+    }
 
     struct Group { first: Option<Vec<u8>>, multi: bool }
     let mut map: HashMap<Vec<u8>, Group> = HashMap::with_capacity(inner.num_rows.min(1 << 20));
@@ -2199,6 +2269,58 @@ fn correlated_scalar_values(outer: &DataBlock, sq: &SelectStmt, ctx: &KqlContext
 
     #[derive(Clone, Default)]
     struct Acc { sum: f64, count: u64, min: Option<f64>, max: Option<f64> }
+
+    // Fast path: one or two numeric correlation keys. Columns are read once and keys hashed as raw
+    // bits, instead of formatting a column name and allocating a key for every row.
+    if corr.len() <= 2 {
+        let ik: Option<Vec<Vec<Option<f64>>>> = (0..corr.len())
+            .map(|i| crate::vecexpr::num_vec(&Expr::Col(format!("__k{i}")), &rows)).collect();
+        let ok: Option<Vec<Vec<Option<f64>>>> = corr.iter().map(|(_, oe)| crate::vecexpr::num_vec(oe, outer)).collect();
+        let av: Option<Vec<Vec<Option<f64>>>> = (0..funcs.len())
+            .map(|j| crate::vecexpr::num_vec(&Expr::Col(format!("__a{j}")), &rows)).collect();
+        if let (Some(ik), Some(ok), Some(av)) = (ik, ok, av) {
+            let bits = |f: f64| if f == 0.0 { 0.0f64.to_bits() } else { f.to_bits() };
+            let key = |cols: &Vec<Vec<Option<f64>>>, r: usize| -> Option<(u64, u64)> {
+                let a = bits(cols[0][r]?);
+                let b = if cols.len() > 1 { bits(cols[1][r]?) } else { 0 };
+                Some((a, b))
+            };
+            let mut groups: HashMap<(u64, u64), Vec<Acc>> = HashMap::with_capacity(rows.num_rows.min(1 << 22));
+            for r in 0..rows.num_rows {
+                let Some(k) = key(&ik, r) else { continue };
+                let accs = groups.entry(k).or_insert_with(|| vec![Acc::default(); funcs.len()]);
+                for (j, acc) in accs.iter_mut().enumerate() {
+                    if let Some(x) = av[j][r] {
+                        acc.count += 1;
+                        acc.sum += x;
+                        acc.min = Some(acc.min.map_or(x, |m| m.min(x)));
+                        acc.max = Some(acc.max.map_or(x, |m| m.max(x)));
+                    }
+                }
+            }
+            let keys: Vec<(u64, u64)> = groups.keys().copied().collect();
+            let cols: Vec<Column> = funcs.iter().enumerate().map(|(j, func)| {
+                let vals: Vec<Option<f64>> = keys.iter().map(|k| {
+                    let a = &groups[k][j];
+                    match func {
+                        AggFunc::Count => Some(a.count as f64),
+                        AggFunc::Sum   => if a.count == 0 { None } else { Some(a.sum) },
+                        AggFunc::Avg   => if a.count == 0 { None } else { Some(a.sum / a.count as f64) },
+                        AggFunc::Min   => a.min,
+                        _              => a.max,
+                    }
+                }).collect();
+                Column { name: aggs[j].0.clone(), data: ColumnData::Float64(vals) }
+            }).collect();
+            let agg_block = DataBlock { columns: cols, num_rows: keys.len() };
+            let finals = crate::vecexpr::num_vec(&rewritten, &agg_block)
+                .unwrap_or_else(|| (0..keys.len()).map(|i| to_f64(&eval_expr(&rewritten, &agg_block, i))).collect());
+            let value_of: HashMap<(u64, u64), Option<f64>> = keys.iter().copied().zip(finals).collect();
+            let out = (0..outer.num_rows).map(|r| key(&ok, r).and_then(|k| value_of.get(&k).copied().flatten())).collect();
+            return Ok(Some(out));
+        }
+    }
+
     let mut groups: HashMap<Vec<u8>, Vec<Acc>> = HashMap::new();
     let mut kb = Vec::new();
     for r in 0..rows.num_rows {

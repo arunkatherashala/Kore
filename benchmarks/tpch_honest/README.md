@@ -29,3 +29,23 @@ Needs Python with `pyspark`, `pyarrow`, `numpy`, Java 17+ for Spark, and `cargo 
 * Single machine, small scale factors. This says nothing about Spark's strength: scale-out over many nodes, spilling,
   fault tolerance and its ecosystem. Competing engines that matter on a single node (DuckDB, DataFusion, Polars)
   were not installable offline here; add them to `run_engines.py` when they are.
+
+## Latest results (this machine: 8 cores, 32 GB; Spark 4.2.0 local mode, tables cached in memory)
+
+All 22 query results agree with Spark at SF 0.1 and SF 1. Timings are the best of 2-3 runs after a warm-up and are
+noisy by roughly +/-20% between runs.
+
+| SF 1 (6M lineitem rows) | |
+|---|---|
+| KORE faster than Spark | 14 of 22 (largest: Q15 12x, Q16 11x, Q12 8x, Q6 5x, Q14 5x, Q10/Q11 3x) |
+| about equal (within 10%) | Q4, Q5, Q13, Q20 |
+| KORE slower | Q1 1.4x, Q7 3.1x, Q8 1.2x, Q9 1.2x, Q17 2.3x, Q18 2.5x, Q21 2.2x |
+| geometric mean | KORE about 1.7x faster |
+
+Full tables: `results/`. Read these numbers with care:
+
+* Spark here is a single-JVM local-mode run on a data set that fits in memory; its strengths (scale-out, spilling,
+  fault tolerance) are not exercised. The comparison says nothing about 100 GB+ data or multiple nodes.
+* KORE keeps every table fully in memory as row-oriented `Option<T>` vectors; data much larger than RAM does not work.
+* The data is TPC-H-shaped, not the official dbgen output, and no official TPC-H result is claimed.
+* DuckDB, DataFusion and Polars are the relevant single-node competitors and were not available offline here.
