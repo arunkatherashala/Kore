@@ -1036,6 +1036,7 @@ fn filter_rows(block: &DataBlock, indices: &[usize]) -> DataBlock {
     DataBlock { num_rows: indices.len(), columns }
 }
 
+
 pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
     if stmt.grouping != Grouping::Plain && !stmt.group_by.is_empty() {
         return execute_grouping_sets(stmt, ctx);
@@ -1232,7 +1233,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     }
 
     // 2. Process JOINs
-    for join in stmt.joins.iter().skip(n_implicit) {
+    for (ji, join) in stmt.joins.iter().enumerate().skip(n_implicit) {
         // Pre-cap the probe side when LIMIT is set with no ORDER BY/WHERE.
         let probe = if let Some(lim) = stmt.limit {
             let has_win = stmt.projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Window { .. }, .. }));
@@ -1243,12 +1244,12 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                 && !has_win
             {
                 let cap = (lim as usize).saturating_add(stmt.offset.unwrap_or(0) as usize);
-                limit_block(result.clone(), cap.max(1))
+                limit_block(std::mem::replace(&mut result, DataBlock::empty()), cap.max(1))
             } else {
-                result.clone()
+                std::mem::replace(&mut result, DataBlock::empty())
             }
         } else {
-            result.clone()
+            std::mem::replace(&mut result, DataBlock::empty())
         };
         let right_name  = &join.table.name;
         let right_alias = join.table.alias.as_deref().unwrap_or(right_name.as_str());
@@ -1257,7 +1258,20 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         let right_block = if let Some(subq) = &join.table.subquery {
             execute_select(subq, ctx)?
         } else if let Some(b) = ctx.get(right_name) {
-            b.clone()
+            // copy only the columns the statement uses (the table itself stays untouched in the catalog)
+            match &needed {
+                Some(needed) => DataBlock {
+                    num_rows: b.num_rows,
+                    columns: b.columns.iter()
+                        .filter(|c| {
+                            let bare = c.name.rsplit('.').next().unwrap_or(&c.name);
+                            needed.contains(bare) || needed.contains(c.name.as_str())
+                        })
+                        .cloned()
+                        .collect(),
+                },
+                None => b.clone(),
+            }
         } else if ctx.views.contains_key(right_name.as_str()) {
             let sql = ctx.views.get(right_name.as_str()).unwrap().clone();
             ctx.query(&sql)?
@@ -1277,6 +1291,15 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         if let Some(ref on_expr) = join.on.expr {
             if let Some(done) = hash_join_with_residual(&probe, &right_block, on_expr, &join.join_type, ctx)? {
                 result = done;
+                // columns only the ON condition needed (filters on the joined table) are dead weight now
+                if needed.is_some() {
+                    let mut rest = stmt.clone();
+                    for j in rest.joins.iter_mut().take(ji + 1) {
+                        j.on = JoinOn { left_col: String::new(), right_col: String::new(), expr: None };
+                    }
+                    let keep = used_columns(&rest);
+                    result.columns.retain(|c| keep.contains(c.name.rsplit('.').next().unwrap_or(&c.name)) || keep.contains(c.name.as_str()));
+                }
             } else {
                 result = nested_loop_join(&probe, &right_block, on_expr, &join.join_type);
             }
@@ -1537,6 +1560,27 @@ fn has_bare_col(block: &DataBlock, bare: &str) -> bool {
         && c.name.as_bytes()[c.name.len() - bare.len() - 1] == b'.'))
 }
 
+/// Bare names of the columns an EXISTS subquery takes from the OUTER row, when the subquery is simple enough
+/// to tell (one registered table, no joins/grouping, WHERE without nested subqueries). None = unsure.
+fn exists_outer_cols(sub: &SelectStmt, ctx: &KqlContext) -> Option<std::collections::HashSet<String>> {
+    if !sub.joins.is_empty() || !sub.group_by.is_empty() || sub.having.is_some() || sub.from.subquery.is_some()
+        || sub.from.values.is_some() || sub.qualify.is_some() { return None; }
+    let w = sub.where_clause.as_ref()?;
+    let table = ctx.get(&sub.from.name)?;
+    let alias = sub.from.alias.as_deref().unwrap_or(sub.from.name.as_str());
+    let mut cols = Vec::new();
+    if !crate::rewrite::referenced_cols(w, &mut cols) { return None; }
+    let mut out = std::collections::HashSet::new();
+    for c in cols {
+        match c.split_once('.') {
+            Some((t, bare)) => if t != alias && t != sub.from.name { out.insert(bare.to_string()); },
+            None => if !has_bare_col(table, &c) { out.insert(c); },
+        }
+    }
+    Some(out)
+}
+
+
 /// Build the working copy of one table. Conjuncts that only need this table's columns are evaluated on
 /// the borrowed source (no copy of the full table) and consumed; only the rows that pass and the columns
 /// still needed afterwards are copied. Falls back to prune-then-filter when the predicate is not one the
@@ -1572,6 +1616,10 @@ fn load_table(
     let keep_cols = |extra: &[Expr]| -> std::collections::HashSet<String> {
         let mut set = after_where.clone();
         for e in extra {
+            // a plain correlated EXISTS only needs the outer columns its WHERE refers to
+            if let Expr::Exists { subquery, .. } = e {
+                if let Some(outer_cols) = exists_outer_cols(subquery, ctx) { set.extend(outer_cols); continue; }
+            }
             let mut cols = Vec::new();
             crate::rewrite::referenced_cols(e, &mut cols);
             let mut tmp = std::collections::HashSet::new();
@@ -1583,11 +1631,11 @@ fn load_table(
     };
 
     let pred = crate::rewrite::and_all(mine.iter().map(|c| crate::rewrite::unqualify(c, alias)).collect());
-    let mask = match &pred {
-        Some(p) => crate::vecexpr::filter_mask(p, src),
+    let idx: Option<Vec<usize>> = match &pred {
+        Some(p) => crate::vecexpr::filter_idx(p, src),
         None => None,
     };
-    if pred.is_some() && mask.is_none() {
+    if pred.is_some() && idx.is_none() {
         // not covered by the fast evaluator: copy what the whole statement needs, filter the copy
         let block = prefix_columns(prune_block(src.clone(), &Some(needed.clone())), alias);
         *conjuncts = rest;
@@ -1596,7 +1644,6 @@ fn load_table(
     }
 
     let after = keep_cols(&rest);
-    let idx: Option<Vec<usize>> = mask.map(|m| m.iter().enumerate().filter_map(|(i, &k)| if k { Some(i) } else { None }).collect());
     let wanted: Vec<&Column> = src.columns.iter().filter(|c| {
         let bare = c.name.rsplit('.').next().unwrap_or(&c.name);
         after.contains(bare) || after.contains(c.name.as_str())
@@ -1739,12 +1786,22 @@ fn hash_join_with_residual(
     }
     if *kind == JoinKind::Left && !other.is_empty() { return Ok(None); }
 
-    let right = match crate::rewrite::and_all(right_only) {
-        Some(p) => filter_block_ctx(right.clone(), &p, ctx)?,
-        None => right.clone(),
+    // Filter the build side where it lives (no copy of rows that are about to be thrown away).
+    let filtered: Option<DataBlock> = match crate::rewrite::and_all(right_only) {
+        Some(p) => Some(match crate::vecexpr::filter_idx(&p, right) {
+            Some(idx) => {
+                use rayon::prelude::*;
+                let columns: Vec<Column> = right.columns.par_iter()
+                    .map(|c| Column { name: c.name.clone(), data: c.data.take_rows(&idx) }).collect();
+                DataBlock { columns, num_rows: idx.len() }
+            }
+            None => filter_block_ctx(right.clone(), &p, ctx)?,
+        }),
+        None => None,
     };
+    let right: &DataBlock = filtered.as_ref().unwrap_or(right);
     let jt = if *kind == JoinKind::Left { JoinType::Left } else { JoinType::Inner };
-    let mut joined = HashJoin::join(left, &right, &JoinConfig { left_key: lk, right_key: rk, join_type: jt })?;
+    let mut joined = HashJoin::join(left, right, &JoinConfig { left_key: lk, right_key: rk, join_type: jt })?;
     if let Some(p) = crate::rewrite::and_all(other) {
         joined = filter_block_ctx(joined, &p, ctx)?;
     }
@@ -1764,6 +1821,35 @@ fn key_bytes(vals: &[ExprVal], out: &mut Vec<u8>) -> bool {
     }
     true
 }
+
+/// A join-key column read straight from the block when it is a plain numeric column.
+enum KeyCol<'a> { I(&'a [Option<i64>]), F(&'a [Option<f64>]), O(Vec<Option<f64>>) }
+
+impl KeyCol<'_> {
+    /// Canonical bits of the value as f64 (-0.0 == 0.0), None for NULL.
+    #[inline(always)]
+    fn bits(&self, r: usize) -> Option<u64> {
+        let f = match self { KeyCol::I(v) => v[r].map(|x| x as f64), KeyCol::F(v) => v[r], KeyCol::O(v) => v[r] }?;
+        Some(if f == 0.0 { 0.0f64.to_bits() } else { f.to_bits() })
+    }
+}
+
+fn key_col<'a>(e: &Expr, block: &'a DataBlock) -> Option<KeyCol<'a>> {
+    let name = match e {
+        Expr::Col(c) => Some(c.clone()),
+        Expr::QualCol(t, c) => Some(format!("{t}.{c}")),
+        _ => None,
+    };
+    if let Some(col) = name.and_then(|n| find_col(block, &n)) {
+        match &col.data {
+            ColumnData::Int64(v) => return Some(KeyCol::I(v)),
+            ColumnData::Float64(v) => return Some(KeyCol::F(v)),
+            _ => {}
+        }
+    }
+    crate::vecexpr::num_vec(e, block).map(KeyCol::O)
+}
+
 
 /// EXISTS / NOT EXISTS as a hash semi/anti join. Supports one table in the subquery, any number of
 /// correlated equalities, inner-only filters and at most one correlated `<>`.
@@ -1847,47 +1933,81 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
     if !inner_filters.is_empty() { return Ok(None); }
 
     // Fast path: one or two numeric keys (the usual surrogate-key joins), no per-row allocation.
-    let inner_keys: Option<Vec<Vec<Option<f64>>>> = eqs.iter().map(|(ie, _)| crate::vecexpr::num_vec(ie, &inner)).collect();
-    let outer_keys: Option<Vec<Vec<Option<f64>>>> = eqs.iter().map(|(_, oe)| crate::vecexpr::num_vec(oe, outer)).collect();
-    let ne_cols = nes.first().map(|(ie, oe)| (crate::vecexpr::num_vec(ie, &inner), crate::vecexpr::num_vec(oe, outer)));
-    if let (Some(ik), Some(ok)) = (&inner_keys, &outer_keys) {
-        let ne_ok = match &ne_cols { None => true, Some((a, b)) => a.is_some() && b.is_some() };
-        if eqs.len() <= 2 && ne_ok {
-            let bits = |f: f64| if f == 0.0 { 0.0f64.to_bits() } else { f.to_bits() };
-            let key = |cols: &Vec<Vec<Option<f64>>>, r: usize| -> Option<(u64, u64)> {
-                let a = bits(cols[0][r]?);
-                let b = if cols.len() > 1 { bits(cols[1][r]?) } else { 0 };
-                Some((a, b))
-            };
-            let ne_inner = ne_cols.as_ref().and_then(|(a, _)| a.as_ref());
-            let ne_outer = ne_cols.as_ref().and_then(|(_, b)| b.as_ref());
-            // per key: first non-null <> value seen and whether a second distinct one exists
-            let mut map: HashMap<(u64, u64), (Option<u64>, bool)> = HashMap::with_capacity(inner.num_rows.min(1 << 22));
-            for r in 0..inner.num_rows {
-                let Some(k) = key(ik, r) else { continue };
-                let g = map.entry(k).or_insert((None, false));
-                if let Some(v) = ne_inner.and_then(|c| c[r]) {
-                    match g.0 {
-                        None => g.0 = Some(bits(v)),
-                        Some(f) if f != bits(v) => g.1 = true,
-                        _ => {}
+    // The (small) outer side defines the set of keys that matter; the inner side is then scanned once, in
+    // parallel, updating a per-outer-key state instead of building a hash table over every inner row.
+    {
+        let ik: Option<Vec<KeyCol>> = eqs.iter().map(|(ie, _)| key_col(ie, &inner)).collect();
+        let ok: Option<Vec<KeyCol>> = eqs.iter().map(|(_, oe)| key_col(oe, outer)).collect();
+        let ne_i = nes.first().map(|(ie, _)| key_col(ie, &inner));
+        let ne_o = nes.first().map(|(_, oe)| key_col(oe, outer));
+        let ne_ok = match (&ne_i, &ne_o) { (None, None) => true, (Some(Some(_)), Some(Some(_))) => true, _ => false };
+        if let (Some(ik), Some(ok)) = (&ik, &ok) {
+            if eqs.len() <= 2 && ne_ok {
+                use rayon::prelude::*;
+                let ne_inner = ne_i.flatten();
+                let ne_outer = ne_o.flatten();
+                let key = |cols: &Vec<KeyCol>, r: usize| -> Option<(u64, u64)> {
+                    let a = cols[0].bits(r)?;
+                    let b = if cols.len() > 1 { cols[1].bits(r)? } else { 0 };
+                    Some((a, b))
+                };
+                const NO: u32 = u32::MAX;
+                let mut slots: HashMap<(u64, u64), u32, std::hash::BuildHasherDefault<FxHasher>> = HashMap::default();
+                let outer_slot: Vec<u32> = (0..outer.num_rows).map(|r| match key(ok, r) {
+                    None => NO,
+                    Some(k) => { let next = slots.len() as u32; *slots.entry(k).or_insert(next) }
+                }).collect();
+                let ns = slots.len();
+                // state per slot: bit 0 = has a first <> value, bit 1 = two distinct values seen
+                #[derive(Clone, Copy)]
+                struct St { first: u64, flags: u8, present: bool }
+                let empty = St { first: 0, flags: 0, present: false };
+                let nthreads = rayon::current_num_threads().max(1);
+                let chunk = inner.num_rows.div_ceil(nthreads).max(1);
+                let parts: Vec<Vec<St>> = (0..nthreads).into_par_iter().map(|t| {
+                    let mut st = vec![empty; ns];
+                    let lo = (t * chunk).min(inner.num_rows);
+                    let hi = ((t + 1) * chunk).min(inner.num_rows);
+                    for r in lo..hi {
+                        let Some(k) = key(ik, r) else { continue };
+                        let Some(&s) = slots.get(&k) else { continue };
+                        let g = &mut st[s as usize];
+                        g.present = true;
+                        if let Some(v) = ne_inner.as_ref().and_then(|c| c.bits(r)) {
+                            if g.flags & 1 == 0 { g.first = v; g.flags |= 1; }
+                            else if g.first != v { g.flags |= 2; }
+                        }
+                    }
+                    st
+                }).collect();
+                let mut merged = vec![empty; ns];
+                for part in &parts {
+                    for (m, p) in merged.iter_mut().zip(part) {
+                        m.present |= p.present;
+                        if p.flags & 1 != 0 {
+                            if m.flags & 1 == 0 { m.first = p.first; m.flags |= 1; }
+                            else if m.first != p.first { m.flags |= 2; }
+                        }
+                        if p.flags & 2 != 0 { m.flags |= 2; }
                     }
                 }
+                let mask = (0..outer.num_rows).map(|r| {
+                    let exists = if outer_slot[r] == NO { false } else {
+                        let g = &merged[outer_slot[r] as usize];
+                        if !g.present { false } else {
+                            match &ne_outer {
+                                None => true,
+                                Some(c) => match c.bits(r) {
+                                    None => false,
+                                    Some(v) => g.flags & 2 != 0 || (g.flags & 1 != 0 && g.first != v),
+                                },
+                            }
+                        }
+                    };
+                    if negated { !exists } else { exists }
+                }).collect();
+                return Ok(Some(mask));
             }
-            let mask = (0..outer.num_rows).map(|r| {
-                let exists = match key(ok, r).and_then(|k| map.get(&k)) {
-                    None => false,
-                    Some(g) => match ne_outer {
-                        None => true,
-                        Some(c) => match c[r] {
-                            None => false,
-                            Some(v) => g.1 || g.0.map_or(false, |f| f != bits(v)),
-                        },
-                    },
-                };
-                if negated { !exists } else { exists }
-            }).collect();
-            return Ok(Some(mask));
         }
     }
 
@@ -4165,6 +4285,10 @@ fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, Ko
                                 continue;
                             }
                         }
+                        if let Some(c) = fast_project_expr(expr, &block, out_name()) {
+                            new_cols.push(c);
+                            continue;
+                        }
                         let n = block.num_rows;
                         let vals: Vec<ExprVal> = (0..n).map(|r| eval_expr(expr, &block, r)).collect();
                         new_cols.push(exprvals_to_column(out_name(), vals));
@@ -4175,6 +4299,39 @@ fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, Ko
     }
     let num_rows = block.num_rows;
     Ok(DataBlock { columns: new_cols, num_rows })
+}
+
+/// Projected expressions the vectorized evaluator can produce directly: arithmetic over numeric columns
+/// (the row interpreter always yields floats for those) and SUBSTR(col, <int>[, <int>]) of a text column.
+fn fast_project_expr(expr: &Expr, block: &DataBlock, name: String) -> Option<Column> {
+    use rayon::prelude::*;
+    match expr {
+        Expr::BinOp { op: BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul | BinOpKind::Div | BinOpKind::Mod, .. } => {
+            let v = crate::vecexpr::num_vec(expr, block)?;
+            Some(Column { name, data: ColumnData::Float64(v) })
+        }
+        Expr::FuncCall { name: f, args } if (f.eq_ignore_ascii_case("SUBSTR") || f.eq_ignore_ascii_case("SUBSTRING")) && (args.len() == 2 || args.len() == 3) => {
+            let col = match &args[0] {
+                Expr::Col(c) => find_col(block, c)?,
+                Expr::QualCol(t, c) => find_col(block, &format!("{t}.{c}"))?,
+                _ => return None,
+            };
+            let ColumnData::Str(v) = &col.data else { return None };
+            let Expr::Int(start) = &args[1] else { return None };
+            let start = (*start - 1).max(0) as usize;
+            let len = match args.get(2) {
+                None => None,
+                Some(Expr::Int(l)) => Some((*l).max(0) as usize),
+                _ => return None,
+            };
+            let out: Vec<Option<String>> = v.par_iter().map(|s| s.as_ref().map(|s| match len {
+                Some(l) => s.chars().skip(start).take(l).collect(),
+                None => s.chars().skip(start).collect(),
+            })).collect();
+            Some(Column { name, data: ColumnData::Str(out) })
+        }
+        _ => None,
+    }
 }
 
 /// Convert a Vec<ExprVal> into a typed Column.
@@ -4497,7 +4654,7 @@ fn global_agg(block: DataBlock, projections: &[Projection]) -> Result<DataBlock,
 struct FxHasher(u64);
 
 impl std::hash::Hasher for FxHasher {
-    fn finish(&self) -> u64 { self.0 }
+    fn finish(&self) -> u64 { self.0.rotate_left(26) } // the multiply leaves the low bits weak; hashbrown indexes by them
     fn write(&mut self, bytes: &[u8]) { for &b in bytes { self.write_u64(b as u64); } }
     fn write_u8(&mut self, i: u8) { self.write_u64(i as u64); }
     fn write_u32(&mut self, i: u32) { self.write_u64(i as u64); }
@@ -4515,28 +4672,41 @@ impl std::hash::Hasher for FxHasher {
 fn group_by_fast(block: &DataBlock, group_cols: &[String], projections: &[Projection]) -> Option<DataBlock> {
     use std::collections::HashMap;
     use std::hash::BuildHasherDefault;
+    use rayon::prelude::*;
     let n = block.num_rows;
     if group_cols.is_empty() || group_cols.len() > 3 || n == 0 { return None; }
 
-    // key columns -> one Option<i64> per row (strings are interned to ids)
+    // key columns, read in place (strings are interned to ids once)
+    enum KeyPart<'a> { I(&'a [Option<i64>]), D(&'a [u8]), O(Vec<Option<i64>>) }
+    impl KeyPart<'_> {
+        /// (value, is_null)
+        #[inline(always)]
+        fn get(&self, r: usize) -> (i64, bool) {
+            match self {
+                KeyPart::I(v) => match v[r] { Some(x) => (x, false), None => (0, true) },
+                KeyPart::D(c) => if c[r] == u8::MAX { (0, true) } else { (c[r] as i64, false) },
+                KeyPart::O(v) => match v[r] { Some(x) => (x, false), None => (0, true) },
+            }
+        }
+    }
     let mut key_cols: Vec<&Column> = Vec::new();
-    let mut parts: Vec<Vec<Option<i64>>> = Vec::new();
+    let mut parts: Vec<KeyPart> = Vec::new();
     for g in group_cols {
         let col = find_col(block, g)?;
         key_cols.push(col);
         parts.push(match &col.data {
-            ColumnData::Int64(v) => v.clone(),
-            ColumnData::StrDict { codes, .. } => codes.iter().map(|&c| if c == u8::MAX { None } else { Some(c as i64) }).collect(),
+            ColumnData::Int64(v) => KeyPart::I(v),
+            ColumnData::StrDict { codes, .. } => KeyPart::D(codes),
             ColumnData::Str(v) => {
                 let mut ids: HashMap<&str, i64, BuildHasherDefault<FxHasher>> = HashMap::default();
-                v.iter().map(|s| s.as_deref().map(|t| { let next = ids.len() as i64; *ids.entry(t).or_insert(next) })).collect()
+                KeyPart::O(v.iter().map(|s| s.as_deref().map(|t| { let next = ids.len() as i64; *ids.entry(t).or_insert(next) })).collect())
             }
             _ => return None,
         });
     }
 
     // projections: group-key columns and numeric aggregates only
-    enum Out<'a> { Key(&'a Column, Option<&'a String>), Agg { func: &'a AggFunc, vals: Option<Vec<Option<f64>>>, count_col: Option<&'a Column>, name: String } }
+    enum Out<'a> { Key(&'a Column, Option<&'a String>), Agg { func: &'a AggFunc, expr: Option<&'a Expr>, count_col: Option<&'a Column>, name: String } }
     let mut outs: Vec<Out> = Vec::new();
     for p in projections {
         let Projection::Expr { expr, alias } = p else { return None };
@@ -4559,38 +4729,114 @@ fn group_by_fast(block: &DataBlock, group_cols: &[String], projections: &[Projec
                 let name = alias.clone().unwrap_or_else(|| format!("{:?}({})", func, col_name));
                 if star {
                     if !matches!(func, AggFunc::Count) { return None; }
-                    outs.push(Out::Agg { func, vals: None, count_col: None, name });
+                    outs.push(Out::Agg { func, expr: None, count_col: None, name });
                 } else if matches!(func, AggFunc::Count) {
                     match inner.as_ref() {
-                        Expr::Col(_) | Expr::QualCol(..) => outs.push(Out::Agg { func, vals: None, count_col: Some(find_col(block, &col_name)?), name }),
-                        other => outs.push(Out::Agg { func, vals: Some(crate::vecexpr::num_vec(other, block)?), count_col: None, name }),
+                        Expr::Col(_) | Expr::QualCol(..) => outs.push(Out::Agg { func, expr: None, count_col: Some(find_col(block, &col_name)?), name }),
+                        other => {
+                            crate::vecexpr::num_range(other, block, 0, 1)?;
+                            outs.push(Out::Agg { func, expr: Some(other), count_col: None, name })
+                        }
                     }
                 } else {
-                    outs.push(Out::Agg { func, vals: Some(crate::vecexpr::num_vec(inner, block)?), count_col: None, name });
+                    crate::vecexpr::num_range(inner, block, 0, 1)?;
+                    outs.push(Out::Agg { func, expr: Some(inner.as_ref()), count_col: None, name });
                 }
             }
             _ => return None,
         }
     }
-
     if !outs.iter().any(|o| matches!(o, Out::Agg { .. })) { return None; }
 
-    // pass 1: row -> group id
-    let mut index: HashMap<[Option<i64>; 3], u32, BuildHasherDefault<FxHasher>> =
-        HashMap::with_capacity_and_hasher((n / 4).clamp(16, 1 << 22), Default::default());
-    let mut gid: Vec<u32> = Vec::with_capacity(n);
+    // aggregate slots in output order
+    struct Spec<'a> { func: &'a AggFunc, expr: Option<&'a Expr>, count_col: Option<&'a Column> }
+    let specs: Vec<Spec> = outs.iter().filter_map(|o| match o {
+        Out::Agg { func, expr, count_col, .. } => Some(Spec { func, expr: *expr, count_col: *count_col }),
+        _ => None,
+    }).collect();
+    let init = |f: &AggFunc| match f { AggFunc::Min => f64::INFINITY, AggFunc::Max => f64::NEG_INFINITY, _ => 0.0 };
+    type Key = (i64, i64, i64, u8);
+
+    // Pass 1 (parallel over row ranges): group ids and per-range partial aggregates, a window at a time.
+    struct Local { keys: Vec<Key>, first: Vec<usize>, acc: Vec<Vec<f64>>, cnt: Vec<Vec<u64>> }
+    const WIN: usize = 32_768;
+    let nparts = if n >= 100_000 { rayon::current_num_threads().max(1) * 2 } else { 1 };
+    let span = n.div_ceil(nparts).max(1);
+    let locals: Vec<Option<Local>> = (0..nparts).into_par_iter().map(|pi| {
+        let (lo, hi) = ((pi * span).min(n), ((pi + 1) * span).min(n));
+        let mut l = Local { keys: Vec::new(), first: Vec::new(), acc: vec![Vec::new(); specs.len()], cnt: vec![Vec::new(); specs.len()] };
+        let mut index: HashMap<Key, u32, BuildHasherDefault<FxHasher>> = HashMap::default();
+        let mut gid: Vec<u32> = Vec::with_capacity(WIN);
+        let mut w = lo;
+        while w < hi {
+            let we = (w + WIN).min(hi);
+            gid.clear();
+            for r in w..we {
+                let mut key: Key = (0, 0, 0, 0);
+                for (i, p) in parts.iter().enumerate() {
+                    let (v, null) = p.get(r);
+                    match i { 0 => key.0 = v, 1 => key.1 = v, _ => key.2 = v }
+                    if null { key.3 |= 1 << i; }
+                }
+                let next = l.keys.len() as u32;
+                let id = *index.entry(key).or_insert_with(|| {
+                    l.keys.push(key);
+                    l.first.push(r);
+                    for (si, s) in specs.iter().enumerate() { l.acc[si].push(init(s.func)); l.cnt[si].push(0); }
+                    next
+                });
+                gid.push(id);
+            }
+            for (si, s) in specs.iter().enumerate() {
+                let (acc, cnt) = (&mut l.acc[si], &mut l.cnt[si]);
+                match (s.expr, s.count_col) {
+                    (None, None) => for &g in &gid { cnt[g as usize] += 1; },
+                    (None, Some(c)) => for (i, &g) in gid.iter().enumerate() { if !is_null_at(c, w + i) { cnt[g as usize] += 1; } },
+                    (Some(e), _) => {
+                        let Some(vals) = crate::vecexpr::num_range(e, block, w, we) else { return None };
+                        match s.func {
+                            AggFunc::Min => for (i, &g) in gid.iter().enumerate() { if let Some(x) = vals[i] { cnt[g as usize] += 1; if x < acc[g as usize] { acc[g as usize] = x } } },
+                            AggFunc::Max => for (i, &g) in gid.iter().enumerate() { if let Some(x) = vals[i] { cnt[g as usize] += 1; if x > acc[g as usize] { acc[g as usize] = x } } },
+                            _ => for (i, &g) in gid.iter().enumerate() { if let Some(x) = vals[i] { cnt[g as usize] += 1; acc[g as usize] += x; } },
+                        }
+                    }
+                }
+            }
+            w = we;
+        }
+        Some(l)
+    }).collect();
+    let locals: Vec<Local> = locals.into_iter().collect::<Option<Vec<_>>>()?;
+
+    // Pass 2: merge the partial results; groups keep their order of first appearance.
+    let mut global: HashMap<Key, u32, BuildHasherDefault<FxHasher>> = HashMap::default();
     let mut first_rows: Vec<usize> = Vec::new();
-    for r in 0..n {
-        let mut key = [None; 3];
-        for (i, p) in parts.iter().enumerate() { key[i] = p[r]; }
-        let next = first_rows.len() as u32;
-        let id = *index.entry(key).or_insert_with(|| { first_rows.push(r); next });
-        gid.push(id);
+    let mut acc: Vec<Vec<f64>> = vec![Vec::new(); specs.len()];
+    let mut cnt: Vec<Vec<u64>> = vec![Vec::new(); specs.len()];
+    for l in &locals {
+        for (lg, key) in l.keys.iter().enumerate() {
+            let next = first_rows.len() as u32;
+            let g = *global.entry(*key).or_insert_with(|| {
+                first_rows.push(l.first[lg]);
+                for (si, s) in specs.iter().enumerate() { acc[si].push(init(s.func)); cnt[si].push(0); }
+                next
+            }) as usize;
+            for (si, s) in specs.iter().enumerate() {
+                let (a, c) = (l.acc[si][lg], l.cnt[si][lg]);
+                cnt[si][g] += c;
+                match s.func {
+                    AggFunc::Min => if a < acc[si][g] { acc[si][g] = a },
+                    AggFunc::Max => if a > acc[si][g] { acc[si][g] = a },
+                    AggFunc::Count => {}
+                    _ => acc[si][g] += a,
+                }
+            }
+        }
     }
     let ng = first_rows.len();
 
-    // pass 2: one loop per aggregate over flat accumulator arrays
     let mut columns: Vec<Column> = Vec::with_capacity(outs.len());
+    let mut si = 0usize;
     for o in &outs {
         match o {
             Out::Key(col, alias) => {
@@ -4598,43 +4844,14 @@ fn group_by_fast(block: &DataBlock, group_cols: &[String], projections: &[Projec
                 if let Some(a) = alias { c.name = (*a).clone(); }
                 columns.push(c);
             }
-            Out::Agg { func, vals, count_col, name } => {
-                let mut count = vec![0u64; ng];
-                let data: Vec<Option<f64>> = match (func, vals) {
-                    (AggFunc::Count, None) => {
-                        match count_col {
-                            Some(c) => for r in 0..n { if !is_null_at(c, r) { count[gid[r] as usize] += 1; } },
-                            None => for r in 0..n { count[gid[r] as usize] += 1; },
-                        }
-                        count.iter().map(|&c| Some(c as f64)).collect()
-                    }
-                    (_, Some(v)) => {
-                        let mut acc = vec![0.0f64; ng];
-                        match func {
-                            AggFunc::Min => acc.iter_mut().for_each(|a| *a = f64::INFINITY),
-                            AggFunc::Max => acc.iter_mut().for_each(|a| *a = f64::NEG_INFINITY),
-                            _ => {}
-                        }
-                        for r in 0..n {
-                            if let Some(x) = v[r] {
-                                let g = gid[r] as usize;
-                                count[g] += 1;
-                                match func {
-                                    AggFunc::Min => if x < acc[g] { acc[g] = x },
-                                    AggFunc::Max => if x > acc[g] { acc[g] = x },
-                                    _ => acc[g] += x,
-                                }
-                            }
-                        }
-                        (0..ng).map(|g| match func {
-                            AggFunc::Count => Some(count[g] as f64),
-                            _ if count[g] == 0 => None,
-                            AggFunc::Avg => Some(acc[g] / count[g] as f64),
-                            _ => Some(acc[g]),
-                        }).collect()
-                    }
-                    _ => return None,
-                };
+            Out::Agg { func, name, .. } => {
+                let data: Vec<Option<f64>> = (0..ng).map(|g| match func {
+                    AggFunc::Count => Some(cnt[si][g] as f64),
+                    _ if cnt[si][g] == 0 => None,
+                    AggFunc::Avg => Some(acc[si][g] / cnt[si][g] as f64),
+                    _ => Some(acc[si][g]),
+                }).collect();
+                si += 1;
                 columns.push(Column { name: name.clone(), data: ColumnData::Float64(data) });
             }
         }
