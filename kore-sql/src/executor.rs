@@ -1045,71 +1045,6 @@ pub fn execute_query(query: &Query, ctx: &KqlContext) -> Result<DataBlock, KoreE
     Ok(result)
 }
 
-/// Apply a set operation between two DataBlocks.
-fn apply_set_op(left: DataBlock, right: DataBlock, kind: &SetOpKind) -> Result<DataBlock, KoreError> {
-    crate::general::apply_set_op(left, right, kind)
-}
-
-fn apply_distinct(block: &DataBlock) -> DataBlock {
-    if block.num_rows == 0 { return block.clone(); }
-    let mut seen = std::collections::HashSet::new();
-    let mut keep = Vec::new();
-    for row in 0..block.num_rows {
-        let key = row_key(block, row);
-        if seen.insert(key) { keep.push(row); }
-    }
-    filter_rows(block, &keep)
-}
-
-fn set_intersect(left: &DataBlock, right: &DataBlock) -> DataBlock {
-    let right_keys: std::collections::HashSet<String> =
-        (0..right.num_rows).map(|r| row_key(right, r)).collect();
-    let keep: Vec<usize> = (0..left.num_rows)
-        .filter(|&r| right_keys.contains(&row_key(left, r)))
-        .collect();
-    filter_rows(left, &keep)
-}
-
-fn set_except(left: &DataBlock, right: &DataBlock) -> DataBlock {
-    let right_keys: std::collections::HashSet<String> =
-        (0..right.num_rows).map(|r| row_key(right, r)).collect();
-    let keep: Vec<usize> = (0..left.num_rows)
-        .filter(|&r| !right_keys.contains(&row_key(left, r)))
-        .collect();
-    filter_rows(left, &keep)
-}
-
-fn row_key(block: &DataBlock, row: usize) -> String {
-    use kore_core::ColumnData;
-    block.columns.iter().map(|col| {
-        match &col.data {
-            ColumnData::Int64(v)   => v.get(row).map(|x| format!("{:?}", x)).unwrap_or_default(),
-            ColumnData::Float64(v) => v.get(row).map(|x| format!("{:?}", x)).unwrap_or_default(),
-            ColumnData::Str(v)     => v.get(row).map(|x| format!("{:?}", x)).unwrap_or_default(),
-            ColumnData::Bool(v)    => v.get(row).map(|x| format!("{:?}", x)).unwrap_or_default(),
-            ColumnData::StrDict { codes, .. } => codes.get(row).map(|x| format!("{}", x)).unwrap_or_default(),
-        }
-    }).collect::<Vec<_>>().join("|")
-}
-
-fn filter_rows(block: &DataBlock, indices: &[usize]) -> DataBlock {
-    use kore_core::{Column, ColumnData};
-    let columns = block.columns.iter().map(|col| {
-        let data = match &col.data {
-            ColumnData::Int64(v)   => ColumnData::Int64(indices.iter().map(|&i| v[i]).collect()),
-            ColumnData::Float64(v) => ColumnData::Float64(indices.iter().map(|&i| v[i]).collect()),
-            ColumnData::Str(v)     => ColumnData::Str(indices.iter().map(|&i| v[i].clone()).collect()),
-            ColumnData::Bool(v)    => ColumnData::Bool(indices.iter().map(|&i| v[i]).collect()),
-            ColumnData::StrDict { codes, dict } => ColumnData::StrDict {
-                codes: indices.iter().map(|&i| codes[i]).collect(),
-                dict: dict.clone(),
-            },
-        };
-        Column { name: col.name.clone(), data }
-    }).collect();
-    DataBlock { num_rows: indices.len(), columns }
-}
-
 pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
     // UNION / INTERSECT / EXCEPT chained onto this statement
     if !stmt.set_ops.is_empty() {
@@ -1437,7 +1372,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         crate::rewrite::split_conjuncts(pred, &mut conj);
         let (exists_conj, plain): (Vec<Expr>, Vec<Expr>) = conj.into_iter().partition(|c| matches!(c, Expr::Exists { .. }));
         let mut leftovers: Vec<Expr> = Vec::new();
-        let mut run_old_path = |pred: Expr, result: DataBlock| -> Result<DataBlock, KoreError> {
+        let run_old_path = |pred: Expr, result: DataBlock| -> Result<DataBlock, KoreError> {
             let mut result = result;
             let mut corr_counter = 0usize;
             let pred = decorrelate_principled(&pred, &mut result, ctx, &mut corr_counter);
@@ -4892,12 +4827,6 @@ pub(crate) fn like_match(value: &str, pattern: &str) -> bool {
     }
 }
 
-fn col_name_from_expr(e: &Expr) -> String {    match e {
-        Expr::Col(n)        => n.clone(),
-        Expr::QualCol(_, n) => n.clone(),
-        _ => "__expr__".into(),
-    }
-}
 
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

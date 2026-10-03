@@ -239,9 +239,7 @@ pub fn strip_qualifiers(mut b: DataBlock) -> DataBlock {
 
 #[derive(Clone)]
 enum SubResult {
-    Scalar(V),
     Set(Vec<V>),
-    Exists(bool),
 }
 
 struct Evaluator<'a> {
@@ -333,8 +331,6 @@ impl<'a> Evaluator<'a> {
                 // a subquery with no columns would still have rows, but the cache holds the first column only
                 Some(v.len())
             }
-            SubResult::Exists(b) => Some(b as usize),
-            SubResult::Scalar(_) => Some(1),
         }
     }
 }
@@ -577,7 +573,7 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
                     });
                 }
                 let name = alias.clone().unwrap_or_else(|| default_name(&e, &input));
-                let src_col = match &e { Expr::Col(c) if alias.is_none() || true => input.columns.iter().position(|x| &x.name == c), _ => None };
+                let src_col = match &e { Expr::Col(c) => input.columns.iter().position(|x| &x.name == c), _ => None };
                 if let Some(a) = alias { proj_alias.push((a.clone(), items.len())); }
                 items.push(Item { expr: e, name, src_col });
             }
@@ -626,7 +622,7 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
 
     // ── grouping ──
     let mut g_block: DataBlock;
-    let mut rewrite: Box<dyn Fn(&Expr) -> Result<Expr, KoreError>>;
+    let rewrite: Box<dyn Fn(&Expr) -> Result<Expr, KoreError>>;
     if grouped {
         // grouping expressions and sets
         let spec: GroupSpec = if !stmt.group_exprs.is_empty() {
@@ -1075,8 +1071,8 @@ fn unused(_: &V, _: &V) -> std::cmp::Ordering { total_cmp(&V::Null, &V::Null) }
 /// expression: the fast paths name their output by the argument *column*, so two of them used to collide
 /// and the second silently returned the first one's values.
 pub fn name_unaliased_aggregates(s: &SelectStmt) -> Option<SelectStmt> {
-    let needs = |p: &Projection| matches!(p, Projection::Expr { expr: e @ Expr::Agg { expr: inner, .. }, alias: None }
-        if !matches!(inner.as_ref(), Expr::Col(_) | Expr::QualCol(..) | Expr::Star) && { let _ = e; true });
+    let needs = |p: &Projection| matches!(p, Projection::Expr { expr: Expr::Agg { expr: inner, .. }, alias: None }
+        if !matches!(inner.as_ref(), Expr::Col(_) | Expr::QualCol(..) | Expr::Star));
     if !s.projections.iter().any(needs) { return None; }
     let mut out = s.clone();
     for p in &mut out.projections {

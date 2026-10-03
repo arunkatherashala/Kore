@@ -81,8 +81,6 @@ pub fn str_to_int(s: &str, bits: u32) -> Option<i64> {
     if val < lo || val > hi { None } else { Some(val as i64) }
 }
 
-fn f2v(f: f64) -> V { V::Float(f) }
-
 /// Total-ish ordering of two non-NULL values (numbers numerically, strings lexically).
 pub fn cmp_vals(a: &V, b: &V) -> Option<Ordering> {
     match (a, b) {
