@@ -88,28 +88,74 @@ pub fn evaluate(func: &WindowFn, spec: &WindowSpec, n: usize, ev: &mut dyn FnMut
     // ── frame helper ──
     let frame_spec = spec.frame.clone();
     let ordered = !spec.order_by.is_empty();
-    // numeric key transformed so that it ascends in window order (for RANGE offsets)
+    // RANGE offsets are numbers (`10 PRECEDING`) or calendar intervals (`INTERVAL 7 DAYS PRECEDING` over a date)
+    #[derive(Clone, Copy)]
+    enum Off { None, Num(i64), Interval(i64, &'static str) }
+    let parse_off = |b: &FrameBound, ev: &mut dyn FnMut(&Expr, usize) -> V| -> Result<Off, KoreError> {
+        match b {
+            FrameBound::Preceding(e) | FrameBound::Following(e) => match e.as_ref() {
+                Expr::FuncCall { name, args } if name == "INTERVAL" => {
+                    let k = const_i64_f(&args[0], ev)?;
+                    let unit = match args.get(1) { Some(Expr::Str(u)) => crate::datetime::norm_unit(u), _ => None }
+                        .ok_or_else(|| err("unsupported interval unit in window frame"))?;
+                    Ok(Off::Interval(k, unit))
+                }
+                other => Ok(Off::Num(const_i64_f(other, ev)?)),
+            },
+            _ => Ok(Off::None),
+        }
+    };
+    let (start_off, end_off) = match &frame_spec {
+        Some(f) => (parse_off(&f.start, ev)?, parse_off(&f.end, ev)?),
+        None => (Off::None, Off::None),
+    };
+    let interval_frame = matches!(start_off, Off::Interval(..)) || matches!(end_off, Off::Interval(..));
+    // dates behind an interval frame, per row
+    let range_dts: Vec<Option<crate::datetime::Dt>> = if interval_frame && spec.order_by.len() == 1 {
+        okeys[0].iter().map(crate::scalar::to_dt).collect()
+    } else { Vec::new() };
+    // order key transformed so that it ascends in window order (descending keys are negated)
     let range_keys: Option<Vec<Option<f64>>> = match &frame_spec {
         Some(f) if f.mode == FrameMode::Range
             && !matches!((&f.start, &f.end), (FrameBound::UnboundedPreceding | FrameBound::CurrentRow, FrameBound::UnboundedFollowing | FrameBound::CurrentRow)) => {
             if spec.order_by.len() != 1 { return Err(err("RANGE frame with an offset needs exactly one ORDER BY expression")); }
             let desc = spec.order_by[0].desc;
             let mut ks = Vec::with_capacity(n);
-            for v in &okeys[0] {
+            for (r, v) in okeys[0].iter().enumerate() {
                 match v {
                     V::Null => ks.push(None),
-                    other => match num(other) {
-                        Some(x) => ks.push(Some(if desc { -x } else { x })),
-                        None => return Err(err("RANGE frame with an offset needs a numeric ORDER BY expression")),
-                    },
+                    other => {
+                        let x = if interval_frame {
+                            range_dts[r].map(|d| d.epoch_secs() as f64)
+                                .ok_or_else(|| err("an INTERVAL RANGE frame needs a date or timestamp ORDER BY expression"))?
+                        } else {
+                            num(other).ok_or_else(|| err("RANGE frame with an offset needs a numeric ORDER BY expression"))?
+                        };
+                        ks.push(Some(if desc { -x } else { x }));
+                    }
                 }
             }
             Some(ks)
         }
         _ => None,
     };
-    let start_off = match &frame_spec { Some(f) => match &f.start { FrameBound::Preceding(e) | FrameBound::Following(e) => Some(const_i64_f(e, ev)?), _ => None }, None => None };
-    let end_off = match &frame_spec { Some(f) => match &f.end { FrameBound::Preceding(e) | FrameBound::Following(e) => Some(const_i64_f(e, ev)?), _ => None }, None => None };
+    // frame boundary value (in the transformed key space) `off` before / after the current row
+    let desc_key = spec.order_by.first().map_or(false, |o| o.desc);
+    let shift = |off: Off, preceding: bool, row: usize, c: f64| -> f64 {
+        match off {
+            Off::None => c,
+            Off::Num(k) => if preceding { c - k as f64 } else { c + k as f64 },
+            Off::Interval(k, unit) => {
+                let Some(d) = range_dts.get(row).copied().flatten() else { return c };
+                let sign = if preceding { -1 } else { 1 };
+                let signed = if desc_key { -sign } else { sign };
+                let moved = crate::datetime::add_unit(&d, unit, signed * k).unwrap_or(d);
+                let secs = moved.epoch_secs() as f64;
+                if desc_key { -secs } else { secs }
+            }
+        }
+    };
+    let rows_off = |o: Off| -> i64 { match o { Off::Num(k) => k, _ => 0 } };
 
     // Frame [lo, hi] (positions) of position p in partition `part`; None when empty.
     let frame_of = |part: &Part, p: usize| -> Option<(usize, usize)> {
@@ -121,16 +167,16 @@ pub fn evaluate(func: &WindowFn, spec: &WindowSpec, n: usize, ev: &mut dyn FnMut
                 FrameMode::Rows => {
                     let lo = match &f.start {
                         FrameBound::UnboundedPreceding => 0,
-                        FrameBound::Preceding(_) => pi - start_off.unwrap_or(0),
+                        FrameBound::Preceding(_) => pi - rows_off(start_off),
                         FrameBound::CurrentRow => pi,
-                        FrameBound::Following(_) => pi + start_off.unwrap_or(0),
+                        FrameBound::Following(_) => pi + rows_off(start_off),
                         FrameBound::UnboundedFollowing => m,
                     };
                     let hi = match &f.end {
                         FrameBound::UnboundedPreceding => -1,
-                        FrameBound::Preceding(_) => pi - end_off.unwrap_or(0),
+                        FrameBound::Preceding(_) => pi - rows_off(end_off),
                         FrameBound::CurrentRow => pi,
-                        FrameBound::Following(_) => pi + end_off.unwrap_or(0),
+                        FrameBound::Following(_) => pi + rows_off(end_off),
                         FrameBound::UnboundedFollowing => m - 1,
                     };
                     (lo, hi)
@@ -165,15 +211,15 @@ pub fn evaluate(func: &WindowFn, spec: &WindowSpec, n: usize, ev: &mut dyn FnMut
                                 let lo = match &f.start {
                                     FrameBound::UnboundedPreceding => 0,
                                     FrameBound::CurrentRow => part.peer_lo[p] as i64,
-                                    FrameBound::Preceding(_) => first_ge(c - start_off.unwrap_or(0) as f64),
-                                    FrameBound::Following(_) => first_ge(c + start_off.unwrap_or(0) as f64),
+                                    FrameBound::Preceding(_) => first_ge(shift(start_off, true, part.rows[p], c)),
+                                    FrameBound::Following(_) => first_ge(shift(start_off, false, part.rows[p], c)),
                                     FrameBound::UnboundedFollowing => m,
                                 };
                                 let hi = match &f.end {
                                     FrameBound::UnboundedFollowing => m - 1,
                                     FrameBound::CurrentRow => part.peer_hi[p] as i64,
-                                    FrameBound::Preceding(_) => last_le(c - end_off.unwrap_or(0) as f64),
-                                    FrameBound::Following(_) => last_le(c + end_off.unwrap_or(0) as f64),
+                                    FrameBound::Preceding(_) => last_le(shift(end_off, true, part.rows[p], c)),
+                                    FrameBound::Following(_) => last_le(shift(end_off, false, part.rows[p], c)),
                                     FrameBound::UnboundedPreceding => -1,
                                 };
                                 (lo, hi)

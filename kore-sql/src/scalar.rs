@@ -271,6 +271,18 @@ fn trim_chars(s: &str, set: &str, lead: bool, trail: bool) -> String {
     t.to_string()
 }
 
+thread_local! {
+    static EVAL_ERROR: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+}
+
+/// Record a failure raised while evaluating a scalar function (the row interpreter has no error channel); the
+/// operator that ran the expression picks it up with `take_error`.
+pub fn set_error(msg: impl Into<String>) {
+    EVAL_ERROR.with(|e| { let mut e = e.borrow_mut(); if e.is_none() { *e = Some(msg.into()); } });
+}
+
+pub fn take_error() -> Option<String> { EVAL_ERROR.with(|e| e.borrow_mut().take()) }
+
 fn regex_of(p: &str) -> Option<regex::Regex> {
     thread_local! {
         static CACHE: std::cell::RefCell<std::collections::HashMap<String, Option<regex::Regex>>> = std::cell::RefCell::new(Default::default());
@@ -278,7 +290,7 @@ fn regex_of(p: &str) -> Option<regex::Regex> {
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
         if let Some(r) = c.get(p) { return r.clone(); }
-        let r = regex::Regex::new(p).ok();
+        let r = regex::Regex::new(p).map_err(|e| set_error(format!("unsupported regular expression '{p}': {e}"))).ok();
         if c.len() > 256 { c.clear(); }
         c.insert(p.to_string(), r.clone());
         r
@@ -296,6 +308,57 @@ fn java_replacement(r: &str) -> String {
         out.push(cs[i]); i += 1;
     }
     out
+}
+
+/// `get_json_object(json, '$.a.b[0].c')` on the JSONPath subset Spark documents (keys, ['keys'], [index]).
+fn json_get(json: &str, path: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let p = path.strip_prefix('$')?;
+    let cs: Vec<char> = p.chars().collect();
+    let mut cur = &v;
+    let mut i = 0;
+    while i < cs.len() {
+        match cs[i] {
+            '.' => {
+                i += 1;
+                let st = i;
+                while i < cs.len() && cs[i] != '.' && cs[i] != '[' { i += 1; }
+                let key: String = cs[st..i].iter().collect();
+                cur = cur.get(&key)?;
+            }
+            '[' => {
+                i += 1;
+                if cs.get(i) == Some(&'\'') {
+                    i += 1;
+                    let st = i;
+                    while i < cs.len() && cs[i] != '\'' { i += 1; }
+                    let key: String = cs[st..i].iter().collect();
+                    i += 1; // closing quote
+                    cur = cur.get(&key)?;
+                } else {
+                    let st = i;
+                    while i < cs.len() && cs[i] != ']' { i += 1; }
+                    let idx: usize = cs[st..i].iter().collect::<String>().trim().parse().ok()?;
+                    cur = cur.get(idx)?;
+                }
+                if cs.get(i) != Some(&']') { return None; }
+                i += 1;
+            }
+            _ => return None,
+        }
+    }
+    match cur {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => Some(s.clone()),
+        other => Some(other.to_string()),
+    }
+}
+
+fn to_base(mut n: u64, base: u32) -> String {
+    if n == 0 { return "0".into(); }
+    let mut digits = Vec::new();
+    while n > 0 { digits.push(std::char::from_digit((n % base as u64) as u32, base).unwrap().to_ascii_uppercase()); n /= base as u64; }
+    digits.iter().rev().collect()
 }
 
 fn levenshtein(a: &str, b: &str) -> i64 {
@@ -600,6 +663,52 @@ pub fn call(name: &str, a: &[V]) -> Option<V> {
                 _ => { let (x, y) = (get!(f(0)), get!(f(1))); V::Float(match name { "TRY_ADD" => x + y, "TRY_SUBTRACT" => x - y, _ => x * y }) }
             }
         }
+        "DECODE" if n >= 3 => {
+            // DECODE(expr, search1, result1, ..., [default]); NULL matches NULL
+            let key = arg(0);
+            let mut i = 1;
+            while i + 1 < n {
+                let hit = match (key, arg(i)) { (V::Null, V::Null) => true, (V::Null, _) | (_, V::Null) => false, (a, b) => eq_vals(a, b) == Some(true) };
+                if hit { return Some(arg(i + 1).clone()); }
+                i += 2;
+            }
+            if i < n { arg(i).clone() } else { V::Null }
+        }
+        "ELT" => { nn!(0); let i = get!(k(0)); if i < 1 || i as usize >= n { V::Null } else { arg(i as usize).clone() } }
+        "FIELD" => {
+            nn!(0);
+            V::Int(a[1..].iter().position(|v| eq_vals(arg(0), v) == Some(true)).map(|p| p as i64 + 1).unwrap_or(0))
+        }
+        "FIND_IN_SET" => { nn!(0, 1); let needle = get!(s(0)); V::Int(get!(s(1)).split(',').position(|x| x == needle).map(|p| p as i64 + 1).unwrap_or(0)) }
+        "GET_JSON_OBJECT" => { nn!(0, 1); match json_get(&get!(s(0)), &get!(s(1))) { Some(v) => V::Str(v), None => V::Null } }
+        "REGEXP_SUBSTR" => { nn!(0, 1); let st = get!(s(0)); match get!(regex_of(&get!(s(1)))).find(&st) { Some(m) => V::Str(m.as_str().to_string()), None => V::Null } }
+        "CONV" => {
+            nn!(0, 1, 2);
+            let (fb, tb) = (get!(k(1)), get!(k(2)));
+            if !(2..=36).contains(&fb) || !(2..=36).contains(&tb.abs()) { return Some(V::Null); }
+            match u64::from_str_radix(get!(s(0)).trim(), fb as u32) { Ok(v) => V::Str(to_base(v, tb.unsigned_abs() as u32)), Err(_) => V::Null }
+        }
+        "BIN" => { nn!(0); V::Str(format!("{:b}", get!(k(0)))) }
+        "UNBASE64" => {
+            nn!(0);
+            let t = get!(s(0));
+            let mut bits = 0u32; let mut nb = 0; let mut out = Vec::new();
+            for ch in t.bytes().filter(|b| *b != b'=') {
+                let v = match ch { b'A'..=b'Z' => ch - b'A', b'a'..=b'z' => ch - b'a' + 26, b'0'..=b'9' => ch - b'0' + 52, b'+' => 62, b'/' => 63, _ => return Some(V::Null) } as u32;
+                bits = (bits << 6) | v; nb += 6;
+                if nb >= 8 { nb -= 8; out.push(((bits >> nb) & 0xff) as u8); }
+            }
+            V::Str(String::from_utf8_lossy(&out).to_string())
+        }
+        "NEGATIVE" => { nn!(0); match arg(0) { V::Int(i) => V::Int(i.wrapping_neg()), o => V::Float(-get!(num(o))) } }
+        "POSITIVE" => arg(0).clone(),
+        "RINT" => math1!(|x: f64| round_half_even(x, 0)),
+        "TIMESTAMP_SECONDS" => { nn!(0); let d = Dt::from_epoch_secs(get!(k(0))); ts_v(d) }
+        "TIMESTAMP_MILLIS" => { nn!(0); let ms = get!(k(0)); let mut d = Dt::from_epoch_secs(ms.div_euclid(1000)); d.nanos = ms.rem_euclid(1000) * 1_000_000; ts_v(d) }
+        "UNIX_DATE" => { nn!(0); V::Int(get!(to_dt(arg(0))).days) }
+        "DATE_FROM_UNIX_DATE" => { nn!(0); V::Str(dt::fmt_date(get!(k(0)))) }
+        "CURRENT_DATABASE" | "CURRENT_SCHEMA" => V::Str("default".into()),
+        "VERSION" => V::Str("3.5.0 kore".into()),
         "MD5" => { nn!(0); V::Str(crate::hashes::md5(get!(s(0)).as_bytes())) }
         "SHA1" | "SHA" => { nn!(0); V::Str(crate::hashes::sha1(get!(s(0)).as_bytes())) }
         "SHA2" => { nn!(0, 1); match crate::hashes::sha2(get!(s(0)).as_bytes(), get!(k(1))) { Some(h) => V::Str(h), None => V::Null } }
@@ -744,7 +853,7 @@ pub fn is_known(name: &str) -> bool {
         | "RLIKE" | "REGEXP" | "REGEXP_COUNT" | "REGEXP_INSTR" | "ABS" | "SIGN" | "SIGNUM" | "ROUND" | "BROUND" | "FLOOR" | "CEIL" | "CEILING"
         | "TRUNC" | "TRUNCATE" | "SQRT" | "CBRT" | "EXP" | "EXPM1" | "LN" | "LOG" | "LOG10" | "LOG2" | "LOG1P" | "POWER" | "POW" | "SIN" | "COS"
         | "TAN" | "ASIN" | "ACOS" | "ATAN" | "SINH" | "COSH" | "TANH" | "COT" | "DEGREES" | "RADIANS" | "ATAN2" | "HYPOT" | "PI" | "E" | "FACTORIAL"
-        | "MD5" | "SHA1" | "SHA" | "SHA2" | "CRC32" | "TRY_DIVIDE" | "TRY_ADD" | "TRY_SUBTRACT" | "TRY_MULTIPLY" | "MOD" | "PMOD" | "REMAINDER" | "DIV" | "BITAND" | "BITOR" | "BITXOR" | "BITNOT" | "SHIFTLEFT" | "SHIFTRIGHT" | "BIT_COUNT" | "WIDTH_BUCKET" | "RAND" | "RANDOM" | "UUID" | "GREATEST" | "LEAST" | "NULLIF" | "ISNULL"
+        | "DECODE" | "ELT" | "FIELD" | "FIND_IN_SET" | "GET_JSON_OBJECT" | "REGEXP_SUBSTR" | "CONV" | "BIN" | "UNBASE64" | "NEGATIVE" | "POSITIVE" | "RINT" | "TIMESTAMP_SECONDS" | "TIMESTAMP_MILLIS" | "UNIX_DATE" | "DATE_FROM_UNIX_DATE" | "CURRENT_DATABASE" | "CURRENT_SCHEMA" | "VERSION" | "SEQUENCE" | "MD5" | "SHA1" | "SHA" | "SHA2" | "CRC32" | "TRY_DIVIDE" | "TRY_ADD" | "TRY_SUBTRACT" | "TRY_MULTIPLY" | "MOD" | "PMOD" | "REMAINDER" | "DIV" | "BITAND" | "BITOR" | "BITXOR" | "BITNOT" | "SHIFTLEFT" | "SHIFTRIGHT" | "BIT_COUNT" | "WIDTH_BUCKET" | "RAND" | "RANDOM" | "UUID" | "GREATEST" | "LEAST" | "NULLIF" | "ISNULL"
         | "ISNOTNULL" | "ISNAN" | "NANVL" | "TYPEOF" | "ASSERT_TRUE" | "YEAR" | "MONTH" | "DAY" | "DAYOFMONTH" | "DAYOFWEEK" | "DAYOFYEAR"
         | "QUARTER" | "WEEKOFYEAR" | "HOUR" | "MINUTE" | "SECOND" | "WEEK" | "WEEKDAY" | "EXTRACT" | "DATE_PART" | "DATEPART" | "LAST_DAY"
         | "ADD_MONTHS" | "DATE_ADD" | "DATEADD" | "TIMESTAMPADD" | "DAYS_ADD" | "ADDDATE" | "DATE_SUB" | "SUBDATE" | "DATEDIFF" | "TIMESTAMPDIFF"

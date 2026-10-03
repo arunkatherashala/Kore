@@ -1132,9 +1132,29 @@ impl Parser {
                 match self.peek().clone() {
                     Token::Like => {
                         self.pos += 1;
-                        let pat = self.parse_expr(5)?;
-                        // LIKE 'x' ESCAPE 'c' is accepted; only the default backslash escape is honoured
-                        if self.peek_ident_upper() == "ESCAPE" { self.pos += 2; }
+                        let mut pat = self.parse_expr(5)?;
+                        // LIKE 'x' ESCAPE 'c': rewritten to the default backslash escape
+                        if self.peek_ident_upper() == "ESCAPE" {
+                            self.pos += 1;
+                            let esc = match self.advance() {
+                                Token::Str(e) if e.chars().count() == 1 => e.chars().next().unwrap(),
+                                other => return Err(KoreError::InvalidArgument(format!("ESCAPE needs a one-character string, got {:?}", other))),
+                            };
+                            pat = match pat {
+                                Expr::Str(p) => {
+                                    let mut out = String::new();
+                                    let mut it = p.chars().peekable();
+                                    while let Some(c) = it.next() {
+                                        if c == esc {
+                                            if let Some(n) = it.next() { out.push('\\'); out.push(n); }
+                                        } else if c == '\\' { out.push_str("\\\\"); }
+                                        else { out.push(c); }
+                                    }
+                                    Expr::Str(out)
+                                }
+                                _ => return Err(KoreError::InvalidArgument("LIKE ... ESCAPE needs a literal pattern".into())),
+                            };
+                        }
                         lhs = Expr::Like { expr: Box::new(lhs), pattern: Box::new(pat), negated };
                         continue;
                     }
@@ -1211,7 +1231,7 @@ impl Parser {
                 continue;
             }
             let op = tok_to_binop(&op_tok)?;
-            lhs = Expr::BinOp { op, left: Box::new(lhs), right: Box::new(rhs) };
+            lhs = fold_decimal_literals(Expr::BinOp { op, left: Box::new(lhs), right: Box::new(rhs) });
         }
         Ok(lhs)
     }
@@ -1702,6 +1722,44 @@ fn tok_to_binop(tok: &Token) -> Result<BinOpKind, KoreError> {
         Token::Concat => BinOpKind::Concat,
         other => return Err(KoreError::InvalidArgument(format!("not a binary op: {:?}", other))),
     })
+}
+
+/// Spark types `0.1`, `19.99` as DECIMAL, so `0.1 + 0.2` is exactly `0.3` there. Literal-only `+ - *` are therefore
+/// evaluated in decimal arithmetic here and stored as the nearest double.
+fn fold_decimal_literals(e: Expr) -> Expr {
+    fn parts(e: &Expr) -> Option<(i128, u32)> {
+        match e {
+            Expr::Int(i) => Some((*i as i128, 0)),
+            Expr::Float(f) if f.is_finite() => {
+                let t = format!("{}", f);
+                if t.contains('e') || t.contains('E') { return None; }
+                let (ip, fp) = t.split_once('.').unwrap_or((&t, ""));
+                if ip.trim_start_matches('-').len() + fp.len() > 17 { return None; }
+                let m: i128 = format!("{ip}{fp}").parse().ok()?;
+                Some((m, fp.len() as u32))
+            }
+            _ => None,
+        }
+    }
+    let Expr::BinOp { op, left, right } = &e else { return e };
+    if !matches!(op, BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul) { return e; }
+    if !matches!((left.as_ref(), right.as_ref()), (Expr::Float(_), Expr::Float(_)) | (Expr::Float(_), Expr::Int(_)) | (Expr::Int(_), Expr::Float(_))) { return e; }
+    let (Some((am, asc)), Some((bm, bsc))) = (parts(left), parts(right)) else { return e };
+    let (mant, scale) = match op {
+        BinOpKind::Mul => (am.checked_mul(bm), asc + bsc),
+        _ => {
+            let sc = asc.max(bsc);
+            let (a2, b2) = (am.checked_mul(10i128.pow(sc - asc)), bm.checked_mul(10i128.pow(sc - bsc)));
+            match (a2, b2) {
+                (Some(a2), Some(b2)) => (if matches!(op, BinOpKind::Add) { a2.checked_add(b2) } else { a2.checked_sub(b2) }, sc),
+                _ => (None, sc),
+            }
+        }
+    };
+    match mant {
+        Some(m) if m.abs() < (1i128 << 100) && scale <= 30 => Expr::Float(m as f64 / 10f64.powi(scale as i32)),
+        _ => e,
+    }
 }
 
 /// ROLLUP(a, b, c) -> [a b c], [a b], [a], []; CUBE(a, b) -> every subset.

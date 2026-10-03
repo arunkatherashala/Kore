@@ -40,6 +40,12 @@ fn tables(r: &mut Rng) -> KqlContext {
         Column::str_col("y", (0..m).map(|_| { let v = r.pick(&strs).to_string(); opt(r, 15, v) }).collect()),
         Column::float64("z", (0..m).map(|_| { let v = *r.pick(&floats); opt(r, 15, v) }).collect()),
     ]).unwrap());
+    let k = 8 + r.below(10);
+    c.register("t3", DataBlock::new(vec![
+        Column::int64("a", (0..k).map(|_| { let v = r.below(7) as i64; opt(r, 15, v) }).collect()),
+        Column::str_col("s", (0..k).map(|_| { let v = r.pick(&strs).to_string(); opt(r, 15, v) }).collect()),
+        Column::float64("w", (0..k).map(|_| { let v = *r.pick(&floats); opt(r, 15, v) }).collect()),
+    ]).unwrap());
     c
 }
 
@@ -126,7 +132,7 @@ fn agg_expr(r: &mut Rng) -> String {
 
 fn query(r: &mut Rng) -> String {
     let wh = if r.chance(65) { format!(" where {}", bool_expr(r, 2)) } else { String::new() };
-    match r.below(34) {
+    match r.below(40) {
         0 | 1 => {
             let k = 1 + r.below(3);
             let items: Vec<String> = (0..k).map(|i| match r.below(3) { 0 => format!("{} as e{i}", int_expr(r, 2)), 1 => format!("{} as e{i}", num_expr(r, 1)), _ => format!("{} as e{i}", str_expr(r)) }).collect();
@@ -287,6 +293,23 @@ fn query(r: &mut Rng) -> String {
         29 => {
             let e = int_expr(r, 2);
             format!("select id, {e} as v from t1{wh} order by case when {e} is null then 1 else 0 end, {e} desc, id")
+        }
+        33 | 34 => {
+            let (k1, k2) = (*r.pick(&["join", "left join"]), *r.pick(&["join", "left join"]));
+            let extra = if r.chance(40) { format!(" and t1.b > {}", r.below(6)) } else { String::new() };
+            format!("select t1.id, t2.y, t3.w from t1 {k1} t2 on t1.a = t2.x {k2} t3 on t2.x = t3.a{extra}{wh} order by t1.id, t2.y, t3.w")
+        }
+        35 | 36 => {
+            // USING / NATURAL joins; explicit select list because SELECT * orders columns differently
+            let kind = *r.pick(&["join", "left join", "right join", "full join"]);
+            let how = *r.pick(&["using (a)", "using (a, s)", "using (s)"]);
+            format!("select a, t1.id, w from t1 {kind} t3 {how} order by a, t1.id, w")
+        }
+        37 => {
+            format!("select t1.id, w from t1 natural join t3 order by t1.id, w")
+        }
+        38 => {
+            format!("select x.id, y.id from t1 x join t1 y on x.a < y.a and x.b = y.b{} order by x.id, y.id", if r.chance(50) { " where x.c > 0" } else { "" })
         }
         _ => {
             // scalar functions whose behaviour is the same in Spark and SQLite

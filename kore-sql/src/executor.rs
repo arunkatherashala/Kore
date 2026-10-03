@@ -2086,6 +2086,7 @@ fn filter_block_ctx(block: DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<D
     } else {
         (0..n).map(|r| eval_bool_ctx(pred, &block, r, ctx)).collect()
     };
+    if let Some(m) = crate::scalar::take_error() { return Err(KoreError::InvalidArgument(m)); }
     let indices: Vec<usize> = keep.iter().enumerate()
         .filter_map(|(i, &k)| if k { Some(i) } else { None })
         .collect();
@@ -3316,6 +3317,43 @@ pub(crate) fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
 pub(crate) fn array_items(e: &Expr, block: &DataBlock, row: usize) -> Option<Vec<ExprVal>> {
     match e {
         Expr::Array(items) => Some(items.iter().map(|i| eval_expr(i, block, row)).collect()),
+        Expr::FuncCall { name, args } if name == "SEQUENCE" && args.len() >= 2 => {
+            // sequence(start, stop[, step]) over integers, or over dates with an INTERVAL step (default one day)
+            let (a, b) = (eval_expr(&args[0], block, row), eval_expr(&args[1], block, row));
+            if matches!(a, ExprVal::Null) || matches!(b, ExprVal::Null) { return Some(vec![ExprVal::Null]); }
+            const LIMIT: usize = 1_000_000;
+            if let (ExprVal::Int(x), ExprVal::Int(y)) = (&a, &b) {
+                let step = match args.get(2).map(|s| eval_expr(s, block, row)) { Some(ExprVal::Int(s)) if s != 0 => s, Some(_) => return None, None => if y >= x { 1 } else { -1 } };
+                let mut out = Vec::new();
+                let mut cur = *x;
+                while (step > 0 && cur <= *y) || (step < 0 && cur >= *y) {
+                    out.push(ExprVal::Int(cur));
+                    if out.len() > LIMIT { return None; }
+                    cur += step;
+                }
+                return Some(out);
+            }
+            let (da, db) = (crate::scalar::to_dt(&a)?, crate::scalar::to_dt(&b)?);
+            let (n, unit) = match args.get(2) {
+                Some(Expr::FuncCall { name, args: iv }) if name == "INTERVAL" => {
+                    let n = match eval_expr(&iv[0], block, row) { ExprVal::Int(n) => n, ExprVal::Float(f) => f as i64, _ => return None };
+                    let u = match iv.get(1) { Some(Expr::Str(u)) => crate::datetime::norm_unit(u)?, _ => return None };
+                    (n, u)
+                }
+                None => (if db.epoch_secs() >= da.epoch_secs() { 1 } else { -1 }, "day"),
+                _ => return None,
+            };
+            if n == 0 { return None; }
+            let (mut out, mut k) = (Vec::new(), 0i64);
+            loop {
+                let cur = crate::datetime::add_unit(&da, unit, k * n)?;
+                let past = if n > 0 { cur.epoch_secs() > db.epoch_secs() } else { cur.epoch_secs() < db.epoch_secs() };
+                if past || out.len() > LIMIT { break; }
+                out.push(ExprVal::Str(if da.has_time { crate::datetime::fmt_ts(cur.days, cur.secs, cur.nanos) } else { crate::datetime::fmt_date(cur.days) }));
+                k += 1;
+            }
+            Some(out)
+        }
         Expr::FuncCall { name, args } if name == "SPLIT" && args.len() >= 2 => {
             let s = eval_expr(&args[0], block, row);
             let p = eval_expr(&args[1], block, row);
@@ -3960,6 +3998,7 @@ fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, Ko
         }
     }
     let num_rows = block.num_rows;
+    if let Some(m) = crate::scalar::take_error() { return Err(KoreError::InvalidArgument(m)); }
     Ok(DataBlock { columns: new_cols, num_rows })
 }
 

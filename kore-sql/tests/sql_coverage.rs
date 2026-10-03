@@ -928,6 +928,37 @@ fn empty_string_is_not_null() {
     ]);
 }
 
+/// LIKE ESCAPE, decimal literal arithmetic, DECODE/ELT/JSON/CONV, sequence(), INTERVAL RANGE frames, bad regex errors.
+#[test]
+fn like_escape_decimal_literals_json_sequence_interval_frames() {
+    check(&[
+        (r#"select 'a%c' like 'a#%c' escape '#', 'abc' like 'a#%c' escape '#', 'a_c' like 'a!_c' escape '!' from t where id = 1"#, r#"true,false,true"#),
+        (r#"select 0.1 + 0.2, 0.1 + 0.2 = 0.3, 19.99 * 3, 1.1 * 1.1, 5 - 0.1 from t where id = 1"#, r#"0.3,true,59.97,1.21,4.9"#),
+        (r#"select 0.1 + 0.2 + 0.3, 3 * 0.1 from t where id = 1"#, r#"0.6,0.3"#),
+        (r#"select f + 0.1 from t where id = 1"#, r#"1.6"#),
+        (r#"select decode(id, 1, 'one', 2, 'two', 'many') from t where id < 4 order by id"#, r#"one|two|many"#),
+        (r#"select decode(g, null, 'none', 'x', 'ex', 'other') from t order by id"#, r#"ex|ex|other|other|other|none"#),
+        (r#"select elt(2, 'a', 'b', 'c'), elt(5, 'a'), field('b', 'a', 'b', 'c'), find_in_set('c', 'a,b,c') from t where id = 1"#, r#"b,NULL,2,3"#),
+        (r#"select get_json_object('{"a":{"b":[1,{"c":"x"}]},"n":null}', '$.a.b[1].c'), get_json_object('{"a":1}', '$.a'), get_json_object('{"a":1}', '$.z'), get_json_object('{"a":[1,2]}', '$.a') from t where id = 1"#, r#"x,1,NULL,[1,2]"#),
+        (r#"select get_json_object('not json', '$.a'), get_json_object('{"k y":5}', '$[''k y'']') from t where id = 1"#, r#"NULL,5"#),
+        (r#"select conv('ff', 16, 10), conv('10', 10, 2), bin(5), hex(255), unbase64('SGVsbG8=') from t where id = 1"#, r#"255,1010,101,FF,Hello"#),
+        (r#"select regexp_substr('abc123', '[0-9]+'), regexp_substr('abc', '[0-9]+') from t where id = 1"#, r#"123,NULL"#),
+        (r#"select regexp_extract('a', '(?=a)', 0) from t where id = 1"#, r#"ERR"#),
+        (r#"select regexp_replace(s, '(', 'x') from t where id = 1"#, r#"ERR"#),
+        (r#"select id from t where s rlike '(?<=a)b'"#, r#"ERR"#),
+        (r#"select timestamp_seconds(86400), unix_date('1970-01-10'), date_from_unix_date(1) from t where id = 1"#, r#"1970-01-02 00:00:00,9,1970-01-02"#),
+        (r#"select e from t lateral view explode(sequence(1, 4)) q as e where id = 1"#, r#"1|2|3|4"#),
+        (r#"select e from t lateral view explode(sequence(5, 1, -2)) q as e where id = 1 order by e desc"#, r#"5|3|1"#),
+        (r#"select d2 from t lateral view explode(sequence(to_date('2024-01-30'), to_date('2024-02-02'))) q as d2 where id = 1"#, r#"2024-01-30|2024-01-31|2024-02-01|2024-02-02"#),
+        (r#"select d2 from t lateral view explode(sequence(to_date('2024-01-31'), to_date('2024-04-30'), interval 1 month)) q as d2 where id = 1"#, r#"2024-01-31|2024-02-29|2024-03-31|2024-04-30"#),
+        (r#"select size(sequence(1, 5)) from t where id = 1"#, r#"5"#),
+        (r#"select d, sum(v) over (order by d range between interval 30 days preceding and current row) from t where d is not null order by d"#, r#"2023-12-31,30|2024-01-01,90|2024-01-15,100|2024-02-29,20|2024-03-01,70"#),
+        (r#"select d, count(*) over (order by d range between interval 1 month preceding and interval 1 day following) from t where d is not null order by d"#, r#"2023-12-31,2|2024-01-01,2|2024-01-15,3|2024-02-29,2|2024-03-01,2"#),
+        (r#"select d, count(*) over (order by d desc range between interval 14 days preceding and current row) from t where d is not null order by d"#, r#"2023-12-31,2|2024-01-01,2|2024-01-15,1|2024-02-29,2|2024-03-01,1"#),
+        (r#"select id, sum(v) over (order by id range between current row and 1 following) from t where id < 4 order by id"#, r#"1,30|2,50|3,30"#),
+    ]);
+}
+
 /// A NULL grouping key never shares a group with 0, false or ''; VALUES keeps booleans.
 #[test]
 fn null_group_keys_of_every_type() {

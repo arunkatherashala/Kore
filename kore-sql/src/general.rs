@@ -247,6 +247,7 @@ impl<'a> Evaluator<'a> {
     fn fail(&self, e: KoreError) { let mut slot = self.error.borrow_mut(); if slot.is_none() { *slot = Some(e); } }
 
     fn check(&self) -> Result<(), KoreError> {
+        if let Some(m) = crate::scalar::take_error() { return Err(err(m)); }
         match self.error.borrow_mut().take() { Some(e) => Err(e), None => Ok(()) }
     }
 
