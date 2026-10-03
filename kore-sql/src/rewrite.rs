@@ -138,8 +138,8 @@ pub fn referenced_cols(e: &Expr, out: &mut Vec<String>) -> bool {
         Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. } => referenced_cols(expr, out) && referenced_cols(pattern, out),
         Expr::FuncCall { args, .. } => args.iter().all(|a| referenced_cols(a, out)),
         Expr::Array(items) => items.iter().all(|a| referenced_cols(a, out)),
-        Expr::Agg { .. } | Expr::Window { .. } | Expr::ScalarSubquery(_) | Expr::InSubquery { .. }
-        | Expr::Exists { .. } | Expr::Explode(_) => false,
+        Expr::Agg { .. } | Expr::AggX { .. } | Expr::Window { .. } | Expr::ScalarSubquery(_) | Expr::InSubquery { .. }
+        | Expr::QuantSubquery { .. } | Expr::Exists { .. } | Expr::Explode(_) => false,
     }
 }
 
@@ -260,6 +260,7 @@ pub fn lift_aggregates(stmt: &SelectStmt) -> Option<SelectStmt> {
         joins: stmt.joins.clone(),
         where_clause: stmt.where_clause.clone(),
         group_by: stmt.group_by.clone(), grouping: stmt.grouping,
+        group_exprs: stmt.group_exprs.clone(), group_sets: stmt.group_sets.clone(), windows: stmt.windows.clone(), parenthesized: false, set_ops: Vec::new(),
         having: inner_having,
         qualify: stmt.qualify.clone(),
         order_by: Vec::new(),
@@ -274,10 +275,11 @@ pub fn lift_aggregates(stmt: &SelectStmt) -> Option<SelectStmt> {
     Some(SelectStmt {
         distinct: stmt.distinct,
         projections: outer_projs,
-        from: TableExpr { name: "__lifted".into(), alias: Some("__lifted".into()), subquery: Some(Box::new(inner)), values: None, push_filter: None },
+        from: TableExpr { name: "__lifted".into(), alias: Some("__lifted".into()), subquery: Some(Box::new(inner)), values: None, push_filter: None, col_aliases: vec![] },
         joins: Vec::new(),
         where_clause: outer_where,
         group_by: Vec::new(), grouping: Grouping::Plain,
+        group_exprs: Vec::new(), group_sets: Vec::new(), windows: Vec::new(), parenthesized: false, set_ops: Vec::new(),
         having: None,
         qualify: None,
         order_by: stmt.order_by.clone(),

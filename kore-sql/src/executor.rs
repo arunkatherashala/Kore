@@ -6,7 +6,6 @@ use std::sync::Arc;
 use kore_core::{Column, ColumnData, DataBlock, KoreError, Value};
 use kore_join::{HashJoin, JoinConfig};
 use kore_core::JoinType;
-use kore_window::{WindowFn as WinFn, WinOrder, apply_window};
 use crate::ast::*;
 // Parquet and KORE store for LOAD TABLE support
 use kore_parquet;
@@ -240,6 +239,7 @@ impl KqlContext {
         }
 
         let query = crate::parser::parse_query(sql_trim)?;
+        validate_functions(&query, self)?;
 
         // Phase 17: try vectorized fast-path before falling into the row-loop
         // interpreter.  Returns None if the query shape isn't supported, in
@@ -262,25 +262,9 @@ impl KqlContext {
     /// Supports multiple CTEs: `WITH a AS (...), b AS (...) SELECT ...`
     fn execute_cte(&self, sql: &str) -> Result<DataBlock, KoreError> {
         let query = crate::parser::parse_query(sql)?;
-
-        // Register each CTE result as a temp table in a cloned context
-        let mut local = self.clone();
-        for cte in &query.ctes {
-            let result = execute_select(&cte.body, &local)?;
-            local.register(cte.name.clone(), result);
-        }
-
-        // Execute the final SELECT (and set ops if present) against extended context
-        let body = query.body.as_ref()
-            .ok_or_else(|| KoreError::InvalidArgument("CTE: empty query body after WITH clause".into()))?;
-        let mut result = execute_select(body, &local)?;
-
-        for (kind, stmt) in &query.set_ops {
-            let other = execute_select(stmt, &local)?;
-            result = apply_set_op(result, other, kind)?;
-        }
-
-        Ok(result)
+        validate_functions(&query, self)?;
+        CURRENT_UDFS.with(|cell| { *cell.borrow_mut() = self.udfs.clone(); });
+        execute_query(&query, self)
     }
 
     /// Execute a DML statement against mutable tables.
@@ -721,7 +705,11 @@ impl KqlContext {
     }
 
     pub fn get(&self, name: &str) -> Option<&DataBlock> {
-        self.tables.get(name).or_else(|| self.mut_tables.get(name)).map(|b| b.as_ref())
+        if let Some(b) = self.tables.get(name).or_else(|| self.mut_tables.get(name)) { return Some(b.as_ref()); }
+        // table names are case-insensitive (Spark default)
+        self.tables.iter().chain(self.mut_tables.iter())
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, b)| b.as_ref())
     }
 
     pub fn table_names(&self) -> Vec<String> {
@@ -928,6 +916,34 @@ impl KqlContext {
     }
 }
 
+/// A derived table (FROM subquery): its columns are visible under bare names, optionally renamed by `alias(c1, c2)`.
+fn derived_block(stmt: &SelectStmt, ctx: &KqlContext, col_aliases: &[String]) -> Result<DataBlock, KoreError> {
+    let mut b = crate::general::strip_qualifiers(execute_select(stmt, ctx)?);
+    if !col_aliases.is_empty() {
+        if col_aliases.len() != b.columns.len() {
+            return Err(KoreError::InvalidArgument(format!("derived table has {} columns but {} column aliases", b.columns.len(), col_aliases.len())));
+        }
+        for (c, a) in b.columns.iter_mut().zip(col_aliases) { c.name = a.clone(); }
+    }
+    Ok(b)
+}
+
+/// A call to a function that exists nowhere (not built in, not a registered UDF) is an error, not a NULL.
+fn validate_functions(q: &Query, ctx: &KqlContext) -> Result<(), KoreError> {
+    let mut unknown: Option<String> = None;
+    crate::ast_walk::walk_query(q, true, &mut |e| {
+        if let Expr::FuncCall { name, .. } = e {
+            if unknown.is_none() && !crate::scalar::is_known(name) && !ctx.udfs.contains_key(name) {
+                unknown = Some(name.clone());
+            }
+        }
+    });
+    match unknown {
+        Some(n) => Err(KoreError::InvalidArgument(format!("unknown function: {}", n.to_ascii_lowercase()))),
+        None => Ok(()),
+    }
+}
+
 pub fn execute(sql: &str, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
     ctx.query(sql)
 }
@@ -942,7 +958,7 @@ pub fn execute_query(query: &Query, ctx: &KqlContext) -> Result<DataBlock, KoreE
     } else {
         let mut l = ctx.clone();
         for cte in &query.ctes {
-            let result = execute_select(&cte.body, &l)?;
+            let result = crate::general::strip_qualifiers(execute_select(&cte.body, &l)?);
             l.register(cte.name.clone(), result);
         }
         extended = l;
@@ -954,10 +970,13 @@ pub fn execute_query(query: &Query, ctx: &KqlContext) -> Result<DataBlock, KoreE
         .ok_or_else(|| KoreError::InvalidArgument("empty query body".into()))?;
     let mut result = execute_select(body, local)?;
 
-    // 3. Set operations (UNION ALL, UNION, INTERSECT, EXCEPT)
+    // 3. Set operations (UNION ALL, UNION, INTERSECT, EXCEPT), then the ORDER BY / LIMIT that follow them
     for (kind, stmt) in &query.set_ops {
         let other = execute_select(stmt, local)?;
         result = apply_set_op(result, other, kind)?;
+    }
+    if !query.set_ops.is_empty() {
+        result = crate::general::order_limit(result, &query.order_by, query.limit, query.offset)?;
     }
 
     Ok(result)
@@ -965,15 +984,7 @@ pub fn execute_query(query: &Query, ctx: &KqlContext) -> Result<DataBlock, KoreE
 
 /// Apply a set operation between two DataBlocks.
 fn apply_set_op(left: DataBlock, right: DataBlock, kind: &SetOpKind) -> Result<DataBlock, KoreError> {
-    match kind {
-        SetOpKind::UnionAll => DataBlock::concat(vec![left, right]),
-        SetOpKind::Union => {
-            let combined = DataBlock::concat(vec![left, right])?;
-            Ok(apply_distinct(&combined))
-        }
-        SetOpKind::Intersect => Ok(set_intersect(&left, &right)),
-        SetOpKind::Except    => Ok(set_except(&left, &right)),
-    }
+    crate::general::apply_set_op(left, right, kind)
 }
 
 fn apply_distinct(block: &DataBlock) -> DataBlock {
@@ -1037,13 +1048,25 @@ fn filter_rows(block: &DataBlock, indices: &[usize]) -> DataBlock {
 }
 
 pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
-    if stmt.grouping != Grouping::Plain && !stmt.group_by.is_empty() {
+    // UNION / INTERSECT / EXCEPT chained onto this statement
+    if !stmt.set_ops.is_empty() {
+        return crate::general::execute_compound(stmt, ctx);
+    }
+    // quantified comparisons, semi/anti joins, USING / NATURAL joins become forms the code below handles
+    if let Some(rewritten) = crate::desugar::rewrite_stmt(stmt, ctx)? {
+        return execute_select(&rewritten, ctx);
+    }
+    // shapes outside the specialised paths below (see general.rs) are run by the general tail
+    let use_general = crate::general::needs_general(stmt);
+    if !use_general && stmt.grouping != Grouping::Plain && !stmt.group_by.is_empty() {
         return execute_grouping_sets(stmt, ctx);
     }
     // Aggregates nested in larger expressions (100 * SUM(a) / SUM(b)) run as an aggregate subquery
     // plus an outer projection over its hidden outputs.
-    if let Some(lifted) = crate::rewrite::lift_aggregates(stmt) {
-        return execute_select(&lifted, ctx);
+    if !use_general {
+        if let Some(lifted) = crate::rewrite::lift_aggregates(stmt) {
+            return execute_select(&lifted, ctx);
+        }
     }
 
     // 1. Resolve FROM table (or execute FROM subquery / VALUES / __dual__)
@@ -1068,7 +1091,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                     Some(ExprVal::Float(_)) => ColumnData::Float64(vals.iter().map(|v| if let ExprVal::Float(f) = v { Some(*f) } else { None }).collect()),
                     _ => ColumnData::Str(vals.iter().map(|v| if let ExprVal::Str(s) = v { Some(s.clone()) } else { None }).collect()),
                 };
-                Column { name: format!("col{}", i+1), data }
+                Column { name: stmt.from.col_aliases.get(i).cloned().unwrap_or_else(|| format!("col{}", i+1)), data }
             }).collect();
             Some(DataBlock::new(columns).map_err(|e| KoreError::InvalidArgument(e.to_string()))?)
         }
@@ -1077,7 +1100,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     // FROM (SELECT ...) subquery — execute it first, then use as temp table
     let subq_block: Option<DataBlock> = if stmt.from.values.is_none() {
         if let Some(subq) = &stmt.from.subquery {
-            Some(execute_select(subq, ctx)?)
+            Some(derived_block(subq, ctx, &stmt.from.col_aliases)?)
         } else { None }
     } else { None };
 
@@ -1120,7 +1143,11 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     // Column pruning: for simple queries (no JOIN, no SELECT *) only clone columns
     // actually referenced by projections/WHERE/GROUP BY/ORDER BY.
     // Avoids cloning expensive high-cardinality Str columns (e.g. l_comment) unnecessarily.
-    let has_star = stmt.projections.iter().any(|p| matches!(p, Projection::Star));
+    let has_star = stmt.projections.iter().any(|p| match p {
+        Projection::Star => true,
+        Projection::Expr { expr: Expr::QualCol(_, c), .. } => c == "*",
+        _ => false,
+    });
     // Pruning also applies to joined tables: joins copy every column of both sides into the output,
     // so a wide table (lineitem, 16 columns incl. a text comment) must be trimmed first.
     let needed: Option<std::collections::HashSet<String>> =
@@ -1255,7 +1282,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
 
         // Resolve right side: subquery, view, or regular table
         let right_block = if let Some(subq) = &join.table.subquery {
-            execute_select(subq, ctx)?
+            derived_block(subq, ctx, &join.table.col_aliases)?
         } else if let Some(b) = ctx.get(right_name) {
             b.clone()
         } else if ctx.views.contains_key(right_name.as_str()) {
@@ -1288,7 +1315,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
             JoinKind::Left  => JoinType::Left,
             JoinKind::Right => JoinType::Left,
             JoinKind::Full  => JoinType::Full,
-            JoinKind::Cross | JoinKind::Implicit => unreachable!(),
+            JoinKind::Cross | JoinKind::Implicit | JoinKind::Semi | JoinKind::Anti => unreachable!(),
         };
 
         // Resolve join keys
@@ -1313,7 +1340,9 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         let cfg = JoinConfig { left_key: lk.clone(), right_key: rk, join_type: jtype };
 
         if join.join_type == JoinKind::Right {
-            result = HashJoin::join(&right_block, &probe, &cfg)?;
+            // RIGHT JOIN = LEFT JOIN with the sides exchanged, so the keys swap sides as well
+            let swapped = JoinConfig { left_key: cfg.right_key.clone(), right_key: cfg.left_key.clone(), join_type: JoinType::Left };
+            result = HashJoin::join(&right_block, &probe, &swapped)?;
         } else {
             result = HashJoin::join(&probe, &right_block, &cfg)?;
         }
@@ -1369,6 +1398,11 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         if let Some(p) = crate::rewrite::and_all(leftovers) { result = run_old_path(p, result)?; }
     }
 
+    // 3.5 anything the numeric fast paths below cannot do correctly
+    if use_general || crate::general::block_needs_general(stmt, &result) {
+        return crate::general::run(stmt, result, ctx);
+    }
+
     // 4. GROUP BY  (or global aggregation if no GROUP BY but has aggregates)
     let has_agg = stmt.projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Agg { .. }, .. }));
     if !stmt.group_by.is_empty() {
@@ -1383,42 +1417,6 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     // 4.1 HAVING — filter on aggregated result
     if let Some(having) = &stmt.having {
         result = filter_block(result, having)?;
-    }
-
-    // 4.5 Window functions — applied AFTER WHERE/GROUP BY, BEFORE ORDER BY
-    let win_projs: Vec<(usize, &Expr, Option<&String>)> = stmt.projections.iter()
-        .enumerate()
-        .filter_map(|(i, p)| match p {
-            Projection::Expr { expr: e @ Expr::Window { .. }, alias } => Some((i, e, alias.as_ref())),
-            _ => None,
-        })
-        .collect();
-
-    if !win_projs.is_empty() {
-        for (_idx, expr, alias) in &win_projs {
-            if let Expr::Window { func, spec } = expr {
-                let out_name = alias.map(|a| a.as_str())
-                    .unwrap_or("__win")
-                    .to_string();
-                if let Some(done) = crate::window::apply(&result, func, spec, &out_name)? {
-                    result = done;
-                    continue;
-                }
-                let win_fn   = ast_to_win_fn(func);
-                let part_by  = spec.partition_by.iter()
-                    .filter_map(|e| match e { Expr::Col(n) | Expr::QualCol(_, n) => Some(n.clone()), _ => None })
-                    .collect::<Vec<_>>();
-                let order_by = spec.order_by.iter()
-                    .map(|o| WinOrder { col: o.col.clone(), desc: o.desc })
-                    .collect::<Vec<_>>();
-                result = apply_window(&result, &part_by, &order_by, &win_fn, &out_name)?;
-            }
-        }
-    }
-
-    // 4.6 QUALIFY — filter on window function results (like WHERE but post-window)
-    if let Some(qualify) = &stmt.qualify {
-        result = filter_block(result, qualify)?;
     }
 
     // 5. Projection — done BEFORE ORDER BY so ORDER BY can reference SELECT aliases
@@ -1464,7 +1462,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     if let Some(off) = stmt.offset {
         let off = off as usize;
         if off >= result.num_rows {
-            result = DataBlock::empty();
+            result = result.select_rows(&[]);
         } else {
             let rows: Vec<usize> = (off..result.num_rows).collect();
             result = result.select_rows(&rows);
@@ -1492,7 +1490,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
 /// The data behind a joined table reference: a FROM-subquery, a registered table or a view.
 fn resolve_join_table(table: &TableExpr, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
     if let Some(subq) = &table.subquery {
-        execute_select(subq, ctx)
+        derived_block(subq, ctx, &table.col_aliases)
     } else if let Some(b) = ctx.get(&table.name) {
         Ok(b.clone())
     } else if let Some(sql) = ctx.views.get(table.name.as_str()) {
@@ -2329,6 +2327,7 @@ fn correlated_scalar_values(outer: &DataBlock, sq: &SelectStmt, ctx: &KqlContext
         from: sq.from.clone(), joins: sq.joins.clone(),
         where_clause: crate::rewrite::and_all(inner_filters),
         group_by: Vec::new(), grouping: Grouping::Plain, having: None, qualify: None, order_by: Vec::new(),
+        group_exprs: Vec::new(), group_sets: Vec::new(), windows: Vec::new(), parenthesized: false, set_ops: Vec::new(),
         limit: None, offset: None, scan_limit: None,
         lateral_views: Vec::new(), pivot: None, unpivot: None, hints: Vec::new(),
     };
@@ -2336,6 +2335,16 @@ fn correlated_scalar_values(outer: &DataBlock, sq: &SelectStmt, ctx: &KqlContext
 
     #[derive(Clone, Default)]
     struct Acc { sum: f64, count: u64, min: Option<f64>, max: Option<f64> }
+
+    // An outer row with no matching inner rows sees the aggregates of an empty set: COUNT = 0, everything else NULL.
+    let empty_val: Option<f64> = {
+        let cols: Vec<Column> = funcs.iter().enumerate().map(|(j, f)| Column {
+            name: aggs[j].0.clone(),
+            data: ColumnData::Float64(vec![if matches!(f, AggFunc::Count) { Some(0.0) } else { None }]),
+        }).collect();
+        let b = DataBlock { columns: cols, num_rows: 1 };
+        to_f64(&eval_expr(&rewritten, &b, 0))
+    };
 
     // Fast path: one or two numeric correlation keys. Columns are read once and keys hashed as raw
     // bits, instead of formatting a column name and allocating a key for every row.
@@ -2383,7 +2392,7 @@ fn correlated_scalar_values(outer: &DataBlock, sq: &SelectStmt, ctx: &KqlContext
             let finals = crate::vecexpr::num_vec(&rewritten, &agg_block)
                 .unwrap_or_else(|| (0..keys.len()).map(|i| to_f64(&eval_expr(&rewritten, &agg_block, i))).collect());
             let value_of: HashMap<(u64, u64), Option<f64>> = keys.iter().copied().zip(finals).collect();
-            let out = (0..outer.num_rows).map(|r| key(&ok, r).and_then(|k| value_of.get(&k).copied().flatten())).collect();
+            let out = (0..outer.num_rows).map(|r| match key(&ok, r).and_then(|k| value_of.get(&k).copied()) { Some(v) => v, None => empty_val }).collect();
             return Ok(Some(out));
         }
     }
@@ -2433,7 +2442,7 @@ fn correlated_scalar_values(outer: &DataBlock, sq: &SelectStmt, ctx: &KqlContext
     for r in 0..outer.num_rows {
         let vals: Vec<ExprVal> = corr.iter().map(|(_, oe)| eval_expr(oe, outer, r)).collect();
         kb.clear();
-        out.push(if key_bytes(&vals, &mut kb) { value_of.get(&kb).copied().flatten() } else { None });
+        out.push(if key_bytes(&vals, &mut kb) { value_of.get(&kb).copied().unwrap_or(empty_val) } else { empty_val });
     }
     Ok(Some(out))
 }
@@ -2561,7 +2570,7 @@ fn execute_grouping_sets(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBloc
     let mut outer = stmt.clone();
     outer.distinct = false;
     outer.projections = vec![Projection::Star];
-    outer.from = TableExpr { name: "__grouping_sets".into(), alias: None, subquery: None, values: None, push_filter: None };
+    outer.from = TableExpr { name: "__grouping_sets".into(), alias: None, subquery: None, values: None, push_filter: None, col_aliases: vec![] };
     outer.joins = Vec::new(); outer.where_clause = None; outer.group_by = Vec::new(); outer.grouping = Grouping::Plain;
     outer.having = None; outer.qualify = None;
     let mut out = execute_select(&outer, &c2)?;
@@ -2618,6 +2627,8 @@ fn precompute_in_subqueries(expr: &Expr, ctx: &KqlContext) -> Expr {
                             Value::Int(i)   => Some(Expr::Int(i)),
                             Value::Float(f) => Some(Expr::Float(f)),
                             Value::Str(s)   => Some(Expr::Str(s)),
+                            // a NULL in the subquery result makes NOT IN / unmatched IN unknown
+                            Value::Null     => Some(Expr::Null),
                             _ => None,
                         })
                         .collect();
@@ -3129,7 +3140,7 @@ pub enum ExprVal {
     Int(i64), Float(f64), Str(String), Bool(bool), Null,
 }
 
-fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
+pub(crate) fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
     match expr {
         Expr::Int(n)   => ExprVal::Int(*n),
         Expr::Float(f) => ExprVal::Float(*f),
@@ -3137,7 +3148,7 @@ fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
         Expr::Bool(b)  => ExprVal::Bool(*b),
         Expr::Not(e)   => match eval_expr(e, block, row) {
             ExprVal::Bool(b) => ExprVal::Bool(!b),
-            _                => ExprVal::Bool(false),
+            _                => ExprVal::Null,
         },
         Expr::Col(_) | Expr::QualCol(_, _) => {
             let full = match expr {
@@ -3148,6 +3159,9 @@ fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
             get_cell(block, &full, row)
         }
         Expr::BinOp { op, left, right } => {
+            if matches!(op, BinOpKind::Add | BinOpKind::Sub) {
+                if let Some(v) = eval_interval(op, left, right, block, row) { return v; }
+            }
             let lv = eval_expr(left,  block, row);
             let rv = eval_expr(right, block, row);
             eval_binop(op, lv, rv)
@@ -3169,6 +3183,8 @@ fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
         Expr::InSubquery { negated, .. } => ExprVal::Bool(*negated),
         Expr::Exists { negated, .. }     => ExprVal::Bool(*negated),
         Expr::Array(_) | Expr::Explode(_) => ExprVal::Null,
+        // evaluated by the general path (general.rs); without it there is no value
+        Expr::AggX { .. } | Expr::QuantSubquery { .. } => ExprVal::Null,
         // ── CASE WHEN ─────────────────────────────────────────────────────
         Expr::Case { operand, branches, else_val } => {
             match operand {
@@ -3204,54 +3220,51 @@ fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
         Expr::Like { expr: e, pattern, negated } => {
             let sv = eval_expr(e, block, row);
             let pv = eval_expr(pattern, block, row);
-            let matches = match (sv, pv) {
-                (ExprVal::Str(s), ExprVal::Str(p)) => like_match(&s, &p),
-                _ => false,
-            };
-            ExprVal::Bool(if *negated { !matches } else { matches })
+            let (sv, pv) = (str_operand(sv), str_operand(pv));
+            match (sv, pv) {
+                (Some(s), Some(p)) => { let m = like_match(&s, &p); ExprVal::Bool(if *negated { !m } else { m }) }
+                _ => ExprVal::Null,
+            }
         }
         // ── ILIKE (case-insensitive LIKE) ────────────────────────────────
         Expr::ILike { expr: e, pattern, negated } => {
             let sv = eval_expr(e, block, row);
             let pv = eval_expr(pattern, block, row);
-            let matches = match (sv, pv) {
-                (ExprVal::Str(s), ExprVal::Str(p)) => like_match(&s.to_lowercase(), &p.to_lowercase()),
-                _ => false,
-            };
-            ExprVal::Bool(if *negated { !matches } else { matches })
+            let (sv, pv) = (str_operand(sv), str_operand(pv));
+            match (sv, pv) {
+                (Some(s), Some(p)) => { let m = like_match(&s.to_lowercase(), &p.to_lowercase()); ExprVal::Bool(if *negated { !m } else { m }) }
+                _ => ExprVal::Null,
+            }
         }
-        // ── IN ────────────────────────────────────────────────────────────
+        // ── IN (three-valued: a NULL in the list makes a miss UNKNOWN) ─────
         Expr::In { expr: e, values, negated } => {
             let lv = eval_expr(e, block, row);
-            let found = values.iter().any(|v| {
+            if matches!(lv, ExprVal::Null) { return ExprVal::Null; }
+            let mut saw_null = false;
+            for v in values {
                 let rv = eval_expr(v, block, row);
-                match (&lv, &rv) {
-                    (ExprVal::Int(a),   ExprVal::Int(b))   => a == b,
-                    (ExprVal::Str(a),   ExprVal::Str(b))   => a == b,
-                    (ExprVal::Bool(a),  ExprVal::Bool(b))  => a == b,
-                    // Int vs Float (and Float vs Float) compare as numbers
-                    _ => match (num_only(&lv), num_only(&rv)) {
-                        (Some(a), Some(b)) => (a - b).abs() < 1e-10,
-                        _ => false,
-                    },
+                match crate::scalar::eq_vals(&lv, &rv) {
+                    Some(true) => return ExprVal::Bool(!*negated),
+                    Some(false) => {}
+                    None => saw_null = true,
                 }
-            });
-            ExprVal::Bool(if *negated { !found } else { found })
+            }
+            if saw_null { ExprVal::Null } else { ExprVal::Bool(*negated) }
         }
         // ── BETWEEN ───────────────────────────────────────────────────────
         Expr::Between { expr: e, low, high, negated } => {
             let v  = eval_expr(e, block, row);
             let lo = eval_expr(low, block, row);
             let hi = eval_expr(high, block, row);
-            let in_range = match (&v, &lo, &hi) {
-                (ExprVal::Str(v), ExprVal::Str(lo), ExprVal::Str(hi)) => v.as_str() >= lo.as_str() && v.as_str() <= hi.as_str(),
-                // numbers compare as numbers whatever their storage type (Int column BETWEEN 0.5 AND 2, ...)
-                _ => match (num_only(&v), num_only(&lo), num_only(&hi)) {
-                    (Some(v), Some(lo), Some(hi)) => v >= lo && v <= hi,
-                    _ => false,
-                },
+            use std::cmp::Ordering::*;
+            let ge = crate::scalar::cmp_vals(&v, &lo).map(|o| o != Less);
+            let le = crate::scalar::cmp_vals(&v, &hi).map(|o| o != Greater);
+            let r = match (ge, le) {
+                (Some(false), _) | (_, Some(false)) => Some(false),
+                (Some(true), Some(true)) => Some(true),
+                _ => None,
             };
-            ExprVal::Bool(if *negated { !in_range } else { in_range })
+            match r { Some(b) => ExprVal::Bool(b != *negated), None => ExprVal::Null }
         }
         // ── SCALAR FUNCTIONS ──────────────────────────────────────────────
         Expr::FuncCall { name, args } => eval_func(name, args, block, row),
@@ -3260,431 +3273,99 @@ fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
 
 // ─── Scalar function evaluation ───────────────────────────────────────────────
 
-fn eval_func(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> ExprVal {
-    // Helper macro: unwrap Option or return Null
-    macro_rules! need {
-        ($e:expr) => { match $e { Some(v) => v, None => return ExprVal::Null } };
+/// Items of an array-valued expression (`ARRAY(..)`, `SPLIT(str, regex)`), when it is one of those.
+fn array_items(e: &Expr, block: &DataBlock, row: usize) -> Option<Vec<ExprVal>> {
+    match e {
+        Expr::Array(items) => Some(items.iter().map(|i| eval_expr(i, block, row)).collect()),
+        Expr::FuncCall { name, args } if name == "SPLIT" && args.len() >= 2 => {
+            let s = eval_expr(&args[0], block, row);
+            let p = eval_expr(&args[1], block, row);
+            let (Some(s), Some(p)) = (crate::scalar::to_str(&s), crate::scalar::to_str(&p)) else { return Some(vec![ExprVal::Null]) };
+            let limit = args.get(2).and_then(|l| match eval_expr(l, block, row) { ExprVal::Int(i) if i > 0 => Some(i as usize), _ => None });
+            let re = regex::Regex::new(&p).ok()?;
+            let parts: Vec<&str> = match limit { Some(l) => re.splitn(&s, l).collect(), None => re.split(&s).collect() };
+            Some(parts.into_iter().map(|x| ExprVal::Str(x.to_string())).collect())
+        }
+        _ => None,
     }
+}
+
+fn eval_func(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> ExprVal {
     let arg = |i: usize| args.get(i).map(|e| eval_expr(e, block, row)).unwrap_or(ExprVal::Null);
-    let arg_str = |i: usize| match arg(i) { ExprVal::Str(s) => Some(s), _ => None };
-    let arg_f64 = |i: usize| to_f64(&arg(i));
 
     match name {
-        // ── String functions ────────────────────────────────────────────────
-        "UPPER" => arg_str(0).map(|s| ExprVal::Str(s.to_uppercase())).unwrap_or(ExprVal::Null),
-        "LOWER" => arg_str(0).map(|s| ExprVal::Str(s.to_lowercase())).unwrap_or(ExprVal::Null),
-        "TRIM"  => arg_str(0).map(|s| ExprVal::Str(s.trim().to_string())).unwrap_or(ExprVal::Null),
-        "LTRIM" => arg_str(0).map(|s| ExprVal::Str(s.trim_start().to_string())).unwrap_or(ExprVal::Null),
-        "RTRIM" => arg_str(0).map(|s| ExprVal::Str(s.trim_end().to_string())).unwrap_or(ExprVal::Null),
-        // LEFT(str, n) and RIGHT(str, n)
-        "LEFT"  => {
-            let s = need!(arg_str(0));
-            let n = arg_f64(1).unwrap_or(0.0) as usize;
-            ExprVal::Str(s.chars().take(n).collect())
-        }
-        "RIGHT" => {
-            let s = need!(arg_str(0));
-            let n = arg_f64(1).unwrap_or(0.0) as usize;
-            let chars: Vec<char> = s.chars().collect();
-            let start = chars.len().saturating_sub(n);
-            ExprVal::Str(chars[start..].iter().collect())
-        }
-        "LENGTH" | "LEN" | "CHAR_LENGTH" => {
-            arg_str(0).map(|s| ExprVal::Int(s.chars().count() as i64)).unwrap_or(ExprVal::Null)
-        }
-        "REVERSE" => arg_str(0).map(|s| ExprVal::Str(s.chars().rev().collect())).unwrap_or(ExprVal::Null),
-        "SUBSTR" | "SUBSTRING" => {
-            let s = need!(arg_str(0));
-            let start = (arg_f64(1).unwrap_or(1.0) as i64 - 1).max(0) as usize;
-            let len   = args.get(2).map(|_| arg_f64(2).unwrap_or(0.0) as usize);
-            let chars: Vec<char> = s.chars().collect();
-            let slice: String = match len {
-                Some(l) => chars.iter().skip(start).take(l).collect(),
-                None    => chars.iter().skip(start).collect(),
-            };
-            ExprVal::Str(slice)
-        }
-        "REPLACE" => {
-            let s    = need!(arg_str(0));
-            let from = arg_str(1).unwrap_or_default();
-            let to   = arg_str(2).unwrap_or_default();
-            ExprVal::Str(s.replace(&from, &to))
-        }
-        "CONCAT" => {
-            let parts: String = args.iter()
-                .map(|a| match eval_expr(a, block, row) { ExprVal::Str(s) => s, v => format!("{:?}", v) })
-                .collect();
-            ExprVal::Str(parts)
-        }
-        "REPEAT" => {
-            let s = arg_str(0).unwrap_or_default();
-            let n = arg_f64(1).unwrap_or(0.0) as usize;
-            ExprVal::Str(s.repeat(n))
-        }
-        "LPAD" => {
-            let s   = arg_str(0).unwrap_or_default();
-            let len = arg_f64(1).unwrap_or(0.0) as usize;
-            let pad = arg_str(2).unwrap_or_else(|| " ".into());
-            if s.len() >= len { return ExprVal::Str(s); }
-            let fill: String = pad.chars().cycle().take(len - s.len()).collect();
-            ExprVal::Str(format!("{fill}{s}"))
-        }
-        "RPAD" => {
-            let s   = arg_str(0).unwrap_or_default();
-            let len = arg_f64(1).unwrap_or(0.0) as usize;
-            let pad = arg_str(2).unwrap_or_else(|| " ".into());
-            if s.len() >= len { return ExprVal::Str(s); }
-            let fill: String = pad.chars().cycle().take(len - s.len()).collect();
-            ExprVal::Str(format!("{s}{fill}"))
-        }
-        // ── Math functions ──────────────────────────────────────────────────
-        "ABS"   => match arg(0) {
-            ExprVal::Int(i)   => ExprVal::Int(i.abs()),
-            ExprVal::Float(f) => ExprVal::Float(f.abs()),
-            _ => ExprVal::Null,
-        },
-        "ROUND" => {
-            let f = need!(arg_f64(0));
-            let dp = arg_f64(1).unwrap_or(0.0) as u32;
-            let m  = 10f64.powi(dp as i32);
-            ExprVal::Float((f * m).round() / m)
-        }
-        "FLOOR" => arg_f64(0).map(|f| ExprVal::Float(f.floor())).unwrap_or(ExprVal::Null),
-        "CEIL" | "CEILING" => arg_f64(0).map(|f| ExprVal::Float(f.ceil())).unwrap_or(ExprVal::Null),
-        "SQRT"  => arg_f64(0).map(|f| ExprVal::Float(f.sqrt())).unwrap_or(ExprVal::Null),
-        "POWER" | "POW" => {
-            let b = need!(arg_f64(0));
-            let e = need!(arg_f64(1));
-            ExprVal::Float(b.powf(e))
-        }
-        "LOG"   => arg_f64(0).map(|f| ExprVal::Float(f.ln())).unwrap_or(ExprVal::Null),
-        "LOG10" => arg_f64(0).map(|f| ExprVal::Float(f.log10())).unwrap_or(ExprVal::Null),
-        "EXP"   => arg_f64(0).map(|f| ExprVal::Float(f.exp())).unwrap_or(ExprVal::Null),
-        "MOD"   => {
-            let a = need!(arg_f64(0));
-            let b = need!(arg_f64(1));
-            ExprVal::Float(a % b)
-        }
-        // ── Null-handling ───────────────────────────────────────────────────
-        "COALESCE" | "NVL" | "IFNULL" | "ISNULL" => {
+        // ── lazy control flow: only the branches that are needed get evaluated ──
+        "COALESCE" | "NVL" | "IFNULL" => {
             for a in args {
                 let v = eval_expr(a, block, row);
                 if !matches!(v, ExprVal::Null) { return v; }
             }
             ExprVal::Null
         }
-        "NULLIF" => {
-            let a = arg(0);
-            let b = arg(1);
-            let eq = match (&a, &b) {
-                (ExprVal::Int(x),   ExprVal::Int(y))   => x == y,
-                (ExprVal::Float(x), ExprVal::Float(y)) => (x - y).abs() < 1e-10,
-                (ExprVal::Str(x),   ExprVal::Str(y))   => x == y,
-                (ExprVal::Bool(x),  ExprVal::Bool(y))  => x == y,
-                _ => false,
-            };
-            if eq { ExprVal::Null } else { a }
+        "NVL2" => if matches!(arg(0), ExprVal::Null) { arg(2) } else { arg(1) },
+        "IF" | "IIF" => if args.len() >= 3 && eval_bool(&args[0], block, row) { arg(1) } else { arg(2) },
+        // ── arrays (only the shapes that exist as expressions: ARRAY(..) and SPLIT(..)) ──
+        "ELEMENT_AT" => {
+            let (Some(items), idx) = (args.first().and_then(|a| array_items(a, block, row)), arg(1)) else { return ExprVal::Null };
+            let ExprVal::Int(i) = (match idx { ExprVal::Float(f) => ExprVal::Int(f as i64), o => o }) else { return ExprVal::Null };
+            let n = items.len() as i64;
+            let pos = if i > 0 { i - 1 } else if i < 0 { n + i } else { return ExprVal::Null };
+            if pos < 0 || pos >= n { ExprVal::Null } else { items[pos as usize].clone() }
         }
-        // ── Date / Time functions ─────────────────────────────────────────
-        // Dates stored as YYYYMMDD integers OR 'YYYY-MM-DD' strings
-        "YEAR" | "EXTRACT_YEAR" => {
-            let d = date_to_int(&arg(0));
-            ExprVal::Int((d / 10000) as i64)
-        }
-        "MONTH" | "EXTRACT_MONTH" => {
-            let d = date_to_int(&arg(0));
-            ExprVal::Int(((d / 100) % 100) as i64)
-        }
-        "DAY" | "EXTRACT_DAY" => {
-            let d = date_to_int(&arg(0));
-            ExprVal::Int((d % 100) as i64)
-        }
-        "DATE_TRUNC" => {
-            // DATE_TRUNC('year', date) or DATE_TRUNC('month', date)
-            let part = arg_str(0).unwrap_or_default().to_lowercase();
-            let d    = date_to_int(&arg(1));
-            let (y, m, _dy) = (d / 10000, (d / 100) % 100, d % 100);
-            let result = match part.as_str() {
-                "year"    => format!("{:04}-01-01", y),
-                "month"   => format!("{:04}-{:02}-01", y, m),
-                "quarter" => format!("{:04}-{:02}-01", y, ((m - 1) / 3) * 3 + 1),
-                _         => arg_str(1).unwrap_or_default(),
-            };
-            ExprVal::Str(result)
-        }
-        "EXTRACT" => {
-            // EXTRACT(year FROM date) — parser passes as FuncCall with args [field, date]
-            let field = arg_str(0).unwrap_or_default().to_lowercase();
-            let d     = date_to_int(&arg(1));
-            let (y, m, dy) = (d / 10000, (d / 100) % 100, d % 100);
-            let v = match field.as_str() {
-                "year"    => y as i64,
-                "month"   => m as i64,
-                "day"     => dy as i64,
-                "quarter" => ((m as i64 - 1) / 3) + 1,
-                _         => 0,
-            };
-            ExprVal::Int(v)
-        }
-        "DATEADD" | "DATE_ADD" => {
-            // DATEADD('day', n, date) or DATE_ADD(date, n, 'day')
-            let part   = arg_str(0).unwrap_or("day".into()).to_lowercase();
-            let n      = arg_f64(1).unwrap_or(0.0) as i64;
-            let d      = date_to_int(&arg(2));
-            let result = date_add_days(d, match part.as_str() { "year" => n * 365, "month" => n * 30, _ => n });
-            ExprVal::Str(result)
-        }
-        "DATEDIFF" | "DATE_DIFF" => {
-            // DATEDIFF('day', start, end)
-            let d1 = date_to_int(&arg(1));
-            let d2 = date_to_int(&arg(2));
-            let diff = date_to_julian(d2) - date_to_julian(d1);
-            ExprVal::Int(diff)
-        }
-        "NOW" | "CURRENT_TIMESTAMP" | "CURRENT_DATE" => {
-            ExprVal::Str(executor_date_now())
-        }
-        "TO_DATE" | "DATE" => {
-            // TO_DATE(str, format) — just return the string as-is for now
-            arg(0)
-        }
-        "STRFTIME" | "FORMAT_DATE" => {
-            // STRFTIME('%Y', date) — return year as string
-            let fmt = arg_str(0).unwrap_or_default();
-            let d   = date_to_int(&arg(1));
-            let (y, m, dy) = (d / 10000, (d / 100) % 100, d % 100);
-            let result = fmt
-                .replace("%Y", &format!("{:04}", y))
-                .replace("%m", &format!("{:02}", m))
-                .replace("%d", &format!("{:02}", dy));
-            ExprVal::Str(result)
-        }
-        // ── Conditional / NULL handling (already implemented above, aliases) ─
-        "IF" => {
-            if eval_bool(&args[0], block, row) { arg(1) } else { arg(2) }
-        }
-        "GREATEST" => {
-            args.iter().map(|a| eval_expr(a, block, row)).max_by(|a, b| {
-                let af = to_f64(a).unwrap_or(f64::MIN);
-                let bf = to_f64(b).unwrap_or(f64::MIN);
-                af.partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Equal)
-            }).unwrap_or(ExprVal::Null)
-        }
-        "LEAST" => {
-            args.iter().map(|a| eval_expr(a, block, row)).min_by(|a, b| {
-                let af = to_f64(a).unwrap_or(f64::MAX);
-                let bf = to_f64(b).unwrap_or(f64::MAX);
-                af.partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Equal)
-            }).unwrap_or(ExprVal::Null)
-        }
-        // ── Cast ────────────────────────────────────────────────────────────
-        "CAST" => {
-            let val = arg(0);
-            // arg(1) is the type keyword parsed as a Col
-            let ty  = match args.get(1) {
-                Some(Expr::Col(t)) => t.to_ascii_uppercase(),
-                _                  => return val,
-            };
-            match ty.as_str() {
-                "INT" | "INTEGER" | "BIGINT" => match val {
-                    ExprVal::Float(f) => ExprVal::Int(f as i64),
-                    ExprVal::Str(s)   => s.trim().parse::<i64>().map(ExprVal::Int).unwrap_or(ExprVal::Null),
-                    other             => other,
-                },
-                "FLOAT" | "DOUBLE" | "REAL" | "NUMERIC" | "DECIMAL" => match val {
-                    ExprVal::Int(i)   => ExprVal::Float(i as f64),
-                    ExprVal::Str(s)   => s.trim().parse::<f64>().map(ExprVal::Float).unwrap_or(ExprVal::Null),
-                    other             => other,
-                },
-                "VARCHAR" | "TEXT" | "STRING" | "CHAR" => ExprVal::Str(match val {
-                    ExprVal::Int(i)   => i.to_string(),
-                    ExprVal::Float(f) => f.to_string(),
-                    ExprVal::Bool(b)  => b.to_string(),
-                    ExprVal::Str(s)   => s,
-                    ExprVal::Null     => return ExprVal::Null,
-                }),
-                "BOOLEAN" | "BOOL" => ExprVal::Bool(match val {
-                    ExprVal::Int(i)   => i != 0,
-                    ExprVal::Float(f) => f != 0.0,
-                    ExprVal::Str(s)   => matches!(s.to_lowercase().as_str(), "true" | "1" | "yes"),
-                    ExprVal::Bool(b)  => b,
-                    ExprVal::Null     => return ExprVal::Null,
-                }),
-                _ => val,
-            }
-        }
-        // ── Type-check predicates ────────────────────────────────────────────
-        "ISNUMERIC" => ExprVal::Bool(to_f64(&arg(0)).is_some()),
-        "IIF" => {
-            if eval_bool(&args[0], block, row) { arg(1) } else { arg(2) }
-        }
-        // ── Missing string functions ─────────────────────────────────────────
-        "CHARINDEX" | "INSTR" | "LOCATE" | "POSITION_OF" => {
-            let needle = arg_str(0).unwrap_or_default();
-            let haystack = arg_str(1).unwrap_or_default();
-            let pos = haystack.find(&needle).map(|p| p as i64 + 1).unwrap_or(0);
-            ExprVal::Int(pos)
-        }
-        "INITCAP" | "PROPERCASE" => {
-            let s = arg_str(0).unwrap_or_default();
-            let result: String = s.split_whitespace()
-                .map(|w| {
-                    let mut c = w.chars();
-                    match c.next() {
-                        None => String::new(),
-                        Some(f) => f.to_uppercase().collect::<String>() + &c.as_str().to_lowercase(),
-                    }
-                })
-                .collect::<Vec<_>>().join(" ");
-            ExprVal::Str(result)
-        }
-        "SPACE" => {
-            let n = arg_f64(0).unwrap_or(0.0) as usize;
-            ExprVal::Str(" ".repeat(n))
-        }
-        "SPLIT_PART" => {
-            let s   = arg_str(0).unwrap_or_default();
-            let sep = arg_str(1).unwrap_or_else(|| ",".into());
-            let n   = arg_f64(2).unwrap_or(1.0) as usize;
-            ExprVal::Str(s.split(&*sep).nth(n.saturating_sub(1)).unwrap_or("").to_string())
-        }
-        "TRANSLATE" => {
-            let s    = arg_str(0).unwrap_or_default();
-            let from = arg_str(1).unwrap_or_default();
-            let to   = arg_str(2).unwrap_or_default();
-            let to_chars: Vec<char> = to.chars().collect();
-            let result: String = s.chars().map(|c| {
-                if let Some(i) = from.chars().position(|f| f == c) {
-                    to_chars.get(i).copied().unwrap_or('\0')
-                } else { c }
-            }).filter(|&c| c != '\0').collect();
-            ExprVal::Str(result)
-        }
-        "ASCII" | "ORD" => {
-            let s = arg_str(0).unwrap_or_default();
-            ExprVal::Int(s.chars().next().map(|c| c as i64).unwrap_or(0))
-        }
-        "CHR" | "CHAR" => {
-            let n = arg_f64(0).unwrap_or(0.0) as u32;
-            ExprVal::Str(char::from_u32(n).map(|c| c.to_string()).unwrap_or_default())
-        }
-        // ── Missing math functions ───────────────────────────────────────────
-        "SIGN" => match arg(0) {
-            ExprVal::Int(i)   => ExprVal::Int(i.signum()),
-            ExprVal::Float(f) => ExprVal::Float(f.signum()),
-            _ => ExprVal::Null,
+        "SIZE" | "CARDINALITY" => match args.first().and_then(|a| array_items(a, block, row)) {
+            Some(items) => ExprVal::Int(items.len() as i64),
+            None => ExprVal::Int(-1),
         },
-        "TRUNCATE" | "TRUNC" => {
-            let f  = need!(arg_f64(0));
-            let dp = arg_f64(1).unwrap_or(0.0) as u32;
-            let m  = 10f64.powi(dp as i32);
-            ExprVal::Float((f * m).trunc() / m)
-        }
-        "LOG2"  => arg_f64(0).map(|f| ExprVal::Float(f.log2())).unwrap_or(ExprVal::Null),
-        "LN"    => arg_f64(0).map(|f| ExprVal::Float(f.ln())).unwrap_or(ExprVal::Null),
-        "PI"    => ExprVal::Float(std::f64::consts::PI),
-        "RAND" | "RANDOM" => {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_nanos() as u64;
-            ExprVal::Float(((seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407) >> 33) as f64) / (u32::MAX as f64))
-        }
-        "CBRT"  => arg_f64(0).map(|f| ExprVal::Float(f.cbrt())).unwrap_or(ExprVal::Null),
-        "DEGREES" => arg_f64(0).map(|f| ExprVal::Float(f.to_degrees())).unwrap_or(ExprVal::Null),
-        "RADIANS" => arg_f64(0).map(|f| ExprVal::Float(f.to_radians())).unwrap_or(ExprVal::Null),
-        "SIN" => arg_f64(0).map(|f| ExprVal::Float(f.sin())).unwrap_or(ExprVal::Null),
-        "COS" => arg_f64(0).map(|f| ExprVal::Float(f.cos())).unwrap_or(ExprVal::Null),
-        "TAN" => arg_f64(0).map(|f| ExprVal::Float(f.tan())).unwrap_or(ExprVal::Null),
-        // ── Fallthrough ─────────────────────────────────────────────────────
-        "CONVERT" => {
-            // CONVERT(value, type) — alias for CAST
+        "INTERVAL" => ExprVal::Null, // only meaningful as an operand of + / - (see eval_interval)
+        "CAST" | "TRY_CAST" | "CONVERT" => {
             let val = arg(0);
-            let ty  = match args.get(1) {
-                Some(Expr::Col(t)) => t.to_ascii_uppercase(),
-                Some(Expr::Str(t)) => t.to_ascii_uppercase(),
-                _                  => return val,
+            let ty = match args.get(1) {
+                Some(Expr::Col(t)) | Some(Expr::Str(t)) => t.clone(),
+                _ => return val,
             };
-            match ty.as_str() {
-                "INT" | "INTEGER" | "BIGINT" => match val {
-                    ExprVal::Float(f) => ExprVal::Int(f as i64),
-                    ExprVal::Str(s)   => s.trim().parse::<i64>().map(ExprVal::Int).unwrap_or(ExprVal::Null),
-                    other             => other,
-                },
-                "FLOAT" | "DOUBLE" | "REAL" | "NUMERIC" | "DECIMAL" => match val {
-                    ExprVal::Int(i)   => ExprVal::Float(i as f64),
-                    ExprVal::Str(s)   => s.trim().parse::<f64>().map(ExprVal::Float).unwrap_or(ExprVal::Null),
-                    other             => other,
-                },
-                "VARCHAR" | "TEXT" | "STRING" | "CHAR" => ExprVal::Str(match val {
-                    ExprVal::Int(i)   => i.to_string(),
-                    ExprVal::Float(f) => f.to_string(),
-                    ExprVal::Bool(b)  => b.to_string(),
-                    ExprVal::Str(s)   => s,
-                    ExprVal::Null     => return ExprVal::Null,
-                }),
-                _ => val,
-            }
+            let lit = |i: usize| match args.get(i) { Some(Expr::Int(n)) => Some(*n), _ => None };
+            crate::scalar::cast(val, &ty, lit(2), lit(3))
         }
+        "ISNUMERIC" => ExprVal::Bool(to_f64(&arg(0)).is_some()),
+        "STRFTIME" | "FORMAT_DATE" => {
+            // STRFTIME('%Y-%m', date)
+            let fmt = match arg(0) { ExprVal::Str(s) => s, _ => return ExprVal::Null };
+            let Some(d) = crate::scalar::to_dt(&arg(1)) else { return ExprVal::Null };
+            let (y, m, dy) = d.ymd();
+            ExprVal::Str(fmt.replace("%Y", &format!("{:04}", y)).replace("%m", &format!("{:02}", m)).replace("%d", &format!("{:02}", dy))
+                .replace("%H", &format!("{:02}", d.secs / 3600)).replace("%M", &format!("{:02}", (d.secs / 60) % 60)).replace("%S", &format!("{:02}", d.secs % 60)))
+        }
+        "EXTRACT_YEAR" | "EXTRACT_MONTH" | "EXTRACT_DAY" => {
+            let field = &name[8..];
+            crate::scalar::to_dt(&arg(0)).and_then(|d| crate::scalar::date_part(field, &d)).unwrap_or(ExprVal::Null)
+        }
+        "MAP" | "ARRAY" | "EXPLODE" => ExprVal::Null,
         _ => {
-            // Check UDFs via thread-local registry
-            let udf_result = CURRENT_UDFS.with(|cell| {
-                let udfs = cell.borrow();
-                if let Some(func) = udfs.get(name) {
-                    let evaluated_args: Vec<ExprVal> = args.iter()
-                        .map(|a| eval_expr(a, block, row))
-                        .collect();
-                    Some(func(&evaluated_args))
-                } else {
-                    None
-                }
-            });
-            udf_result.unwrap_or(ExprVal::Null)
+            let vals: Vec<ExprVal> = args.iter().map(|a| eval_expr(a, block, row)).collect();
+            if let Some(v) = crate::scalar::call(name, &vals) { return v; }
+            // user-defined functions via the thread-local registry
+            CURRENT_UDFS.with(|cell| {
+                cell.borrow().get(name).map(|func| func(&vals)).unwrap_or(ExprVal::Null)
+            })
         }
     }
 }
 
-// ─── Date helpers ─────────────────────────────────────────────────────────────
-
-fn date_to_int(v: &ExprVal) -> i64 {
-    match v {
-        ExprVal::Int(i) => *i,
-        ExprVal::Float(f) => *f as i64,
-        ExprVal::Str(s) => {
-            let s = s.trim();
-            if s.len() >= 10 && s.as_bytes().get(4) == Some(&b'-') {
-                let y: i64 = s[0..4].parse().unwrap_or(0);
-                let m: i64 = s[5..7].parse().unwrap_or(0);
-                let d: i64 = s[8..10].parse().unwrap_or(0);
-                y * 10000 + m * 100 + d
-            } else { s.parse().unwrap_or(0) }
-        }
-        _ => 0,
-    }
-}
-
-fn date_add_days(d: i64, days: i64) -> String {
-    let julian = date_to_julian(d) + days;
-    julian_to_date_str(julian)
-}
-
-fn date_to_julian(d: i64) -> i64 {
-    let y = d / 10000; let m = (d / 100) % 100; let dy = d % 100;
-    let a = (14 - m) / 12; let yr = y + 4800 - a; let mo = m + 12 * a - 3;
-    dy + (153 * mo + 2) / 5 + 365 * yr + yr / 4 - yr / 100 + yr / 400 - 32045
-}
-
-fn julian_to_date_str(j: i64) -> String {
-    let a = j + 32044; let b = (4 * a + 3) / 146097; let c = a - 146097 * b / 4;
-    let d = (4 * c + 3) / 1461; let e = c - 1461 * d / 4; let m = (5 * e + 2) / 153;
-    let day   = e - (153 * m + 2) / 5 + 1;
-    let month = m + 3 - 12 * (m / 10);
-    let year  = 100 * b + d - 4800 + m / 10;
-    format!("{:04}-{:02}-{:02}", year, month, day)
-}
-
-fn executor_date_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-    julian_to_date_str(2440588 + (secs / 86400) as i64)
+/// `left (+|-) INTERVAL n unit`: calendar arithmetic on a date/timestamp.
+fn eval_interval(op: &BinOpKind, left: &Expr, right: &Expr, block: &DataBlock, row: usize) -> Option<ExprVal> {
+    let (date_e, iv, sign) = match (left, right) {
+        (d, Expr::FuncCall { name, args }) if name == "INTERVAL" => (d, args, if matches!(op, BinOpKind::Sub) { -1 } else { 1 }),
+        (Expr::FuncCall { name, args }, d) if name == "INTERVAL" && matches!(op, BinOpKind::Add) => (d, args, 1),
+        _ => return None,
+    };
+    if !matches!(op, BinOpKind::Add | BinOpKind::Sub) { return None; }
+    let d = eval_expr(date_e, block, row);
+    let n = eval_expr(&iv[0], block, row);
+    let unit = match iv.get(1) { Some(Expr::Str(u)) => u.clone(), _ => return Some(ExprVal::Null) };
+    let (Some(dt), Some(n), Some(unit)) = (crate::scalar::to_dt(&d), crate::scalar::num(&n), crate::datetime::norm_unit(&unit)) else { return Some(ExprVal::Null) };
+    let r = crate::datetime::add_unit(&dt, unit, n as i64 * sign)?;
+    let keep_time = dt.has_time || matches!(unit, "hour" | "minute" | "second");
+    Some(ExprVal::Str(if keep_time { crate::datetime::fmt_ts(r.days, r.secs, r.nanos) } else { crate::datetime::fmt_date(r.days) }))
 }
 
 // ─── MERGE helpers ─────────────────────────────────────────────────────────────
@@ -3761,55 +3442,84 @@ fn get_cell(block: &DataBlock, col_name: &str, row: usize) -> ExprVal {    // Tr
     }
 }
 
+fn str_operand(v: ExprVal) -> Option<String> {
+    crate::scalar::to_str(&v)
+}
+
 fn eval_binop(op: &BinOpKind, l: ExprVal, r: ExprVal) -> ExprVal {
+    use std::cmp::Ordering::*;
     // String concatenation operator: ||
     if let BinOpKind::Concat = op {
-        let ls = match &l { ExprVal::Str(s) => s.clone(), ExprVal::Int(i) => i.to_string(), ExprVal::Float(f) => f.to_string(), ExprVal::Bool(b) => b.to_string(), ExprVal::Null => return ExprVal::Null };
-        let rs = match &r { ExprVal::Str(s) => s.clone(), ExprVal::Int(i) => i.to_string(), ExprVal::Float(f) => f.to_string(), ExprVal::Bool(b) => b.to_string(), ExprVal::Null => return ExprVal::Null };
-        return ExprVal::Str(format!("{}{}", ls, rs));
-    }
-    // Boolean short-circuits
-    if let (BinOpKind::And, ExprVal::Bool(lb), ExprVal::Bool(rb)) = (op, &l, &r) {
-        return ExprVal::Bool(*lb && *rb);
-    }
-    if let (BinOpKind::Or, ExprVal::Bool(lb), ExprVal::Bool(rb)) = (op, &l, &r) {
-        return ExprVal::Bool(*lb || *rb);
-    }
-
-    // Numeric comparison / arithmetic
-    let lf = to_f64(&l);
-    let rf = to_f64(&r);
-
-    if let (Some(lv), Some(rv)) = (lf, rf) {
-        return match op {
-            BinOpKind::Eq  => ExprVal::Bool((lv - rv).abs() < 1e-10),
-            BinOpKind::Ne  => ExprVal::Bool((lv - rv).abs() >= 1e-10),
-            BinOpKind::Lt  => ExprVal::Bool(lv < rv),
-            BinOpKind::Le  => ExprVal::Bool(lv <= rv),
-            BinOpKind::Gt  => ExprVal::Bool(lv > rv),
-            BinOpKind::Ge  => ExprVal::Bool(lv >= rv),
-            BinOpKind::Add => ExprVal::Float(lv + rv),
-            BinOpKind::Sub => ExprVal::Float(lv - rv),
-            BinOpKind::Mul => ExprVal::Float(lv * rv),
-            BinOpKind::Div => ExprVal::Float(lv / rv),
-            BinOpKind::Mod => ExprVal::Float(lv % rv),
-            _ => ExprVal::Bool(false),
-        };
-    }
-
-    // String comparison
-    if let (ExprVal::Str(ls), ExprVal::Str(rs)) = (&l, &r) {
-        return match op {
-            BinOpKind::Eq => ExprVal::Bool(ls == rs),
-            BinOpKind::Ne => ExprVal::Bool(ls != rs),
-            BinOpKind::Lt => ExprVal::Bool(ls < rs),
-            BinOpKind::Le => ExprVal::Bool(ls <= rs),
-            BinOpKind::Gt => ExprVal::Bool(ls > rs),
-            BinOpKind::Ge => ExprVal::Bool(ls >= rs),
+        return match (crate::scalar::to_str(&l), crate::scalar::to_str(&r)) {
+            (Some(a), Some(b)) => ExprVal::Str(a + &b),
             _ => ExprVal::Null,
         };
     }
+    // Three-valued AND / OR: FALSE AND x is FALSE and TRUE OR x is TRUE even when x is NULL
+    match op {
+        BinOpKind::And | BinOpKind::Or => {
+            let tri = |v: &ExprVal| match v { ExprVal::Bool(b) => Some(*b), _ => None };
+            let (a, b) = (tri(&l), tri(&r));
+            return match (op, a, b) {
+                (BinOpKind::And, Some(false), _) | (BinOpKind::And, _, Some(false)) => ExprVal::Bool(false),
+                (BinOpKind::And, Some(true), Some(true)) => ExprVal::Bool(true),
+                (BinOpKind::Or, Some(true), _) | (BinOpKind::Or, _, Some(true)) => ExprVal::Bool(true),
+                (BinOpKind::Or, Some(false), Some(false)) => ExprVal::Bool(false),
+                _ => ExprVal::Null,
+            };
+        }
+        _ => {}
+    }
+    if matches!(l, ExprVal::Null) || matches!(r, ExprVal::Null) { return ExprVal::Null; }
 
+    match op {
+        BinOpKind::Eq | BinOpKind::Ne | BinOpKind::Lt | BinOpKind::Le | BinOpKind::Gt | BinOpKind::Ge => {
+            // exact on integers, numeric when one side is a number and the other a numeric string
+            let ord = match (&l, &r) {
+                (ExprVal::Float(a), ExprVal::Float(b)) if a.is_nan() || b.is_nan() => {
+                    // NaN = NaN is true in Spark and NaN sorts above every number
+                    Some(match (a.is_nan(), b.is_nan()) { (true, true) => Equal, (true, false) => Greater, _ => Less })
+                }
+                _ => crate::scalar::cmp_vals(&l, &r),
+            };
+            return match ord {
+                None => ExprVal::Null,
+                Some(o) => ExprVal::Bool(match op {
+                    BinOpKind::Eq => o == Equal,
+                    BinOpKind::Ne => o != Equal,
+                    BinOpKind::Lt => o == Less,
+                    BinOpKind::Le => o != Greater,
+                    BinOpKind::Gt => o == Greater,
+                    _ => o != Less,
+                }),
+            };
+        }
+        _ => {}
+    }
+
+    // arithmetic
+    if let (ExprVal::Int(a), ExprVal::Int(b)) = (&l, &r) {
+        let (a, b) = (*a, *b);
+        return match op {
+            BinOpKind::Add => ExprVal::Int(a.wrapping_add(b)),
+            BinOpKind::Sub => ExprVal::Int(a.wrapping_sub(b)),
+            BinOpKind::Mul => ExprVal::Int(a.wrapping_mul(b)),
+            BinOpKind::Div => if b == 0 { ExprVal::Null } else { ExprVal::Float(a as f64 / b as f64) },
+            BinOpKind::Mod => if b == 0 { ExprVal::Null } else { ExprVal::Int(a.wrapping_rem(b)) },
+            _ => ExprVal::Null,
+        };
+    }
+    let (lf, rf) = (crate::scalar::num(&l), crate::scalar::num(&r));
+    if let (Some(a), Some(b)) = (lf, rf) {
+        return match op {
+            BinOpKind::Add => ExprVal::Float(a + b),
+            BinOpKind::Sub => ExprVal::Float(a - b),
+            BinOpKind::Mul => ExprVal::Float(a * b),
+            BinOpKind::Div => if b == 0.0 { ExprVal::Null } else { ExprVal::Float(a / b) },
+            BinOpKind::Mod => if b == 0.0 { ExprVal::Null } else { ExprVal::Float(a % b) },
+            _ => ExprVal::Null,
+        };
+    }
     ExprVal::Null
 }
 
@@ -4134,7 +3844,9 @@ fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, Ko
                     Expr::Agg { func, expr: inner } => {
                         let col_name = alias.clone().unwrap_or_else(|| {
                             let inner_name = match inner.as_ref() {
-                                Expr::Col(c) | Expr::QualCol(_, c) => c.clone(),
+                                Expr::Col(c) => c.clone(),
+                                // global_agg / group_by_agg name the output after the qualified column
+                                Expr::QualCol(t, c) => format!("{t}.{c}"),
                                 Expr::Star => "*".to_string(),
                                 _ => String::new(),
                             };
@@ -4149,8 +3861,9 @@ fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, Ko
                             let mut nc = src.clone();
                             if let Some(a) = alias { nc.name = a.clone(); }
                             new_cols.push(nc);
+                        } else {
+                            return Err(KoreError::InvalidArgument(format!("aggregate result column not found: {col_name}")));
                         }
-                        // else silently skip (shouldn't happen after group_by_agg)
                     }
                     // Everything else: evaluate row-by-row
                     // BUT: if this alias was already computed (e.g. by group_by_agg or
@@ -4262,20 +3975,17 @@ fn collect_cols_expr(expr: &Expr, set: &mut std::collections::HashSet<String>) {
         Expr::InSubquery { expr: e, subquery, .. } => { collect_cols_expr(e, set); collect_cols_stmt(subquery, set); }
         Expr::ScalarSubquery(stmt) => collect_cols_stmt(stmt, set),
         Expr::Exists { subquery, .. } => collect_cols_stmt(subquery, set),
-        Expr::Window { func, spec } => {
-            match func {
-                WindowFn::Agg { expr: e, .. } => collect_cols_expr(e, set),
-                WindowFn::Ntile(e) | WindowFn::FirstValue(e) | WindowFn::LastValue(e) | WindowFn::CumSum(e) => {
-                    collect_cols_expr(e, set);
-                }
-                WindowFn::Lag { expr: e, offset } | WindowFn::Lead { expr: e, offset } => {
-                    collect_cols_expr(e, set);
-                    collect_cols_expr(offset, set);
-                }
+        Expr::AggX { args, filter, .. } => {
+            for a in args { collect_cols_expr(a, set); }
+            if let Some(f) = filter { collect_cols_expr(f, set); }
+        }
+        Expr::QuantSubquery { expr: e, subquery, .. } => { collect_cols_expr(e, set); collect_cols_stmt(subquery, set); }
+        Expr::Window { .. } => {
+            // every column mentioned by the function, PARTITION BY, ORDER BY and frame offsets
+            crate::ast_walk::walk_expr(expr, false, &mut |x| match x {
+                Expr::Col(c) | Expr::QualCol(_, c) => { set.insert(c.clone()); }
                 _ => {}
-            }
-            for e in &spec.partition_by { collect_cols_expr(e, set); }
-            for o in &spec.order_by    { set.insert(o.col.rsplit('.').next().unwrap_or(&o.col).to_string()); }
+            });
         }
         _ => {}
     }
@@ -4302,6 +4012,11 @@ fn collect_cols_stmt_opt(stmt: &SelectStmt, set: &mut std::collections::HashSet<
         collect_cols_expr(e, set);
     }
     for col in &stmt.group_by { set.insert(col.rsplit('.').next().unwrap_or(col).to_string()); }
+    for g in &stmt.group_exprs { collect_cols_expr(g, set); }
+    for (_, w) in &stmt.windows {
+        for e in &w.partition_by { collect_cols_expr(e, set); }
+        for o in &w.order_by { collect_cols_expr(&o.expr, set); }
+    }
     for item in &stmt.order_by {
         set.insert(item.col.rsplit('.').next().unwrap_or(&item.col).to_string());
         collect_cols_expr(&item.expr, set);
@@ -4975,32 +4690,6 @@ fn col_name_from_expr(e: &Expr) -> String {    match e {
     }
 }
 
-fn ast_to_win_fn(ast: &WindowFn) -> WinFn {
-    match ast {
-        WindowFn::RowNumber   => WinFn::RowNumber,
-        WindowFn::Rank        => WinFn::Rank,
-        WindowFn::DenseRank   => WinFn::DenseRank,
-        WindowFn::PercentRank => WinFn::PercentRank,
-        WindowFn::CumeDist    => WinFn::CumeDist,
-        WindowFn::Ntile(n)    => WinFn::Ntile(match n.as_ref() { Expr::Int(i) => *i as usize, _ => 4 }),
-        WindowFn::Lag  { expr, offset } => WinFn::Lag  { col: col_name_from_expr(expr), offset: match offset.as_ref() { Expr::Int(i) => *i as usize, _ => 1 } },
-        WindowFn::Lead { expr, offset } => WinFn::Lead { col: col_name_from_expr(expr), offset: match offset.as_ref() { Expr::Int(i) => *i as usize, _ => 1 } },
-        WindowFn::Agg { func, expr } => match func {
-            AggFunc::Sum   => WinFn::Sum  (col_name_from_expr(expr)),
-            AggFunc::Avg   => WinFn::Avg  (col_name_from_expr(expr)),
-            AggFunc::Count | AggFunc::CountDistinct => WinFn::Count(col_name_from_expr(expr)),
-            AggFunc::Min   => WinFn::Min  (col_name_from_expr(expr)),
-            AggFunc::Max   => WinFn::Max  (col_name_from_expr(expr)),
-            // New agg funcs fall back to Sum window for now
-            AggFunc::Stddev | AggFunc::Variance | AggFunc::Median |
-            AggFunc::StringAgg { .. } | AggFunc::Percentile { .. }
-                           => WinFn::Sum  (col_name_from_expr(expr)),
-        },
-        WindowFn::CumSum(e)    => WinFn::CumSum    (col_name_from_expr(e)),
-        WindowFn::FirstValue(e) => WinFn::FirstValue(col_name_from_expr(e)),
-        WindowFn::LastValue(e)  => WinFn::LastValue (col_name_from_expr(e)),
-    }
-}
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 

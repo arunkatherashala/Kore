@@ -256,6 +256,8 @@ fn num_win(e: &Expr, block: &DataBlock, w: Win) -> Option<Vec<Option<f64>>> {
         Expr::BinOp { op: op @ (BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul | BinOpKind::Div | BinOpKind::Mod), left, right } => {
             let (l, r) = (num_win(left, block, w)?, num_win(right, block, w)?);
             Some(l.iter().zip(&r).map(|(a, b)| match (a, b) {
+                // x / 0 and x % 0 are NULL (Spark semantics), not inf / NaN
+                (Some(_), Some(b)) if *b == 0.0 && matches!(op, BinOpKind::Div | BinOpKind::Mod) => None,
                 (Some(a), Some(b)) => Some(match op {
                     BinOpKind::Add => a + b,
                     BinOpKind::Sub => a - b,

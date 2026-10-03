@@ -23,28 +23,14 @@ pub fn parse_query(sql: &str) -> Result<Query, KoreError> {
         p.parse_cte_list()?
     } else { vec![] };
 
-    // Main SELECT
-    let body = Some(p.parse_select()?);
-
-    // UNION ALL / UNION / INTERSECT / EXCEPT
-    let mut set_ops = vec![];
-    while matches!(p.peek(), Token::Union | Token::Intersect | Token::Except) {
-        let kind = match p.peek() {
-            Token::Union => {
-                p.pos += 1;
-                if p.consume_if(&Token::All) {
-                    SetOpKind::UnionAll
-                } else {
-                    p.consume_if(&Token::Distinct);
-                    SetOpKind::Union
-                }
-            }
-            Token::Intersect => { p.pos += 1; p.consume_if(&Token::All); SetOpKind::Intersect }
-            Token::Except    => { p.pos += 1; p.consume_if(&Token::All); SetOpKind::Except }
-            _ => unreachable!(),
-        };
-        set_ops.push((kind, p.parse_select()?));
-    }
+    // Main statement: SELECT arms joined by UNION / INTERSECT / EXCEPT / MINUS, optional trailing ORDER BY / LIMIT
+    let mut body = p.parse_compound()?;
+    let set_ops = std::mem::take(&mut body.set_ops);
+    let (q_order, q_limit, q_offset) = if set_ops.is_empty() {
+        (Vec::new(), None, None)
+    } else {
+        (std::mem::take(&mut body.order_by), body.limit.take(), body.offset.take())
+    };
 
     // Never silently drop the tail of a statement: whatever the grammar did not consume is an error.
     p.consume_if(&Token::Semicolon);
@@ -53,7 +39,7 @@ pub fn parse_query(sql: &str) -> Result<Query, KoreError> {
             "unexpected {:?} after the end of the statement", p.peek())));
     }
 
-    Ok(Query { ctes, body, set_ops })
+    Ok(Query { ctes, body: Some(body), set_ops, order_by: q_order, limit: q_limit, offset: q_offset })
 }
 
 struct Parser {
@@ -128,6 +114,7 @@ impl Parser {
             Token::Unpivot   => Ok("unpivot".to_string()),
             Token::Lateral   => Ok("lateral".to_string()),
             Token::For       => Ok("for".to_string()),
+            Token::Str(s)    => Ok(s),
             other => Err(KoreError::InvalidArgument(format!("expected alias name, got {:?}", other))),
         }
     }
@@ -158,7 +145,7 @@ impl Parser {
             self.pos += 1;
             self.parse_table_expr()?
         } else {
-            TableExpr { name: "__dual__".to_string(), alias: None, subquery: None, values: None, push_filter: None }
+            TableExpr { name: "__dual__".to_string(), alias: None, subquery: None, values: None, push_filter: None, col_aliases: vec![] }
         };
 
         // FROM a, b, c — comma-separated tables are implicit inner joins; the join keys are taken
@@ -171,6 +158,8 @@ impl Parser {
                 table,
                 on: JoinOn { left_col: String::new(), right_col: String::new(), expr: None },
                 push_filter: None,
+                using: Vec::new(),
+                natural: false,
             });
         }
 
@@ -200,45 +189,37 @@ impl Parser {
             None
         };
 
-        // GROUP BY [ROLLUP(...) | CUBE(...) | plain list]
-        let (group_by, rollup, cube) = if self.peek() == &Token::Group && self.peek2() == &Token::By {
+        // GROUP BY [plain list | expressions | ordinals | ROLLUP | CUBE | GROUPING SETS]
+        let (group_by, grouping, group_exprs, group_sets) = if self.peek() == &Token::Group && self.peek2() == &Token::By {
             self.pos += 2; // consume GROUP BY
-            // Check for ROLLUP or CUBE
-            let upper = self.peek().clone();
-            if let Token::Ident(kw) = &upper {
-                let kw = kw.to_uppercase();
-                if kw == "ROLLUP" || kw == "CUBE" {
-                    let is_rollup = kw == "ROLLUP";
-                    self.pos += 1; // consume ROLLUP/CUBE
-                    self.expect(&Token::LParen)?;
-                    let cols = self.parse_ident_list()?;
-                    self.expect(&Token::RParen)?;
-                    (cols, is_rollup, !is_rollup)
-                } else {
-                    (self.parse_ident_list()?, false, false)
+            self.parse_group_by(&projections)?
+        } else {
+            (Vec::new(), Grouping::Plain, Vec::new(), Vec::new())
+        };
+
+        // HAVING / QUALIFY / WINDOW w AS (..) in any order
+        let mut having = None;
+        let mut qualify = None;
+        let mut windows: Vec<(String, WindowSpec)> = Vec::new();
+        loop {
+            if self.peek() == &Token::Having {
+                self.pos += 1;
+                having = Some(self.parse_expr(0)?);
+            } else if self.peek_ident_upper() == "QUALIFY" {
+                self.pos += 1;
+                qualify = Some(self.parse_expr(0)?);
+            } else if self.peek_ident_upper() == "WINDOW" {
+                self.pos += 1;
+                loop {
+                    let name = self.expect_ident()?;
+                    self.expect(&Token::As)?;
+                    windows.push((name, self.parse_window_spec()?));
+                    if !self.consume_if(&Token::Comma) { break; }
                 }
             } else {
-                (self.parse_ident_list()?, false, false)
+                break;
             }
-        } else {
-            (Vec::new(), false, false)
-        };
-        let grouping = if rollup { Grouping::Rollup } else if cube { Grouping::Cube } else { Grouping::Plain };
-
-        // HAVING
-        let having = if self.consume_if(&Token::Having) {
-            Some(self.parse_expr(0)?)
-        } else {
-            None
-        };
-
-        // QUALIFY (filter on window function results)
-        let qualify = if self.peek_ident_upper() == "QUALIFY" {
-            self.pos += 1;
-            Some(self.parse_expr(0)?)
-        } else {
-            None
-        };
+        }
 
         // ORDER BY
         let order_by = if self.peek() == &Token::Order && self.peek2() == &Token::By {
@@ -248,41 +229,229 @@ impl Parser {
             Vec::new()
         };
 
-        // LIMIT
-        let limit = if self.consume_if(&Token::Limit) {
-            match self.advance() {
-                Token::Int(n) => Some(n as u64),
-                other => return Err(KoreError::InvalidArgument(format!("LIMIT expects integer, got {:?}", other))),
-            }
-        } else if self.peek_ident_upper() == "FETCH" {
-            // FETCH FIRST n ROWS ONLY
-            self.pos += 1; // consume FETCH
-            self.pos += 1; // consume FIRST (or NEXT)
-            let n = match self.advance() { Token::Int(n) => n as u64, _ => 1 };
-            // consume ROWS ONLY
-            while !matches!(self.peek(), Token::Eof) {
-                if self.peek_ident_upper() == "ONLY" { self.pos += 1; break; }
-                self.pos += 1;
-            }
-            Some(n)
-        } else {
-            None
-        };
-
-        // OFFSET n ROWS
-        let offset = if self.peek_ident_upper() == "OFFSET" {
-            self.pos += 1;
-            let n = match self.advance() { Token::Int(n) => n as u64, _ => 0 };
-            // skip optional ROWS
-            if self.peek_ident_upper() == "ROWS" { self.pos += 1; }
-            Some(n)
-        } else {
-            None
-        };
+        let (limit, offset) = self.parse_limit_offset()?;
 
         Ok(SelectStmt { distinct, projections, from, joins, where_clause,
-                         group_by, grouping, having, qualify, order_by, limit, offset, scan_limit: None,
-                         lateral_views, pivot, unpivot, hints })
+                         group_by, grouping, group_exprs, group_sets, windows, having, qualify, order_by, limit, offset, scan_limit: None,
+                         lateral_views, pivot, unpivot, hints, parenthesized: false, set_ops: Vec::new() })
+    }
+
+    /// `arm [UNION|INTERSECT|EXCEPT|MINUS [ALL|DISTINCT] arm]* [ORDER BY ..] [LIMIT ..]`. With set operations
+    /// the first arm carries them in `set_ops` and the trailing ORDER BY / LIMIT / OFFSET apply to the whole.
+    fn parse_compound(&mut self) -> Result<SelectStmt, KoreError> {
+        let mut first = self.parse_select_arm()?;
+        let mut arms: Vec<(SetOpKind, SelectStmt)> = Vec::new();
+        loop {
+            let is_minus = self.peek_ident_upper() == "MINUS";
+            if !(matches!(self.peek(), Token::Union | Token::Intersect | Token::Except) || is_minus) { break; }
+            let kind = match self.peek().clone() {
+                Token::Union => {
+                    self.pos += 1;
+                    if self.consume_if(&Token::All) { SetOpKind::UnionAll } else { self.consume_if(&Token::Distinct); SetOpKind::Union }
+                }
+                Token::Intersect => {
+                    self.pos += 1;
+                    if self.consume_if(&Token::All) { SetOpKind::IntersectAll } else { self.consume_if(&Token::Distinct); SetOpKind::Intersect }
+                }
+                _ => {
+                    self.pos += 1; // EXCEPT / MINUS
+                    if self.consume_if(&Token::All) { SetOpKind::ExceptAll } else { self.consume_if(&Token::Distinct); SetOpKind::Except }
+                }
+            };
+            arms.push((kind, self.parse_select_arm()?));
+        }
+        let (mut order, mut limit, mut offset) = (Vec::new(), None, None);
+        // ORDER BY / LIMIT written after a bare last arm belong to the whole result
+        if let Some((_, last)) = arms.last_mut() {
+            if !last.parenthesized {
+                order = std::mem::take(&mut last.order_by);
+                limit = last.limit.take();
+                offset = last.offset.take();
+            }
+        }
+        // ... as do clauses following a parenthesised arm
+        if self.peek() == &Token::Order && self.peek2() == &Token::By {
+            self.pos += 2;
+            order = self.parse_order_by_list()?;
+        }
+        if self.peek() == &Token::Limit || matches!(self.peek_ident_upper().as_str(), "OFFSET" | "FETCH") {
+            let (l, o) = self.parse_limit_offset()?;
+            if l.is_some() { limit = l; }
+            if o.is_some() { offset = o; }
+        }
+        if arms.is_empty() {
+            if !order.is_empty() { first.order_by = order; }
+            if limit.is_some() { first.limit = limit; }
+            if offset.is_some() { first.offset = offset; }
+            return Ok(first);
+        }
+        // the first arm keeps its own ORDER BY / LIMIT only when it is parenthesised: isolate it
+        if !first.order_by.is_empty() || first.limit.is_some() || first.offset.is_some() {
+            first = SelectStmt::wrap(first);
+        }
+        first.set_ops = arms;
+        first.order_by = order;
+        first.limit = limit;
+        first.offset = offset;
+        Ok(first)
+    }
+
+    /// `SELECT ..` or `( SELECT .. )` as one arm of a set operation / the whole statement.
+    fn parse_select_arm(&mut self) -> Result<SelectStmt, KoreError> {
+        if self.peek() == &Token::LParen {
+            self.pos += 1;
+            let mut inner = self.parse_select_arm()?;
+            self.expect(&Token::RParen)?;
+            inner.parenthesized = true;
+            return Ok(inner);
+        }
+        self.parse_select()
+    }
+
+    /// `LIMIT n`, `OFFSET m [ROWS]`, `FETCH FIRST n ROWS ONLY` in any sensible order.
+    fn parse_limit_offset(&mut self) -> Result<(Option<u64>, Option<u64>), KoreError> {
+        let (mut limit, mut offset) = (None, None);
+        loop {
+            if self.consume_if(&Token::Limit) {
+                match self.advance() {
+                    Token::Int(n) if n >= 0 => limit = Some(n as u64),
+                    Token::All => {}
+                    other => return Err(KoreError::InvalidArgument(format!("LIMIT expects a non-negative integer, got {:?}", other))),
+                }
+            } else if self.peek_ident_upper() == "FETCH" {
+                // FETCH FIRST n ROWS ONLY
+                self.pos += 2; // FETCH FIRST|NEXT
+                let n = match self.peek().clone() { Token::Int(n) => { self.pos += 1; n as u64 } _ => 1 };
+                while !matches!(self.peek(), Token::Eof) {
+                    if self.peek_ident_upper() == "ONLY" { self.pos += 1; break; }
+                    self.pos += 1;
+                }
+                limit = Some(n);
+            } else if self.peek_ident_upper() == "OFFSET" {
+                self.pos += 1;
+                match self.advance() {
+                    Token::Int(n) if n >= 0 => offset = Some(n as u64),
+                    other => return Err(KoreError::InvalidArgument(format!("OFFSET expects a non-negative integer, got {:?}", other))),
+                }
+                if self.peek_ident_upper() == "ROWS" || self.peek() == &Token::Rows { self.pos += 1; }
+            } else {
+                break;
+            }
+        }
+        Ok((limit, offset))
+    }
+
+    /// GROUP BY list. Plain column lists and a lone ROLLUP/CUBE over columns keep the original
+    /// representation (fast executor paths); anything else becomes expressions + grouping sets.
+    fn parse_group_by(&mut self, projections: &[Projection]) -> Result<(Vec<String>, Grouping, Vec<Expr>, Vec<Vec<usize>>), KoreError> {
+        // every GROUP BY element contributes a list of alternative sets; the final sets are their product
+        let mut elements: Vec<Vec<Vec<Expr>>> = Vec::new();
+        let mut kinds: Vec<Option<Grouping>> = Vec::new();
+        loop {
+            let kw = self.peek_ident_upper();
+            let next_is_paren = self.peek2() == &Token::LParen;
+            if (kw == "ROLLUP" || kw == "CUBE") && next_is_paren {
+                self.pos += 2;
+                let mut items = vec![self.parse_group_item(projections)?];
+                while self.consume_if(&Token::Comma) { items.push(self.parse_group_item(projections)?); }
+                self.expect(&Token::RParen)?;
+                elements.push(rollup_cube_sets(&items, kw == "ROLLUP"));
+                kinds.push(Some(if kw == "ROLLUP" { Grouping::Rollup } else { Grouping::Cube }));
+            } else if kw == "GROUPING" && matches!(self.peek2(), Token::Ident(s) if s.eq_ignore_ascii_case("SETS")) {
+                self.pos += 2;
+                self.expect(&Token::LParen)?;
+                let mut sets: Vec<Vec<Expr>> = Vec::new();
+                loop {
+                    if self.consume_if(&Token::LParen) {
+                        let mut set = Vec::new();
+                        if self.peek() != &Token::RParen {
+                            set.push(self.parse_group_item(projections)?);
+                            while self.consume_if(&Token::Comma) { set.push(self.parse_group_item(projections)?); }
+                        }
+                        self.expect(&Token::RParen)?;
+                        sets.push(set);
+                    } else {
+                        sets.push(vec![self.parse_group_item(projections)?]);
+                    }
+                    if !self.consume_if(&Token::Comma) { break; }
+                }
+                self.expect(&Token::RParen)?;
+                elements.push(sets);
+                kinds.push(None);
+            } else {
+                let e = self.parse_group_item(projections)?;
+                elements.push(vec![vec![e]]);
+                kinds.push(None);
+            }
+            if !self.consume_if(&Token::Comma) { break; }
+        }
+        // GROUP BY a, b WITH ROLLUP / WITH CUBE
+        if self.peek() == &Token::With {
+            let w = match self.tokens.get(self.pos + 1) { Some(Token::Ident(s)) => s.to_ascii_uppercase(), _ => String::new() };
+            if w == "ROLLUP" || w == "CUBE" {
+                self.pos += 2;
+                let items: Vec<Expr> = elements.drain(..).flat_map(|e| e.into_iter().flatten()).collect();
+                elements.push(rollup_cube_sets(&items, w == "ROLLUP"));
+                kinds = vec![Some(if w == "ROLLUP" { Grouping::Rollup } else { Grouping::Cube })];
+            }
+        }
+
+        let is_col = |e: &Expr| matches!(e, Expr::Col(_) | Expr::QualCol(..));
+        let col_name = |e: &Expr| match e { Expr::Col(c) => c.clone(), Expr::QualCol(t, c) => format!("{t}.{c}"), _ => String::new() };
+        // classic shapes: all single plain columns, or one ROLLUP/CUBE over plain columns
+        if elements.iter().all(|e| e.len() == 1 && e[0].len() == 1 && is_col(&e[0][0])) {
+            let cols: Vec<String> = elements.iter().map(|e| col_name(&e[0][0])).collect();
+            return Ok((cols, Grouping::Plain, Vec::new(), Vec::new()));
+        }
+        if elements.len() == 1 {
+            if let Some(kind) = kinds[0] {
+                let all_cols = elements[0].iter().flatten().all(is_col);
+                // the longest set lists every column in order
+                if all_cols {
+                    if let Some(full) = elements[0].iter().max_by_key(|s| s.len()) {
+                        return Ok((full.iter().map(col_name).collect(), kind, Vec::new(), Vec::new()));
+                    }
+                }
+            }
+        }
+
+        // general form
+        let mut exprs: Vec<Expr> = Vec::new();
+        let mut index_of = |e: &Expr| -> usize {
+            match exprs.iter().position(|x| x == e) {
+                Some(i) => i,
+                None => { exprs.push(e.clone()); exprs.len() - 1 }
+            }
+        };
+        let mut sets: Vec<Vec<usize>> = vec![Vec::new()];
+        for el in &elements {
+            let mut next = Vec::new();
+            for base in &sets {
+                for alt in el {
+                    let mut s = base.clone();
+                    for e in alt {
+                        let i = index_of(e);
+                        if !s.contains(&i) { s.push(i); }
+                    }
+                    next.push(s);
+                }
+            }
+            sets = next;
+        }
+        let placeholders = (0..exprs.len()).map(|i| format!("__gexpr{i}")).collect();
+        Ok((placeholders, Grouping::Plain, exprs, sets))
+    }
+
+    /// One GROUP BY item; an integer is a 1-based position in the select list.
+    fn parse_group_item(&mut self, projections: &[Projection]) -> Result<Expr, KoreError> {
+        let e = self.parse_expr(0)?;
+        if let Expr::Int(n) = e {
+            return match projections.get((n - 1).max(0) as usize) {
+                Some(Projection::Expr { expr, .. }) if n >= 1 && !matches!(expr, Expr::Agg { .. } | Expr::AggX { .. }) => Ok(expr.clone()),
+                _ => Err(KoreError::InvalidArgument(format!("GROUP BY position {n} is not in the select list"))),
+            };
+        }
+        Ok(e)
     }
 
     // ── Window spec helpers ────────────────────────────────────────────────
@@ -294,7 +463,7 @@ impl Parser {
             let name = self.expect_ident()?;
             self.expect(&Token::As)?;
             self.expect(&Token::LParen)?;
-            let body = self.parse_select()?;
+            let body = self.parse_compound()?;
             self.expect(&Token::RParen)?;
             ctes.push(CteClause { name, body });
             if !self.consume_if(&Token::Comma) { break; }
@@ -302,20 +471,132 @@ impl Parser {
         Ok(ctes)
     }
 
-    fn maybe_window(&mut self, agg: Expr, func: AggFunc) -> Result<Expr, KoreError> {
-        if self.peek() != &Token::Over { return Ok(agg); }
-        self.pos += 1;
-        let spec  = self.parse_window_spec()?;
-        let inner = match &agg {
-            Expr::Agg { expr, .. } => expr.as_ref().clone(),
-            _ => agg.clone(),
+    /// Argument list and trailers of an aggregate call: `NAME([DISTINCT] args) [WITHIN GROUP (ORDER BY x)]
+    /// [FILTER (WHERE c)] [OVER (..)]`. Calls the classic fast paths cover become `Expr::Agg`; everything
+    /// else (DISTINCT over several columns, FILTER, population statistics, ...) becomes `Expr::AggX`.
+    fn parse_aggregate(&mut self, name: &str) -> Result<Expr, KoreError> {
+        self.expect(&Token::LParen)?;
+        let distinct = self.consume_if(&Token::Distinct);
+        if !distinct && self.peek() == &Token::All && self.peek2() != &Token::RParen { self.pos += 1; }
+        let mut args: Vec<Expr> = Vec::new();
+        if self.peek() == &Token::Star {
+            self.pos += 1;
+            args.push(Expr::Col("*".into()));
+        } else if self.peek() != &Token::RParen {
+            args.push(self.parse_expr(0)?);
+            while self.consume_if(&Token::Comma) { args.push(self.parse_expr(0)?); }
+        }
+        self.expect(&Token::RParen)?;
+
+        // IGNORE NULLS / RESPECT NULLS on FIRST / LAST
+        let mut ignore_nulls = false;
+        if matches!(self.peek_ident_upper().as_str(), "IGNORE" | "RESPECT") {
+            ignore_nulls = self.peek_ident_upper() == "IGNORE";
+            self.pos += 1;
+            if self.peek_ident_upper() == "NULLS" { self.pos += 1; }
+        }
+        // PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY x [DESC])
+        let mut within: Option<(Expr, bool)> = None;
+        if self.peek_ident_upper() == "WITHIN" {
+            self.pos += 1;
+            self.expect(&Token::Group)?;
+            self.expect(&Token::LParen)?;
+            self.expect(&Token::Order)?;
+            self.expect(&Token::By)?;
+            let e = self.parse_expr(0)?;
+            let desc = self.consume_if(&Token::Desc);
+            if !desc { self.consume_if(&Token::Asc); }
+            self.expect(&Token::RParen)?;
+            within = Some((e, desc));
+        }
+        // FILTER (WHERE cond)
+        let mut filter: Option<Box<Expr>> = None;
+        if self.peek_ident_upper() == "FILTER" && self.peek2() == &Token::LParen {
+            self.pos += 2;
+            self.expect(&Token::Where)?;
+            filter = Some(Box::new(self.parse_expr(0)?));
+            self.expect(&Token::RParen)?;
+        }
+
+        // canonical names
+        let mut nm = match name {
+            "STD" | "STDDEV_SAMP" => "STDDEV",
+            "VAR_SAMP" => "VARIANCE",
+            "LISTAGG" | "GROUP_CONCAT" => "STRING_AGG",
+            "ARRAY_AGG" => "COLLECT_LIST",
+            "EVERY" => "BOOL_AND",
+            "SOME" | "ANY" => "BOOL_OR",
+            "APPROX_PERCENTILE" => "PERCENTILE_APPROX",
+            other => other,
+        }.to_string();
+        if let Some((e, desc)) = within {
+            // the percentile argument stays, the ordering expression becomes the first argument
+            let mut a = vec![e];
+            for x in args.drain(..) {
+                a.push(match (&x, desc) {
+                    (Expr::Float(p), true) => Expr::Float(1.0 - p),
+                    (Expr::Int(p), true) => Expr::Float(1.0 - *p as f64),
+                    _ => x,
+                });
+            }
+            args = a;
+        }
+        if ignore_nulls && matches!(nm.as_str(), "FIRST" | "LAST") { args.push(Expr::Bool(true)); }
+        if nm == "PERCENTILE_CONT" || nm == "PERCENTILE_DISC" { /* args = [x, p] already */ }
+
+        // classic form?
+        let classic = filter.is_none() && args.len() == 1
+            && match nm.as_str() {
+                "COUNT" => true,
+                "SUM" | "AVG" | "MIN" | "MAX" => !distinct,
+                "STDDEV" | "VARIANCE" | "MEDIAN" => !distinct,
+                _ => false,
+            };
+        let func = match (nm.as_str(), distinct) {
+            ("COUNT", true) => AggFunc::CountDistinct,
+            ("COUNT", false) => AggFunc::Count,
+            ("SUM", _) => AggFunc::Sum,
+            ("AVG", _) => AggFunc::Avg,
+            ("MIN", _) => AggFunc::Min,
+            ("MAX", _) => AggFunc::Max,
+            ("STDDEV", _) => AggFunc::Stddev,
+            ("VARIANCE", _) => AggFunc::Variance,
+            _ => AggFunc::Median,
         };
-        Ok(Expr::Window { func: WindowFn::Agg { func, expr: Box::new(inner) }, spec })
+
+        if self.peek() == &Token::Over {
+            self.pos += 1;
+            let spec = self.parse_window_spec()?;
+            let wf = if classic {
+                WindowFn::Agg { func, expr: Box::new(args.remove(0)) }
+            } else {
+                WindowFn::AggX { name: std::mem::take(&mut nm), args, filter }
+            };
+            return Ok(Expr::Window { func: wf, spec });
+        }
+        if classic {
+            return Ok(Expr::Agg { func, expr: Box::new(args.remove(0)) });
+        }
+        Ok(Expr::AggX { name: nm, args, distinct, filter })
     }
 
+    /// `OVER name`, `OVER (name? PARTITION BY .. ORDER BY .. frame?)` or a `WINDOW w AS (..)` body.
     fn parse_window_spec(&mut self) -> Result<WindowSpec, KoreError> {
-        self.expect(&Token::LParen)?;
         let mut spec = WindowSpec::default();
+        if let Token::Ident(w) = self.peek().clone() {
+            // OVER w
+            self.pos += 1;
+            spec.base = Some(w);
+            return Ok(spec);
+        }
+        self.expect(&Token::LParen)?;
+        // (w ORDER BY ..) refines a named window
+        if let Token::Ident(w) = self.peek().clone() {
+            if !matches!(w.to_ascii_uppercase().as_str(), "PARTITION" | "ORDER" | "ROWS" | "RANGE") {
+                self.pos += 1;
+                spec.base = Some(w);
+            }
+        }
         if self.peek() == &Token::Partition {
             self.pos += 1;
             self.expect(&Token::By)?;
@@ -328,17 +609,21 @@ impl Parser {
             spec.order_by = self.parse_order_by_list()?;
         }
         if matches!(self.peek(), Token::Rows | Token::Range) {
-            let mode = if self.peek() == &Token::Rows { self.pos += 1; FrameMode::Rows }
-                       else { self.pos += 1; FrameMode::Range };
-            // Consume optional BETWEEN keyword (Token::Between or Ident "BETWEEN")
-            match self.peek() {
-                Token::Between => { self.pos += 1; }
-                Token::Ident(s) if s.eq_ignore_ascii_case("BETWEEN") => { self.pos += 1; }
-                _ => {}
-            }
+            let mode = if self.peek() == &Token::Rows { FrameMode::Rows } else { FrameMode::Range };
+            self.pos += 1;
+            // BETWEEN a AND b, or a single bound (the end then defaults to CURRENT ROW)
+            let between = match self.peek() {
+                Token::Between => { self.pos += 1; true }
+                Token::Ident(s) if s.eq_ignore_ascii_case("BETWEEN") => { self.pos += 1; true }
+                _ => false,
+            };
             let start = self.parse_frame_bound()?;
-            if self.peek() == &Token::And { self.pos += 1; }
-            let end = self.parse_frame_bound()?;
+            let end = if between {
+                self.expect(&Token::And)?;
+                self.parse_frame_bound()?
+            } else {
+                FrameBound::CurrentRow
+            };
             spec.frame = Some(WindowFrame { mode, start, end });
         }
         self.expect(&Token::RParen)?;
@@ -358,9 +643,9 @@ impl Parser {
                 Ok(FrameBound::CurrentRow)
             }
             _ => {
-                let n = self.parse_expr(0)?;
+                let n = self.parse_expr(10)?;
                 Ok(if self.peek() == &Token::Preceding { self.pos += 1; FrameBound::Preceding(Box::new(n)) }
-                   else { self.consume_if(&Token::Following); FrameBound::Following(Box::new(n)) })
+                   else { self.expect(&Token::Following)?; FrameBound::Following(Box::new(n)) })
             }
         }
     }
@@ -373,22 +658,42 @@ impl Parser {
             "PERCENT_RANK" => WindowFn::PercentRank,
             "CUME_DIST"    => WindowFn::CumeDist,
             "NTILE"      => WindowFn::Ntile(Box::new(self.parse_expr(0)?)),
-            "LAG"  => { let e = self.parse_expr(0)?;
-                        let o = if self.consume_if(&Token::Comma) { self.parse_expr(0)? } else { Expr::Int(1) };
-                        WindowFn::Lag  { expr: Box::new(e), offset: Box::new(o) } }
-            "LEAD" => { let e = self.parse_expr(0)?;
-                        let o = if self.consume_if(&Token::Comma) { self.parse_expr(0)? } else { Expr::Int(1) };
-                        WindowFn::Lead { expr: Box::new(e), offset: Box::new(o) } }
-            "FIRST_VALUE" => WindowFn::FirstValue(Box::new(self.parse_expr(0)?)),
-            "LAST_VALUE"  => WindowFn::LastValue (Box::new(self.parse_expr(0)?)),
+            up @ ("LAG" | "LEAD") => {
+                let e = self.parse_expr(0)?;
+                let o = if self.consume_if(&Token::Comma) { self.parse_expr(0)? } else { Expr::Int(1) };
+                let d = if self.consume_if(&Token::Comma) { Some(Box::new(self.parse_expr(0)?)) } else { None };
+                if up == "LAG" { WindowFn::Lag { expr: Box::new(e), offset: Box::new(o), default: d } }
+                else { WindowFn::Lead { expr: Box::new(e), offset: Box::new(o), default: d } }
+            }
+            up @ ("FIRST_VALUE" | "LAST_VALUE") => {
+                let e = Box::new(self.parse_expr(0)?);
+                // FIRST_VALUE(x, true) ignores NULLs
+                let ignore = if self.consume_if(&Token::Comma) { matches!(self.parse_expr(0)?, Expr::Bool(true)) || false } else { false };
+                match (up, ignore) {
+                    ("FIRST_VALUE", false) => WindowFn::FirstValue(e),
+                    ("FIRST_VALUE", true) => WindowFn::FirstValueIgnoreNulls(e),
+                    (_, false) => WindowFn::LastValue(e),
+                    (_, true) => WindowFn::LastValueIgnoreNulls(e),
+                }
+            }
+            "NTH_VALUE" => {
+                let e = self.parse_expr(0)?;
+                self.expect(&Token::Comma)?;
+                let n = self.parse_expr(0)?;
+                WindowFn::NthValue { expr: Box::new(e), n: Box::new(n) }
+            }
             "CUMSUM"|"CUM_SUM" => WindowFn::CumSum(Box::new(self.parse_expr(0)?)),
             other => return Err(KoreError::InvalidArgument(format!("unknown window fn: {other}"))),
         })
     }
 
     fn is_join_keyword(&self) -> bool {
-        matches!(self.peek(),
-            Token::Join | Token::Inner | Token::Left | Token::Right | Token::Full | Token::Cross)
+        match self.peek() {
+            Token::Join | Token::Inner | Token::Left | Token::Right | Token::Full | Token::Cross => true,
+            Token::Ident(w) => w.eq_ignore_ascii_case("NATURAL")
+                || ((w.eq_ignore_ascii_case("SEMI") || w.eq_ignore_ascii_case("ANTI")) && self.peek2() == &Token::Join),
+            _ => false,
+        }
     }
 
     // ─── LATERAL VIEW ──────────────────────────────────────────────────────
@@ -484,6 +789,11 @@ impl Parser {
             self.pos += 1;
             return Ok(Projection::Star);
         }
+        // alias.* expands to every column of one table
+        if let (Token::Ident(t), Some(Token::Dot), Some(Token::Star)) = (self.peek().clone(), self.tokens.get(self.pos + 1), self.tokens.get(self.pos + 2)) {
+            self.pos += 3;
+            return Ok(Projection::Expr { expr: Expr::QualCol(t, "*".into()), alias: None });
+        }
         let expr = self.parse_expr(0)?;
         let alias = if self.consume_if(&Token::As) {
             Some(self.expect_alias()?)
@@ -512,41 +822,70 @@ impl Parser {
 
     // ─── Table reference ───────────────────────────────────────────────────
 
-    fn parse_table_expr(&mut self) -> Result<TableExpr, KoreError> {
-        // VALUES (r1c1, r1c2), (r2c1, r2c2) AS t — inline table
-        if self.peek_ident_upper() == "VALUES" {
+    /// Optional `(c1, c2, ..)` column alias list after a table alias.
+    fn parse_col_aliases(&mut self) -> Result<Vec<String>, KoreError> {
+        let mut cols = Vec::new();
+        if self.peek() == &Token::LParen {
             self.pos += 1;
-            let mut rows: Vec<Vec<Expr>> = Vec::new();
             loop {
-                self.expect(&Token::LParen)?;
-                let mut row = vec![self.parse_expr(0)?];
-                while self.consume_if(&Token::Comma) { row.push(self.parse_expr(0)?); }
-                self.expect(&Token::RParen)?;
-                rows.push(row);
+                cols.push(self.expect_alias()?);
                 if !self.consume_if(&Token::Comma) { break; }
             }
-            let alias = if self.consume_if(&Token::As) { Some(self.expect_alias()?) }
-                        else if matches!(self.peek(), Token::Ident(_)) { Some(self.expect_alias()?) }
-                        else { Some("_values".to_string()) };
-            let name = alias.clone().unwrap_or_else(|| "_values".to_string());
-            return Ok(TableExpr { name, alias, subquery: None, values: Some(rows), push_filter: None });
+            self.expect(&Token::RParen)?;
+        }
+        Ok(cols)
+    }
+
+    /// `VALUES (..), (..)` rows (the VALUES keyword already consumed).
+    fn parse_values_rows(&mut self) -> Result<Vec<Vec<Expr>>, KoreError> {
+        let mut rows: Vec<Vec<Expr>> = Vec::new();
+        loop {
+            let paren = self.consume_if(&Token::LParen);
+            let mut row = vec![self.parse_expr(0)?];
+            while self.consume_if(&Token::Comma) { row.push(self.parse_expr(0)?); }
+            if paren { self.expect(&Token::RParen)?; }
+            rows.push(row);
+            // VALUES 1, 2 (bare) is one row per expression; VALUES (1), (2) has parentheses
+            if !paren || !self.consume_if(&Token::Comma) { break; }
+        }
+        Ok(rows)
+    }
+
+    /// Alias after a derived table or VALUES: `[AS] name [(c1, c2)]`.
+    fn parse_derived_alias(&mut self, default: &str) -> Result<(String, Vec<String>), KoreError> {
+        let alias = if self.consume_if(&Token::As) {
+            self.expect_alias()?
+        } else if matches!(self.peek(), Token::Ident(s) if !is_clause_word(s)) {
+            self.expect_ident()?
+        } else {
+            default.to_string()
+        };
+        Ok((alias, self.parse_col_aliases()?))
+    }
+
+    fn parse_table_expr(&mut self) -> Result<TableExpr, KoreError> {
+        // VALUES (r1c1, r1c2), (r2c1, r2c2) AS t(a, b) — inline table
+        if self.peek_ident_upper() == "VALUES" {
+            self.pos += 1;
+            let rows = self.parse_values_rows()?;
+            let (alias, col_aliases) = self.parse_derived_alias("_values")?;
+            return Ok(TableExpr { name: alias.clone(), alias: Some(alias), subquery: None, values: Some(rows), push_filter: None, col_aliases });
         }
 
-        // Handle FROM (SELECT ...) alias — subquery as FROM table
+        // FROM (SELECT ...) alias — subquery as FROM table; also FROM (VALUES ...) and FROM ((SELECT ..) UNION ..)
         if self.peek() == &Token::LParen {
             self.pos += 1; // consume (
-            // Could be VALUES inside parens too
-            let subq = self.parse_select()?;
+            if self.peek_ident_upper() == "VALUES" {
+                self.pos += 1;
+                let rows = self.parse_values_rows()?;
+                self.expect(&Token::RParen)?;
+                let (alias, col_aliases) = self.parse_derived_alias("_values")?;
+                return Ok(TableExpr { name: alias.clone(), alias: Some(alias), subquery: None, values: Some(rows), push_filter: None, col_aliases });
+            }
+            let subq = self.parse_compound()?;
             self.expect(&Token::RParen)?;
-            let alias = if self.consume_if(&Token::As) {
-                Some(self.expect_ident()?)
-            } else if matches!(self.peek(), Token::Ident(_)) {
-                Some(self.expect_ident()?)
-            } else {
-                Some("_subq".to_string())
-            };
-            let name = alias.clone().unwrap_or_else(|| "_subq".to_string());
-            return Ok(TableExpr { name, alias, subquery: Some(Box::new(subq)), values: None, push_filter: None });
+            let (alias, col_aliases) = self.parse_derived_alias("_subq")?;
+            return Ok(TableExpr { name: alias.clone(), alias: Some(alias), subquery: Some(Box::new(subq)), values: None, push_filter: None, col_aliases });
         }
 
         // Accept a string literal as table name (e.g. FROM 'data/file.parquet')
@@ -555,14 +894,16 @@ impl Parser {
         } else {
             self.expect_ident()?
         };
+        // schema-qualified names: db.table
+        let name = if self.peek() == &Token::Dot && matches!(self.tokens.get(self.pos + 1), Some(Token::Ident(_))) {
+            self.pos += 1;
+            let t = self.expect_ident()?;
+            format!("{name}.{t}")
+        } else { name };
         let alias = if self.consume_if(&Token::As) {
-            Some(self.expect_ident()?)
-        } else if matches!(self.peek(), Token::Ident(s) if !["WHERE","ORDER","GROUP","LIMIT","HAVING","QUALIFY","UNION","INTERSECT","EXCEPT","FETCH","OFFSET","ON","SET","INTO"].contains(&s.to_ascii_uppercase().as_str()))
+            Some(self.expect_alias()?)
+        } else if matches!(self.peek(), Token::Ident(s) if !is_clause_word(s))
                && !self.is_join_keyword()
-               && self.peek() != &Token::Where
-               && self.peek() != &Token::Order
-               && self.peek() != &Token::Group
-               && self.peek() != &Token::Limit
                && self.peek() != &Token::Pivot
                && self.peek() != &Token::Unpivot
                && self.peek() != &Token::Lateral {
@@ -570,19 +911,24 @@ impl Parser {
         } else {
             None
         };
-        Ok(TableExpr { name, alias, subquery: None, values: None, push_filter: None })
+        Ok(TableExpr { name, alias, subquery: None, values: None, push_filter: None, col_aliases: vec![] })
     }
 
     // ─── JOIN clause ───────────────────────────────────────────────────────
 
     fn parse_join(&mut self) -> Result<JoinClause, KoreError> {
-        let join_type = match self.peek() {
+        let natural = if self.peek_ident_upper() == "NATURAL" { self.pos += 1; true } else { false };
+        let join_type = match self.peek().clone() {
             Token::Inner => { self.pos += 1; self.expect(&Token::Join)?; JoinKind::Inner }
             Token::Left  => {
                 self.pos += 1;
-                self.consume_if(&Token::Outer);
+                let kind = match self.peek_ident_upper().as_str() {
+                    "SEMI" => { self.pos += 1; JoinKind::Semi }
+                    "ANTI" => { self.pos += 1; JoinKind::Anti }
+                    _ => { self.consume_if(&Token::Outer); JoinKind::Left }
+                };
                 self.expect(&Token::Join)?;
-                JoinKind::Left
+                kind
             }
             Token::Right => {
                 self.pos += 1;
@@ -601,22 +947,37 @@ impl Parser {
                 self.expect(&Token::Join)?;
                 JoinKind::Cross
             }
+            Token::Ident(w) if w.eq_ignore_ascii_case("SEMI") || w.eq_ignore_ascii_case("ANTI") => {
+                self.pos += 1;
+                self.expect(&Token::Join)?;
+                if w.eq_ignore_ascii_case("SEMI") { JoinKind::Semi } else { JoinKind::Anti }
+            }
             Token::Join  => { self.pos += 1; JoinKind::Inner }
             _ => return Err(KoreError::InvalidArgument("expected JOIN keyword".into())),
         };
 
         let table = self.parse_table_expr()?;
+        let no_on = JoinOn { left_col: String::new(), right_col: String::new(), expr: None };
 
-        // CROSS JOIN has no ON clause
-        if join_type == JoinKind::Cross {
-            return Ok(JoinClause {
-                join_type,
-                table,
-                on: JoinOn { left_col: String::new(), right_col: String::new(), expr: None },
-                push_filter: None,
-            });
+        // CROSS JOIN and NATURAL JOIN have no ON clause
+        if join_type == JoinKind::Cross || natural {
+            return Ok(JoinClause { join_type, table, on: no_on, push_filter: None, using: Vec::new(), natural });
         }
 
+        // JOIN .. USING (a, b)
+        if self.peek_ident_upper() == "USING" {
+            self.pos += 1;
+            self.expect(&Token::LParen)?;
+            let mut using = vec![self.expect_alias()?];
+            while self.consume_if(&Token::Comma) { using.push(self.expect_alias()?); }
+            self.expect(&Token::RParen)?;
+            return Ok(JoinClause { join_type, table, on: no_on, push_filter: None, using, natural: false });
+        }
+
+        // a bare inner JOIN without ON is a cross join
+        if self.peek() != &Token::On && join_type == JoinKind::Inner {
+            return Ok(JoinClause { join_type: JoinKind::Cross, table, on: no_on, push_filter: None, using: Vec::new(), natural: false });
+        }
         self.expect(&Token::On)?;
 
         // Parse the ON expression (supports non-equi joins)
@@ -638,7 +999,7 @@ impl Parser {
             None
         };
 
-        Ok(JoinClause { join_type, table, on: JoinOn { left_col, right_col, expr }, push_filter: None })
+        Ok(JoinClause { join_type, table, on: JoinOn { left_col, right_col, expr }, push_filter: None, using: Vec::new(), natural: false })
     }
 
     fn parse_qualified_col(&mut self) -> Result<String, KoreError> {
@@ -658,114 +1019,145 @@ impl Parser {
     fn parse_expr(&mut self, min_prec: u8) -> Result<Expr, KoreError> {
         let mut lhs = self.parse_unary()?;
         loop {
-            // array[index] → ELEMENT_AT(array, index)
+            // array subscript: Spark's `arr[i]` is 0-based, ELEMENT_AT is 1-based
             if self.peek() == &Token::LBracket {
                 self.pos += 1;
                 let idx = self.parse_expr(0)?;
                 self.expect(&Token::RBracket)?;
-                lhs = Expr::FuncCall {
-                    name: "ELEMENT_AT".to_string(),
-                    args: vec![lhs, idx],
-                };
+                let one_based = Expr::BinOp { op: BinOpKind::Add, left: Box::new(idx), right: Box::new(Expr::Int(1)) };
+                lhs = Expr::FuncCall { name: "ELEMENT_AT".to_string(), args: vec![lhs, one_based] };
                 continue;
             }
-            // IS NULL / IS NOT NULL
-            if self.peek() == &Token::Is {
-                self.pos += 1;
-                lhs = if self.peek() == &Token::Not {
-                    self.pos += 1; self.expect(&Token::Null)?;
-                    Expr::IsNotNull(Box::new(lhs))
-                } else {
-                    self.expect(&Token::Null)?;
-                    Expr::IsNull(Box::new(lhs))
-                };
-                continue;
-            }
-            // LIKE / NOT LIKE
-            if self.peek() == &Token::Like {
-                self.pos += 1;
-                let pat = self.parse_unary()?;
-                lhs = Expr::Like { expr: Box::new(lhs), pattern: Box::new(pat), negated: false };
-                continue;
-            }
-            // ILIKE (case-insensitive LIKE)
-            if self.peek() == &Token::ILike {
-                self.pos += 1;
-                let pat = self.parse_unary()?;
-                lhs = Expr::ILike { expr: Box::new(lhs), pattern: Box::new(pat), negated: false };
-                continue;
-            }
-            // IN (...) or IN (SELECT ...)
-            if self.peek() == &Token::In {
-                self.pos += 1;
-                self.expect(&Token::LParen)?;
-                // Distinguish IN (SELECT ...) from IN (literal, ...)
-                if self.peek() == &Token::Select {
-                    let stmt = self.parse_select()?;
-                    self.expect(&Token::RParen)?;
-                    lhs = Expr::InSubquery { expr: Box::new(lhs), subquery: Box::new(stmt), negated: false };
-                } else {
-                    let values = self.parse_expr_list()?;
-                    self.expect(&Token::RParen)?;
-                    lhs = Expr::In { expr: Box::new(lhs), values, negated: false };
-                }
-                continue;
-            }
-            // NOT IN / NOT LIKE / NOT ILIKE / NOT BETWEEN / NOT IN (SELECT ...)
-            if self.peek() == &Token::Not {
-                let next = self.tokens.get(self.pos + 1).cloned().unwrap_or(Token::Eof);
-                match next {
-                    Token::In => {
-                        self.pos += 2;
-                        self.expect(&Token::LParen)?;
-                        if self.peek() == &Token::Select {
-                            let stmt = self.parse_select()?;
-                            self.expect(&Token::RParen)?;
-                            lhs = Expr::InSubquery { expr: Box::new(lhs), subquery: Box::new(stmt), negated: true };
-                        } else {
-                            let values = self.parse_expr_list()?;
-                            self.expect(&Token::RParen)?;
-                            lhs = Expr::In { expr: Box::new(lhs), values, negated: true };
+            // Predicate operators (IS, [NOT] LIKE/IN/BETWEEN/RLIKE) bind tighter than AND/OR/NOT but
+            // looser than arithmetic, so they only apply when the caller is not inside an arithmetic operand.
+            if min_prec <= 3 {
+                // IS [NOT] NULL / TRUE / FALSE / DISTINCT FROM
+                if self.peek() == &Token::Is {
+                    self.pos += 1;
+                    let negated = self.consume_if(&Token::Not);
+                    lhs = match self.peek().clone() {
+                        Token::Null => {
+                            self.pos += 1;
+                            if negated { Expr::IsNotNull(Box::new(lhs)) } else { Expr::IsNull(Box::new(lhs)) }
                         }
-                        continue;
-                    }
+                        Token::Distinct => {
+                            self.pos += 1;
+                            self.expect(&Token::From)?;
+                            let rhs = self.parse_expr(4)?;
+                            let eq = null_safe_eq(lhs, rhs);
+                            // IS DISTINCT FROM = NOT null-safe-equal
+                            if negated { eq } else { Expr::Not(Box::new(eq)) }
+                        }
+                        Token::Ident(w) if w.eq_ignore_ascii_case("TRUE") || w.eq_ignore_ascii_case("FALSE") || w.eq_ignore_ascii_case("UNKNOWN") => {
+                            self.pos += 1;
+                            let w = w.to_ascii_uppercase();
+                            let coalesce = |e: Expr| Expr::FuncCall { name: "COALESCE".into(), args: vec![e, Expr::Bool(false)] };
+                            match (w.as_str(), negated) {
+                                ("TRUE", false) => coalesce(lhs),
+                                ("TRUE", true) => Expr::Not(Box::new(coalesce(lhs))),
+                                ("FALSE", false) => coalesce(Expr::Not(Box::new(lhs))),
+                                ("FALSE", true) => Expr::Not(Box::new(coalesce(Expr::Not(Box::new(lhs))))),
+                                (_, false) => Expr::IsNull(Box::new(lhs)),
+                                (_, true) => Expr::IsNotNull(Box::new(lhs)),
+                            }
+                        }
+                        other => return Err(KoreError::InvalidArgument(format!("expected NULL, TRUE, FALSE or DISTINCT after IS, got {:?}", other))),
+                    };
+                    continue;
+                }
+                // optional NOT before LIKE / ILIKE / IN / BETWEEN / RLIKE / REGEXP
+                let mut negated = false;
+                if self.peek() == &Token::Not {
+                    let next = self.tokens.get(self.pos + 1).cloned().unwrap_or(Token::Eof);
+                    let is_pred = match &next {
+                        Token::In | Token::Like | Token::ILike | Token::Between => true,
+                        Token::Ident(w) => w.eq_ignore_ascii_case("RLIKE") || w.eq_ignore_ascii_case("REGEXP"),
+                        _ => false,
+                    };
+                    if is_pred { self.pos += 1; negated = true; }
+                }
+                match self.peek().clone() {
                     Token::Like => {
-                        self.pos += 2;
-                        let pat = self.parse_unary()?;
-                        lhs = Expr::Like { expr: Box::new(lhs), pattern: Box::new(pat), negated: true };
+                        self.pos += 1;
+                        let pat = self.parse_expr(5)?;
+                        // LIKE 'x' ESCAPE 'c' is accepted; only the default backslash escape is honoured
+                        if self.peek_ident_upper() == "ESCAPE" { self.pos += 2; }
+                        lhs = Expr::Like { expr: Box::new(lhs), pattern: Box::new(pat), negated };
                         continue;
                     }
                     Token::ILike => {
-                        self.pos += 2;
-                        let pat = self.parse_unary()?;
-                        lhs = Expr::ILike { expr: Box::new(lhs), pattern: Box::new(pat), negated: true };
+                        self.pos += 1;
+                        let pat = self.parse_expr(5)?;
+                        lhs = Expr::ILike { expr: Box::new(lhs), pattern: Box::new(pat), negated };
+                        continue;
+                    }
+                    Token::Ident(w) if w.eq_ignore_ascii_case("RLIKE") || w.eq_ignore_ascii_case("REGEXP") => {
+                        self.pos += 1;
+                        let pat = self.parse_expr(5)?;
+                        let call = Expr::FuncCall { name: "REGEXP_LIKE".into(), args: vec![lhs, pat] };
+                        lhs = if negated { Expr::Not(Box::new(call)) } else { call };
+                        continue;
+                    }
+                    Token::In => {
+                        self.pos += 1;
+                        self.expect(&Token::LParen)?;
+                        if self.peek() == &Token::Select {
+                            let stmt = self.parse_compound()?;
+                            self.expect(&Token::RParen)?;
+                            lhs = Expr::InSubquery { expr: Box::new(lhs), subquery: Box::new(stmt), negated };
+                        } else {
+                            let values = self.parse_expr_list()?;
+                            self.expect(&Token::RParen)?;
+                            lhs = Expr::In { expr: Box::new(lhs), values, negated };
+                        }
                         continue;
                     }
                     Token::Between => {
-                        self.pos += 2;
+                        self.pos += 1;
                         let low  = self.parse_expr(5)?;
                         self.expect(&Token::And)?;
                         let high = self.parse_expr(5)?;
-                        lhs = Expr::Between { expr: Box::new(lhs), low: Box::new(low), high: Box::new(high), negated: true };
+                        lhs = Expr::Between { expr: Box::new(lhs), low: Box::new(low), high: Box::new(high), negated };
                         continue;
                     }
                     _ => {}
                 }
             }
-            // BETWEEN low AND high
-            if self.peek() == &Token::Between {
+            // integer division operator
+            if self.peek_ident_upper() == "DIV" && min_prec <= 9 {
                 self.pos += 1;
-                let low  = self.parse_expr(5)?;
-                self.expect(&Token::And)?;
-                let high = self.parse_expr(5)?;
-                lhs = Expr::Between { expr: Box::new(lhs), low: Box::new(low), high: Box::new(high), negated: false };
+                let rhs = self.parse_expr(10)?;
+                lhs = Expr::FuncCall { name: "DIV".into(), args: vec![lhs, rhs] };
                 continue;
             }
             let prec = infix_precedence(self.peek());
             if prec == 0 || prec < min_prec { break; }
             let op_tok = self.advance();
-            let op = tok_to_binop(&op_tok)?;
+            // x <op> ANY|SOME|ALL (SELECT ..)
+            if matches!(op_tok, Token::Eq | Token::Ne | Token::Lt | Token::Le | Token::Gt | Token::Ge) {
+                let quant = match self.peek() {
+                    Token::All => Some(true),
+                    Token::Ident(w) if w.eq_ignore_ascii_case("ANY") || w.eq_ignore_ascii_case("SOME") => Some(false),
+                    _ => None,
+                };
+                if let (Some(all), Token::LParen, Some(Token::Select)) = (quant, self.peek2().clone(), self.tokens.get(self.pos + 2)) {
+                    self.pos += 2;
+                    let sub = self.parse_compound()?;
+                    self.expect(&Token::RParen)?;
+                    lhs = Expr::QuantSubquery { expr: Box::new(lhs), op: tok_to_binop(&op_tok)?, all, subquery: Box::new(sub) };
+                    continue;
+                }
+            }
             let rhs = self.parse_expr(prec + 1)?;
+            if op_tok == Token::NullSafeEq {
+                lhs = null_safe_eq(lhs, rhs);
+                continue;
+            }
+            if let Some(f) = match op_tok { Token::Ampersand => Some("BITAND"), Token::Pipe => Some("BITOR"), Token::Caret => Some("BITXOR"), _ => None } {
+                lhs = Expr::FuncCall { name: f.into(), args: vec![lhs, rhs] };
+                continue;
+            }
+            let op = tok_to_binop(&op_tok)?;
             lhs = Expr::BinOp { op, left: Box::new(lhs), right: Box::new(rhs) };
         }
         Ok(lhs)
@@ -777,7 +1169,7 @@ impl Parser {
             if s.eq_ignore_ascii_case("EXISTS") {
                 self.pos += 1;
                 self.expect(&Token::LParen)?;
-                let stmt = self.parse_select()?;
+                let stmt = self.parse_compound()?;
                 self.expect(&Token::RParen)?;
                 return Ok(Expr::Exists { subquery: Box::new(stmt), negated: false });
             }
@@ -788,38 +1180,160 @@ impl Parser {
                 if s.eq_ignore_ascii_case("EXISTS") {
                     self.pos += 1;
                     self.expect(&Token::LParen)?;
-                    let stmt = self.parse_select()?;
+                    let stmt = self.parse_compound()?;
                     self.expect(&Token::RParen)?;
                     return Ok(Expr::Exists { subquery: Box::new(stmt), negated: true });
                 }
             }
-            // NOT IN / NOT LIKE / NOT BETWEEN
-            if self.peek() == &Token::In {
-                self.pos += 1;
-                self.expect(&Token::LParen)?;
-                // Check if it's IN (SELECT ...) or IN (literal, ...)
-                if self.peek() == &Token::Select {
-                    let stmt = self.parse_select()?;
-                    self.expect(&Token::RParen)?;
-                    return Ok(Expr::InSubquery { expr: Box::new(Expr::Null), subquery: Box::new(stmt), negated: true });
-                }
-                let values = self.parse_expr_list()?;
-                self.expect(&Token::RParen)?;
-                return Ok(Expr::In { expr: Box::new(Expr::Null), values, negated: true });
-            }
-            return Ok(Expr::Not(Box::new(self.parse_unary()?)));
+            // NOT binds looser than comparison and predicates: NOT a > 1 is NOT (a > 1)
+            return Ok(Expr::Not(Box::new(self.parse_expr(3)?)));
         }
-        // Unary minus: -expr → (0 - expr)
+        // Unary minus / plus
         if self.peek() == &Token::Minus {
             self.pos += 1;
-            let inner = self.parse_primary()?;
-            return Ok(Expr::BinOp {
-                left: Box::new(Expr::Int(0)),
-                op:   BinOpKind::Sub,
-                right: Box::new(inner),
+            let inner = self.parse_unary()?;
+            return Ok(match inner {
+                Expr::Int(n) => Expr::Int(n.wrapping_neg()),
+                Expr::Float(f) => Expr::Float(-f),
+                other => Expr::BinOp { left: Box::new(Expr::Int(0)), op: BinOpKind::Sub, right: Box::new(other) },
             });
         }
+        if self.peek() == &Token::Plus {
+            self.pos += 1;
+            return self.parse_unary();
+        }
+        if self.peek() == &Token::Tilde {
+            self.pos += 1;
+            let inner = self.parse_unary()?;
+            return Ok(Expr::FuncCall { name: "BITNOT".into(), args: vec![inner] });
+        }
         self.parse_primary()
+    }
+
+    /// Function calls with their own syntax (CAST .. AS, TRIM(BOTH .. FROM ..), SUBSTRING(.. FROM .. FOR ..),
+    /// POSITION(.. IN ..), OVERLAY(.. PLACING ..)). Called right after the opening parenthesis; returns
+    /// None for ordinary calls with nothing consumed.
+    fn parse_special_call(&mut self, up: &str) -> Result<Option<Expr>, KoreError> {
+        match up {
+            "CAST" | "TRY_CAST" => {
+                let e = self.parse_expr(0)?;
+                self.expect(&Token::As)?;
+                let ty = self.expect_alias()?.to_ascii_uppercase();
+                let mut args = vec![e, Expr::Col(ty)];
+                if self.consume_if(&Token::LParen) {
+                    loop {
+                        match self.advance() {
+                            Token::Int(n) => args.push(Expr::Int(n)),
+                            other => return Err(KoreError::InvalidArgument(format!("bad type parameter {:?}", other))),
+                        }
+                        if !self.consume_if(&Token::Comma) { break; }
+                    }
+                    self.expect(&Token::RParen)?;
+                }
+                self.expect(&Token::RParen)?;
+                Ok(Some(Expr::FuncCall { name: up.to_string(), args }))
+            }
+            "TRIM" => {
+                let mode = self.peek_ident_upper();
+                if matches!(mode.as_str(), "BOTH" | "LEADING" | "TRAILING") {
+                    self.pos += 1;
+                    let chars = if self.peek() == &Token::From { Expr::Str(" ".into()) } else { self.parse_expr(0)? };
+                    self.expect(&Token::From)?;
+                    let s = self.parse_expr(0)?;
+                    self.expect(&Token::RParen)?;
+                    return Ok(Some(Expr::FuncCall { name: format!("__TRIM_{mode}"), args: vec![s, chars] }));
+                }
+                if self.peek() == &Token::RParen { return Ok(None); }
+                let first = self.parse_expr(0)?;
+                if self.consume_if(&Token::From) {
+                    let s = self.parse_expr(0)?;
+                    self.expect(&Token::RParen)?;
+                    return Ok(Some(Expr::FuncCall { name: "__TRIM_BOTH".into(), args: vec![s, first] }));
+                }
+                let mut args = vec![first];
+                while self.consume_if(&Token::Comma) { args.push(self.parse_expr(0)?); }
+                self.expect(&Token::RParen)?;
+                Ok(Some(Expr::FuncCall { name: up.to_string(), args }))
+            }
+            "SUBSTRING" | "SUBSTR" => {
+                let s = self.parse_expr(0)?;
+                if self.consume_if(&Token::From) {
+                    let a = self.parse_expr(0)?;
+                    let mut args = vec![s, a];
+                    if self.consume_if(&Token::For) { args.push(self.parse_expr(0)?); }
+                    self.expect(&Token::RParen)?;
+                    return Ok(Some(Expr::FuncCall { name: up.to_string(), args }));
+                }
+                let mut args = vec![s];
+                while self.consume_if(&Token::Comma) { args.push(self.parse_expr(0)?); }
+                self.expect(&Token::RParen)?;
+                Ok(Some(Expr::FuncCall { name: up.to_string(), args }))
+            }
+            "POSITION" => {
+                let sub = self.parse_expr(4)?;
+                if self.consume_if(&Token::In) {
+                    let s = self.parse_expr(0)?;
+                    self.expect(&Token::RParen)?;
+                    return Ok(Some(Expr::FuncCall { name: "LOCATE".into(), args: vec![sub, s] }));
+                }
+                let mut args = vec![sub];
+                while self.consume_if(&Token::Comma) { args.push(self.parse_expr(0)?); }
+                self.expect(&Token::RParen)?;
+                Ok(Some(Expr::FuncCall { name: up.to_string(), args }))
+            }
+            "OVERLAY" => {
+                let s = self.parse_expr(0)?;
+                if self.peek_ident_upper() == "PLACING" {
+                    self.pos += 1;
+                    let rep = self.parse_expr(0)?;
+                    self.expect(&Token::From)?;
+                    let from = self.parse_expr(0)?;
+                    let mut args = vec![s, rep, from];
+                    if self.consume_if(&Token::For) { args.push(self.parse_expr(0)?); }
+                    self.expect(&Token::RParen)?;
+                    return Ok(Some(Expr::FuncCall { name: "OVERLAY".into(), args }));
+                }
+                let mut args = vec![s];
+                while self.consume_if(&Token::Comma) { args.push(self.parse_expr(0)?); }
+                self.expect(&Token::RParen)?;
+                Ok(Some(Expr::FuncCall { name: up.to_string(), args }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// `INTERVAL 1 DAY`, `INTERVAL '1' MONTH`, `INTERVAL '3 days'` -> INTERVAL(n, 'unit').
+    fn parse_interval(&mut self) -> Result<Expr, KoreError> {
+        let (n, unit): (Expr, String) = match self.advance() {
+            Token::Str(s) => {
+                let t = s.trim().to_string();
+                match t.split_once(char::is_whitespace) {
+                    Some((a, u)) => {
+                        let n = a.parse::<i64>().map(Expr::Int).or_else(|_| a.parse::<f64>().map(Expr::Float))
+                            .map_err(|_| KoreError::InvalidArgument(format!("bad interval '{s}'")))?;
+                        (n, u.trim().to_string())
+                    }
+                    None => {
+                        let n = t.parse::<i64>().map(Expr::Int).or_else(|_| t.parse::<f64>().map(Expr::Float))
+                            .map_err(|_| KoreError::InvalidArgument(format!("bad interval '{s}'")))?;
+                        (n, self.expect_alias()?)
+                    }
+                }
+            }
+            Token::Int(n) => (Expr::Int(n), self.expect_alias()?),
+            Token::Float(f) => (Expr::Float(f), self.expect_alias()?),
+            Token::Minus => {
+                match self.advance() {
+                    Token::Int(n) => (Expr::Int(-n), self.expect_alias()?),
+                    other => return Err(KoreError::InvalidArgument(format!("bad interval value {:?}", other))),
+                }
+            }
+            other => return Err(KoreError::InvalidArgument(format!("bad interval value {:?}", other))),
+        };
+        if crate::datetime::norm_unit(&unit).is_none() {
+            return Err(KoreError::InvalidArgument(format!("unsupported interval unit '{unit}'")));
+        }
+        Ok(Expr::FuncCall { name: "INTERVAL".into(), args: vec![n, Expr::Str(unit)] })
     }
 
     fn parse_primary(&mut self) -> Result<Expr, KoreError> {
@@ -860,7 +1374,7 @@ impl Parser {
             Token::LParen => {
                 // If next token is SELECT → scalar subquery: (SELECT ...)
                 if self.peek() == &Token::Select {
-                    let stmt = self.parse_select()?;
+                    let stmt = self.parse_compound()?;
                     self.expect(&Token::RParen)?;
                     return Ok(Expr::ScalarSubquery(Box::new(stmt)));
                 }
@@ -874,103 +1388,43 @@ impl Parser {
             Token::Null     => Ok(Expr::Null),
             // CASE WHEN ... THEN ... [ELSE ...] END
             Token::Case => self.parse_case(),
-            // Aggregate functions — check for OVER (window)
-            Token::Count => {
-                if self.peek() != &Token::LParen {
-                    return Ok(Expr::Col("count".to_string()));
-                }
-                self.expect(&Token::LParen)?;
-                let distinct = self.consume_if(&Token::Distinct);
-                let inner = if self.peek() == &Token::Star {
-                    self.pos += 1; Expr::Col("*".into())
-                } else { self.parse_expr(0)? };
-                self.expect(&Token::RParen)?;
-                let func = if distinct { AggFunc::CountDistinct } else { AggFunc::Count };
-                self.maybe_window(Expr::Agg { func: func.clone(), expr: Box::new(inner) }, func)
-            }
-            Token::Sum => {
-                if self.peek() != &Token::LParen {
-                    return Ok(Expr::Col("sum".to_string()));
-                }
-                self.expect(&Token::LParen)?;
-                let inner = self.parse_expr(0)?;
-                self.expect(&Token::RParen)?;
-                self.maybe_window(Expr::Agg { func: AggFunc::Sum, expr: Box::new(inner.clone()) }, AggFunc::Sum)
-            }
-            Token::Avg => {
-                // If NOT followed by '(', treat as column reference (e.g. CTE alias named "avg")
-                if self.peek() != &Token::LParen {
-                    return Ok(Expr::Col("avg".to_string()));
-                }
-                self.expect(&Token::LParen)?;
-                let inner = self.parse_expr(0)?;
-                self.expect(&Token::RParen)?;
-                self.maybe_window(Expr::Agg { func: AggFunc::Avg, expr: Box::new(inner) }, AggFunc::Avg)
-            }
-            Token::Min => {
-                if self.peek() != &Token::LParen {
-                    return Ok(Expr::Col("min".to_string()));
-                }
-                self.expect(&Token::LParen)?;
-                let inner = self.parse_expr(0)?;
-                self.expect(&Token::RParen)?;
-                self.maybe_window(Expr::Agg { func: AggFunc::Min, expr: Box::new(inner) }, AggFunc::Min)
-            }
-            Token::Max => {
-                self.expect(&Token::LParen)?;
-                let inner = self.parse_expr(0)?;
-                self.expect(&Token::RParen)?;
-                self.maybe_window(Expr::Agg { func: AggFunc::Max, expr: Box::new(inner) }, AggFunc::Max)
-            }
-            // ── Extended aggregate functions ──────────────────────────────────────
-            Token::Ident(ref name) if matches!(name.to_ascii_uppercase().as_str(),
-                "STDDEV" | "STDEV" | "STDDEV_POP" | "STDDEV_SAMP" | "STD" |
-                "VARIANCE" | "VAR_POP" | "VAR_SAMP" |
-                "MEDIAN" | "STRING_AGG" | "GROUP_CONCAT" | "LISTAGG" |
-                "PERCENTILE_CONT" | "PERCENTILE_DISC"
-            ) => {
-                let fname = name.to_ascii_uppercase();
-                // token already consumed by parse_primary's advance()
-                if self.peek() != &Token::LParen {
-                    return Ok(Expr::Col(fname.to_lowercase()));
-                }
-                self.expect(&Token::LParen)?;
-                let inner = self.parse_expr(0)?;
-                let func = match fname.as_str() {
-                    "STDDEV" | "STDEV" | "STDDEV_SAMP" | "STDDEV_POP" | "STD" => AggFunc::Stddev,
-                    "VARIANCE" | "VAR_POP" | "VAR_SAMP" => AggFunc::Variance,
-                    "MEDIAN" => AggFunc::Median,
-                    "STRING_AGG" | "LISTAGG" | "GROUP_CONCAT" => {
-                        let sep = if self.consume_if(&Token::Comma) {
-                            match self.advance() { Token::Str(s) => s, _ => ",".to_string() }
-                        } else { ",".to_string() };
-                        AggFunc::StringAgg { sep }
-                    }
-                    "PERCENTILE_CONT" | "PERCENTILE_DISC" => {
-                        let p_str = match &inner { Expr::Float(f) => format!("{}", f), Expr::Int(i) => format!("{}", i), _ => "0.5".to_string() };
-                        self.expect(&Token::RParen)?;
-                        if self.peek_ident_upper() == "WITHIN" { self.pos += 1; }
-                        if self.peek_ident_upper() == "GROUP"  { self.pos += 1; }
-                        if self.peek() == &Token::LParen { self.pos += 1; }
-                        if self.peek_ident_upper() == "ORDER"  { self.pos += 1; }
-                        if let Token::Ident(s) = self.peek().clone() { if s.eq_ignore_ascii_case("BY") { self.pos += 1; } }
-                        let order_col = self.parse_expr(0)?;
-                        if self.peek() == &Token::RParen { self.pos += 1; }
-                        return Ok(Expr::Agg { func: AggFunc::Percentile { p: p_str }, expr: Box::new(order_col) });
-                    }
-                    _ => AggFunc::Avg,
+            // Aggregate functions (COUNT/SUM/AVG/MIN/MAX keywords and the named ones), optionally windowed
+            Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max => {
+                let nm = match &self.tokens[self.pos - 1] {
+                    Token::Count => "COUNT", Token::Sum => "SUM", Token::Avg => "AVG", Token::Min => "MIN", _ => "MAX",
                 };
-                self.expect(&Token::RParen)?;
-                Ok(Expr::Agg { func, expr: Box::new(inner) })
+                // not followed by '(': a column that happens to be called count / sum / avg ...
+                if self.peek() != &Token::LParen {
+                    return Ok(Expr::Col(nm.to_ascii_lowercase()));
+                }
+                self.parse_aggregate(nm)
+            }
+            Token::Ident(ref name) if self.peek() == &Token::LParen && is_agg_name(&name.to_ascii_uppercase()) => {
+                let up = name.to_ascii_uppercase();
+                self.parse_aggregate(&up)
             }
             // Identifier: plain column OR window function name
             Token::Ident(name) => {
                 match name.to_ascii_uppercase().as_str() {
                     "ROW_NUMBER" | "RANK" | "DENSE_RANK" | "PERCENT_RANK" | "CUME_DIST" | "NTILE" |
-                    "LAG" | "LEAD" | "FIRST_VALUE" | "LAST_VALUE" | "CUMSUM" | "CUM_SUM" => {
+                    "LAG" | "LEAD" | "FIRST_VALUE" | "LAST_VALUE" | "NTH_VALUE" | "CUMSUM" | "CUM_SUM"
+                        if self.peek() == &Token::LParen => {
                         self.expect(&Token::LParen)?;
-                        let wfn = self.parse_window_fn_args(&name)?;
+                        let mut wfn = self.parse_window_fn_args(&name)?;
                         self.expect(&Token::RParen)?;
+                        // FIRST_VALUE(x) IGNORE NULLS
+                        if matches!(self.peek_ident_upper().as_str(), "IGNORE" | "RESPECT") {
+                            let ignore = self.peek_ident_upper() == "IGNORE";
+                            self.pos += 1;
+                            if self.peek_ident_upper() == "NULLS" { self.pos += 1; }
+                            if ignore {
+                                wfn = match wfn {
+                                    WindowFn::FirstValue(e) => WindowFn::FirstValueIgnoreNulls(e),
+                                    WindowFn::LastValue(e) => WindowFn::LastValueIgnoreNulls(e),
+                                    other => other,
+                                };
+                            }
+                        }
                         let spec = if self.peek() == &Token::Over {
                             self.pos += 1;
                             self.parse_window_spec()?
@@ -980,20 +1434,31 @@ impl Parser {
                         Ok(Expr::Window { func: wfn, spec })
                     }
                     _ => {
+                        let up = name.to_ascii_uppercase();
                         if self.peek() == &Token::LParen {
-                            // Scalar function call: UPPER(x), ROUND(x,2), etc.
                             self.pos += 1;
+                            if let Some(special) = self.parse_special_call(&up)? { return Ok(special); }
+                            // Scalar function call: UPPER(x), ROUND(x,2), etc.
                             let args = if self.peek() != &Token::RParen {
-                                // CAST(expr AS type) — treat AS as arg separator
                                 let first = self.parse_expr(0)?;
                                 let mut a = vec![first];
-                                while self.consume_if(&Token::Comma) || self.consume_if(&Token::As) {
+                                while self.consume_if(&Token::Comma) {
                                     a.push(self.parse_expr(0)?);
                                 }
                                 a
                             } else { vec![] };
                             self.expect(&Token::RParen)?;
-                            Ok(Expr::FuncCall { name: name.to_ascii_uppercase(), args })
+                            Ok(Expr::FuncCall { name: up, args })
+                        } else if (up == "TRUE" || up == "FALSE") && self.peek() != &Token::Dot {
+                            Ok(Expr::Bool(up == "TRUE"))
+                        } else if matches!(up.as_str(), "CURRENT_DATE" | "CURRENT_TIMESTAMP" | "LOCALTIMESTAMP" | "CURRENT_USER") && self.peek() != &Token::Dot {
+                            Ok(Expr::FuncCall { name: up, args: vec![] })
+                        } else if (up == "DATE" || up == "TIMESTAMP") && matches!(self.peek(), Token::Str(_)) {
+                            // DATE '2024-01-31' / TIMESTAMP '2024-01-31 10:00:00'
+                            let lit = self.parse_primary()?;
+                            Ok(Expr::FuncCall { name: if up == "DATE" { "TO_DATE".into() } else { "TO_TIMESTAMP".into() }, args: vec![lit] })
+                        } else if up == "INTERVAL" && matches!(self.peek(), Token::Str(_) | Token::Int(_) | Token::Float(_) | Token::Minus) {
+                            self.parse_interval()
                         } else if self.peek() == &Token::Dot {
                             self.pos += 1;
                             let col = self.expect_ident()?;
@@ -1126,15 +1591,36 @@ fn parse_hints(hint_text: &str) -> Vec<QueryHint> {
 
 // ─── Operator helpers ─────────────────────────────────────────────────────────
 
+/// Aggregate functions that are not spelled with a dedicated keyword.
+fn is_agg_name(up: &str) -> bool {
+    matches!(up,
+        "STDDEV" | "STDDEV_SAMP" | "STDDEV_POP" | "STD" | "VARIANCE" | "VAR_SAMP" | "VAR_POP" | "MEDIAN"
+        | "PERCENTILE" | "PERCENTILE_APPROX" | "APPROX_PERCENTILE" | "PERCENTILE_CONT" | "PERCENTILE_DISC"
+        | "STRING_AGG" | "LISTAGG" | "GROUP_CONCAT" | "COLLECT_LIST" | "COLLECT_SET" | "ARRAY_AGG"
+        | "FIRST" | "LAST" | "ANY_VALUE" | "COUNT_IF" | "BOOL_AND" | "BOOL_OR" | "EVERY" | "SOME" | "ANY"
+        | "MAX_BY" | "MIN_BY" | "APPROX_COUNT_DISTINCT" | "CORR" | "COVAR_POP" | "COVAR_SAMP"
+        | "SKEWNESS" | "KURTOSIS" | "SUM_DISTINCT")
+}
+
+/// Words that end a table reference and so cannot be an implicit table alias.
+fn is_clause_word(s: &str) -> bool {
+    matches!(s.to_ascii_uppercase().as_str(),
+        "WHERE" | "ORDER" | "GROUP" | "LIMIT" | "HAVING" | "QUALIFY" | "UNION" | "INTERSECT" | "EXCEPT" | "MINUS" | "FETCH"
+        | "OFFSET" | "ON" | "SET" | "INTO" | "USING" | "NATURAL" | "WINDOW" | "SEMI" | "ANTI" | "TABLESAMPLE")
+}
+
 fn infix_precedence(tok: &Token) -> u8 {
     match tok {
         Token::Or              => 1,
         Token::And             => 2,
-        Token::Eq | Token::Ne  => 3,
+        Token::Eq | Token::Ne | Token::NullSafeEq => 3,
         Token::Lt | Token::Le
         | Token::Gt | Token::Ge => 4,
-        Token::Plus | Token::Minus | Token::Concat => 5,
-        Token::Star | Token::Slash | Token::Percent => 6,
+        Token::Pipe            => 5,
+        Token::Caret           => 6,
+        Token::Ampersand       => 7,
+        Token::Plus | Token::Minus | Token::Concat => 8,
+        Token::Star | Token::Slash | Token::Percent => 9,
         _ => 0,
     }
 }
@@ -1157,6 +1643,27 @@ fn tok_to_binop(tok: &Token) -> Result<BinOpKind, KoreError> {
         Token::Concat => BinOpKind::Concat,
         other => return Err(KoreError::InvalidArgument(format!("not a binary op: {:?}", other))),
     })
+}
+
+/// ROLLUP(a, b, c) -> [a b c], [a b], [a], []; CUBE(a, b) -> every subset.
+fn rollup_cube_sets(items: &[Expr], rollup: bool) -> Vec<Vec<Expr>> {
+    if rollup {
+        (0..=items.len()).rev().map(|n| items[..n].to_vec()).collect()
+    } else {
+        let n = items.len();
+        (0..(1usize << n)).rev().map(|mask| (0..n).filter(|i| mask & (1 << (n - 1 - i)) != 0).map(|i| items[i].clone()).collect()).collect()
+    }
+}
+
+/// `a <=> b`: equality that treats NULL = NULL as true and NULL = x as false.
+fn null_safe_eq(a: Expr, b: Expr) -> Expr {
+    let both_null = Expr::BinOp {
+        op: BinOpKind::And,
+        left: Box::new(Expr::IsNull(Box::new(a.clone()))),
+        right: Box::new(Expr::IsNull(Box::new(b.clone()))),
+    };
+    let eq = Expr::BinOp { op: BinOpKind::Eq, left: Box::new(a), right: Box::new(b) };
+    Expr::FuncCall { name: "COALESCE".into(), args: vec![eq, both_null] }
 }
 
 fn expr_to_col_name(e: &Expr) -> Option<String> {

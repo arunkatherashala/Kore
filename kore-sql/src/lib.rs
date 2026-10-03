@@ -16,8 +16,14 @@ pub mod lexer;
 pub mod parser;
 pub mod executor;
 pub mod rewrite;
+pub mod ast_walk;
+pub mod general;
+pub mod aggs;
+pub mod desugar;
 pub mod vecexpr;
 pub mod window;
+pub mod scalar;
+pub mod datetime;
 pub mod vec_path;
 
 pub use ast::*;
