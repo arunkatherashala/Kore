@@ -17,6 +17,7 @@ pub mod parser;
 pub mod executor;
 pub mod rewrite;
 pub mod vecexpr;
+pub mod window;
 pub mod vec_path;
 
 pub use ast::*;

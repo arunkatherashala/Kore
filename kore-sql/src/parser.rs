@@ -223,8 +223,7 @@ impl Parser {
         } else {
             (Vec::new(), false, false)
         };
-        // Ignore rollup/cube flags for now — treat same as plain GROUP BY
-        let _ = (rollup, cube);
+        let grouping = if rollup { Grouping::Rollup } else if cube { Grouping::Cube } else { Grouping::Plain };
 
         // HAVING
         let having = if self.consume_if(&Token::Having) {
@@ -282,7 +281,7 @@ impl Parser {
         };
 
         Ok(SelectStmt { distinct, projections, from, joins, where_clause,
-                         group_by, having, qualify, order_by, limit, offset, scan_limit: None,
+                         group_by, grouping, having, qualify, order_by, limit, offset, scan_limit: None,
                          lateral_views, pivot, unpivot, hints })
     }
 

@@ -1037,6 +1037,9 @@ fn filter_rows(block: &DataBlock, indices: &[usize]) -> DataBlock {
 }
 
 pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
+    if stmt.grouping != Grouping::Plain && !stmt.group_by.is_empty() {
+        return execute_grouping_sets(stmt, ctx);
+    }
     // Aggregates nested in larger expressions (100 * SUM(a) / SUM(b)) run as an aggregate subquery
     // plus an outer projection over its hidden outputs.
     if let Some(lifted) = crate::rewrite::lift_aggregates(stmt) {
@@ -1383,6 +1386,10 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                 let out_name = alias.map(|a| a.as_str())
                     .unwrap_or("__win")
                     .to_string();
+                if let Some(done) = crate::window::apply(&result, func, spec, &out_name)? {
+                    result = done;
+                    continue;
+                }
                 let win_fn   = ast_to_win_fn(func);
                 let part_by  = spec.partition_by.iter()
                     .filter_map(|e| match e { Expr::Col(n) | Expr::QualCol(_, n) => Some(n.clone()), _ => None })
@@ -2298,7 +2305,7 @@ fn correlated_scalar_values(outer: &DataBlock, sq: &SelectStmt, ctx: &KqlContext
         distinct: false, projections,
         from: sq.from.clone(), joins: sq.joins.clone(),
         where_clause: crate::rewrite::and_all(inner_filters),
-        group_by: Vec::new(), having: None, qualify: None, order_by: Vec::new(),
+        group_by: Vec::new(), grouping: Grouping::Plain, having: None, qualify: None, order_by: Vec::new(),
         limit: None, offset: None, scan_limit: None,
         lateral_views: Vec::new(), pivot: None, unpivot: None, hints: Vec::new(),
     };
@@ -2461,6 +2468,86 @@ fn collect_corr_and_filters<'a>(
 
 /// For GROUP BY, materialize any SELECT alias expressions as computed columns.
 /// Example: SELECT CASE WHEN ... END l_year — GROUP BY l_year needs "l_year" as a real column.
+/// GROUP BY ROLLUP / CUBE: one aggregate per grouping set, the rolled-up keys reported as NULL, all
+/// sets concatenated; then the statement's ORDER BY / LIMIT / OFFSET run over the combined rows.
+fn execute_grouping_sets(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
+    let keys = &stmt.group_by;
+    let k = keys.len();
+    if k > 10 { return Err(KoreError::InvalidArgument("CUBE/ROLLUP over more than 10 columns".into())); }
+    // sets as bitmasks over `keys`, the full set first
+    let full = (1u32 << k) - 1;
+    let sets: Vec<u32> = match stmt.grouping {
+        Grouping::Rollup => (0..=k).rev().map(|n| (1u32 << n) - 1).collect(),
+        _ => (0..=full).rev().collect(),
+    };
+    let key_of = |p: &Projection| -> Option<usize> {
+        let Projection::Expr { expr, .. } = p else { return None };
+        let name = match expr { Expr::Col(c) | Expr::QualCol(_, c) => c, _ => return None };
+        keys.iter().position(|g| g == name || g.rsplit('.').next() == Some(name.as_str()))
+    };
+    let mut first: Option<DataBlock> = None;
+    let mut parts: Vec<DataBlock> = Vec::new();
+    for mask in sets {
+        let mut sub = stmt.clone();
+        sub.grouping = Grouping::Plain;
+        sub.group_by = (0..k).filter(|i| mask >> i & 1 == 1).map(|i| keys[i].clone()).collect();
+        sub.order_by = Vec::new(); sub.limit = None; sub.offset = None;
+        let kept: Vec<usize> = (0..stmt.projections.len())
+            .filter(|&i| key_of(&stmt.projections[i]).map_or(true, |g| mask >> g & 1 == 1)).collect();
+        sub.projections = kept.iter().map(|&i| stmt.projections[i].clone()).collect();
+        let got = execute_select(&sub, ctx)?;
+        if first.is_none() {
+            first = Some(got.clone());
+        }
+        let proto = first.as_ref().unwrap();
+        let mut cols: Vec<Column> = Vec::with_capacity(stmt.projections.len());
+        let mut at = 0;
+        for i in 0..stmt.projections.len() {
+            let p = &proto.columns[i];
+            if kept.contains(&i) {
+                let mut c = got.columns[at].clone();
+                c.name = p.name.clone();
+                cols.push(c);
+                at += 1;
+            } else {
+                let n = got.num_rows;
+                let data = match &p.data {
+                    ColumnData::Int64(_) => ColumnData::Int64(vec![None; n]),
+                    ColumnData::Float64(_) => ColumnData::Float64(vec![None; n]),
+                    ColumnData::Bool(_) => ColumnData::Bool(vec![None; n]),
+                    _ => ColumnData::Str(vec![None; n]),
+                };
+                cols.push(Column { name: p.name.clone(), data });
+            }
+        }
+        parts.push(DataBlock { columns: cols, num_rows: got.num_rows });
+    }
+    // Str and StrDict mix across sets; normalise string columns to Str before concatenating.
+    for b in &mut parts {
+        for c in &mut b.columns {
+            if let ColumnData::StrDict { .. } = c.data {
+                let n = b.num_rows;
+                c.data = ColumnData::Str((0..n).map(|r| c.data.get_str(r).map(str::to_string)).collect());
+            }
+        }
+    }
+    let combined = DataBlock::concat(parts)?;
+    if stmt.order_by.is_empty() && stmt.limit.is_none() && stmt.offset.is_none() { return Ok(combined); }
+    let mut c2 = ctx.clone();
+    c2.register("__grouping_sets", combined);
+    let mut outer = stmt.clone();
+    outer.distinct = false;
+    outer.projections = vec![Projection::Star];
+    outer.from = TableExpr { name: "__grouping_sets".into(), alias: None, subquery: None, values: None, push_filter: None };
+    outer.joins = Vec::new(); outer.where_clause = None; outer.group_by = Vec::new(); outer.grouping = Grouping::Plain;
+    outer.having = None; outer.qualify = None;
+    let mut out = execute_select(&outer, &c2)?;
+    for c in &mut out.columns {
+        if let Some(rest) = c.name.strip_prefix("__grouping_sets.") { c.name = rest.to_string(); }
+    }
+    Ok(out)
+}
+
 fn materialize_groupby_aliases(mut block: DataBlock, group_by: &[String], projections: &[Projection]) -> DataBlock {
     for gb_col in group_by {
         // Skip if column already exists in block
@@ -5327,15 +5414,12 @@ mod tests {
         ).unwrap();
         assert_eq!(r.num_rows, 4);
         let lag_col = r.columns.iter().find(|c| c.name == "prev_score").expect("prev_score column");
-        if let ColumnData::Float64(vals) = &lag_col.data {
-            // Ordered by id: scores are [90, 70, 85, 60]
-            // LAG(1): [NaN, 90, 70, 85]
-            assert!(vals[0].unwrap().is_nan()); // first row has no predecessor
-            assert_eq!(vals[1], Some(90.0));
-            assert_eq!(vals[2], Some(70.0));
-            assert_eq!(vals[3], Some(85.0));
-        } else {
-            panic!("expected Float64 for window column");
+        // Ordered by id: scores are [90, 70, 85, 60]; LAG(1) keeps the column type and the
+        // first row has no predecessor, which is NULL (not NaN).
+        let got: Vec<Value> = (0..4).map(|i| lag_col.data.get_value(i)).collect();
+        assert_eq!(got[0], Value::Null);
+        for (g, want) in got[1..].iter().zip([90.0, 70.0, 85.0]) {
+            match g { Value::Int(i) => assert_eq!(*i as f64, want), Value::Float(f) => assert_eq!(*f, want), o => panic!("{o:?}") }
         }
     }
 

@@ -146,6 +146,8 @@ pub struct SelectStmt {
     pub joins:         Vec<JoinClause>,
     pub where_clause:  Option<Expr>,
     pub group_by:      Vec<String>,
+    /// GROUP BY ROLLUP(..) / CUBE(..) expand `group_by` into grouping sets.
+    pub grouping:      Grouping,
     pub having:        Option<Expr>,
     pub qualify:       Option<Expr>,  // QUALIFY (window filter)
     pub order_by:      Vec<OrderByItem>,
@@ -161,6 +163,9 @@ pub struct SelectStmt {
     /// Query hints: /*+ BROADCAST(t) */ etc.
     pub hints:         Vec<QueryHint>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum Grouping { #[default] Plain, Rollup, Cube }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Projection {

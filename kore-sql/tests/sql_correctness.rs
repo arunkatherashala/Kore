@@ -352,3 +352,66 @@ fn correlated_scalar_subquery_with_outer_filter() {
         (select avg(l2.l_qty) from line l2 where l2.l_ord = line.l_ord)").unwrap();
     assert_eq!(f64s(&r, "l_qty"), vec![2.0]);
 }
+
+fn grouped() -> KqlContext {
+    let mut c = KqlContext::new();
+    c.register("t", DataBlock::new(vec![
+        Column::int64("g", [1, 1, 1, 2, 2].iter().map(|&x| Some(x)).collect()),
+        Column::int64("v", [10, 20, 20, 5, 7].iter().map(|&x| Some(x)).collect()),
+    ]).unwrap());
+    c
+}
+
+fn opt_f64s(b: &DataBlock, name: &str) -> Vec<Option<f64>> {
+    let c = b.columns.iter().find(|c| c.name == name).unwrap();
+    (0..b.num_rows).map(|r| match c.data.get_value(r) {
+        kore_core::Value::Int(i) => Some(i as f64),
+        kore_core::Value::Float(f) => Some(f),
+        _ => None,
+    }).collect()
+}
+
+#[test]
+fn window_aggregate_with_order_by_is_a_running_frame_with_peers() {
+    let c = grouped();
+    let r = c.query("select g, v, sum(v) over (partition by g order by v) as s, \
+        count(*) over (partition by g order by v) as n from t order by g, v").unwrap();
+    // rows with equal v are peers and share the running value
+    assert_eq!(f64s(&r, "s"), vec![10.0, 50.0, 50.0, 5.0, 12.0]);
+    assert_eq!(f64s(&r, "n"), vec![1.0, 3.0, 3.0, 1.0, 2.0]);
+}
+
+#[test]
+fn window_aggregate_without_order_by_spans_the_partition() {
+    let r = grouped().query("select g, v, sum(v) over (partition by g) as s from t order by g, v").unwrap();
+    assert_eq!(f64s(&r, "s"), vec![50.0, 50.0, 50.0, 12.0, 12.0]);
+}
+
+#[test]
+fn window_rows_frame_and_lag_lead_nulls() {
+    let c = grouped();
+    let r = c.query("select g, v, sum(v) over (partition by g order by v rows between 1 preceding and current row) as s \
+        from t order by g, v").unwrap();
+    assert_eq!(f64s(&r, "s"), vec![10.0, 30.0, 40.0, 5.0, 12.0]);
+    let r = c.query("select v, lag(v) over (partition by g order by v) as p, lead(v) over (partition by g order by v) as n \
+        from t order by g, v").unwrap();
+    assert_eq!(opt_f64s(&r, "p"), vec![None, Some(10.0), Some(20.0), None, Some(5.0)]);
+    assert_eq!(opt_f64s(&r, "n"), vec![Some(20.0), Some(20.0), None, Some(7.0), None]);
+}
+
+#[test]
+fn rollup_and_cube_add_subtotals_and_grand_total() {
+    let c = grouped();
+    let r = c.query("select g, sum(v) as s from t group by rollup(g) order by g").unwrap();
+    assert_eq!(opt_f64s(&r, "t.g"), vec![None, Some(1.0), Some(2.0)]);
+    assert_eq!(f64s(&r, "s"), vec![62.0, 50.0, 12.0]);
+
+    let r = c.query("select g, v, count(*) as n from t group by rollup(g, v)").unwrap();
+    assert_eq!(r.num_rows, 7); // 4 (g,v) + 2 (g) + 1 grand total
+    assert_eq!(f64s(&r, "n").iter().sum::<f64>(), 5.0 * 3.0);
+
+    let r = c.query("select g, v, count(*) as n from t group by cube(g, v)").unwrap();
+    assert_eq!(r.num_rows, 11); // 4 + 2 (g) + 4 (v) + 1
+    let r = c.query("select g, sum(v) as s from t group by rollup(g) order by s desc limit 1").unwrap();
+    assert_eq!(f64s(&r, "s"), vec![62.0]);
+}
