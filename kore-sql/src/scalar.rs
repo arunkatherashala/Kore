@@ -240,6 +240,18 @@ pub fn date_part(field: &str, d: &Dt) -> Option<V> {
 // ─── strings ──────────────────────────────────────────────────────────────────
 
 fn substr(s: &str, start: i64, len: Option<i64>) -> String {
+    // ASCII text (the common case) slices by bytes without materialising a char vector
+    if s.is_ascii() {
+        let n = s.len() as i64;
+        let from = if start > 0 { start - 1 } else if start < 0 { n + start } else { 0 };
+        let (lo, hi) = match len {
+            Some(l) if l <= 0 => return String::new(),
+            Some(l) => (from, from.saturating_add(l)),
+            None => (from, n),
+        };
+        let (lo, hi) = (lo.max(0), hi.min(n));
+        return if lo >= hi { String::new() } else { s[lo as usize..hi as usize].to_string() };
+    }
     let chars: Vec<char> = s.chars().collect();
     let n = chars.len() as i64;
     // 1-based; 0 behaves like 1; negative counts from the end

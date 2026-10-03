@@ -239,10 +239,12 @@ struct Evaluator<'a> {
     outer_map: RefCell<Vec<(String, String)>>,
     /// table qualifiers of the query's own input (a reference to one of them from a subquery is correlated)
     outer_aliases: RefCell<HashSet<String>>,
+    /// false when no expression of the statement contains a subquery: evaluation then skips the per-row scan for one
+    any_subquery: std::cell::Cell<bool>,
 }
 
 impl<'a> Evaluator<'a> {
-    fn new(ctx: &'a KqlContext) -> Self { Evaluator { ctx, cache: RefCell::new(HashMap::new()), error: RefCell::new(None), outer_map: RefCell::new(Vec::new()), outer_aliases: RefCell::new(HashSet::new()) } }
+    fn new(ctx: &'a KqlContext) -> Self { Evaluator { ctx, cache: RefCell::new(HashMap::new()), error: RefCell::new(None), outer_map: RefCell::new(Vec::new()), outer_aliases: RefCell::new(HashSet::new()), any_subquery: std::cell::Cell::new(true) } }
 
     fn fail(&self, e: KoreError) { let mut slot = self.error.borrow_mut(); if slot.is_none() { *slot = Some(e); } }
 
@@ -253,7 +255,7 @@ impl<'a> Evaluator<'a> {
 
     /// Evaluate `e` for `row`, running any subqueries it contains.
     fn eval(&self, e: &Expr, block: &DataBlock, row: usize) -> V {
-        if has_subq(e) {
+        if self.any_subquery.get() && has_subq(e) {
             let bound = self.materialize(e, block, row);
             eval_expr(&bound, block, row)
         } else {
@@ -352,12 +354,21 @@ fn bind_outer(
     sub: &SelectStmt, block: &DataBlock, row: usize, ctx: &KqlContext,
     outer_map: &[(String, String)], outer_aliases: &HashSet<String>,
 ) -> Result<SelectStmt, String> {
-    let mut inner_aliases: HashSet<String> = HashSet::new();
-    let mut inner_cols: HashSet<String> = HashSet::new();
+    bind_outer_in(sub, block, row, ctx, outer_map, outer_aliases, &HashSet::new(), &HashSet::new())
+}
+
+/// `skip_*`: names of enclosing subquery scopes, which belong to the middle of the nesting and are not outer rows.
+fn bind_outer_in(
+    sub: &SelectStmt, block: &DataBlock, row: usize, ctx: &KqlContext,
+    outer_map: &[(String, String)], outer_aliases: &HashSet<String>,
+    skip_aliases: &HashSet<String>, skip_cols: &HashSet<String>,
+) -> Result<SelectStmt, String> {
+    let mut inner_aliases: HashSet<String> = skip_aliases.clone();
+    let mut inner_cols: HashSet<String> = skip_cols.clone();
     let mut unknown_inner = false;
     let mut scope = |t: &TableExpr| {
+        // once a table has an alias, only the alias names it
         inner_aliases.insert(t.alias.clone().unwrap_or_else(|| t.name.clone()));
-        inner_aliases.insert(t.name.clone());
         if let Some(b) = ctx.get(&t.name) {
             for c in &b.columns { inner_cols.insert(bare_name(&c.name)); }
         } else if let Some(sq) = &t.subquery {
@@ -393,8 +404,23 @@ fn bind_outer(
         None
     };
     let mut unresolved: Option<String> = None;
+    let nested_error: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+    let (ia, ic) = (inner_aliases.clone(), inner_cols.clone());
+    let nested = |inner: &SelectStmt| -> SelectStmt {
+        match bind_outer_in(inner, block, row, ctx, outer_map, outer_aliases, &ia, &ic) {
+            Ok(b) => b,
+            Err(m) => { *nested_error.borrow_mut() = Some(m); inner.clone() }
+        }
+    };
     let mut f = |x: &Expr| -> Option<Expr> {
         match x {
+            // a subquery inside the subquery may refer to the outermost row as well
+            Expr::ScalarSubquery(inner) => Some(Expr::ScalarSubquery(Box::new(nested(inner)))),
+            Expr::Exists { subquery, negated } => Some(Expr::Exists { subquery: Box::new(nested(subquery)), negated: *negated }),
+            Expr::InSubquery { expr, subquery, negated } => Some(Expr::InSubquery {
+                expr: Box::new(crate::ast_walk::map_expr(expr, &mut |y| { let _ = y; None })),
+                subquery: Box::new(nested(subquery)), negated: *negated,
+            }),
             Expr::QualCol(q, c) if !inner_aliases.contains(q) => {
                 let v = lookup(&format!("{q}.{c}"));
                 if v.is_none() && outer_aliases.iter().any(|a| a.eq_ignore_ascii_case(q)) && unresolved.is_none() {
@@ -414,10 +440,22 @@ fn bind_outer(
         j.on.right_col = orig.on.right_col.clone();
         j
     }).collect();
+    if let Some(m) = nested_error.into_inner() { return Err(m); }
     if let Some(r) = unresolved {
         return Err(format!("correlated reference to '{r}', which is neither grouped nor aggregated in the outer query"));
     }
     Ok(bound)
+}
+
+/// Rows of `block` for which `pred` is TRUE, evaluated row by row with subqueries bound to the current row
+/// (correlated subqueries the fast decorrelation paths could not rewrite).
+pub fn filter_rows_with_subqueries(block: &DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<Vec<bool>, KoreError> {
+    let evaluator = Evaluator::new(ctx);
+    *evaluator.outer_aliases.borrow_mut() = block.columns.iter()
+        .filter_map(|c| c.name.split_once('.').map(|(q, _)| q.to_string())).collect();
+    let keep: Vec<bool> = (0..block.num_rows).map(|r| matches!(evaluator.eval(pred, block, r), V::Bool(true))).collect();
+    evaluator.check()?;
+    Ok(keep)
 }
 
 fn column_values_at(c: &Column, row: usize) -> Option<V> {
@@ -485,6 +523,11 @@ fn subsets(n: usize) -> Vec<Vec<usize>> {
 pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
     let n_in = input.num_rows;
     let evaluator = Evaluator::new(ctx);
+    {
+        let mut any = false;
+        crate::ast_walk::walk_own_exprs(stmt, &mut |x| { if is_subq(x) { any = true; } });
+        evaluator.any_subquery.set(any);
+    }
     *evaluator.outer_aliases.borrow_mut() = input.columns.iter()
         .filter_map(|c| c.name.split_once('.').map(|(q, _)| q.to_string())).collect();
 

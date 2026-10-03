@@ -1530,8 +1530,34 @@ fn resolve_join_table(table: &TableExpr, ctx: &KqlContext) -> Result<DataBlock, 
     }
 }
 
+/// Table names / aliases introduced anywhere inside `s` (nested subqueries included).
+fn tree_aliases(s: &SelectStmt, out: &mut std::collections::HashSet<String>) {
+    for t in std::iter::once(&s.from).chain(s.joins.iter().map(|j| &j.table)) {
+        out.insert(t.alias.clone().unwrap_or_else(|| t.name.clone()));
+        if let Some(sq) = &t.subquery { tree_aliases(sq, out); }
+    }
+    crate::ast_walk::walk_own_exprs(s, &mut |e| match e {
+        Expr::ScalarSubquery(x) | Expr::Exists { subquery: x, .. } | Expr::InSubquery { subquery: x, .. } | Expr::QuantSubquery { subquery: x, .. } => tree_aliases(x, out),
+        _ => {}
+    });
+    for (_, arm) in &s.set_ops { tree_aliases(arm, out); }
+}
+
+/// True when some `qualifier.column` inside the subquery names a table that is not defined inside it, which
+/// makes it a reference to the enclosing query.
+fn refers_to_enclosing_query(sub: &SelectStmt) -> bool {
+    let mut own = std::collections::HashSet::new();
+    tree_aliases(sub, &mut own);
+    let mut foreign = false;
+    crate::ast_walk::walk_stmt(sub, true, &mut |e| {
+        if let Expr::QualCol(q, _) = e { if !own.iter().any(|a| a.eq_ignore_ascii_case(q)) { foreign = true; } }
+    });
+    foreign
+}
+
 /// True when every column the subquery mentions comes from its own tables (or is one of its own aliases).
 fn is_uncorrelated(sub: &SelectStmt, ctx: &KqlContext) -> bool {
+    if refers_to_enclosing_query(sub) { return false; }
     let mut avail: std::collections::HashSet<String> = std::collections::HashSet::new();
     for t in std::iter::once(&sub.from).chain(sub.joins.iter().map(|j| &j.table)) {
         if t.subquery.is_some() || t.values.is_some() { return false; }
@@ -2080,7 +2106,10 @@ fn filter_block_ctx(block: DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<D
         return Ok(block.select_rows(&keep));
     }
     let n = block.num_rows;
-    let keep: Vec<bool> = if n >= 100_000 {
+    // subqueries that survived the decorrelation rewrites run once per row, bound to that row
+    let keep: Vec<bool> = if crate::general::has_subq(pred) {
+        crate::general::filter_rows_with_subqueries(&block, pred, ctx)?
+    } else if n >= 100_000 {
         use rayon::prelude::*;
         (0..n).into_par_iter().map(|r| eval_bool_ctx(pred, &block, r, ctx)).collect()
     } else {
@@ -2129,9 +2158,13 @@ fn decorrelate_expr(
                         let mut corr: Vec<(String, Expr)> = Vec::new(); // (inner_col, outer_expr)
                         let mut filters: Vec<Expr>         = Vec::new();
                         collect_corr_and_filters(where_expr, inner_table, &mut corr, &mut filters);
+                        let alias = sq.from.alias.as_deref().unwrap_or(inner_table.as_str());
+                        if filters.iter().any(|f| !filter_is_inner_only(f, inner_table, alias, inner_block)) { return expr.clone(); }
 
                         if !corr.is_empty() {
                             if let Some(Projection::Expr { expr: proj_expr, .. }) = sq.projections.first() {
+                                // only aggregate subqueries are rewritten here; a plain column per outer key is left to the row evaluator
+                                if !crate::rewrite::contains_agg(proj_expr) { return expr.clone(); }
                                 // Apply non-correlation filters to inner block first
                                 let mut filtered = inner_block.clone();
                                 for fc in &filters {
@@ -2656,6 +2689,8 @@ fn materialize_groupby_aliases(mut block: DataBlock, group_by: &[String], projec
 /// Replaces InSubquery nodes with In{values} so the subquery only runs once.
 fn precompute_in_subqueries(expr: &Expr, ctx: &KqlContext) -> Expr {
     match expr {
+        // a correlated IN (SELECT ..) is evaluated per outer row, never once against the whole table
+        Expr::InSubquery { subquery, .. } if !is_uncorrelated(subquery, ctx) => expr.clone(),
         Expr::InSubquery { expr: e, subquery, negated } => {
             // Execute subquery once, collect all values
             let inner_ctx = ctx.clone();
@@ -2869,6 +2904,9 @@ fn rewrite_exists(expr: &Expr, ctx: &KqlContext) -> Expr {
                     collect_exists_parts(where_clause, inner_table, inner_alias,
                                         &mut corr_inner, &mut corr_outer, &mut filters);
 
+                    if filters.iter().any(|f| !filter_is_inner_only(f, inner_table, inner_alias, inner_block)) {
+                        return expr.clone();
+                    }
                     if corr_inner.len() == 1 {
                         let inner_col = &corr_inner[0];
                         let outer_expr = corr_outer[0].clone();
@@ -2965,6 +3003,19 @@ fn collect_exists_parts(
     }
 }
 
+/// True when every column of `f` is a column of the inner table (so the filter can run on the inner rows alone).
+/// A conjunct such as `e.id < o.id` mentions the outer row and has to be evaluated per outer row instead.
+fn filter_is_inner_only(f: &Expr, table: &str, alias: &str, inner: &DataBlock) -> bool {
+    let mut ok = true;
+    crate::ast_walk::walk_expr(f, true, &mut |x| match x {
+        Expr::QualCol(q, _) => { if !(q.eq_ignore_ascii_case(table) || q.eq_ignore_ascii_case(alias)) { ok = false; } }
+        Expr::Col(c) => { if find_col(inner, c).is_none() { ok = false; } }
+        Expr::ScalarSubquery(_) | Expr::Exists { .. } | Expr::InSubquery { .. } | Expr::QuantSubquery { .. } => ok = false,
+        _ => {}
+    });
+    ok
+}
+
 fn col_belongs_to_either(expr: &Expr, table: &str, alias: &str) -> bool {
     match expr {
         Expr::QualCol(t, _) => t == table || t == alias,
@@ -2983,6 +3034,8 @@ fn bare_col_name(expr: &Expr) -> Option<String> {
 
 fn resolve_subqueries(expr: &Expr, ctx: &KqlContext) -> Expr {
     match expr {
+        // a correlated subquery would run against the whole outer table here and return a meaningless first row
+        Expr::ScalarSubquery(stmt) if !is_uncorrelated(stmt, ctx) => expr.clone(),
         Expr::ScalarSubquery(stmt) => {
             // Try to evaluate — if succeeds and not correlated, replace with literal
             match execute_select(stmt, ctx) {

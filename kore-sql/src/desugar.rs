@@ -49,6 +49,15 @@ fn table_columns(t: &TableExpr, ctx: &KqlContext) -> Result<Vec<String>, KoreErr
 
 /// `Some(rewritten)` when the statement uses a form this module desugars.
 pub fn rewrite_stmt(stmt: &SelectStmt, ctx: &KqlContext) -> Result<Option<(SelectStmt, Option<KqlContext>)>, KoreError> {
+    // cheap test first: most statements need none of these rewrites and must not pay for a clone
+    let mut has_quant = false;
+    walk_own_exprs(stmt, &mut |e| { if matches!(e, Expr::QuantSubquery { .. }) { has_quant = true; } });
+    let needs = has_quant
+        || stmt.pivot.is_some() || stmt.unpivot.is_some() || !stmt.lateral_views.is_empty()
+        || stmt.projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Explode(_), .. }))
+        || stmt.joins.iter().any(|j| matches!(j.join_type, JoinKind::Semi | JoinKind::Anti) || !j.using.is_empty() || j.natural);
+    if !needs { return Ok(None); }
+
     let mut cur = stmt.clone();
     let mut changed = false;
     let mut local_ctx: Option<KqlContext> = None;
@@ -64,10 +73,6 @@ pub fn rewrite_stmt(stmt: &SelectStmt, ctx: &KqlContext) -> Result<Option<(Selec
     }
 
     // quantified comparisons
-    let mut has_quant = false;
-    walk_own_exprs(stmt, &mut |e| {
-        if matches!(e, Expr::QuantSubquery { .. }) { has_quant = true; }
-    });
     if has_quant {
         let failure: RefCell<Option<KoreError>> = RefCell::new(None);
         cur = map_stmt_exprs(&cur, &mut |e| match e {

@@ -132,7 +132,7 @@ fn agg_expr(r: &mut Rng) -> String {
 
 fn query(r: &mut Rng) -> String {
     let wh = if r.chance(65) { format!(" where {}", bool_expr(r, 2)) } else { String::new() };
-    match r.below(40) {
+    match r.below(43) {
         0 | 1 => {
             let k = 1 + r.below(3);
             let items: Vec<String> = (0..k).map(|i| match r.below(3) { 0 => format!("{} as e{i}", int_expr(r, 2)), 1 => format!("{} as e{i}", num_expr(r, 1)), _ => format!("{} as e{i}", str_expr(r)) }).collect();
@@ -310,6 +310,21 @@ fn query(r: &mut Rng) -> String {
         }
         38 => {
             format!("select x.id, y.id from t1 x join t1 y on x.a < y.a and x.b = y.b{} order by x.id, y.id", if r.chance(50) { " where x.c > 0" } else { "" })
+        }
+        40 | 41 => {
+            // self-correlated subqueries: the inner table has the same name as the outer one
+            let sub = *r.pick(&[
+                "b > (select avg(b) from t1 c where c.s = o.s)", "o.c = (select max(c) from t1 d where d.a = o.a)",
+                "exists (select 1 from t1 e where e.s = o.s and e.id <> o.id)", "not exists (select 1 from t1 e where e.a = o.a and e.id < o.id)",
+                "o.b = (select b from t1 f where f.id = o.id)", "o.id = (select min(id) from t1 h where h.a = o.a)",
+                "(select count(*) from t1 g where g.b < o.b) > 3", "o.a in (select a from t1 i where i.b > o.b)",
+                "b = (select max(b) from t1 j where j.s = o.s and j.a = o.a)",
+            ]);
+            format!("select id from t1 o where {sub}{} order by id", wh.replace(" where", " and").replace("(not ", "(not o.").replace(" s ", " o.s ").replace("(s ", "(o.s ").replace(" id", " o.id").replace("(id", "(o.id"))
+        }
+        42 => {
+            let sel = *r.pick(&["(select count(*) from t1 g where g.b < o.b)", "(select max(g.c) from t1 g where g.s = o.s)", "(select sum(g.b) from t1 g where g.a = o.a and g.id <> o.id)"]);
+            format!("select id, {sel} as v from t1 o order by id")
         }
         _ => {
             // scalar functions whose behaviour is the same in Spark and SQLite

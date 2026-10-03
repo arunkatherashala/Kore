@@ -928,6 +928,56 @@ fn empty_string_is_not_null() {
     ]);
 }
 
+/// Correlated scalar subqueries (also non-aggregate and nested), HAVING with subqueries, percent-of-total.
+#[test]
+fn correlated_and_nested_subqueries() {
+    check(&[
+        (r#"select g, sum(v) from t where g is not null group by g having sum(v) > (select sum(u.id) * 10 from u where u.w = t.g) order by g"#, r#""#),
+        (r#"select g, sum(v) s from t group by g having sum(v) > (select max(x) from nn) order by g"#, r#"NULL,60|x,30|y,30|z,50"#),
+        (r#"select g, sum(v) s from t group by g having sum(v) >= all (select 30) order by g"#, r#"NULL,60|x,30|y,30|z,50"#),
+        (r#"select g, sum(v) s from t group by g having g in (select w from u) order by g"#, r#""#),
+        (r#"select g, sum(v) s from t group by g having g in ('x', 'y') order by g"#, r#"x,30|y,30"#),
+        (r#"select g, count(*) from t group by g having count(*) = (select max(c) from (select count(*) c from t group by g) q) order by g"#, r#"x,2|y,2"#),
+        (r#"select id from t t1 where v > (select avg(v) from t t2 where t2.g = t1.g) order by id"#, r#"2"#),
+        (r#"select id from t t1 where v = (select max(v) from t t2 where t2.g = t1.g) order by id"#, r#"2|3|5"#),
+        (r#"select id, (select count(*) from t t2 where t2.v < t1.v) as rank_ from t t1 order by id"#, r#"1,0|2,1|3,2|4,0|5,3|6,4"#),
+        (r#"select id from t where exists (select 1 from t t2 where t2.g = t.g and t2.id <> t.id) order by id"#, r#"1|2|3|4"#),
+        (r#"select id from t where not exists (select 1 from t t2 where t2.g = t.g and t2.id <> t.id) order by id"#, r#"5|6"#),
+        (r#"select g, (select max(w) from u where u.id = (select min(id) from t t2 where t2.g = t1.g)) m from t t1 where id < 3 order by id"#, r#"x,p|x,p"#),
+        (r#"select * from (select id, (select max(w) from u where u.id = t.id) mw from t) q where mw is not null order by id"#, r#"1,p|2,r"#),
+        (r#"select id from t where id in (select id from u where w in (select w from u where id > 1)) order by id"#, r#"2"#),
+        (r#"select id from t where v > any (select v from t t2 where t2.g = 'x') order by id"#, r#"2|3|5|6"#),
+        (r#"select id from t where v > all (select v from t t2 where t2.g = 'x') order by id"#, r#"3|5|6"#),
+        (r#"select (select sum(v) from t) as total, count(*) from t where id < 3"#, r#"170,2"#),
+        (r#"select id, v, v * 100.0 / (select sum(v) from t) as pct from t where id < 3 order by id"#, r#"1,10,5.882353|2,20,11.764706"#),
+        (r#"select id, sum(v) over () as total, v * 1.0 / sum(v) over () as share from t where id < 3 order by id"#, r#"1,30,0.333333|2,30,0.666667"#),
+        (r#"select g, max(v) from t group by g having max(v) > (select min(v) from t) + 10 order by g"#, r#"NULL,60|y,30|z,50"#),
+        (r#"with m as (select g, max(v) mv from t group by g) select t.id from t join m on t.g = m.g and t.v = m.mv order by t.id"#, r#"2|3|5"#),
+        (r#"with m as (select g, max(v) mv from t group by g) select id from t where v = (select mv from m where m.g = t.g) order by id"#, r#"2|3|5"#),
+        (r#"select a.id, b.id from t a join t b on a.g = b.g and a.id < b.id order by a.id, b.id"#, r#"1,2|3,4"#),
+        (r#"select distinct a.g from t a join u b on a.id = b.id order by a.g"#, r#"x"#),
+        (r#"select count(*) from (select id from t union all select id from u) q where id > 1"#, r#"8"#),
+        (r#"select g, count(*) over (partition by g) from t where g = 'x'"#, r#"x,2|x,2"#),
+        (r#"select upper(g) u, count(*) c from t group by upper(g) having count(*) > 1 order by u"#, r#"X,2|Y,2"#),
+        (r#"select coalesce(g, 'none') k, sum(v) from t group by coalesce(g, 'none') having sum(v) > 40 order by k"#, r#"none,60|z,50"#),
+        (r#"select length(coalesce(s, '')) l, count(*) from t group by length(coalesce(s, '')) order by l"#, r#"0,1|3,1|5,3|6,1"#),
+    ]);
+}
+
+/// A correlated subquery must never be evaluated against the whole outer table.
+#[test]
+fn correlated_scalar_subquery_regressions() {
+    check(&[
+        (r#"with m as (select g, max(v) mv from t group by g) select id from t where v = (select mv from m where m.g = t.g) order by id"#, r#"2|3|5"#),
+        (r#"select id from t where v = (select mv from (select g, max(v) mv from t group by g) m where m.g = t.g) order by id"#, r#"2|3|5"#),
+        (r#"select id from t where v = (select max(mv) from (select g, max(v) mv from t group by g) m where m.g = t.g) order by id"#, r#"2|3|5"#),
+        (r#"select id, (select mv from (select g, max(v) mv from t group by g) m where m.g = t.g) from t where id < 4 order by id"#, r#"1,20|2,20|3,30"#),
+        (r#"select id from t where v = (select v from t t2 where t2.id = t.id) order by id"#, r#"1|2|3|5|6"#),
+        (r#"select id from t where g = (select g from t t2 where t2.id = t.id) order by id"#, r#"1|2|3|4|5"#),
+        (r#"select id from t where id = (select id from t t2 where t2.v = t.v) order by id"#, r#"1|2|3|5|6"#),
+    ]);
+}
+
 /// LIKE ESCAPE, decimal literal arithmetic, DECODE/ELT/JSON/CONV, sequence(), INTERVAL RANGE frames, bad regex errors.
 #[test]
 fn like_escape_decimal_literals_json_sequence_interval_frames() {
