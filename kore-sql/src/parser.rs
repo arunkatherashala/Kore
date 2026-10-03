@@ -115,6 +115,7 @@ impl Parser {
             Token::Lateral   => Ok("lateral".to_string()),
             Token::For       => Ok("for".to_string()),
             Token::Str(s)    => Ok(s),
+            ref t if non_reserved_word(t).is_some() => Ok(non_reserved_word(t).unwrap().to_string()),
             other => Err(KoreError::InvalidArgument(format!("expected alias name, got {:?}", other))),
         }
     }
@@ -1420,7 +1421,7 @@ impl Parser {
                 return Ok(Expr::Array(elements));
             }
             // ARRAY(1, 2, 3) → Array literal
-            Token::Array => {
+            Token::Array if self.peek() == &Token::LParen => {
                 self.expect(&Token::LParen)?;
                 let elements = if self.peek() != &Token::RParen {
                     self.parse_expr_list()?
@@ -1429,7 +1430,7 @@ impl Parser {
                 return Ok(Expr::Array(elements));
             }
             // MAP('a', 1, 'b', 2) → FuncCall("MAP", ...)
-            Token::Map => {
+            Token::Map if self.peek() == &Token::LParen => {
                 self.expect(&Token::LParen)?;
                 let args = if self.peek() != &Token::RParen {
                     self.parse_expr_list()?
@@ -1438,7 +1439,7 @@ impl Parser {
                 return Ok(Expr::FuncCall { name: "MAP".to_string(), args });
             }
             // EXPLODE(expr)
-            Token::Explode => {
+            Token::Explode if self.peek() == &Token::LParen => {
                 self.expect(&Token::LParen)?;
                 let inner = self.parse_expr(0)?;
                 self.expect(&Token::RParen)?;
@@ -1554,7 +1555,7 @@ impl Parser {
                             self.parse_interval()
                         } else if self.peek() == &Token::Dot {
                             self.pos += 1;
-                            let col = self.expect_ident()?;
+                            let col = self.expect_alias()?;
                             Ok(Expr::QualCol(name, col))
                         } else {
                             Ok(Expr::Col(name))
@@ -1587,6 +1588,16 @@ impl Parser {
                 let date_expr = self.parse_expr(0)?;
                 self.expect(&Token::RParen)?;
                 Ok(Expr::FuncCall { name: "EXTRACT".to_string(), args: vec![Expr::Str(field), date_expr] })
+            }
+            ref t if non_reserved_word(t).is_some() && self.peek() != &Token::LParen => {
+                let n = non_reserved_word(t).unwrap();
+                if self.peek() == &Token::Dot {
+                    // keyword-named table alias: rows.x
+                    self.pos += 1;
+                    let col = self.expect_alias()?;
+                    return Ok(Expr::QualCol(n.to_string(), col));
+                }
+                Ok(Expr::Col(n.to_string()))
             }
             other => Err(KoreError::InvalidArgument(format!("unexpected token in expr: {:?}", other))),
         }
@@ -1683,6 +1694,20 @@ fn parse_hints(hint_text: &str) -> Vec<QueryHint> {
 }
 
 // ─── Operator helpers ─────────────────────────────────────────────────────────
+
+/// Keywords that Spark does not reserve: they stay usable as column names.
+fn non_reserved_word(t: &Token) -> Option<&'static str> {
+    Some(match t {
+        Token::Over => "over", Token::Partition => "partition", Token::Rows => "rows", Token::Range => "range",
+        Token::Unbounded => "unbounded", Token::Preceding => "preceding", Token::Following => "following",
+        Token::Current => "current", Token::Array => "array", Token::Map => "map", Token::Pivot => "pivot",
+        Token::Unpivot => "unpivot", Token::Lateral => "lateral", Token::View => "view", Token::Temp => "temp",
+        Token::Merge => "merge", Token::Explode => "explode", Token::Count => "count", Token::Sum => "sum",
+        Token::Avg => "avg", Token::Min => "min", Token::Max => "max", Token::Left => "left", Token::Right => "right",
+        Token::Create => "create", Token::Drop => "drop", Token::For => "for", Token::Extract => "extract",
+        _ => return None,
+    })
+}
 
 /// Aggregate functions that are not spelled with a dedicated keyword.
 fn is_agg_name(up: &str) -> bool {

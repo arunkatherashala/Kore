@@ -4202,6 +4202,19 @@ fn needs_col(set: &std::collections::HashSet<String>, name: &str) -> bool {
     set.contains(name) || set.iter().any(|n| n.eq_ignore_ascii_case(name))
 }
 
+/// COUNT is always a whole number; SUM / MIN / MAX of an integer column are integers too (Spark: BIGINT).
+fn integral_result(func: &AggFunc, input: Option<&Column>) -> bool {
+    match func {
+        AggFunc::Count | AggFunc::CountDistinct => true,
+        AggFunc::Sum | AggFunc::Min | AggFunc::Max => matches!(input.map(|c| &c.data), Some(ColumnData::Int64(_))),
+        _ => false,
+    }
+}
+
+fn agg_column_data(vals: Vec<Option<f64>>, integral: bool) -> ColumnData {
+    if integral { ColumnData::Int64(vals.into_iter().map(|v| v.map(|x| x as i64)).collect()) } else { ColumnData::Float64(vals) }
+}
+
 fn find_col<'a>(block: &'a DataBlock, name: &str) -> Option<&'a Column> {
     // Hot path: avoid format!() allocation by doing suffix check inline.
     block.columns.iter().find(|c| {
@@ -4362,7 +4375,8 @@ fn global_agg(block: DataBlock, projections: &[Projection]) -> Result<DataBlock,
                 continue;
             }
             let name = alias.clone().unwrap_or_else(|| format!("{:?}({})", func, col_name));
-            new_cols.push(Column { name, data: ColumnData::Float64(vec![v]) });
+            let data = agg_column_data(vec![v], integral_result(func, agg_col));
+            new_cols.push(Column { name, data });
         }
     }
     Ok(DataBlock { columns: new_cols, num_rows: 1 })
@@ -4414,7 +4428,7 @@ fn group_by_fast(block: &DataBlock, group_cols: &[String], projections: &[Projec
     }
 
     // projections: group-key columns and numeric aggregates only
-    enum Out<'a> { Key(&'a Column, Option<&'a String>), Agg { func: &'a AggFunc, vals: Option<Vec<Option<f64>>>, count_col: Option<&'a Column>, name: String } }
+    enum Out<'a> { Key(&'a Column, Option<&'a String>), Agg { func: &'a AggFunc, vals: Option<Vec<Option<f64>>>, count_col: Option<&'a Column>, name: String, integral: bool } }
     let mut outs: Vec<Out> = Vec::new();
     for p in projections {
         let Projection::Expr { expr, alias } = p else { return None };
@@ -4437,14 +4451,15 @@ fn group_by_fast(block: &DataBlock, group_cols: &[String], projections: &[Projec
                 let name = alias.clone().unwrap_or_else(|| format!("{:?}({})", func, col_name));
                 if star {
                     if !matches!(func, AggFunc::Count) { return None; }
-                    outs.push(Out::Agg { func, vals: None, count_col: None, name });
+                    outs.push(Out::Agg { func, vals: None, count_col: None, name, integral: true });
                 } else if matches!(func, AggFunc::Count) {
                     match inner.as_ref() {
-                        Expr::Col(_) | Expr::QualCol(..) => outs.push(Out::Agg { func, vals: None, count_col: Some(find_col(block, &col_name)?), name }),
-                        other => outs.push(Out::Agg { func, vals: Some(crate::vecexpr::num_vec(other, block)?), count_col: None, name }),
+                        Expr::Col(_) | Expr::QualCol(..) => outs.push(Out::Agg { func, vals: None, count_col: Some(find_col(block, &col_name)?), name, integral: true }),
+                        other => outs.push(Out::Agg { func, vals: Some(crate::vecexpr::num_vec(other, block)?), count_col: None, name, integral: true }),
                     }
                 } else {
-                    outs.push(Out::Agg { func, vals: Some(crate::vecexpr::num_vec(inner, block)?), count_col: None, name });
+                    let integral = integral_result(func, match inner.as_ref() { Expr::Col(_) | Expr::QualCol(..) => find_col(block, &col_name), _ => None });
+                    outs.push(Out::Agg { func, vals: Some(crate::vecexpr::num_vec(inner, block)?), count_col: None, name, integral });
                 }
             }
             _ => return None,
@@ -4476,7 +4491,7 @@ fn group_by_fast(block: &DataBlock, group_cols: &[String], projections: &[Projec
                 if let Some(a) = alias { c.name = (*a).clone(); }
                 columns.push(c);
             }
-            Out::Agg { func, vals, count_col, name } => {
+            Out::Agg { func, vals, count_col, name, integral } => {
                 let mut count = vec![0u64; ng];
                 let data: Vec<Option<f64>> = match (func, vals) {
                     (AggFunc::Count, None) => {
@@ -4513,7 +4528,12 @@ fn group_by_fast(block: &DataBlock, group_cols: &[String], projections: &[Projec
                     }
                     _ => return None,
                 };
-                columns.push(Column { name: name.clone(), data: ColumnData::Float64(data) });
+                let input_col = match (count_col, vals) {
+                    (Some(c), _) => Some(*c),
+                    _ => None,
+                };
+                let _ = input_col;
+                columns.push(Column { name: name.clone(), data: agg_column_data(data, *integral) });
             }
         }
     }
@@ -4753,7 +4773,7 @@ fn group_by_agg(
                         let name = alias.clone().unwrap_or_else(|| format!("{:?}({})", func, col_name));
                         new_cols.push(Column {
                             name,
-                            data: ColumnData::Float64(agg_vals),
+                            data: agg_column_data(agg_vals, integral_result(func, agg_col)),
                         });
                     }
                     other => {

@@ -525,6 +525,7 @@ fn grouped_queries_over_joins_and_expressions() {
         (r#"select g, round(avg(v), 1) from t group by g order by g"#, r#"NULL,60|x,15|y,30|z,50"#),
         (r#"select g, count(*) / 2.0 from t group by g order by g"#, r#"NULL,0.5|x,1|y,1|z,0.5"#),
         (r#"select -sum(v) from t"#, r#"-170"#),
+        (r#"select cast(sum(v) as string) from t"#, r#"170"#),
         (r#"select coalesce(sum(v), 0) from t where id > 100"#, r#"0"#),
         (r#"select count(*) from (select distinct g from t) q"#, r#"4"#),
         (r#"select a.g, b.cnt from (select distinct g from t) a join (select g, count(*) cnt from t group by g) b on a.g = b.g order by a.g"#, r#"x,2|y,2|z,1"#),
@@ -1062,6 +1063,18 @@ fn like_escape_decimal_literals_json_sequence_interval_frames() {
         (r#"select d, count(*) over (order by d range between interval 1 month preceding and interval 1 day following) from t where d is not null order by d"#, r#"2023-12-31,2|2024-01-01,2|2024-01-15,3|2024-02-29,2|2024-03-01,2"#),
         (r#"select d, count(*) over (order by d desc range between interval 14 days preceding and current row) from t where d is not null order by d"#, r#"2023-12-31,2|2024-01-01,2|2024-01-15,1|2024-02-29,2|2024-03-01,1"#),
         (r#"select id, sum(v) over (order by id range between current row and 1 following) from t where id < 4 order by id"#, r#"1,30|2,50|3,30"#),
+    ]);
+}
+
+/// COUNT / SUM / MIN / MAX of integers are integers (cast to text shows it).
+#[test]
+fn integer_aggregates_stay_integers() {
+    check(&[
+        (r#"select cast(sum(v) as string), cast(count(*) as string), cast(min(v) as string), cast(max(id) as string) from t"#, r#"170,6,10,6"#),
+        (r#"select g, cast(sum(v) as string), cast(count(*) as string) from t group by g order by g"#, r#"NULL,60,1|x,30,2|y,30,2|z,50,1"#),
+        (r#"select cast(sum(f) as string), cast(avg(v) as string) from t"#, r#"4.5,34.0"#),
+        (r#"select cast(sum(v) as string) from t where id > 100"#, r#"NULL"#),
+        (r#"select cast(count(distinct g) as string) from t"#, r#"3"#),
     ]);
 }
 

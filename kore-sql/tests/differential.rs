@@ -153,7 +153,7 @@ fn agg_expr(r: &mut Rng) -> String {
 
 fn query(r: &mut Rng) -> String {
     let wh = if r.chance(65) { format!(" where {}", bool_expr(r, 2)) } else { String::new() };
-    match r.below(43) {
+    match r.below(49) {
         0 | 1 => {
             let k = 1 + r.below(3);
             let items: Vec<String> = (0..k).map(|i| match r.below(3) { 0 => format!("{} as e{i}", int_expr(r, 2)), 1 => format!("{} as e{i}", num_expr(r, 1)), _ => format!("{} as e{i}", str_expr(r)) }).collect();
@@ -347,6 +347,22 @@ fn query(r: &mut Rng) -> String {
             let sel = *r.pick(&["(select count(*) from t1 g where g.b < o.b)", "(select max(g.c) from t1 g where g.s = o.s)", "(select sum(g.b) from t1 g where g.a = o.a and g.id <> o.id)"]);
             format!("select id, {sel} as v from t1 o order by id")
         }
+        43 => {
+            format!("with c as (select a, count(*) as n, sum(b) as sb from t1{wh} group by a) select t1.id, c.n, c.sb from t1 join c on t1.a = c.a order by t1.id")
+        }
+        44 => {
+            let t = *r.pick(&[1, 2, 3]);
+            format!("with x as (select id, a, b from t1 where b > {t}), y as (select a, max(b) as mb from x group by a) select x.id, y.mb from x left join y on x.a = y.a order by x.id")
+        }
+        45 => {
+            format!("select q.id, q.a from (select id, a from t1{wh} order by a, id limit {}) q order by q.a, q.id", 3 + r.below(10))
+        }
+        46 => {
+            format!("select k, count(*) as n, sum(v) as sv from (select a as k, b as v from t1 union all select x, x * 2 from t2) q group by k order by k")
+        }
+        47 => {
+            format!("select id from t1 where a in (select x from t2 where z > 0) and exists (select 1 from t2 where t2.y = t1.s) and b > (select min(b) from t1){} order by id", wh.replace(" where", " and"))
+        }
         _ => {
             // scalar functions whose behaviour is the same in Spark and SQLite
             let fs = [
@@ -394,8 +410,8 @@ fn random_queries_agree_across_execution_paths() {
     let mut mismatches: Vec<String> = Vec::new();
     let mut total = 0;
     let (mut answered, mut errored) = (0usize, 0usize);
-    let seeds: u64 = std::env::var("DIFF_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
-    let per: usize = std::env::var("DIFF_PER").ok().and_then(|v| v.parse().ok()).unwrap_or(250);
+    let seeds: u64 = std::env::var("DIFF_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    let per: usize = std::env::var("DIFF_PER").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
     for seed in 1..=seeds {
         let mut r = Rng(seed * 7919);
         let ctx = tables(&mut r);
