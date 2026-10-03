@@ -34,7 +34,9 @@ impl HashJoin {
         // ── Fallback: generic JoinKey path (handles Str/Bool/Null keys) ────────
         let mut table: HashMap<JoinKey, Vec<usize>> = HashMap::with_capacity(right.num_rows);
         for i in 0..right.num_rows {
-            let key = right.join_key(i, &cfg.right_key)?;
+            let key = join_key(right, i, &cfg.right_key)?;
+            // a NULL key equals nothing, not even another NULL
+            if key == JoinKey::Null { continue; }
             table.entry(key).or_default().push(i);
         }
         let table = Arc::new(table);
@@ -51,8 +53,9 @@ impl HashJoin {
                 if start >= end { return vec![]; }
                 let mut pairs: Vec<(Option<usize>, Option<usize>)> = Vec::new();
                 for l in start..end {
-                    if let Ok(key) = left.join_key(l, &cfg.left_key) {
-                        if let Some(right_rows) = table.get(&key) {
+                    if let Ok(key) = join_key(left, l, &cfg.left_key) {
+                        let hit = if key == JoinKey::Null { None } else { table.get(&key) };
+                        if let Some(right_rows) = hit {
                             for &r in right_rows { pairs.push((Some(l), Some(r))); }
                         } else if matches!(cfg.join_type, JoinType::Left | JoinType::Full) {
                             pairs.push((Some(l), None));
@@ -117,6 +120,9 @@ impl HashJoin {
                             e = table.next[e as usize];
                         }
                     }
+                } else if keep_unmatched {
+                    // a NULL key matches nothing, but an outer join still keeps the row
+                    pi.push(p as u32); bi.push(NONE);
                 }
             }
             (pi, bi)
@@ -268,6 +274,20 @@ fn gather(src: &kore_core::ColumnData, idx: &[u32]) -> kore_core::ColumnData {
     }
 }
 
+/// Join key of a cell. Floats are comparable (an integral float equals the same integer, so a DOUBLE key can
+/// join a BIGINT key); NULL stays `JoinKey::Null`, which never matches.
+fn join_key(block: &DataBlock, row: usize, col: &str) -> Result<JoinKey, KoreError> {
+    let c = block.column(col).ok_or_else(|| KoreError::ColumnNotFound(col.into()))?;
+    Ok(match c.data.get_value(row) {
+        kore_core::Value::Float(f) => {
+            if f.is_nan() { JoinKey::Null }
+            else if f.fract() == 0.0 && f.abs() < 9.0e15 { JoinKey::Int(f as i64) }
+            else { JoinKey::Str(format!("float#{:?}", f)) }
+        }
+        v => JoinKey::from(&v),
+    })
+}
+
 /// Materialise a DataBlock from (left_idx | None, right_idx | None) pairs.
 /// Uses bulk column-at-a-time copy — replaces 102M per-row virtual dispatch
 /// calls with tight indexed iterator chains that LLVM can vectorize.
@@ -368,5 +388,30 @@ mod tests {
         let cfg = JoinConfig::new("id", "id", JoinType::Full);
         let result = HashJoin::join(&l, &r, &cfg).unwrap();
         assert_eq!(result.num_rows, 4); // alice(unmatched) + bob+carol(matched) + 4(unmatched)
+    }
+
+    #[test]
+    fn null_keys_never_match_but_outer_joins_keep_the_row() {
+        // integer keys (fast path)
+        let l = DataBlock::new(vec![Column::int64("k", vec![Some(1), None, Some(3)])]).unwrap();
+        let r = DataBlock::new(vec![Column::int64("k", vec![None, Some(3)]), Column::int64("v", vec![Some(10), Some(30)])]).unwrap();
+        assert_eq!(HashJoin::join(&l, &r, &JoinConfig::inner("k", "k")).unwrap().num_rows, 1);
+        // LEFT keeps the NULL-key row and the unmatched row: 1 -> none, NULL -> none, 3 -> 30
+        assert_eq!(HashJoin::join(&l, &r, &JoinConfig::left("k", "k")).unwrap().num_rows, 3);
+        // string keys (generic path): NULL = NULL is not a match
+        let l = DataBlock::new(vec![Column::str_col("k", vec![Some("a".into()), None])]).unwrap();
+        let r = DataBlock::new(vec![Column::str_col("k", vec![None, Some("a".into())])]).unwrap();
+        assert_eq!(HashJoin::join(&l, &r, &JoinConfig::inner("k", "k")).unwrap().num_rows, 1);
+        assert_eq!(HashJoin::join(&l, &r, &JoinConfig::new("k", "k", JoinType::Full)).unwrap().num_rows, 3);
+    }
+
+    #[test]
+    fn float_keys_join_on_value_and_against_integers() {
+        let l = DataBlock::new(vec![Column::float64("k", vec![Some(1.0), Some(2.5), Some(3.0)])]).unwrap();
+        let r = DataBlock::new(vec![Column::float64("k", vec![Some(2.5), Some(9.0)])]).unwrap();
+        // previously every float key hashed to NULL, which made this a cross join
+        assert_eq!(HashJoin::join(&l, &r, &JoinConfig::inner("k", "k")).unwrap().num_rows, 1);
+        let ri = DataBlock::new(vec![Column::int64("k", vec![Some(1), Some(3)])]).unwrap();
+        assert_eq!(HashJoin::join(&l, &ri, &JoinConfig::inner("k", "k")).unwrap().num_rows, 2);
     }
 }

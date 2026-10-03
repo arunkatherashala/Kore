@@ -17,7 +17,7 @@ pub enum Token {
     Over, Partition, Rows, Range, Unbounded, Preceding, Following, Current,
     // ─── Punctuation / operators ──────────────────────────────────
     Star, Comma, Dot, LParen, RParen, Semicolon,
-    Eq, Ne, Lt, Le, Gt, Ge, Plus, Minus, Slash, Percent,
+    Eq, Ne, Lt, Le, Gt, Ge, Plus, Minus, Slash, Percent, NullSafeEq, Ampersand, Pipe, Caret, Tilde,
     Concat,  // ||
     LBracket, RBracket,  // [ ]
     // ─── Literals ─────────────────────────────────────────────────
@@ -89,6 +89,7 @@ impl Lexer {
         Ok(match c {
             '*'  => { self.pos += 1; Token::Star }
             ','  => { self.pos += 1; Token::Comma }
+            '.'  if self.peek2().map_or(false, |c| c.is_ascii_digit()) => self.read_number()?,
             '.'  => { self.pos += 1; Token::Dot }
             '('  => { self.pos += 1; Token::LParen }
             ')'  => { self.pos += 1; Token::RParen }
@@ -115,32 +116,75 @@ impl Lexer {
             '%'  => { self.pos += 1; Token::Percent }
             '['  => { self.pos += 1; Token::LBracket }
             ']'  => { self.pos += 1; Token::RBracket }
-            '='  => { self.pos += 1; Token::Eq }
+            '='  => { self.pos += 1; if self.peek() == Some('=') { self.pos += 1; } Token::Eq }
             '!'  if self.peek2() == Some('=') => { self.pos += 2; Token::Ne }
-            '<'  => { if self.peek2() == Some('=') { self.pos += 2; Token::Le }
+            '<'  => { if self.peek2() == Some('=') && self.chars.get(self.pos + 2).copied() == Some('>') { self.pos += 3; Token::NullSafeEq }
+                      else if self.peek2() == Some('=') { self.pos += 2; Token::Le }
                       else if self.peek2() == Some('>') { self.pos += 2; Token::Ne }  // <> = !=
                       else { self.pos += 1; Token::Lt } }
             '>'  => { if self.peek2() == Some('=') { self.pos += 2; Token::Ge }
                       else { self.pos += 1; Token::Gt } }
-            '\'' => self.read_str()?,
+            '\'' => self.read_str('\'')?,
+            // Spark: "abc" is a string literal; `abc` is a quoted identifier
+            '"'  => self.read_str('"')?,
+            '`'  => self.read_quoted_ident()?,
             '|' if self.peek2() == Some('|') => { self.pos += 2; Token::Concat }
+            '|'  => { self.pos += 1; Token::Pipe }
+            '&'  => { self.pos += 1; Token::Ampersand }
+            '^'  => { self.pos += 1; Token::Caret }
+            '~'  => { self.pos += 1; Token::Tilde }
             c if c.is_ascii_digit() => self.read_number()?,
             c if c.is_alphabetic() || c == '_' => self.read_ident(),
             other => return Err(KoreError::InvalidArgument(format!("unexpected char {:?} at pos {}", other, self.pos))),
         })
     }
 
-    fn read_str(&mut self) -> Result<Token, KoreError> {
-        self.pos += 1; // skip opening '
+    fn read_str(&mut self, quote: char) -> Result<Token, KoreError> {
+        self.pos += 1; // skip opening quote
         let mut s = String::new();
         loop {
             match self.peek() {
                 None => return Err(KoreError::InvalidArgument("unterminated string".into())),
-                Some('\'') => { self.pos += 1; break; }
+                Some(c) if c == quote => {
+                    // a doubled quote is an escaped quote
+                    if self.peek2() == Some(quote) { s.push(quote); self.pos += 2; continue; }
+                    self.pos += 1;
+                    break;
+                }
+                Some('\\') => {
+                    // Spark escapes; \% and \_ keep their backslash so LIKE can still see them
+                    match self.peek2() {
+                        Some('n') => { s.push('\n'); self.pos += 2; }
+                        Some('t') => { s.push('\t'); self.pos += 2; }
+                        Some('r') => { s.push('\r'); self.pos += 2; }
+                        Some('0') => { s.push('\0'); self.pos += 2; }
+                        Some('\'') => { s.push('\''); self.pos += 2; }
+                        Some('"') => { s.push('"'); self.pos += 2; }
+                        Some('\\') => { s.push('\\'); self.pos += 2; }
+                        _ => { s.push('\\'); self.pos += 1; }
+                    }
+                }
                 Some(c) => { s.push(c); self.pos += 1; }
             }
         }
         Ok(Token::Str(s))
+    }
+
+    fn read_quoted_ident(&mut self) -> Result<Token, KoreError> {
+        self.pos += 1;
+        let mut s = String::new();
+        loop {
+            match self.peek() {
+                None => return Err(KoreError::InvalidArgument("unterminated quoted identifier".into())),
+                Some('`') => {
+                    if self.peek2() == Some('`') { s.push('`'); self.pos += 2; continue; }
+                    self.pos += 1;
+                    break;
+                }
+                Some(c) => { s.push(c); self.pos += 1; }
+            }
+        }
+        Ok(Token::Ident(s))
     }
 
     fn read_number(&mut self) -> Result<Token, KoreError> {
@@ -158,6 +202,18 @@ impl Lexer {
             while self.peek().map_or(false, |c| c.is_ascii_digit()) { self.pos += 1; }
         }
         let s: String = self.chars[start..self.pos].iter().collect();
+        // Spark literal suffixes: 10L, 1.5D, 2F, 3Y, 4S, 1.5BD
+        let suffix_end = {
+            let mut e = self.pos;
+            while self.chars.get(e).map_or(false, |c| c.is_ascii_alphabetic()) { e += 1; }
+            e
+        };
+        let suffix: String = self.chars[self.pos..suffix_end].iter().collect::<String>().to_ascii_uppercase();
+        let next_ok = !self.chars.get(suffix_end).map_or(false, |c| c.is_alphanumeric() || *c == '_');
+        if next_ok && matches!(suffix.as_str(), "L" | "Y" | "S" | "D" | "F" | "BD") {
+            self.pos = suffix_end;
+            if matches!(suffix.as_str(), "D" | "F" | "BD") { is_float = true; }
+        }
         if is_float {
             s.parse::<f64>()
              .map(Token::Float)

@@ -1,0 +1,1247 @@
+//! Spark SQL coverage regression tests.
+//!
+//! Every case is `(sql, expected)`: rows are `|` separated, cells `,` separated, NULL prints as `NULL`,
+//! floats are printed with at most 6 decimals, `ERR` means the statement must be rejected (unsupported
+//! syntax has to be an error, never a silently wrong answer), and a leading `~` compares rows as a set.
+//! Expected values were worked out by hand from standard SQL / Spark SQL semantics.
+
+use kore_core::{Column, ColumnData, DataBlock};
+use kore_sql::KqlContext;
+
+fn s(v: &[Option<&str>]) -> Vec<Option<String>> { v.iter().map(|x| x.map(|y| y.to_string())).collect() }
+
+fn ctx() -> KqlContext {
+    let mut c = KqlContext::new();
+    c.register("t", DataBlock::new(vec![
+        Column::int64("id", (1..=6).map(Some).collect()),
+        Column::str_col("g", s(&[Some("x"), Some("x"), Some("y"), Some("y"), Some("z"), None])),
+        Column::int64("v", vec![Some(10), Some(20), Some(30), None, Some(50), Some(60)]),
+        Column::str_col("s", s(&[Some("Hello"), Some("  pad "), Some("abc"), None, Some("a,b,c"), Some("World")])),
+        Column::float64("f", vec![Some(1.5), Some(2.5), Some(-3.5), None, Some(4.0), Some(0.0)]),
+        Column::str_col("d", s(&[Some("2024-01-15"), Some("2024-02-29"), Some("2023-12-31"), None, Some("2024-03-01"), Some("2024-01-01")])),
+    ]).unwrap());
+    c.register("u", DataBlock::new(vec![
+        Column::int64("id", vec![Some(1), Some(2), Some(2), Some(7)]),
+        Column::str_col("w", s(&[Some("p"), Some("q"), Some("r"), Some("s")])),
+    ]).unwrap());
+    c.register("nn", DataBlock::new(vec![Column::int64("x", vec![Some(1), Some(2), None])]).unwrap());
+    c.register("e", DataBlock::new(vec![
+        Column::int64("a", vec![]),
+        Column::str_col("b", vec![]),
+        Column::float64("c", vec![]),
+    ]).unwrap());
+    c
+}
+
+fn render(b: &DataBlock) -> String {
+    let n = b.columns.first().map(|c| c.data.len()).unwrap_or(0);
+    let mut rows = vec![];
+    for r in 0..n {
+        let cells: Vec<String> = b.columns.iter().map(|c| match &c.data {
+            ColumnData::Int64(v) => v[r].map(|x| x.to_string()).unwrap_or("NULL".into()),
+            ColumnData::Float64(v) => v[r].map(|x| {
+                let t = format!("{:.6}", x);
+                let t = t.trim_end_matches('0').trim_end_matches('.').to_string();
+                if t.is_empty() || t == "-0" { "0".into() } else { t }
+            }).unwrap_or("NULL".into()),
+            ColumnData::Bool(v) => v[r].map(|x| x.to_string()).unwrap_or("NULL".into()),
+            ColumnData::Str(v) => v[r].clone().unwrap_or("NULL".into()),
+            ColumnData::StrDict { codes, dict } => if codes[r] == u8::MAX { "NULL".into() } else { dict[codes[r] as usize].clone() },
+        }).collect();
+        rows.push(cells.join(","));
+    }
+    rows.join("|")
+}
+
+fn check(cases: &[(&str, &str)]) {
+    let c = ctx();
+    let mut failures = Vec::new();
+    for (sql, exp) in cases {
+        let actual = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.query(sql)));
+        let act = match actual {
+            Ok(Ok(b)) => render(&b),
+            Ok(Err(e)) => format!("ERR({e})"),
+            Err(_) => "PANIC".to_string(),
+        };
+        let (sorted, exp) = match exp.strip_prefix('~') { Some(e) => (true, e), None => (false, *exp) };
+        let norm = |x: &str| if sorted { let mut v: Vec<&str> = x.split('|').collect(); v.sort(); v.join("|") } else { x.to_string() };
+        let ok = if exp == "ERR" { act.starts_with("ERR") } else { norm(&act) == norm(exp) };
+        if !ok { failures.push(format!("{sql}\n    expected {exp}\n    actual   {act}")); }
+    }
+    assert!(failures.is_empty(), "{} of {} cases failed:\n{}", failures.len(), cases.len(), failures.join("\n"));
+}
+
+/// BIGINT values beyond 2^53 stay exact; JOIN (VALUES ...)
+#[test]
+fn int_precision() {
+    check(&[
+        (r#"select cast(sum(n) as string), cast(min(n) as string), cast(max(n) as string) from (values (9007199254740993), (1), (9007199254740995)) q(n)"#, r#"18014398509481989,1,9007199254740995"#),
+        (r#"select n, count(*) from (values (9007199254740993), (9007199254740992), (9007199254740993)) q(n) group by n order by n"#, r#"9007199254740992,1|9007199254740993,2"#),
+        (r#"select count(distinct n) from (values (9007199254740993), (9007199254740992)) q(n)"#, r#"2"#),
+        (r#"select n from (values (9007199254740993), (9007199254740992)) q(n) order by n desc"#, r#"9007199254740993|9007199254740992"#),
+        (r#"select a.n, b.n from (values (9007199254740993), (9007199254740992)) a(n) join (values (9007199254740992)) b(n) on a.n = b.n"#, r#"9007199254740992,9007199254740992"#),
+        (r#"select n + 1, n * 2 from (values (9007199254740993)) q(n)"#, r#"9007199254740994,18014398509481986"#),
+        (r#"select cast(sum(n) as string) from (values (4611686018427387904), (4611686018427387904)) q(n)"#, r#"-9223372036854775808"#),
+        (r#"select n = 9007199254740992, n > 9007199254740992 from (values (9007199254740993)) q(n)"#, r#"false,true"#),
+        (r#"select sum(n) over (order by n rows unbounded preceding) s from (values (9007199254740993), (1)) q(n) order by s"#, r#"1|9007199254740994"#),
+        (r#"select avg(n) from (values (9007199254740993), (9007199254740993)) q(n)"#, r#"9007199254740992"#),
+    ]);
+}
+
+/// Inputs found by mutation fuzzing that used to crash the engine.
+#[test]
+fn malformed_input_is_an_error_not_a_panic() {
+    check(&[
+        (r#"select count() from t"#, r#"ERR"#),
+        (r#"select sum() over () from t"#, r#"ERR"#),
+        (r#"select id, count() over (order by id) from t"#, r#"ERR"#),
+        (r#"select * from (values (1), (1, 2)) q"#, r#"ERR"#),
+        (r#"select s, count(*) from (values ('a'), - (null), ('')) q(s) group by s"#, r#"ERR"#),
+        (r#"select * from (values (1, 2), (3, 4)) q(a, b) where a > 1"#, r#"3,4"#),
+    ]);
+}
+
+/// String, regexp and conditional functions.
+#[test]
+fn strings_regex_conditionals() {
+    check(&[
+        (r#"select substr(s,2,3) from t where id=1"#, r#"ell"#),
+        (r#"select substring(s,2) from t where id=1"#, r#"ello"#),
+        (r#"select substring(s from 2 for 2) from t where id=1"#, r#"el"#),
+        (r#"select substr(s,-3) from t where id=1"#, r#"llo"#),
+        (r#"select concat(s,'-',g) from t where id=1"#, r#"Hello-x"#),
+        (r#"select concat(s,'-',g) from t where id=4"#, r#"NULL"#),
+        (r#"select s || '!' from t where id=1"#, r#"Hello!"#),
+        (r#"select concat_ws(',', g, s) from t where id=6"#, r#"World"#),
+        (r#"select upper(s), lower(s) from t where id=1"#, r#"HELLO,hello"#),
+        (r#"select trim(s) from t where id=2"#, r#"pad"#),
+        (r#"select rtrim(s) from t where id=2"#, r#"  pad"#),
+        (r#"select replace(s,'l','L') from t where id=1"#, r#"HeLLo"#),
+        (r#"select length(s) from t where id=1"#, r#"5"#),
+        (r#"select char_length(s) from t where id=1"#, r#"5"#),
+        (r#"select lpad(s,8,'*') from t where id=1"#, r#"***Hello"#),
+        (r#"select rpad(s,8,'*') from t where id=1"#, r#"Hello***"#),
+        (r#"select lpad(s,3,'*') from t where id=1"#, r#"Hel"#),
+        (r#"select reverse(s) from t where id=1"#, r#"olleH"#),
+        (r#"select instr(s,'l') from t where id=1"#, r#"3"#),
+        (r#"select locate('l',s) from t where id=1"#, r#"3"#),
+        (r#"select position('l' in s) from t where id=1"#, r#"3"#),
+        (r#"select left(s,2), right(s,2) from t where id=1"#, r#"He,lo"#),
+        (r#"select repeat('ab',3) from t where id=1"#, r#"ababab"#),
+        (r#"select initcap('hello world') from t where id=1"#, r#"Hello World"#),
+        (r#"select ascii('A') from t where id=1"#, r#"65"#),
+        (r#"select chr(66) from t where id=1"#, r#"B"#),
+        (r#"select startswith(s,'He') from t where id=1"#, r#"true"#),
+        (r#"select contains(s,'ell') from t where id=1"#, r#"true"#),
+        (r#"select s like '%l_o' from t where id=1"#, r#"true"#),
+        (r#"select s ilike 'hello' from t where id=1"#, r#"true"#),
+        (r#"select s rlike '^H.*o$' from t where id=1"#, r#"true"#),
+        (r#"select regexp_replace(s,'[aeiou]','#') from t where id=1"#, r#"H#ll#"#),
+        (r#"select regexp_extract(s,'(l+)(o)',2) from t where id=1"#, r#"o"#),
+        (r#"select regexp_extract(s,'(l+)',1) from t where id=1"#, r#"ll"#),
+        (r#"select regexp_like(s,'^H') from t where id=1"#, r#"true"#),
+        (r#"select split(s,',')[1] from t where id=5"#, r#"b"#),
+        (r#"select split_part(s,',',2) from t where id=5"#, r#"b"#),
+        (r#"select translate(s,'el','ip') from t where id=1"#, r#"Hippo"#),
+        (r#"select substr(s,0,2) from t where id=1"#, r#"He"#),
+        (r#"select md5('a') from t where id=1"#, r#"0cc175b9c0f1b6a831c399e269772661"#),
+        (r#"select format_string('%d-%s', id, g) from t where id=1"#, r#"1-x"#),
+        (r#"select ifnull(s,'z') from t where id=4"#, r#"z"#),
+        (r#"select nvl(s,'z') from t where id=4"#, r#"z"#),
+        (r#"select coalesce(s,g,'q') from t where id=4"#, r#"y"#),
+        (r#"select coalesce(s,g,'q') from t where id=6"#, r#"World"#),
+        (r#"select nullif(g,'x') from t where id<=3 order by id"#, r#"NULL|NULL|y"#),
+        (r#"select if(v>15,'big','small') from t where id<=2 order by id"#, r#"small|big"#),
+        (r#"select case when v is null then 'n' when v>25 then 'hi' else 'lo' end from t order by id"#, r#"lo|lo|hi|n|hi|hi"#),
+        (r#"select case g when 'x' then 1 when 'y' then 2 end from t order by id"#, r#"1|1|2|2|NULL|NULL"#),
+        (r#"select nvl2(v,1,0) from t order by id"#, r#"1|1|1|0|1|1"#),
+        (r#"select greatest(1,5,3), least(4,2,9) from t where id=1"#, r#"5,2"#),
+        (r#"select greatest(v,25) from t order by id"#, r#"25|25|30|25|50|60"#),
+        (r#"select 'a' = 'A' from t where id=1"#, r#"false"#),
+        (r#"select s from t where s like 'a%' order by s"#, r#"a,b,c|abc"#),
+        (r#"select upper(s) from t where id=4"#, r#"NULL"#),
+        (r#"select concat('a', null) from t where id=1"#, r#"NULL"#),
+        (r#"select 1 + null from t where id=1"#, r#"NULL"#),
+        (r#"select lower(trim(s)) from t where id=2"#, r#"pad"#),
+        (r#"select trim(both 'x' from 'xxaxx') from t where id=1"#, r#"a"#),
+        (r#"select substr(s, 2, 100) from t where id=1"#, r#"ello"#),
+        (r#"select overlay('abcdef' placing 'XY' from 2 for 2) from t where id=1"#, r#"aXYdef"#),
+        (r#"select levenshtein('kitten','sitting') from t where id=1"#, r#"3"#),
+        (r#"select base64('hi') from t where id=1"#, r#"aGk="#),
+        (r#"select hex(255) from t where id=1"#, r#"FF"#),
+        (r#"select sha2('a',256) from t where id=1"#, r#"ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"#),
+    ]);
+}
+
+/// Date/time arithmetic, CAST corner cases and math functions.
+#[test]
+fn dates_casts_math() {
+    check(&[
+        (r#"select date_add('2024-01-31', 1) from t where id=1"#, r#"2024-02-01"#),
+        (r#"select date_sub('2024-03-01', 1) from t where id=1"#, r#"2024-02-29"#),
+        (r#"select datediff('2024-03-01','2024-02-01') from t where id=1"#, r#"29"#),
+        (r#"select year('2024-03-05'), month('2024-03-05'), day('2024-03-05') from t where id=1"#, r#"2024,3,5"#),
+        (r#"select dayofmonth('2024-03-05'), dayofweek('2024-03-05'), dayofyear('2024-03-05'), quarter('2024-03-05') from t where id=1"#, r#"5,3,65,1"#),
+        (r#"select last_day('2024-02-10') from t where id=1"#, r#"2024-02-29"#),
+        (r#"select add_months('2024-01-31', 1) from t where id=1"#, r#"2024-02-29"#),
+        (r#"select dateadd('month', 1, '2024-01-31') from t where id=1"#, r#"2024-02-29"#),
+        (r#"select dateadd('year', 1, '2024-02-29') from t where id=1"#, r#"2025-02-28"#),
+        (r#"select to_date('2024-03-05') from t where id=1"#, r#"2024-03-05"#),
+        (r#"select date_format('2024-03-05','yyyy/MM/dd') from t where id=1"#, r#"2024/03/05"#),
+        (r#"select weekofyear('2024-03-05') from t where id=1"#, r#"10"#),
+        (r#"select months_between('2024-03-31','2024-02-29') from t where id=1"#, r#"1"#),
+        (r#"select date '2024-01-31' + interval 1 day from t where id=1"#, r#"2024-02-01"#),
+        (r#"select date '2024-01-31' + interval '1' month from t where id=1"#, r#"2024-02-29"#),
+        (r#"select cast('2024-03-05' as date) from t where id=1"#, r#"2024-03-05"#),
+        (r#"select year(d) from t where id=3"#, r#"2023"#),
+        (r#"select count(*) from t where d >= '2024-01-01'"#, r#"4"#),
+        (r#"select id from t where d between '2024-01-01' and '2024-02-29' order by id"#, r#"1|2|6"#),
+        (r#"select extract(year from d), extract(month from d) from t where id=2"#, r#"2024,2"#),
+        (r#"select datediff(d, '2024-01-01') from t where id=2"#, r#"59"#),
+        (r#"select date_add(d, 1) from t where id=2"#, r#"2024-03-01"#),
+        (r#"select year(d) from t where id=4"#, r#"NULL"#),
+        (r#"select datediff('2024-03-01', null) from t where id=1"#, r#"NULL"#),
+        (r#"select next_day('2024-03-05','Mon') from t where id=1"#, r#"2024-03-11"#),
+        (r#"select make_date(2024,3,5) from t where id=1"#, r#"2024-03-05"#),
+        (r#"select unix_timestamp('1970-01-02') from t where id=1"#, r#"86400"#),
+        (r#"select hour('2024-03-05 13:45:10'), minute('2024-03-05 13:45:10'), second('2024-03-05 13:45:10') from t where id=1"#, r#"13,45,10"#),
+        (r#"select cast('12' as int) from t where id=1"#, r#"12"#),
+        (r#"select cast(1.9 as int) from t where id=1"#, r#"1"#),
+        (r#"select cast(-1.9 as int) from t where id=1"#, r#"-1"#),
+        (r#"select cast('abc' as int) from t where id=1"#, r#"NULL"#),
+        (r#"select cast(5 as string) from t where id=1"#, r#"5"#),
+        (r#"select cast(2.0 as string) from t where id=1"#, r#"2.0"#),
+        (r#"select cast(1 as double) from t where id=1"#, r#"1"#),
+        (r#"select cast('1.5' as double) from t where id=1"#, r#"1.5"#),
+        (r#"select cast(1 as boolean) from t where id=1"#, r#"true"#),
+        (r#"select cast(0 as boolean) from t where id=1"#, r#"false"#),
+        (r#"select cast('true' as boolean) from t where id=1"#, r#"true"#),
+        (r#"select cast('x' as boolean) from t where id=1"#, r#"NULL"#),
+        (r#"select cast(3.7 as bigint) from t where id=1"#, r#"3"#),
+        (r#"select cast(v as double) / 4 from t where id=1"#, r#"2.5"#),
+        (r#"select cast(123.456 as decimal(10,2)) from t where id=1"#, r#"123.46"#),
+        (r#"select cast(true as int) from t where id=1"#, r#"1"#),
+        (r#"select cast(null as int) from t where id=1"#, r#"NULL"#),
+        (r#"select cast(v as string) || 'x' from t where id=1"#, r#"10x"#),
+        (r#"select try_cast('abc' as int) from t where id=1"#, r#"NULL"#),
+        (r#"select cast(' 12 ' as int) from t where id=1"#, r#"12"#),
+        (r#"select cast('12abc' as int) from t where id=1"#, r#"NULL"#),
+        (r#"select id from t where id = '2'"#, r#"2"#),
+        (r#"select '5' + 1 from t where id=1"#, r#"6"#),
+        (r#"select cast(1 as tinyint) from t where id=1"#, r#"1"#),
+        (r#"select cast(12 as string) = '12' from t where id=1"#, r#"true"#),
+        (r#"select round(2.5), round(-2.5), round(1.2345,2) from t where id=1"#, r#"3,-3,1.23"#),
+        (r#"select bround(2.5) from t where id=1"#, r#"2"#),
+        (r#"select floor(2.5), ceil(2.5), floor(-2.5), ceil(-2.5) from t where id=1"#, r#"2,3,-3,-2"#),
+        (r#"select mod(7,3), 7 % 3, -7 % 3, pmod(-7,3) from t where id=1"#, r#"1,1,-1,2"#),
+        (r#"select 7/2, 7 div 2, 6/2 from t where id=1"#, r#"3.5,3,3"#),
+        (r#"select 1/0 from t where id=1"#, r#"NULL"#),
+        (r#"select mod(7,0) from t where id=1"#, r#"NULL"#),
+        (r#"select abs(-3), abs(-2.5) from t where id=1"#, r#"3,2.5"#),
+        (r#"select power(2,10), sqrt(16), exp(0), ln(1) from t where id=1"#, r#"1024,4,1,0"#),
+        (r#"select log(10,100) from t where id=1"#, r#"2"#),
+        (r#"select log2(8), log10(1000) from t where id=1"#, r#"3,3"#),
+        (r#"select sign(-5), sign(0), sign(2.5) from t where id=1"#, r#"-1,0,1"#),
+        (r#"select 2 * 3 + 4 * 5, (2+3)*4, 10 - 3 - 2 from t where id=1"#, r#"26,20,5"#),
+        (r#"select 7 / 2 * 2 from t where id=1"#, r#"7"#),
+        (r#"select -v, +v from t where id=1"#, r#"-10,10"#),
+        (r#"select v + f from t where id=1"#, r#"11.5"#),
+        (r#"select sum(v) / count(v) from t"#, r#"34"#),
+        (r#"select id, v * 2 from t where id in (3,4) order by id"#, r#"3,60|4,NULL"#),
+        (r#"select factorial(5) from t where id=1"#, r#"120"#),
+        (r#"select hypot(3,4) from t where id=1"#, r#"5"#),
+        (r#"select atan2(0,1), sinh(0), cosh(0), tanh(0), asin(0), acos(1), atan(0) from t where id=1"#, r#"0,0,1,0,0,0,0"#),
+        (r#"select ceil(2.1) + 1 from t where id=1"#, r#"4"#),
+        (r#"select least(v, 15) from t order by id"#, r#"10|15|15|15|15|15"#),
+        (r#"select width_bucket(5, 0, 10, 5) from t where id=1"#, r#"3"#),
+        (r#"select shiftleft(1,3), 5 & 3, 5 | 3, 5 ^ 3 from t where id=1"#, r#"8,1,7,6"#),
+        (r#"select 5 between 1 and 10 from t where id=1"#, r#"true"#),
+        (r#"select cbrt(27), degrees(0), radians(0) from t where id=1"#, r#"3,0,0"#),
+    ]);
+}
+
+/// Three-valued logic, NULL ordering, DISTINCT/LIMIT, aggregate families.
+#[test]
+fn null_logic_ordering_aggregates() {
+    check(&[
+        (r#"select v from t order by v"#, r#"NULL|10|20|30|50|60"#),
+        (r#"select v from t order by v desc"#, r#"60|50|30|20|10|NULL"#),
+        (r#"select v from t order by v nulls last"#, r#"10|20|30|50|60|NULL"#),
+        (r#"select v from t order by v desc nulls first"#, r#"NULL|60|50|30|20|10"#),
+        (r#"select v from t order by v asc nulls first"#, r#"NULL|10|20|30|50|60"#),
+        (r#"select g, id from t order by g, id desc"#, r#"NULL,6|x,2|x,1|y,4|y,3|z,5"#),
+        (r#"select count(*) from t where not (v > 15)"#, r#"1"#),
+        (r#"select count(*) from t where not v > 15"#, r#"1"#),
+        (r#"select count(*) from t where v not in (10, null)"#, r#"0"#),
+        (r#"select count(*) from t where v in (10, null)"#, r#"1"#),
+        (r#"select count(*) from t where v not in (10, 20)"#, r#"3"#),
+        (r#"select count(*) from t where s not like 'a%'"#, r#"3"#),
+        (r#"select count(*) from t where v not between 15 and 55"#, r#"2"#),
+        (r#"select count(*) from t where v <> 10"#, r#"4"#),
+        (r#"select count(*) from t where v <=> null"#, r#"1"#),
+        (r#"select count(*) from t where v is distinct from 10"#, r#"5"#),
+        (r#"select count(*) from t where v is not distinct from null"#, r#"1"#),
+        (r#"select (v > 5) or null from t where id=4"#, r#"NULL"#),
+        (r#"select (v > 5) or true from t where id=4"#, r#"true"#),
+        (r#"select (v > 5) and false from t where id=4"#, r#"false"#),
+        (r#"select (v > 5) and true from t where id=4"#, r#"NULL"#),
+        (r#"select not (v > 5) from t where id=4"#, r#"NULL"#),
+        (r#"select count(*) from t where v > 5 or f > 100"#, r#"5"#),
+        (r#"select count(*) from t where v = null"#, r#"0"#),
+        (r#"select count(*) from t where null"#, r#"0"#),
+        (r#"select count(*) from t where not (g = 'x' and v > 15)"#, r#"4"#),
+        (r#"select (case when v > 25 then 'y' end) is null from t where id=1"#, r#"true"#),
+        (r#"select id from t where g in ('x','y') and s is not null order by id"#, r#"1|2|3"#),
+        (r#"select id from t where g not in ('x') order by id"#, r#"3|4|5"#),
+        (r#"select count(*) from t where g in (select g from t where id = 6)"#, r#"0"#),
+        (r#"select true and null from t where id=1"#, r#"NULL"#),
+        (r#"select null is null from t where id=1"#, r#"true"#),
+        (r#"select coalesce(null, null) from t where id=1"#, r#"NULL"#),
+        (r#"select case when null then 1 else 2 end from t where id=1"#, r#"2"#),
+        (r#"select 1 = 1, 1 <> 1, 2 > 1 from t where id=1"#, r#"true,false,true"#),
+        (r#"select v is null as a, v is not null as b from t where id=4"#, r#"true,false"#),
+        (r#"select distinct g from t"#, r#"~x|y|z|NULL"#),
+        (r#"select count(distinct g) from t"#, r#"3"#),
+        (r#"select count(distinct g, v) from t"#, r#"4"#),
+        (r#"select count(distinct v) from t"#, r#"5"#),
+        (r#"select count(*) from (select distinct g, v from t) q"#, r#"6"#),
+        (r#"select id from t order by id limit 2 offset 3"#, r#"4|5"#),
+        (r#"select id from t order by id limit 0"#, r#""#),
+        (r#"select id from t order by id offset 4"#, r#"5|6"#),
+        (r#"select id from t order by id limit 10 offset 10"#, r#""#),
+        (r#"select distinct g, count(*) over () from t"#, r#"~x,6|y,6|z,6|NULL,6"#),
+        (r#"select count(*), count(v), count(g) from t"#, r#"6,5,5"#),
+        (r#"select sum(v), avg(v), min(v), max(v) from t"#, r#"170,34,10,60"#),
+        (r#"select sum(v) from t where id > 100"#, r#"NULL"#),
+        (r#"select count(*) from t where id > 100"#, r#"0"#),
+        (r#"select avg(v) from t where id > 100"#, r#"NULL"#),
+        (r#"select g, sum(v) from t group by 1 order by 1"#, r#"NULL,60|x,30|y,30|z,50"#),
+        (r#"select g as k, sum(v) from t group by k order by k"#, r#"NULL,60|x,30|y,30|z,50"#),
+        (r#"select id, g from t order by 2, 1"#, r#"6,NULL|1,x|2,x|3,y|4,y|5,z"#),
+        (r#"select g, v from t order by v desc limit 2"#, r#"NULL,60|z,50"#),
+        (r#"select id from t order by f desc nulls last limit 1"#, r#"5"#),
+        (r#"select g, sum(v) from t group by g order by sum(v) desc"#, r#"NULL,60|z,50|x,30|y,30"#),
+        (r#"select upper(g), count(*) from t group by upper(g) order by 1"#, r#"NULL,1|X,2|Y,2|Z,1"#),
+        (r#"select g, max(v) - min(v) from t group by g order by g"#, r#"NULL,0|x,10|y,0|z,0"#),
+        (r#"select count(*) from t group by g having count(*) > 1 order by 1"#, r#"2|2"#),
+        (r#"select sum(v) + 1, sum(v + 1) from t"#, r#"171,175"#),
+        (r#"select sum(case when v > 15 then 1 else 0 end) from t"#, r#"4"#),
+        (r#"select max(v) from t where v < 0"#, r#"NULL"#),
+        (r#"select g, count(distinct v) from t group by g order by g"#, r#"NULL,1|x,2|y,1|z,1"#),
+        (r#"select sum(distinct v) from t"#, r#"170"#),
+        (r#"select avg(distinct v) from t"#, r#"34"#),
+        (r#"select count(1) from t"#, r#"6"#),
+        (r#"select count(*) filter (where v > 15), sum(v) filter (where g = 'x') from t"#, r#"4,30"#),
+        (r#"select g, count(*) filter (where v > 15) from t group by g order by g"#, r#"NULL,1|x,1|y,1|z,1"#),
+        (r#"select stddev(v), stddev_samp(v), stddev_pop(v) from t"#, r#"20.736441,20.736441,18.547237"#),
+        (r#"select variance(v), var_samp(v), var_pop(v) from t"#, r#"430,430,344"#),
+        (r#"select percentile(v, 0.5), median(v), percentile_approx(v, 0.5) from t"#, r#"30,30,30"#),
+        (r#"select percentile(v, 0.4) from t"#, r#"26"#),
+        (r#"select percentile_cont(0.25) within group (order by v) from t"#, r#"20"#),
+        (r#"select count_if(v > 15) from t"#, r#"4"#),
+        (r#"select approx_count_distinct(g) from t"#, r#"3"#),
+        (r#"select first(g), last(id) from t"#, r#"x,6"#),
+        (r#"select any_value(g) from t where id=2"#, r#"x"#),
+        (r#"select bool_and(v > 5), bool_or(v > 55) from t"#, r#"true,true"#),
+        (r#"select string_agg(g, ',') from t where id < 3"#, r#"x,x"#),
+        (r#"select max_by(id, v), min_by(id, v) from t"#, r#"6,1"#),
+        (r#"select count(*) from t having count(*) > 3"#, r#"6"#),
+        (r#"select g, sum(v) from t where v is not null group by g having count(*) >= 1 order by g"#, r#"NULL,60|x,30|y,30|z,50"#),
+    ]);
+}
+
+/// CTEs, derived tables, every join kind, subqueries and set operations.
+#[test]
+fn ctes_joins_subqueries_set_operations() {
+    check(&[
+        (r#"with a as (select id from t where id < 3), b as (select id from a where id > 1) select * from b"#, r#"2"#),
+        (r#"with a as (select id, v from t), b as (select id, w from u) select a.id, b.w from a join b on a.id = b.id order by a.id, b.w"#, r#"1,p|2,q|2,r"#),
+        (r#"with a as (select 1 as x from t where id=1) select x from a"#, r#"1"#),
+        (r#"with a as (select id from t) select count(*) from a"#, r#"6"#),
+        (r#"with a as (select g, sum(v) as s from t group by g) select g from a where s > 40 order by g"#, r#"NULL|z"#),
+        (r#"select m from (select max(v) as m from t) x"#, r#"60"#),
+        (r#"select q.g, q.c from (select g, count(*) as c from t group by g) q where q.c > 1 order by q.g"#, r#"x,2|y,2"#),
+        (r#"select * from (select id from (select id from t where id < 4) a where id > 1) b order by id"#, r#"2|3"#),
+        (r#"select a.id from (select id from t) a join (select id from u) b on a.id = b.id order by a.id"#, r#"1|2|2"#),
+        (r#"select id from t where id in (select id from (select id from u) z) order by id"#, r#"1|2"#),
+        (r#"with a as (select id from t where id < 3) select id from a union all select id from u order by id"#, r#"1|1|2|2|2|7"#),
+        (r#"with a as (select id from t) select a.id from a where a.id = 1"#, r#"1"#),
+        (r#"select count(*) from t join u on t.id = u.id"#, r#"3"#),
+        (r#"select count(*) from t inner join u on t.id = u.id"#, r#"3"#),
+        (r#"select t.id, u.w from t left join u on t.id = u.id order by t.id, u.w"#, r#"1,p|2,q|2,r|3,NULL|4,NULL|5,NULL|6,NULL"#),
+        (r#"select t.id, u.w from t right join u on t.id = u.id order by u.w"#, r#"1,p|2,q|2,r|NULL,s"#),
+        (r#"select t.id, u.id from t full join u on t.id = u.id order by t.id, u.id"#, r#"NULL,7|1,1|2,2|2,2|3,NULL|4,NULL|5,NULL|6,NULL"#),
+        (r#"select t.id, u.id from t full outer join u on t.id = u.id order by t.id, u.id"#, r#"NULL,7|1,1|2,2|2,2|3,NULL|4,NULL|5,NULL|6,NULL"#),
+        (r#"select id from t left semi join u on t.id = u.id order by id"#, r#"1|2"#),
+        (r#"select id from t left anti join u on t.id = u.id order by id"#, r#"3|4|5|6"#),
+        (r#"select t.id from t semi join u on t.id = u.id order by 1"#, r#"1|2"#),
+        (r#"select count(*) from t join u using (id)"#, r#"3"#),
+        (r#"select id, w from t join u using (id) order by id, w"#, r#"1,p|2,q|2,r"#),
+        (r#"select count(*) from t natural join u"#, r#"3"#),
+        (r#"select count(*) from t cross join u"#, r#"24"#),
+        (r#"select count(*) from t, u"#, r#"24"#),
+        (r#"select count(*) from t join u on t.id < u.id"#, r#"8"#),
+        (r#"select count(*) from t join u on t.id = u.id and u.w = 'q'"#, r#"1"#),
+        (r#"select t.id, u.w from t left join u on t.id = u.id and u.w = 'q' where t.id <= 3 order by t.id"#, r#"1,NULL|2,q|3,NULL"#),
+        (r#"select count(*) from t a join t b on a.id = b.id + 1"#, r#"5"#),
+        (r#"select a.id, b.id from t a join t b on a.id = b.id and a.id < 3 order by a.id"#, r#"1,1|2,2"#),
+        (r#"select count(*) from t a left join u b on a.id = b.id where b.id is null"#, r#"4"#),
+        (r#"select t.id, u.w from t join u on t.id = u.id where u.w <> 'p' order by u.w"#, r#"2,q|2,r"#),
+        (r#"select count(*) from t left join u on t.id = u.id left join nn on nn.x = t.id"#, r#"7"#),
+        (r#"select u.w, count(*) from t join u on t.id = u.id group by u.w order by u.w"#, r#"p,1|q,1|r,1"#),
+        (r#"select t.g, count(u.w) from t left join u on t.id = u.id group by t.g order by t.g"#, r#"NULL,0|x,3|y,0|z,0"#),
+        (r#"select count(*) from t join nn on t.v = nn.x * 10"#, r#"2"#),
+        (r#"select count(*) from t left join nn on t.id = nn.x"#, r#"6"#),
+        (r#"select id from t where id not in (select x from nn)"#, r#""#),
+        (r#"select id from t where id in (select x from nn) order by id"#, r#"1|2"#),
+        (r#"select id from t where id not in (select x from nn where x is not null) order by id"#, r#"3|4|5|6"#),
+        (r#"select id from t where exists (select 1 from u where u.id = t.id) order by id"#, r#"1|2"#),
+        (r#"select id from t where not exists (select 1 from u where u.id = t.id) order by id"#, r#"3|4|5|6"#),
+        (r#"select id, (select max(w) from u where u.id = t.id) from t where id <= 3 order by id"#, r#"1,p|2,r|3,NULL"#),
+        (r#"select id from t where v > (select avg(v) from t) order by id"#, r#"5|6"#),
+        (r#"select (select count(*) from u) from t where id = 1"#, r#"4"#),
+        (r#"select id, (select count(*) from u where u.id = t.id) c from t where id<=3 order by id"#, r#"1,1|2,2|3,0"#),
+        (r#"select g, sum(v) from t group by g having sum(v) > (select avg(v) from t) order by g"#, r#"NULL,60|z,50"#),
+        (r#"select id from t where v = (select max(v) from t t2 where t2.g = t.g) order by id"#, r#"2|3|5"#),
+        (r#"select id from t where v > (select min(v) from t t2 where t2.g = t.g) order by id"#, r#"2"#),
+        (r#"select id from t where exists (select 1 from u where u.id = t.id and u.w = 'q')"#, r#"2"#),
+        (r#"select id from t where id in (select id from u where w in ('q','s'))"#, r#"2"#),
+        (r#"select count(*) from t where id in (1, 2) and exists (select 1 from nn where nn.x = t.id)"#, r#"2"#),
+        (r#"select id from t where (select count(*) from u where u.id = t.id) > 1"#, r#"2"#),
+        (r#"select id, id in (select id from u) from t where id <= 3 order by id"#, r#"1,true|2,true|3,false"#),
+        (r#"select id from t where v >= all (select x from nn where x is not null) order by id"#, r#"1|2|3|5|6"#),
+        (r#"select id from t where v > any (select x from nn) order by id"#, r#"1|2|3|5|6"#),
+        (r#"select (select id from t where id = 99) from t where id = 1"#, r#"NULL"#),
+        (r#"select id from t where id < 4 union select id from u order by id"#, r#"1|2|3|7"#),
+        (r#"select id from t where id < 4 union all select id from u"#, r#"~1|2|3|1|2|2|7"#),
+        (r#"select id from t where id < 4 union distinct select id from u order by id"#, r#"1|2|3|7"#),
+        (r#"select id from t where id < 4 intersect select id from u order by id"#, r#"1|2"#),
+        (r#"select id from t where id < 4 except select id from u"#, r#"3"#),
+        (r#"select id from t where id < 4 minus select id from u"#, r#"3"#),
+        (r#"select id from u intersect all select id from t where id < 4 order by id"#, r#"1|2"#),
+        (r#"select id from u except all select id from t where id < 4 order by id"#, r#"2|7"#),
+        (r#"select id from u except select id from t where id < 4"#, r#"7"#),
+        (r#"select g from t union select g from t"#, r#"~x|y|z|NULL"#),
+        (r#"select g from t intersect select g from t"#, r#"~x|y|z|NULL"#),
+        (r#"select id from t where id=1 union all select id from t where id=2 union all select id from t where id=3"#, r#"~1|2|3"#),
+        (r#"select id from u union select id from t where id < 3 order by id desc limit 2"#, r#"7|2"#),
+        (r#"(select id from t where id<3) union all (select id from u)"#, r#"~1|2|1|2|2|7"#),
+        (r#"select 1 as x union all select 2"#, r#"1|2"#),
+        (r#"select id, w from u union select id, g from t where id < 3 order by id, w"#, r#"1,p|1,x|2,q|2,r|2,x|7,s"#),
+    ]);
+}
+
+/// Window functions, GROUPING SETS / ROLLUP / CUBE, VALUES, quoting and literals.
+#[test]
+fn windows_grouping_sets_and_syntax() {
+    check(&[
+        (r#"select id, row_number() over (order by id) from t order by id"#, r#"1,1|2,2|3,3|4,4|5,5|6,6"#),
+        (r#"select id, row_number() over (partition by g order by id desc) from t order by id"#, r#"1,2|2,1|3,2|4,1|5,1|6,1"#),
+        (r#"select id, ntile(2) over (order by id) from t order by id"#, r#"1,1|2,1|3,1|4,2|5,2|6,2"#),
+        (r#"select id, ntile(4) over (order by id) from t order by id"#, r#"1,1|2,1|3,2|4,2|5,3|6,4"#),
+        (r#"select id, percent_rank() over (order by id) from t order by id"#, r#"1,0|2,0.2|3,0.4|4,0.6|5,0.8|6,1"#),
+        (r#"select id, cume_dist() over (order by id) from t order by id"#, r#"1,0.166667|2,0.333333|3,0.5|4,0.666667|5,0.833333|6,1"#),
+        (r#"select id, first_value(v) over (order by id rows between 1 preceding and current row) from t order by id"#, r#"1,10|2,10|3,20|4,30|5,NULL|6,50"#),
+        (r#"select id, last_value(v) over (order by id) from t order by id"#, r#"1,10|2,20|3,30|4,NULL|5,50|6,60"#),
+        (r#"select id, last_value(v) over (order by id rows between current row and unbounded following) from t order by id"#, r#"1,60|2,60|3,60|4,60|5,60|6,60"#),
+        (r#"select id, sum(v) over (order by id range between 1 preceding and 1 following) from t order by id"#, r#"1,30|2,60|3,50|4,80|5,110|6,110"#),
+        (r#"select id, sum(v) over (order by id rows between 1 preceding and 1 following) from t order by id"#, r#"1,30|2,60|3,50|4,80|5,110|6,110"#),
+        (r#"select id, sum(v) over w from t window w as (order by id) order by id"#, r#"1,10|2,30|3,60|4,60|5,110|6,170"#),
+        (r#"select id, sum(v) over w, count(*) over w2 from t window w as (order by id), w2 as (partition by g) order by id"#, r#"1,10,2|2,30,2|3,60,2|4,60,2|5,110,1|6,170,1"#),
+        (r#"select id, lag(v, 1, -1) over (order by id) from t order by id"#, r#"1,-1|2,10|3,20|4,30|5,NULL|6,50"#),
+        (r#"select id, lead(v) over (order by id) from t order by id"#, r#"1,20|2,30|3,NULL|4,50|5,60|6,NULL"#),
+        (r#"select id, lead(v, 2) over (order by id) from t order by id"#, r#"1,30|2,NULL|3,50|4,60|5,NULL|6,NULL"#),
+        (r#"select id, rank() over (order by g), dense_rank() over (order by g) from t order by id"#, r#"1,2,2|2,2,2|3,4,3|4,4,3|5,6,4|6,1,1"#),
+        (r#"select g, sum(v), rank() over (order by sum(v) desc) from t group by g"#, r#"~x,30,3|y,30,3|z,50,2|NULL,60,1"#),
+        (r#"select id from t qualify row_number() over (partition by g order by id desc) = 1"#, r#"~2|4|5|6"#),
+        (r#"select id, avg(v) over (partition by g) from t order by id"#, r#"1,15|2,15|3,30|4,30|5,50|6,60"#),
+        (r#"select id, count(*) over () from t order by id"#, r#"1,6|2,6|3,6|4,6|5,6|6,6"#),
+        (r#"select id, sum(v) over (order by id rows unbounded preceding) from t order by id"#, r#"1,10|2,30|3,60|4,60|5,110|6,170"#),
+        (r#"select id, max(v) over (partition by g order by id) from t order by id"#, r#"1,10|2,20|3,30|4,30|5,50|6,60"#),
+        (r#"select id, min(v) over (order by id rows between 2 preceding and current row) from t order by id"#, r#"1,10|2,10|3,10|4,20|5,30|6,50"#),
+        (r#"select id, sum(v) over (order by v range between unbounded preceding and current row) from t order by id"#, r#"1,10|2,30|3,60|4,NULL|5,110|6,170"#),
+        (r#"select id, sum(v) over (order by v desc nulls last range between 10 preceding and 10 following) from t order by id"#, r#"1,30|2,60|3,50|4,NULL|5,110|6,110"#),
+        (r#"select id, nth_value(v, 2) over (order by id) from t order by id"#, r#"1,NULL|2,20|3,20|4,20|5,20|6,20"#),
+        (r#"select id, first_value(v) over (partition by g order by id) from t order by id"#, r#"1,10|2,10|3,30|4,30|5,50|6,60"#),
+        (r#"select id, row_number() over (order by g nulls last, id) from t order by id"#, r#"1,1|2,2|3,3|4,4|5,5|6,6"#),
+        (r#"select id, sum(v) over (partition by g order by id rows between unbounded preceding and unbounded following) from t order by id"#, r#"1,30|2,30|3,30|4,30|5,50|6,60"#),
+        (r#"select id, rank() over (partition by g order by v desc) from t order by id"#, r#"1,2|2,1|3,1|4,2|5,1|6,1"#),
+        (r#"select id, sum(v) over (order by id rows between current row and 1 following) from t order by id"#, r#"1,30|2,50|3,30|4,50|5,110|6,60"#),
+        (r#"select id, lag(g) over (partition by g order by id) from t order by id"#, r#"1,NULL|2,x|3,NULL|4,y|5,NULL|6,NULL"#),
+        (r#"select id, v - lag(v) over (order by id) from t order by id"#, r#"1,NULL|2,10|3,10|4,NULL|5,NULL|6,10"#),
+        (r#"select sum(v) over (partition by g) from t where id = 1"#, r#"10"#),
+        (r#"select g, count(*) from t group by grouping sets ((g), ())"#, r#"~x,2|y,2|z,1|NULL,1|NULL,6"#),
+        (r#"select g, count(*) from t group by rollup(g)"#, r#"~x,2|y,2|z,1|NULL,1|NULL,6"#),
+        (r#"select g, sum(v) from t group by cube(g)"#, r#"~x,30|y,30|z,50|NULL,60|NULL,170"#),
+        (r#"select g, id, count(*) from t where id < 3 group by rollup(g, id)"#, r#"~x,1,1|x,2,1|x,NULL,2|NULL,NULL,2"#),
+        (r#"select g, grouping(g), count(*) from t group by rollup(g)"#, r#"~x,0,2|y,0,2|z,0,1|NULL,0,1|NULL,1,6"#),
+        (r#"select g, count(*) from t group by g with rollup"#, r#"~x,2|y,2|z,1|NULL,1|NULL,6"#),
+        (r#"select coalesce(g, 'ALL') as g, sum(v) from t group by rollup(g) order by g"#, r#"ALL,60|ALL,170|x,30|y,30|z,50"#),
+        (r#"select g, v, count(*) from t where id < 4 group by grouping sets ((g, v), (g), ())"#, r#"~x,10,1|x,20,1|y,30,1|x,NULL,2|y,NULL,1|NULL,NULL,3"#),
+        (r#"select * from (values (1, 'a'), (2, 'b')) as q(n, c) where n > 1"#, r#"2,b"#),
+        (r#"select n from (values (1), (2), (3)) as q(n) order by n desc limit 1"#, r#"3"#),
+        (r#"select 1 + 1"#, r#"2"#),
+        (r#"select 1, 'a', 2.5"#, r#"1,a,2.5"#),
+        (r#"select t.* from t where id = 1"#, r#"1,x,10,Hello,1.5,2024-01-15"#),
+        (r#"select count(*) c from t where id = 1"#, r#"1"#),
+        (r#"select id as "my id" from t where id=1"#, r#"1"#),
+        (r#"select `id` from t where id=1"#, r#"1"#),
+        (r#"SELECT ID FROM T WHERE ID = 1"#, r#"1"#),
+        (r#"select id from t where id = 1 and (g = 'x' or g = 'y')"#, r#"1"#),
+        (r#"select id from t where s like '%a%' and s not like 'a%' order by id"#, r#"2"#),
+        (r#"select id from t where s like 'H_llo'"#, r#"1"#),
+        (r#"select id from t where upper(g) = 'X' order by id"#, r#"1|2"#),
+        (r#"select id, v from t order by v desc, id limit 3 offset 1"#, r#"5,50|3,30|2,20"#),
+        (r#"select a.id from t a where a.id = 1"#, r#"1"#),
+        (r#"select x.id from t x, u y where x.id = y.id and y.w = 'p'"#, r#"1"#),
+        (r#"select (v > 5) or true from t where id=4"#, r#"true"#),
+        (r#"select true, false from t where id=1"#, r#"true,false"#),
+        (r#"select id from t where id between 2 and 4 and v is not null order by id"#, r#"2|3"#),
+        (r#"select distinct g from t order by g limit 2"#, r#"NULL|x"#),
+        (r#"select distinct g from t limit 2"#, r#"~x|y"#),
+        (r#"select g from t group by g order by g desc"#, r#"z|y|x|NULL"#),
+        (r#"select g, count(*) from t group by g order by count(*) desc, g limit 2"#, r#"x,2|y,2"#),
+        (r#"select count(*) from t where id in (select id from u)"#, r#"2"#),
+        (r#"select it from (select id as it from t) q where it > 4 order by it"#, r#"5|6"#),
+        (r#"select q.g, q.c from (select g, count(*) as c from t group by g) q where q.c > 1 order by q.g"#, r#"x,2|y,2"#),
+        (r#"select sum(case when g = 'x' then v end) from t"#, r#"30"#),
+        (r#"select count(*) from t where v between 20 and 50"#, r#"3"#),
+        (r#"select id, v from t where v is null"#, r#"4,NULL"#),
+        (r#"select 5 % 3, -5 % 3, 5.5 % 2 from t where id=1"#, r#"2,-2,1.5"#),
+        (r#"select 10 / 4, 10 / 5, 10 div 4 from t where id=1"#, r#"2.5,2,2"#),
+        (r#"select 'it''s' from t where id=1"#, r#"it's"#),
+        (r#"select "dq" from t where id=1"#, r#"dq"#),
+        (r#"select 1L + 2, 1.5D from t where id=1"#, r#"3,1.5"#),
+        (r#"select 5 & 3, 5 | 3, 5 ^ 3, shiftleft(1,3) from t where id=1"#, r#"1,7,6,8"#),
+    ]);
+}
+
+/// GROUP BY over joins and expressions, ordinals, HAVING, FILTER, subqueries in the select list.
+#[test]
+fn grouped_queries_over_joins_and_expressions() {
+    check(&[
+        (r#"select t.g, count(u.w) from t left join u on t.id = u.id group by t.g order by t.g"#, r#"NULL,0|x,3|y,0|z,0"#),
+        (r#"select t.g, count(u.w) as c from t left join u on t.id = u.id group by t.g order by t.g"#, r#"NULL,0|x,3|y,0|z,0"#),
+        (r#"select t.g, count(*) as c from t left join u on t.id = u.id group by t.g order by t.g"#, r#"NULL,1|x,3|y,2|z,1"#),
+        (r#"select t.g, count(u.id) as c from t left join u on t.id = u.id group by t.g order by t.g"#, r#"NULL,0|x,3|y,0|z,0"#),
+        (r#"select g, count(w) from t left join u on t.id = u.id group by g order by g"#, r#"NULL,0|x,3|y,0|z,0"#),
+        (r#"select count(u.w) from t left join u on t.id = u.id"#, r#"3"#),
+        (r#"select u.w, count(*) from t join u on t.id = u.id group by u.w order by u.w"#, r#"p,1|q,1|r,1"#),
+        (r#"select count(distinct u.w) from t left join u on t.id = u.id"#, r#"3"#),
+        (r#"select t.g, max(u.w) from t left join u on t.id = u.id group by t.g order by t.g"#, r#"NULL,NULL|x,r|y,NULL|z,NULL"#),
+        (r#"select t.g, min(t.s) from t group by t.g order by t.g"#, r#"NULL,World|x,  pad |y,abc|z,a,b,c"#),
+        (r#"select g, sum(v) from t where v > 15 group by g order by g"#, r#"NULL,60|x,20|y,30|z,50"#),
+        (r#"select g, sum(v) as s from t group by g having sum(v) > (select avg(v) from t) order by g"#, r#"NULL,60|z,50"#),
+        (r#"select g from t group by g having count(*) > 1 order by g"#, r#"x|y"#),
+        (r#"select g, count(*) from t group by g order by 2 desc, 1"#, r#"x,2|y,2|NULL,1|z,1"#),
+        (r#"select g, count(*) as c from t group by g order by c desc, g desc"#, r#"y,2|x,2|z,1|NULL,1"#),
+        (r#"select upper(g) as k, count(*) from t group by upper(g) order by k"#, r#"NULL,1|X,2|Y,2|Z,1"#),
+        (r#"select case when v > 25 then 'hi' else 'lo' end as b, count(*) from t group by case when v > 25 then 'hi' else 'lo' end order by b"#, r#"hi,3|lo,3"#),
+        (r#"select case when v > 25 then 'hi' else 'lo' end as b, count(*) from t group by 1 order by b"#, r#"hi,3|lo,3"#),
+        (r#"select g, count(*) from t group by 1"#, r#"~x,2|y,2|z,1|NULL,1"#),
+        (r#"select sum(v) filter (where v > 15) from t"#, r#"160"#),
+        (r#"select g, avg(v) from t group by g order by g"#, r#"NULL,60|x,15|y,30|z,50"#),
+        (r#"select g, count(distinct v) from t group by g order by g"#, r#"NULL,1|x,2|y,1|z,1"#),
+        (r#"select count(distinct g, v) from t"#, r#"4"#),
+        (r#"select sum(distinct v) from t"#, r#"170"#),
+        (r#"select min(d), max(d) from t"#, r#"2023-12-31,2024-03-01"#),
+        (r#"select max(s) from t"#, r#"abc"#),
+        (r#"select min(g) from t"#, r#"x"#),
+        (r#"select count(*), sum(v) from t where id > 100"#, r#"0,NULL"#),
+        (r#"select g, sum(v) from t where id > 100 group by g"#, r#""#),
+        (r#"select max(v) - min(v) from t"#, r#"50"#),
+        (r#"select sum(v) * 2 from t"#, r#"340"#),
+        (r#"select sum(v) / count(*) from t"#, r#"28.333333"#),
+        (r#"select g, round(avg(v), 1) from t group by g order by g"#, r#"NULL,60|x,15|y,30|z,50"#),
+        (r#"select g, count(*) / 2.0 from t group by g order by g"#, r#"NULL,0.5|x,1|y,1|z,0.5"#),
+        (r#"select -sum(v) from t"#, r#"-170"#),
+        (r#"select cast(sum(v) as string) from t"#, r#"170"#),
+        (r#"select coalesce(sum(v), 0) from t where id > 100"#, r#"0"#),
+        (r#"select count(*) from (select distinct g from t) q"#, r#"4"#),
+        (r#"select a.g, b.cnt from (select distinct g from t) a join (select g, count(*) cnt from t group by g) b on a.g = b.g order by a.g"#, r#"x,2|y,2|z,1"#),
+        (r#"select * from (select g, sum(v) as s from t group by g) q where s > 40 order by g"#, r#"NULL,60|z,50"#),
+        (r#"select g, s from (select g, sum(v) as s from t group by g) q order by s desc limit 2"#, r#"NULL,60|z,50"#),
+        (r#"with c as (select g, sum(v) s from t group by g) select * from c where s = (select max(s) from c)"#, r#"NULL,60"#),
+        (r#"with c as (select g, sum(v) s from t group by g) select g from c order by s desc, g"#, r#"NULL|z|x|y"#),
+        (r#"select t.id, u.w from t join u on t.id = u.id where u.w like 'q%'"#, r#"2,q"#),
+        (r#"select t.id from t join u on t.id = u.id group by t.id having count(*) > 1"#, r#"2"#),
+        (r#"select t.id, count(u.id) from t join u on t.id = u.id group by t.id order by t.id"#, r#"1,1|2,2"#),
+        (r#"select t.id, u.w from t join u on t.id = u.id order by t.id desc, u.w desc"#, r#"2,r|2,q|1,p"#),
+        (r#"select count(*) from t, u where t.id = u.id"#, r#"3"#),
+        (r#"select t.id from t where t.id in (select id from u) and t.v > 15"#, r#"2"#),
+        (r#"select id from t where id in (select id from u where w = 'r')"#, r#"2"#),
+        (r#"select id, (select count(*) from u where u.id = t.id) from t where id <= 2 order by id"#, r#"1,1|2,2"#),
+        (r#"select id from t where (select count(*) from u where u.id = t.id) = 0 order by id"#, r#"3|4|5|6"#),
+        (r#"select id, exists (select 1 from u where u.id = t.id) from t where id <= 3 order by id"#, r#"1,true|2,true|3,false"#),
+        (r#"select id from t where id not in (1,2,null)"#, r#""#),
+        (r#"select id from t where id in (1,2,null) order by id"#, r#"1|2"#),
+        (r#"select id, id not in (1,2,null) from t where id < 4 order by id"#, r#"1,false|2,false|3,NULL"#),
+        (r#"select 1 in (1, null), 3 in (1, null), 3 not in (1, null) from t where id = 1"#, r#"true,NULL,NULL"#),
+        (r#"select null = null, null <=> null, 1 <=> 2 from t where id = 1"#, r#"NULL,true,false"#),
+        (r#"select nullif(1, 1), nullif(2, 1) from t where id = 1"#, r#"NULL,2"#),
+        (r#"select coalesce(null, 1, 2), ifnull(null, 3), nvl(4, 5) from t where id = 1"#, r#"1,3,4"#),
+        (r#"select case when 1 = 1 then 'a' end, case 2 when 1 then 'x' when 2 then 'y' end from t where id = 1"#, r#"a,y"#),
+        (r#"select cast(v as double) from t where id = 2"#, r#"20"#),
+        (r#"select v / 3 from t where id = 1"#, r#"3.333333"#),
+        (r#"select 7 % 0 from t where id = 1"#, r#"NULL"#),
+        (r#"select abs(-v) from t where id = 2"#, r#"20"#),
+        (r#"select ceil(1.2), floor(-1.2) from t where id = 1"#, r#"2,-2"#),
+        (r#"select id from t order by id desc limit 2"#, r#"6|5"#),
+        (r#"select id from t where g is null"#, r#"6"#),
+        (r#"select id from t where g is not null and v is null"#, r#"4"#),
+        (r#"select * from t where false"#, r#""#),
+        (r#"select count(*) from t where 1 = 0"#, r#"0"#),
+        (r#"select id from t limit 0"#, r#""#),
+    ]);
+}
+
+/// Trim argument order, arrays via SPLIT, GROUP BY ALL, CTE column lists, quantified subqueries, dates.
+#[test]
+fn misc_functions_dates_and_subqueries() {
+    check(&[
+        (r#"select ltrim('Sp', 'SSparkSQL') from t where id=1"#, r#"arkSQL"#),
+        (r#"select rtrim('SQL', 'SparkSQL') from t where id=1"#, r#"Spark"#),
+        (r#"select btrim('xxhixx', 'x') from t where id=1"#, r#"hi"#),
+        (r#"select mode(g) from t"#, r#"x"#),
+        (r#"select map('a', 1) from t where id=1"#, r#"ERR"#),
+        (r#"select size(split(s, ',')) from t where id=5"#, r#"3"#),
+        (r#"select array_contains(split(s, ','), 'b') from t where id=5"#, r#"true"#),
+        (r#"select element_at(split(s, ','), 2) from t where id=5"#, r#"b"#),
+        (r#"select g, count(*) from t group by all"#, r#"~x,2|y,2|z,1|NULL,1"#),
+        (r#"select id, v not in (select id from u) from t where id < 3 order by id"#, r#"1,true|2,true"#),
+        (r#"select id from t where v not in (select id from u) order by id"#, r#"1|2|3|5|6"#),
+        (r#"select id from t where exists (select 1 from u where u.id = t.id or u.w = 's') order by id"#, r#"1|2|3|4|5|6"#),
+        (r#"select id from t where not exists (select 1 from u where u.id = t.id) order by id"#, r#"3|4|5|6"#),
+        (r#"with c(a, b) as (select id, v from t where id < 3) select a, b from c order by a"#, r#"1,10|2,20"#),
+        (r#"with c as (select id from t where id < 3) select count(*) from c c1, c c2"#, r#"4"#),
+        (r#"with c as (select id from t where id < 3), d as (select id from c where id > 1) select * from d union all select * from c order by id"#, r#"1|2|2"#),
+        (r#"select * from (select id from t union all select id from u) q order by id limit 3"#, r#"1|1|2"#),
+        (r#"select count(*) from (select id from t union select id from u) q"#, r#"7"#),
+        (r#"select id from t where id = (select min(id) from u)"#, r#"1"#),
+        (r#"select id from t where id = (select id from u)"#, r#"ERR"#),
+        (r#"select id, (select w from u where u.id = t.id) from t where id = 2"#, r#"ERR"#),
+        (r#"select t.id, u.w from t join u on lower(cast(t.id as string)) = lower(cast(u.id as string)) order by t.id, u.w"#, r#"1,p|2,q|2,r"#),
+        (r#"select t.id, u.w from t left join u on t.id = u.id and t.v > 15 order by t.id, u.w"#, r#"1,NULL|2,q|2,r|3,NULL|4,NULL|5,NULL|6,NULL"#),
+        (r#"select t.id, u.id from t full join u on t.id = u.id and t.v > 100 order by t.id, u.id"#, r#"NULL,1|NULL,2|NULL,2|NULL,7|1,NULL|2,NULL|3,NULL|4,NULL|5,NULL|6,NULL"#),
+        (r#"select d, date_add(d, 30) from t where id = 1"#, r#"2024-01-15,2024-02-14"#),
+        (r#"select d from t where d > date_sub(current_date(), 100000) order by d limit 1"#, r#"2023-12-31"#),
+        (r#"select to_date('03/05/2024', 'MM/dd/yyyy') from t where id=1"#, r#"2024-03-05"#),
+        (r#"select date_format('2024-03-05 13:45:10', 'yyyy-MM-dd HH:mm') from t where id=1"#, r#"2024-03-05 13:45"#),
+        (r#"select datediff('2024-03-05 23:59:59', '2024-03-01 00:00:00') from t where id=1"#, r#"4"#),
+        (r#"select timestampdiff(day, '2024-03-01', '2024-03-05') from t where id=1"#, r#"4"#),
+        (r#"select dateadd(day, 5, '2024-03-01') from t where id=1"#, r#"2024-03-06"#),
+        (r#"select date_add('2024-03-01', -1) from t where id=1"#, r#"2024-02-29"#),
+        (r#"select cast('2024-03-05 10:20:30' as timestamp) + interval 1 hour from t where id=1"#, r#"2024-03-05 11:20:30"#),
+        (r#"select date '2024-03-05' - interval 1 month from t where id=1"#, r#"2024-02-05"#),
+        (r#"select date'2024-03-05' + interval '2' day from t where id=1"#, r#"2024-03-07"#),
+        (r#"select extract(year from date '2024-03-05') from t where id=1"#, r#"2024"#),
+        (r#"select trunc('2024-03-15', 'MM') from t where id=1"#, r#"2024-03-01"#),
+        (r#"select year(date_trunc('year', d)) from t where id=1"#, r#"2024"#),
+        (r#"select current_date() = current_date from t where id=1"#, r#"true"#),
+        (r#"select length(current_timestamp()) from t where id=1"#, r#"19"#),
+        (r#"select year(current_date()) >= 2024 from t where id=1"#, r#"true"#),
+        (r#"select cast(1.5 as int), cast(-1.5 as int), cast('2.9' as int) from t where id=1"#, r#"1,-1,2"#),
+        (r#"select cast(3 as decimal(5,2)) from t where id=1"#, r#"3"#),
+        (r#"select 3 = 3.0, '3' = 3, 3 = '3.0' from t where id=1"#, r#"true,true,true"#),
+        (r#"select 'b' > 'a', 'B' > 'a', 'abc' < 'abd' from t where id=1"#, r#"true,false,true"#),
+        (r#"select 1 < 2 and 2 < 3, not true, true or false from t where id=1"#, r#"true,false,true"#),
+        (r#"select if(1 > 2, 'a', 'b'), if(null, 'a', 'b') from t where id=1"#, r#"b,b"#),
+        (r#"select nvl2(null, 1, 2), nvl2(0, 1, 2) from t where id=1"#, r#"2,1"#),
+        (r#"select greatest(1, null, 3), least('b', 'a') from t where id=1"#, r#"3,a"#),
+        (r#"select concat(1, 2), concat('a', 1.5) from t where id=1"#, r#"12,a1.5"#),
+        (r#"select 'a' || 1 || 2.0 from t where id=1"#, r#"a12.0"#),
+        (r#"select round(2.567, 2), round(-0.5), round(1.5), round(0.5) from t where id=1"#, r#"2.57,-1,2,1"#),
+        (r#"select floor(5), ceil(5.0), floor(-0.5) from t where id=1"#, r#"5,5,-1"#),
+        (r#"select pmod(10, 3), pmod(-10, 3), mod(-10, 3) from t where id=1"#, r#"1,2,-1"#),
+        (r#"select 2 ** 3 from t where id=1"#, r#"ERR"#),
+        (r#"select power(2, 0.5), sqrt(2) from t where id=1"#, r#"1.414214,1.414214"#),
+        (r#"select exp(1), ln(exp(2)), log10(100), log2(1024) from t where id=1"#, r#"2.718282,2,2,10"#),
+        (r#"select sign(-2.5), abs(-0.0) from t where id=1"#, r#"-1,0"#),
+        (r#"select sum(v) / 0 from t"#, r#"NULL"#),
+        (r#"select avg(v) from t where g = 'zzz'"#, r#"NULL"#),
+        (r#"select max(g) from t where g is null"#, r#"NULL"#),
+        (r#"select count(g), count(distinct g), count(*) from t where id > 3"#, r#"2,2,3"#),
+        (r#"select g from t where g like 'x%' or g like 'y%' order by id"#, r#"x|x|y|y"#),
+        (r#"select s from t where s rlike '^[A-Z]' order by id"#, r#"Hello|World"#),
+        (r#"select regexp_replace(s, '(\\w+),(\\w+)', '$2-$1') from t where id = 5"#, r#"b-a,c"#),
+        (r#"select id from t order by case when g = 'x' then 0 else 1 end, id desc"#, r#"2|1|6|5|4|3"#),
+        (r#"select id, g from t order by g desc, id"#, r#"5,z|3,y|4,y|1,x|2,x|6,NULL"#),
+        (r#"select id from t order by f desc nulls first, id"#, r#"4|5|2|1|6|3"#),
+        (r#"select id from t order by 1 desc limit 2"#, r#"6|5"#),
+        (r#"select id as x from t order by x desc limit 1"#, r#"6"#),
+        (r#"select id as x from t order by -x limit 1"#, r#"6"#),
+        (r#"select id from t order by v - 5 desc limit 1"#, r#"6"#),
+        (r#"select id, v from t order by v nulls last, id limit 2"#, r#"1,10|2,20"#),
+        (r#"select * from t order by id limit 1 offset 1"#, r#"2,x,20,  pad ,2.5,2024-02-29"#),
+    ]);
+}
+
+/// Errors for invalid grouping, range(), windows in expressions, percent-of-total and friends.
+#[test]
+fn analytic_query_shapes() {
+    check(&[
+        (r#"select id, count(*) from t"#, r#"ERR"#),
+        (r#"select g, v, count(*) from t group by g"#, r#"ERR"#),
+        (r#"select g, count(*) from t group by g having v > 1"#, r#"ERR"#),
+        (r#"select * from range(3)"#, r#"0|1|2"#),
+        (r#"select id from range(1, 8, 3)"#, r#"1|4|7"#),
+        (r#"select sum(id) from range(5)"#, r#"10"#),
+        (r#"select try_divide(1, 0), try_divide(6, 3) from t where id = 1"#, r#"NULL,2"#),
+        (r#"select * from t tablesample (10 percent)"#, r#"ERR"#),
+        (r#"select cast(v as array<int>) from t"#, r#"ERR"#),
+        (r#"select v::int from t"#, r#"ERR"#),
+        (r#"select struct(1,2) from t"#, r#"ERR"#),
+        (r#"select a.b.c from t"#, r#"ERR"#),
+        (r#"select foo(1) from t"#, r#"ERR"#),
+        (r#"select foo() over () from t"#, r#"ERR"#),
+        (r#"select 1; select 2"#, r#"ERR"#),
+        (r#"select id from t where id in (select id from u union select id from t where id = 3) order by id"#, r#"1|2|3"#),
+        (r#"select * from t where id > 1 limit 1"#, r#"2,x,20,  pad ,2.5,2024-02-29"#),
+        (r#"select first(g), last(g) from t"#, r#"x,NULL"#),
+        (r#"select first(g, true), last(g, true) from t"#, r#"x,z"#),
+        (r#"select any_value(g) from t"#, r#"x"#),
+        (r#"select collect_set(g) from t where g is not null"#, r#"[x, y, z]"#),
+        (r#"select string_agg(g, '-') from t where g is not null"#, r#"x-x-y-y-z"#),
+        (r#"select count(*) from t where s is not null and s <> ''"#, r#"5"#),
+        (r#"select sum(f) from t"#, r#"4.5"#),
+        (r#"select avg(f) from t"#, r#"0.9"#),
+        (r#"select max(f), min(f) from t"#, r#"4,-3.5"#),
+        (r#"select sum(v) over (partition by g) from t order by id"#, r#"30|30|30|30|50|60"#),
+        (r#"select id, sum(v) over (partition by g order by id) from t order by id"#, r#"1,10|2,30|3,30|4,30|5,50|6,60"#),
+        (r#"select id, row_number() over (partition by g order by v desc nulls last) from t order by id"#, r#"1,2|2,1|3,1|4,2|5,1|6,1"#),
+        (r#"select id from (select id, row_number() over (order by id desc) rn from t) q where rn <= 2 order by id"#, r#"5|6"#),
+        (r#"select g, rn from (select g, id, row_number() over (partition by g order by id) rn from t) q where rn = 1 order by g"#, r#"NULL,1|x,1|y,1|z,1"#),
+        (r#"select id, sum(v) over (order by id) - v from t order by id"#, r#"1,0|2,10|3,30|4,NULL|5,60|6,110"#),
+        (r#"select id, case when sum(v) over (partition by g) > 35 then 'big' else 'small' end from t order by id"#, r#"1,small|2,small|3,small|4,small|5,big|6,big"#),
+        (r#"select count(*) over (partition by g), id from t order by id"#, r#"2,1|2,2|2,3|2,4|1,5|1,6"#),
+        (r#"select distinct g, sum(v) over (partition by g) from t order by g"#, r#"NULL,60|x,30|y,30|z,50"#),
+        (r#"select t.g, sum(t.v) over (order by t.id) from t where t.id < 3 order by t.id"#, r#"x,10|x,30"#),
+        (r#"select id, lead(id) over (order by id), lag(id, 2) over (order by id) from t where id < 4 order by id"#, r#"1,2,NULL|2,3,NULL|3,NULL,1"#),
+        (r#"select upper(g) as ug, count(*) as c from t where g is not null group by upper(g) having count(*) > 1 order by ug"#, r#"X,2|Y,2"#),
+        (r#"select g, count(*) from t group by g having g is not null order by g"#, r#"x,2|y,2|z,1"#),
+        (r#"select g, count(*) from t group by g having max(v) > 20 order by g"#, r#"NULL,1|y,2|z,1"#),
+        (r#"select g, max(v) m from t group by g order by m desc nulls last limit 2"#, r#"NULL,60|z,50"#),
+        (r#"select g from t group by g order by max(v) desc limit 1"#, r#"NULL"#),
+        (r#"select g, sum(v) from t group by g order by sum(v) desc limit 1"#, r#"NULL,60"#),
+        (r#"select round(sum(v) * 100.0 / (select sum(v) from t), 1) from t where g = 'x'"#, r#"17.6"#),
+        (r#"select g, round(sum(v) * 100.0 / sum(sum(v)) over (), 1) from t group by g order by g"#, r#"NULL,35.3|x,17.6|y,17.6|z,29.4"#),
+        (r#"select coalesce(max(v), -1) from t where id > 100"#, r#"-1"#),
+        (r#"select (select max(v) from t) - (select min(v) from t) from t where id = 1"#, r#"50"#),
+        (r#"select id from t where (g, v) in (select g, v from t where id = 1)"#, r#"ERR"#),
+        (r#"select id, v from t where v = (select max(v) from t)"#, r#"6,60"#),
+        (r#"select * from (select id, v from t) a join (select id, g from t) b on a.id = b.id where a.id = 1"#, r#"1,10,1,x"#),
+        (r#"select a.id, b.id from t a, t b where a.id + 1 = b.id and a.id < 3 order by a.id"#, r#"1,2|2,3"#),
+        (r#"select count(*) from t a cross join t b"#, r#"36"#),
+        (r#"select count(*) from t a left join t b on a.id = b.id + 100"#, r#"6"#),
+        (r#"select count(*) from t a right join u b on a.id = b.id"#, r#"4"#),
+        (r#"select count(*) from t a full join u b on a.id = b.id"#, r#"8"#),
+        (r#"select id from t where id = any (select id from u) order by id"#, r#"1|2"#),
+        (r#"select id from t where id > all (select id from u where id < 3) order by id"#, r#"3|4|5|6"#),
+        (r#"select id from t where id <> all (select id from u) order by id"#, r#"3|4|5|6"#),
+        (r#"select coalesce(g, 'none') g2, sum(v) from t group by coalesce(g, 'none') order by g2"#, r#"none,60|x,30|y,30|z,50"#),
+        (r#"select 'a' as k, 1 as n union all select 'b', 2"#, r#"a,1|b,2"#),
+        (r#"select * from (select 1 as a, 2 as b) q"#, r#"1,2"#),
+        (r#"select a + b from (select 1 as a, 2 as b) q"#, r#"3"#),
+        (r#"select max(a) from (values (1), (3), (2)) as q(a)"#, r#"3"#),
+    ]);
+}
+
+/// Identifier case and NULLS FIRST/LAST for every column type.
+#[test]
+fn case_insensitive_identifiers_and_null_placement() {
+    check(&[
+        (r#"SELECT ID FROM T WHERE ID = 1"#, r#"1"#),
+        (r#"SELECT T.ID, U.W FROM T JOIN U ON T.ID = U.ID ORDER BY T.ID, U.W"#, r#"1,p|2,q|2,r"#),
+        (r#"SELECT G, COUNT(*) FROM T GROUP BY G ORDER BY G"#, r#"NULL,1|x,2|y,2|z,1"#),
+        (r#"SELECT G, SUM(V) AS S FROM T GROUP BY G ORDER BY S DESC LIMIT 1"#, r#"NULL,60"#),
+        (r#"select Id, Upper(G) from t where iD = 3"#, r#"3,Y"#),
+        (r#"select g from t order by g nulls last"#, r#"x|x|y|y|z|NULL"#),
+        (r#"select g from t order by g desc"#, r#"z|y|y|x|x|NULL"#),
+        (r#"select g from t order by g desc nulls first"#, r#"NULL|z|y|y|x|x"#),
+        (r#"select s from t order by s"#, r#"NULL|  pad |Hello|World|a,b,c|abc"#),
+        (r#"select s from t order by s desc nulls last"#, r#"abc|a,b,c|World|Hello|  pad |NULL"#),
+        (r#"select f from t order by f"#, r#"NULL|-3.5|0|1.5|2.5|4"#),
+        (r#"select f from t order by f desc"#, r#"4|2.5|1.5|0|-3.5|NULL"#),
+        (r#"select d from t order by d nulls last limit 2"#, r#"2023-12-31|2024-01-01"#),
+        (r#"select g, v from t order by g nulls last, v desc nulls first"#, r#"x,20|x,10|y,NULL|y,30|z,50|NULL,60"#),
+        (r#"select count(*) from t where g = 'X'"#, r#"0"#),
+        (r#"select count(*) from t where lower(g) = 'x'"#, r#"2"#),
+    ]);
+}
+
+/// Integer precision, operator precedence, predicates on boolean expressions, string literals.
+#[test]
+fn literals_precedence_and_big_integers() {
+    check(&[
+        (r#"select count(*) from t where id = 9007199254740993"#, r#"0"#),
+        (r#"select 9007199254740993 = 9007199254740992, 9007199254740993 > 9007199254740992 from t where id = 1"#, r#"false,true"#),
+        (r#"select 9007199254740993 + 1 from t where id = 1"#, r#"9007199254740994"#),
+        (r#"select count(*) from t where id in (9007199254740993, 9007199254740992)"#, r#"0"#),
+        (r#"select -id, id * -1, 0 - id from t where id = 3"#, r#"-3,-3,-3"#),
+        (r#"select - - id from t where id = 3"#, r#"3"#),
+        (r#"select id from t where id = -(-3)"#, r#"3"#),
+        (r#"select 2 - -1 from t where id = 1"#, r#"3"#),
+        (r#"select 1 - - 1 from t where id = 1"#, r#"2"#),
+        (r#"select id from t where not id = 3 and id < 5 order by id"#, r#"1|2|4"#),
+        (r#"select id from t where id > 2 and id < 5 or id = 1 order by id"#, r#"1|3|4"#),
+        (r#"select id from t where id > 2 and (id < 4 or id = 6) order by id"#, r#"3|6"#),
+        (r#"select id from t where not (id > 2 and id < 5) order by id"#, r#"1|2|5|6"#),
+        (r#"select id from t where id not between 2 and 5 order by id"#, r#"1|6"#),
+        (r#"select id from t where g not like 'x%' order by id"#, r#"3|4|5"#),
+        (r#"select id from t where g is null or v > 50 order by id"#, r#"6"#),
+        (r#"select id from t where coalesce(g, 'q') = 'q'"#, r#"6"#),
+        (r#"select id from t where (g = 'x') is true order by id"#, r#"1|2"#),
+        (r#"select id from t where (g = 'x') is not true order by id"#, r#"3|4|5|6"#),
+        (r#"select id from t where (g = 'x') is false order by id"#, r#"3|4|5"#),
+        (r#"select id from t where (g = 'x') is null"#, r#"6"#),
+        (r#"select id, v is null as n from t where id in (3,4) order by id"#, r#"3,false|4,true"#),
+        (r#"select 'it''s', 'a\tb', 'x\\y' from t where id = 1"#, r#"it's,a	b,x\y"#),
+        (r#"select 5 between 1 and 10 and 3 between 2 and 4 from t where id = 1"#, r#"true"#),
+        (r#"select 1 + 2 * 3 - 4 / 2, (1 + 2) * 3, 2 * 3 % 4 from t where id = 1"#, r#"5,9,2"#),
+        (r#"select 10 - 2 - 3, 100 / 10 / 5, 2 * 3 * 4 from t where id = 1"#, r#"5,2,24"#),
+        (r#"select 7 / 2, cast(7 as int) / 2, 7 div 2 from t where id = 1"#, r#"3.5,3.5,3"#),
+        (r#"select 1 = 1 and 2 = 2 or 3 = 4 from t where id = 1"#, r#"true"#),
+        (r#"select case when id = 1 then 'a' when id = 2 then 'b' end from t where id < 4 order by id"#, r#"a|b|NULL"#),
+        (r#"select case id when 1 then 'a' else 'z' end from t where id < 3 order by id"#, r#"a|z"#),
+        (r#"select case when g is null then 'n' else g end from t where id > 4 order by id"#, r#"z|n"#),
+        (r#"select coalesce(nullif(g, 'x'), 'was x') from t where id < 4 order by id"#, r#"was x|was x|y"#),
+        (r#"select abs(v - 25) from t where id < 4 order by id"#, r#"15|5|5"#),
+        (r#"select max(length(s)) from t"#, r#"6"#),
+        (r#"select min(v + f) from t"#, r#"11.5"#),
+        (r#"select count(case when v > 25 then 1 end) from t"#, r#"3"#),
+        (r#"select sum(case when v > 25 then 1 else 0 end) from t"#, r#"3"#),
+        (r#"select count(*) filter (where g = 'x' and v > 10) from t"#, r#"1"#),
+        (r#"select upper(substr(s, 1, 1)) || lower(substr(s, 2)) from t where id = 1"#, r#"Hello"#),
+        (r#"select concat_ws('-', g, cast(id as string)) from t where id < 3 order by id"#, r#"x-1|x-2"#),
+        (r#"select concat_ws('-', null, 'a', null, 'b') from t where id = 1"#, r#"a-b"#),
+        (r#"select lpad(cast(id as string), 3, '0') from t where id = 5"#, r#"005"#),
+        (r#"select regexp_extract('abc123def', '(\\d+)', 1) from t where id = 1"#, r#"123"#),
+        (r#"select regexp_replace('a1b22c', '\\d+', '#') from t where id = 1"#, r#"a#b#c"#),
+        (r#"select split_part('a-b-c', '-', -1) from t where id = 1"#, r#"c"#),
+        (r#"select instr('hello', 'l'), locate('l', 'hello', 4), position('x' in 'hello') from t where id = 1"#, r#"3,4,0"#),
+        (r#"select translate('hello', 'el', 'ip'), replace('aaa', 'a', 'bb'), reverse('abc') from t where id = 1"#, r#"hippo,bbbbbb,cba"#),
+        (r#"select length(''), length(' '), length(null) from t where id = 1"#, r#"0,1,NULL"#),
+        (r#"select substring('hello', 2, 3), substring('hello', -2), substring('hello', 10) from t where id = 1"#, r#"ell,lo,"#),
+        (r#"select 'abc' like 'a%', 'abc' like '%c', 'abc' like 'a_c', 'abc' like 'A%', 'a%c' like 'a\%c' from t where id = 1"#, r#"true,true,true,false,true"#),
+        (r#"select upper('straße'), lower('ÀB') from t where id = 1"#, r#"STRASSE,àb"#),
+        (r#"select ascii('a'), chr(97), hex(255), hex('Ab') from t where id = 1"#, r#"97,a,FF,4162"#),
+    ]);
+}
+
+/// PIVOT, LATERAL VIEW, USING/NATURAL/SEMI/ANTI joins, hash and date functions.
+#[test]
+fn pivot_lateral_using_hashes_and_dates() {
+    check(&[
+        (r#"select id, e from t lateral view explode(array(10, 20)) x as e where id = 1 order by e"#, r#"1,10|1,20"#),
+        (r#"select * from (select g, v from t where g is not null) pivot (sum(v) for g in ('x', 'y'))"#, r#"30,30"#),
+        (r#"select id, w from t full join u using (id) order by id, w"#, r#"1,p|2,q|2,r|3,NULL|4,NULL|5,NULL|6,NULL|7,s"#),
+        (r#"select count(*) from t full join u using (id)"#, r#"8"#),
+        (r#"select id from t right join u using (id) order by id"#, r#"1|2|2|7"#),
+        (r#"select u.id, w from t right join u using (id) order by u.id, w"#, r#"1,p|2,q|2,r|7,s"#),
+        (r#"select * from t natural left join u order by id limit 2"#, r#"1,x,10,Hello,1.5,2024-01-15,p|2,x,20,  pad ,2.5,2024-02-29,q"#),
+        (r#"select id from t natural join u order by id"#, r#"1|2|2"#),
+        (r#"select count(*) from t join u using (id) join nn on t.id = nn.x"#, r#"3"#),
+        (r#"select a.id from t a join t b using (id) where a.id < 3 order by a.id"#, r#"1|2"#),
+        (r#"select t.id, u.w from t left semi join u on t.id = u.id order by t.id"#, r#"ERR"#),
+        (r#"select * from t left semi join u on t.id = u.id order by t.id"#, r#"1,x,10,Hello,1.5,2024-01-15|2,x,20,  pad ,2.5,2024-02-29"#),
+        (r#"select t.id from t left anti join u on t.id = u.id order by t.id"#, r#"3|4|5|6"#),
+        (r#"select count(*) from t left anti join u on t.id = u.id where t.v is not null"#, r#"3"#),
+        (r#"select count(*) from t semi join (select id from u where w = 'q') s on t.id = s.id"#, r#"1"#),
+        (r#"select md5('a'), sha1('a'), sha2('a', 256), crc32('a') from t where id = 1"#, r#"0cc175b9c0f1b6a831c399e269772661,86f7e437faa5a7fce15d1ddcb9eaeaea377667b8,ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb,3904355907"#),
+        (r#"select hash('a') from t where id = 1"#, r#"ERR"#),
+        (r#"select md5(cast(id as string)) from t where id = 1"#, r#"c4ca4238a0b923820dcc509a6f75849b"#),
+        (r#"select length(uuid()) from t where id = 1"#, r#"36"#),
+        (r#"select typeof(1.5), typeof('a'), typeof(true) from t where id = 1"#, r#"double,string,boolean"#),
+        (r#"select translate(s, 'abc', 'xyz') from t where id = 3"#, r#"xyz"#),
+        (r#"select char_length('héllo'), length('héllo'), octet_length('héllo') from t where id = 1"#, r#"5,5,6"#),
+        (r#"select lower(s) like '%pad%' from t where id = 2"#, r#"true"#),
+        (r#"select base64('Hello') from t where id = 1"#, r#"SGVsbG8="#),
+        (r#"select format_number(1234567.891, 2), format_number(0.5, 0) from t where id = 1"#, r#"1,234,567.89,1"#),
+        (r#"select format_string('%05d|%.2f|%s', 42, 3.14159, 'x') from t where id = 1"#, r#"00042|3.14|x"#),
+        (r#"select to_date('2024-02-30') from t where id = 1"#, r#"NULL"#),
+        (r#"select cast('2024-13-01' as date) from t where id = 1"#, r#"NULL"#),
+        (r#"select dayofweek('2024-03-03'), weekday('2024-03-03') from t where id = 1"#, r#"1,6"#),
+        (r#"select last_day('2023-02-10'), add_months('2024-03-31', -1) from t where id = 1"#, r#"2023-02-28,2024-02-29"#),
+        (r#"select months_between('2024-03-15', '2024-01-15'), months_between('2024-03-31', '2024-02-29') from t where id = 1"#, r#"2,1"#),
+        (r#"select next_day('2024-03-05', 'Friday'), next_day('2024-03-08', 'fri') from t where id = 1"#, r#"2024-03-08,2024-03-15"#),
+        (r#"select date_format('2024-03-05', 'EEEE, MMM d, yyyy') from t where id = 1"#, r#"Tuesday, Mar 5, 2024"#),
+        (r#"select unix_timestamp('2024-01-01 00:00:00'), from_unixtime(86400) from t where id = 1"#, r#"1704067200,1970-01-02 00:00:00"#),
+        (r#"select quarter('2024-05-05'), weekofyear('2024-12-30'), dayofyear('2024-12-31') from t where id = 1"#, r#"2,1,366"#),
+        (r#"select make_date(2024, 2, 30) from t where id = 1"#, r#"NULL"#),
+        (r#"select date_diff('2024-03-05', '2024-03-01') from t where id = 1"#, r#"4"#),
+        (r#"select datediff(null, '2024-01-01') from t where id = 1"#, r#"NULL"#),
+        (r#"select year('2024-03-05') + 1, month(d), day(d) from t where id = 1"#, r#"2025,1,15"#),
+        (r#"select d from t where year(d) = 2024 and month(d) = 1 order by d"#, r#"2024-01-01|2024-01-15"#),
+        (r#"select year(d), count(*) from t where d is not null group by year(d) order by year(d)"#, r#"2023,1|2024,4"#),
+        (r#"select date_trunc('month', d) m, count(*) from t where d is not null group by date_trunc('month', d) order by m"#, r#"2023-12-01 00:00:00,1|2024-01-01 00:00:00,2|2024-02-01 00:00:00,1|2024-03-01 00:00:00,1"#),
+        (r#"select d, lag(d) over (order by d) from t where d is not null order by d limit 2"#, r#"2023-12-31,NULL|2024-01-01,2023-12-31"#),
+        (r#"select datediff(d, lag(d) over (order by d)) from t where d is not null order by d limit 3"#, r#"NULL|1|14"#),
+    ]);
+}
+
+/// Empty tables through every operator, window frame edge cases.
+#[test]
+fn empty_inputs_and_window_frames() {
+    check(&[
+        (r#"select * from e"#, r#""#),
+        (r#"select count(*), sum(a), min(b), max(c), avg(a) from e"#, r#"0,NULL,NULL,NULL,NULL"#),
+        (r#"select count(*), sum(a), min(b) from e group by b"#, r#""#),
+        (r#"select b, count(*) from e group by b"#, r#""#),
+        (r#"select a, row_number() over (order by a) from e"#, r#""#),
+        (r#"select a, sum(a) over (partition by b) from e"#, r#""#),
+        (r#"select distinct b from e"#, r#""#),
+        (r#"select a from e order by a limit 3"#, r#""#),
+        (r#"select a from e union select id from u order by 1"#, r#"1|2|7"#),
+        (r#"select count(*) from e a join e b on a.a = b.a"#, r#"0"#),
+        (r#"select count(*) from t left join e on t.id = e.a"#, r#"6"#),
+        (r#"select count(*) from e right join t on t.id = e.a"#, r#"6"#),
+        (r#"select count(*) from e full join u on u.id = e.a"#, r#"4"#),
+        (r#"select t.id, e.b from t left join e on t.id = e.a where t.id < 3 order by t.id"#, r#"1,NULL|2,NULL"#),
+        (r#"select count(distinct b), count(distinct a, b) from e"#, r#"0,0"#),
+        (r#"select stddev(a), variance(c), median(a), percentile(a, 0.5), collect_list(a), string_agg(b, ',') from e"#, r#"NULL,NULL,NULL,NULL,[],NULL"#),
+        (r#"select b, count(*) from e group by grouping sets ((b), ())"#, r#"NULL,0"#),
+        (r#"select 1 from e"#, r#""#),
+        (r#"select (select count(*) from e), (select max(a) from e) from t where id = 1"#, r#"0,NULL"#),
+        (r#"select id from t where id in (select a from e)"#, r#""#),
+        (r#"select id from t where id not in (select a from e) order by id"#, r#"1|2|3|4|5|6"#),
+        (r#"select id from t where exists (select 1 from e)"#, r#""#),
+        (r#"select id from t where not exists (select 1 from e) order by id"#, r#"1|2|3|4|5|6"#),
+        (r#"select id from t where v > all (select a from e) order by id"#, r#"1|2|3|4|5|6"#),
+        (r#"select id from t where v > any (select a from e)"#, r#""#),
+        (r#"select * from t where 1 = 0 union all select * from t where id = 1"#, r#"1,x,10,Hello,1.5,2024-01-15"#),
+        (r#"select id, ntile(3) over (order by id) from t where id < 3 order by id"#, r#"1,1|2,2"#),
+        (r#"select id, ntile(10) over (order by id) from t where id < 4 order by id"#, r#"1,1|2,2|3,3"#),
+        (r#"select id, nth_value(v, 10) over (order by id) from t where id < 3 order by id"#, r#"1,NULL|2,NULL"#),
+        (r#"select id, lag(v, 10, 0) over (order by id) from t where id < 3 order by id"#, r#"1,0|2,0"#),
+        (r#"select id, first_value(v) over (order by id rows between 5 following and 6 following) from t where id < 3 order by id"#, r#"1,NULL|2,NULL"#),
+        (r#"select id, count(*) over (order by id rows between 1 following and 2 following) from t order by id"#, r#"1,2|2,2|3,2|4,2|5,1|6,0"#),
+        (r#"select id, percent_rank() over (partition by g order by id) from t order by id"#, r#"1,0|2,1|3,0|4,1|5,0|6,0"#),
+        (r#"select id, sum(id) over (order by id desc) from t where id < 4 order by id"#, r#"1,6|2,5|3,3"#),
+        (r#"select count(distinct g) over () from t"#, r#"ERR"#),
+        (r#"select id, sum(v) over (order by id range between 1 following and 2 following) from t where id < 4 order by id"#, r#"1,50|2,30|3,NULL"#),
+        (r#"select -1 * v, v * -1, -v from t where id = 1"#, r#"-10,-10,-10"#),
+        (r#"select id, id % 2 = 0, id % 2 from t where id < 4 order by id"#, r#"1,false,1|2,true,0|3,false,1"#),
+        (r#"select id from t where id % 2 = 0 order by id"#, r#"2|4|6"#),
+        (r#"select id from t where mod(id, 3) = 0 order by id"#, r#"3|6"#),
+        (r#"select max(id) - min(id) + 1 from t"#, r#"6"#),
+        (r#"select sum(1), sum(1.5), sum(true) from t where id < 3"#, r#"2,3,2"#),
+        (r#"select avg(id), avg(f) from t where id < 3"#, r#"1.5,2"#),
+        (r#"select count(1), count('a'), count(null) from t"#, r#"6,6,0"#),
+    ]);
+}
+
+/// Two unaliased aggregates over different expressions must not share a column.
+#[test]
+fn aggregate_output_naming() {
+    check(&[
+        (r#"select sum(v*2), sum(v*3) from t"#, r#"340,510"#),
+        (r#"select g, sum(v*2), sum(v*3) from t group by g order by g"#, r#"NULL,120,180|x,60,90|y,60,90|z,100,150"#),
+        (r#"select sum(v*2) a, sum(v*3) b from t"#, r#"340,510"#),
+        (r#"select count(1), count(null) from t"#, r#"6,0"#),
+        (r#"select sum(v), sum(distinct v) from t"#, r#"170,170"#),
+        (r#"select min(v), min(v + 1) from t"#, r#"10,11"#),
+        (r#"select avg(v), avg(v * 2) from t"#, r#"34,68"#),
+        (r#"select count(v), count(v + 1) from t"#, r#"5,5"#),
+    ]);
+}
+
+/// Grouping, counting and DISTINCT keep NULL and '' apart.
+#[test]
+fn empty_string_is_not_null() {
+    check(&[
+        (r#"select s, count(*) from (values ('a'), (''), (null), ('')) q(s) group by s order by s"#, r#"NULL,1|,2|a,1"#),
+        (r#"select s, count(*), count(s) from (values ('a'), (''), (null), ('')) q(s) group by s order by s"#, r#"NULL,1,0|,2,2|a,1,1"#),
+        (r#"select s, sum(n) from (values ('a', 1), ('', 2), (null, 3), ('', 4)) q(s, n) group by s order by s"#, r#"NULL,3|,6|a,1"#),
+        (r#"select count(distinct s) from (values ('a'), (''), (null), ('')) q(s)"#, r#"2"#),
+    ]);
+}
+
+/// Lateral column aliases, string aggregation idioms, and complex-type functions that must be rejected.
+#[test]
+fn lateral_aliases_and_unsupported_features() {
+    check(&[
+        (r#"select id + 1 as x, x * 2 as y from t where id < 3 order by id"#, r#"2,4|3,6"#),
+        (r#"select sum(v) as total, total / 2 as h from t"#, r#"170,85"#),
+        (r#"select v as id, id from t where id = 1"#, r#"10,1"#),
+        (r#"select id, (select 1) as one, one + 1 as two from t where id = 1"#, r#"1,1,2"#),
+        (r#"select g, count(*) as n, n * 2 as dbl from t group by g order by g"#, r#"NULL,1,2|x,2,4|y,2,4|z,1,2"#),
+        (r#"select (a, b) from (select 1 as a, 2 as b) q"#, r#"ERR"#),
+        (r#"select * from t where (id, v) in ((1, 10), (2, 20))"#, r#"ERR"#),
+        (r#"select id from t where id = 1 /* inline */"#, r#"1"#),
+        (r#"select 1 as `my col`, 2 as "other col" from t where id = 1"#, r#"1,2"#),
+        (r#"select cast(v as decimal(18, 2)) from t where id = 1"#, r#"10"#),
+        (r#"select cast('2024-03-05 10:20:30' as timestamp) - interval 1 day from t where id = 1"#, r#"2024-03-04 10:20:30"#),
+        (r#"select datediff(current_date, '2020-01-01') > 0, current_date() > '2020-01-01' from t where id = 1"#, r#"true,true"#),
+        (r#"select id from t where g is not null and g <> '' order by id"#, r#"1|2|3|4|5"#),
+        (r#"select case when g in ('x', 'y') then 'xy' when g is null then 'n' else 'other' end from t order by id"#, r#"xy|xy|xy|xy|other|n"#),
+        (r#"select g, grouping(g) gg, sum(v) from t group by rollup(g) order by grouping(g), g"#, r#"NULL,0,60|x,0,30|y,0,30|z,0,50|NULL,1,170"#),
+        (r#"select g, sum(v) over (partition by g order by id rows between unbounded preceding and current row) - v from t where g = 'x' order by id"#, r#"x,0|x,10"#),
+        (r#"select max(v) keep (dense_rank first order by id) from t"#, r#"ERR"#),
+        (r#"select first_value(v) over (order by id) from t order by id limit 1"#, r#"10"#),
+        (r#"select id from t where id between 2 and 3 or id = 6 order by id"#, r#"2|3|6"#),
+        (r#"select id from t where not (id < 3 or id > 4) order by id"#, r#"3|4"#),
+        (r#"select count(*) from t where v is null or g is null"#, r#"2"#),
+        (r#"select lower(trim(both ' ' from '  Ab  ')) from t where id = 1"#, r#"ab"#),
+        (r#"select concat_ws(',', collect_list(g)) from t where g is not null"#, r#"x,x,y,y,z"#),
+        (r#"select array_join(collect_set(g), '|') from t where g is not null"#, r#"x|y|z"#),
+        (r#"select g, concat_ws(';', collect_list(s)) from t group by g order by g"#, r#"NULL,World|x,Hello;  pad |y,abc|z,a,b,c"#),
+        (r#"select concat_ws(',', collect_list(g)) from t where id > 100"#, r#""#),
+        (r#"select explode(split('a,b', ',')) from t where id = 1"#, r#"a|b"#),
+        (r#"select posexplode(split('a,b', ',')) from t where id = 1"#, r#"ERR"#),
+        (r#"select stack(2, 1, 2) from t where id = 1"#, r#"ERR"#),
+        (r#"select inline(array(1)) from t where id = 1"#, r#"ERR"#),
+        (r#"select map_keys(map('a', 1)) from t where id = 1"#, r#"ERR"#),
+        (r#"select named_struct('a', 1) from t where id = 1"#, r#"ERR"#),
+        (r#"select to_json(named_struct('a', 1)) from t where id = 1"#, r#"ERR"#),
+        (r#"select from_json('{"a":1}', 'a int') from t where id = 1"#, r#"ERR"#),
+        (r#"select transform(array(1, 2), x -> x + 1) from t where id = 1"#, r#"ERR"#),
+        (r#"select aggregate(array(1, 2), 0, (a, b) -> a + b) from t where id = 1"#, r#"ERR"#),
+        (r#"select regexp_extract_all('a1b2', '(\\d)', 1) from t where id = 1"#, r#"ERR"#),
+        (r#"select current_timezone() from t where id = 1"#, r#"ERR"#),
+        (r#"select input_file_name() from t where id = 1"#, r#"ERR"#),
+        (r#"select monotonically_increasing_id() from t where id = 1"#, r#"ERR"#),
+        (r#"select spark_partition_id() from t where id = 1"#, r#"ERR"#),
+        (r#"select reflect('java.lang.Math', 'abs', -1) from t where id = 1"#, r#"ERR"#),
+        (r#"select assert_true(1 = 1) from t where id = 1"#, r#"true"#),
+        (r#"select hash('a') from t where id = 1"#, r#"ERR"#),
+        (r#"select xxhash64('a') from t where id = 1"#, r#"ERR"#),
+        (r#"select sentences('a b') from t where id = 1"#, r#"ERR"#),
+    ]);
+}
+
+/// Correlated scalar subqueries (also non-aggregate and nested), HAVING with subqueries, percent-of-total.
+#[test]
+fn correlated_and_nested_subqueries() {
+    check(&[
+        (r#"select g, sum(v) from t where g is not null group by g having sum(v) > (select sum(u.id) * 10 from u where u.w = t.g) order by g"#, r#""#),
+        (r#"select g, sum(v) s from t group by g having sum(v) > (select max(x) from nn) order by g"#, r#"NULL,60|x,30|y,30|z,50"#),
+        (r#"select g, sum(v) s from t group by g having sum(v) >= all (select 30) order by g"#, r#"NULL,60|x,30|y,30|z,50"#),
+        (r#"select g, sum(v) s from t group by g having g in (select w from u) order by g"#, r#""#),
+        (r#"select g, sum(v) s from t group by g having g in ('x', 'y') order by g"#, r#"x,30|y,30"#),
+        (r#"select g, count(*) from t group by g having count(*) = (select max(c) from (select count(*) c from t group by g) q) order by g"#, r#"x,2|y,2"#),
+        (r#"select id from t t1 where v > (select avg(v) from t t2 where t2.g = t1.g) order by id"#, r#"2"#),
+        (r#"select id from t t1 where v = (select max(v) from t t2 where t2.g = t1.g) order by id"#, r#"2|3|5"#),
+        (r#"select id, (select count(*) from t t2 where t2.v < t1.v) as rank_ from t t1 order by id"#, r#"1,0|2,1|3,2|4,0|5,3|6,4"#),
+        (r#"select id from t where exists (select 1 from t t2 where t2.g = t.g and t2.id <> t.id) order by id"#, r#"1|2|3|4"#),
+        (r#"select id from t where not exists (select 1 from t t2 where t2.g = t.g and t2.id <> t.id) order by id"#, r#"5|6"#),
+        (r#"select g, (select max(w) from u where u.id = (select min(id) from t t2 where t2.g = t1.g)) m from t t1 where id < 3 order by id"#, r#"x,p|x,p"#),
+        (r#"select * from (select id, (select max(w) from u where u.id = t.id) mw from t) q where mw is not null order by id"#, r#"1,p|2,r"#),
+        (r#"select id from t where id in (select id from u where w in (select w from u where id > 1)) order by id"#, r#"2"#),
+        (r#"select id from t where v > any (select v from t t2 where t2.g = 'x') order by id"#, r#"2|3|5|6"#),
+        (r#"select id from t where v > all (select v from t t2 where t2.g = 'x') order by id"#, r#"3|5|6"#),
+        (r#"select (select sum(v) from t) as total, count(*) from t where id < 3"#, r#"170,2"#),
+        (r#"select id, v, v * 100.0 / (select sum(v) from t) as pct from t where id < 3 order by id"#, r#"1,10,5.882353|2,20,11.764706"#),
+        (r#"select id, sum(v) over () as total, v * 1.0 / sum(v) over () as share from t where id < 3 order by id"#, r#"1,30,0.333333|2,30,0.666667"#),
+        (r#"select g, max(v) from t group by g having max(v) > (select min(v) from t) + 10 order by g"#, r#"NULL,60|y,30|z,50"#),
+        (r#"with m as (select g, max(v) mv from t group by g) select t.id from t join m on t.g = m.g and t.v = m.mv order by t.id"#, r#"2|3|5"#),
+        (r#"with m as (select g, max(v) mv from t group by g) select id from t where v = (select mv from m where m.g = t.g) order by id"#, r#"2|3|5"#),
+        (r#"select a.id, b.id from t a join t b on a.g = b.g and a.id < b.id order by a.id, b.id"#, r#"1,2|3,4"#),
+        (r#"select distinct a.g from t a join u b on a.id = b.id order by a.g"#, r#"x"#),
+        (r#"select count(*) from (select id from t union all select id from u) q where id > 1"#, r#"8"#),
+        (r#"select g, count(*) over (partition by g) from t where g = 'x'"#, r#"x,2|x,2"#),
+        (r#"select upper(g) u, count(*) c from t group by upper(g) having count(*) > 1 order by u"#, r#"X,2|Y,2"#),
+        (r#"select coalesce(g, 'none') k, sum(v) from t group by coalesce(g, 'none') having sum(v) > 40 order by k"#, r#"none,60|z,50"#),
+        (r#"select length(coalesce(s, '')) l, count(*) from t group by length(coalesce(s, '')) order by l"#, r#"0,1|3,1|5,3|6,1"#),
+    ]);
+}
+
+/// A correlated subquery must never be evaluated against the whole outer table.
+#[test]
+fn correlated_scalar_subquery_regressions() {
+    check(&[
+        (r#"with m as (select g, max(v) mv from t group by g) select id from t where v = (select mv from m where m.g = t.g) order by id"#, r#"2|3|5"#),
+        (r#"select id from t where v = (select mv from (select g, max(v) mv from t group by g) m where m.g = t.g) order by id"#, r#"2|3|5"#),
+        (r#"select id from t where v = (select max(mv) from (select g, max(v) mv from t group by g) m where m.g = t.g) order by id"#, r#"2|3|5"#),
+        (r#"select id, (select mv from (select g, max(v) mv from t group by g) m where m.g = t.g) from t where id < 4 order by id"#, r#"1,20|2,20|3,30"#),
+        (r#"select id from t where v = (select v from t t2 where t2.id = t.id) order by id"#, r#"1|2|3|5|6"#),
+        (r#"select id from t where g = (select g from t t2 where t2.id = t.id) order by id"#, r#"1|2|3|4|5"#),
+        (r#"select id from t where id = (select id from t t2 where t2.v = t.v) order by id"#, r#"1|2|3|5|6"#),
+    ]);
+}
+
+/// LIKE ESCAPE, decimal literal arithmetic, DECODE/ELT/JSON/CONV, sequence(), INTERVAL RANGE frames, bad regex errors.
+#[test]
+fn like_escape_decimal_literals_json_sequence_interval_frames() {
+    check(&[
+        (r#"select 'a%c' like 'a#%c' escape '#', 'abc' like 'a#%c' escape '#', 'a_c' like 'a!_c' escape '!' from t where id = 1"#, r#"true,false,true"#),
+        (r#"select 0.1 + 0.2, 0.1 + 0.2 = 0.3, 19.99 * 3, 1.1 * 1.1, 5 - 0.1 from t where id = 1"#, r#"0.3,true,59.97,1.21,4.9"#),
+        (r#"select 0.1 + 0.2 + 0.3, 3 * 0.1 from t where id = 1"#, r#"0.6,0.3"#),
+        (r#"select f + 0.1 from t where id = 1"#, r#"1.6"#),
+        (r#"select decode(id, 1, 'one', 2, 'two', 'many') from t where id < 4 order by id"#, r#"one|two|many"#),
+        (r#"select decode(g, null, 'none', 'x', 'ex', 'other') from t order by id"#, r#"ex|ex|other|other|other|none"#),
+        (r#"select elt(2, 'a', 'b', 'c'), elt(5, 'a'), field('b', 'a', 'b', 'c'), find_in_set('c', 'a,b,c') from t where id = 1"#, r#"b,NULL,2,3"#),
+        (r#"select get_json_object('{"a":{"b":[1,{"c":"x"}]},"n":null}', '$.a.b[1].c'), get_json_object('{"a":1}', '$.a'), get_json_object('{"a":1}', '$.z'), get_json_object('{"a":[1,2]}', '$.a') from t where id = 1"#, r#"x,1,NULL,[1,2]"#),
+        (r#"select get_json_object('not json', '$.a'), get_json_object('{"k y":5}', '$[''k y'']') from t where id = 1"#, r#"NULL,5"#),
+        (r#"select conv('ff', 16, 10), conv('10', 10, 2), bin(5), hex(255), unbase64('SGVsbG8=') from t where id = 1"#, r#"255,1010,101,FF,Hello"#),
+        (r#"select regexp_substr('abc123', '[0-9]+'), regexp_substr('abc', '[0-9]+') from t where id = 1"#, r#"123,NULL"#),
+        (r#"select regexp_extract('a', '(?=a)', 0) from t where id = 1"#, r#"ERR"#),
+        (r#"select regexp_replace(s, '(', 'x') from t where id = 1"#, r#"ERR"#),
+        (r#"select id from t where s rlike '(?<=a)b'"#, r#"ERR"#),
+        (r#"select timestamp_seconds(86400), unix_date('1970-01-10'), date_from_unix_date(1) from t where id = 1"#, r#"1970-01-02 00:00:00,9,1970-01-02"#),
+        (r#"select e from t lateral view explode(sequence(1, 4)) q as e where id = 1"#, r#"1|2|3|4"#),
+        (r#"select e from t lateral view explode(sequence(5, 1, -2)) q as e where id = 1 order by e desc"#, r#"5|3|1"#),
+        (r#"select d2 from t lateral view explode(sequence(to_date('2024-01-30'), to_date('2024-02-02'))) q as d2 where id = 1"#, r#"2024-01-30|2024-01-31|2024-02-01|2024-02-02"#),
+        (r#"select d2 from t lateral view explode(sequence(to_date('2024-01-31'), to_date('2024-04-30'), interval 1 month)) q as d2 where id = 1"#, r#"2024-01-31|2024-02-29|2024-03-31|2024-04-30"#),
+        (r#"select size(sequence(1, 5)) from t where id = 1"#, r#"5"#),
+        (r#"select d, sum(v) over (order by d range between interval 30 days preceding and current row) from t where d is not null order by d"#, r#"2023-12-31,30|2024-01-01,90|2024-01-15,100|2024-02-29,20|2024-03-01,70"#),
+        (r#"select d, count(*) over (order by d range between interval 1 month preceding and interval 1 day following) from t where d is not null order by d"#, r#"2023-12-31,2|2024-01-01,2|2024-01-15,3|2024-02-29,2|2024-03-01,2"#),
+        (r#"select d, count(*) over (order by d desc range between interval 14 days preceding and current row) from t where d is not null order by d"#, r#"2023-12-31,2|2024-01-01,2|2024-01-15,1|2024-02-29,2|2024-03-01,1"#),
+        (r#"select id, sum(v) over (order by id range between current row and 1 following) from t where id < 4 order by id"#, r#"1,30|2,50|3,30"#),
+    ]);
+}
+
+/// INTERSECT binds tighter than UNION / EXCEPT; parenthesised compound arms.
+#[test]
+fn set_operation_precedence() {
+    check(&[
+        (r#"select 1 as x union select 2 intersect select 2 order by x"#, r#"1|2"#),
+        (r#"select 1 as x union all select 2 intersect select 3 order by x"#, r#"1"#),
+        (r#"select 1 as x except select 1 union select 5 order by x"#, r#"5"#),
+        (r#"select 1 as x union select 1 except select 1 union select 7 order by x"#, r#"7"#),
+        (r#"select id from t where id < 4 intersect select id from u union select x from nn where x is not null order by id"#, r#"1|2"#),
+        (r#"(select 1 as x union select 2) intersect select 2"#, r#"2"#),
+        (r#"select id from t where id < 4 union select id from u except select id from t where id = 1 intersect select id from u order by id"#, r#"2|3|7"#),
+    ]);
+}
+
+/// Result names and ORDER BY after chains of set operations.
+#[test]
+fn set_operations_with_order_by() {
+    check(&[
+        (r#"select id from t where id < 4 intersect select id from u"#, r#"1|2"#),
+        (r#"select id from t where id < 4 intersect select id from u order by id"#, r#"1|2"#),
+        (r#"select id from t where id < 4 union select x from nn where x is not null order by id"#, r#"1|2|3"#),
+        (r#"select id from t where id < 4 intersect select id from u union select x from nn where x is not null order by id"#, r#"1|2"#),
+        (r#"select id from t where id < 4 union select id from u order by id"#, r#"1|2|3|7"#),
+    ]);
+}
+
+/// ARRAY values: constructors, split, collect_list/set, size, element_at, sort_array, array_join, set operations, explode.
+#[test]
+fn array_functions() {
+    check(&[
+        (r#"select split(s, ',') from t where id = 5"#, r#"[a, b, c]"#),
+        (r#"select array(1, 2, 3) from t where id = 1"#, r#"[1, 2, 3]"#),
+        (r#"select array('a', null, 'c') from t where id = 1"#, r#"[a, null, c]"#),
+        (r#"select [1, 2.5] from t where id = 1"#, r#"[1.0, 2.5]"#),
+        (r#"select size(array(1, 2, 3)), size(split(s, ',')), cardinality(array()) from t where id = 5"#, r#"3,3,0"#),
+        (r#"select split(s, ',')[1], element_at(split(s, ','), -1), element_at(array(1, 2), 5) from t where id = 5"#, r#"b,c,NULL"#),
+        (r#"select array_contains(array(1, 2, null), 2), array_contains(array(1, 2), 3), array_contains(array(1, null), 3) from t where id = 1"#, r#"true,false,NULL"#),
+        (r#"select sort_array(array(3, 1, null, 2)), sort_array(array('b', 'a'), false) from t where id = 1"#, r#"[null, 1, 2, 3],[b, a]"#),
+        (r#"select array_distinct(array(1, 2, 1, 3, 2)), array_union(array(1, 2), array(2, 3)), array_intersect(array(1, 2, 3), array(2, 3, 4)), array_except(array(1, 2, 3), array(2)) from t where id = 1"#, r#"[1, 2, 3],[1, 2, 3],[2, 3],[1, 3]"#),
+        (r#"select array_max(array(3, 1, 2)), array_min(array(3, 1, 2)), array_position(array('a', 'b'), 'b'), array_remove(array(1, 2, 1), 1) from t where id = 1"#, r#"3,1,2,[2]"#),
+        (r#"select array_join(array('a', 'b', null), '-'), array_join(array('a', null), '-', '?'), concat_ws('+', array('x', 'y'), 'z') from t where id = 1"#, r#"a-b,a-?,x+y+z"#),
+        (r#"select slice(array(1, 2, 3, 4), 2, 2), slice(array(1, 2, 3, 4), -2, 2), flatten(array(array(1), array(2, 3))), reverse(array(1, 2, 3)), array_repeat('x', 2) from t where id = 1"#, r#"[2, 3],[3, 4],[1, 2, 3],[3, 2, 1],[x, x]"#),
+        (r#"select arrays_overlap(array(1, 2), array(2, 3)), array_compact(array(1, null, 2)), array_append(array(1), 2), array_prepend(array(1), 0) from t where id = 1"#, r#"true,[1, 2],[1, 2],[0, 1]"#),
+        (r#"select sequence(1, 4), sequence(3, 1), sequence(1, 10, 4) from t where id = 1"#, r#"[1, 2, 3, 4],[3, 2, 1],[1, 5, 9]"#),
+        (r#"select sequence(to_date('2024-01-30'), to_date('2024-02-01')) from t where id = 1"#, r#"[2024-01-30, 2024-01-31, 2024-02-01]"#),
+        (r#"select g, collect_list(v) from t where g is not null group by g order by g"#, r#"x,[10, 20]|y,[30]|z,[50]"#),
+        (r#"select g, size(collect_set(s)) from t group by g order by g"#, r#"NULL,1|x,2|y,1|z,1"#),
+        (r#"select sort_array(collect_list(id)) from t"#, r#"[1, 2, 3, 4, 5, 6]"#),
+        (r#"select g, array_join(sort_array(collect_list(s)), '|') from t where g = 'x' group by g"#, r#"x,  pad |Hello"#),
+        (r#"select e from t lateral view explode(array(1, 2)) q as e where id = 1"#, r#"1|2"#),
+        (r#"select e from t lateral view explode(split(s, ',')) q as e where id = 5"#, r#"a|b|c"#),
+        (r#"select explode(split(s, ',')) from t where id = 5"#, r#"a|b|c"#),
+        (r#"select id, e from (select id, split(s, ',') as parts from t where id in (1, 5)) q lateral view explode(parts) x as e order by id, e"#, r#"1,Hello|5,a|5,b|5,c"#),
+        (r#"select id, size(parts) from (select id, split(s, ',') as parts from t) q order by id"#, r#"1,1|2,1|3,1|4,-1|5,3|6,1"#),
+        (r#"select count(*) from t where array_contains(split(s, ','), 'b')"#, r#"1"#),
+        (r#"select * from (select array(1, 2) as a) q"#, r#"[1, 2]"#),
+        (r#"select a, count(*) from (select array(1, 2) as a union all select array(1, 2)) q group by a"#, r#"[1, 2],2"#),
+        (r#"select array(array(1), array(2, 3)) from t where id = 1"#, r#"[[1], [2, 3]]"#),
+        (r#"select map('a', 1) from t where id = 1"#, r#"ERR"#),
+        (r#"select transform(array(1), x -> x) from t where id = 1"#, r#"ERR"#),
+        (r#"select array_contains(1, 1) from t where id = 1"#, r#"NULL"#),
+        (r#"select size(null) from t where id = 1"#, r#"-1"#),
+        (r#"select sort_array(split(s, ',')) from t where id = 5"#, r#"[a, b, c]"#),
+    ]);
+}
+
+/// Syntax and types the engine does not implement are errors; division by zero, overflow and casts at the edges.
+#[test]
+fn unsupported_syntax_is_rejected_and_edge_arithmetic() {
+    check(&[
+        (r#"with recursive r as (select 1 as n union all select n + 1 from r where n < 3) select * from r"#, r#"ERR"#),
+        (r#"select id from t tablesample (50 percent)"#, r#"ERR"#),
+        (r#"select interval 1 day 2 hours from t where id = 1"#, r#"ERR"#),
+        (r#"select from_utc_timestamp('2024-01-01 00:00:00', 'PST') from t where id = 1"#, r#"ERR"#),
+        (r#"select id from t window w as (order by id)"#, r#"1|2|3|4|5|6"#),
+        (r#"select sum(v) over (order by id groups between 1 preceding and current row) from t"#, r#"ERR"#),
+        (r#"select * from t cluster by id"#, r#"ERR"#),
+        (r#"select cast(v as binary) from t"#, r#"ERR"#),
+        (r#"select map_from_arrays(array(1), array(2)) from t"#, r#"ERR"#),
+        (r#"select id::int from t"#, r#"ERR"#),
+        (r#"select id from t where id in (1, 2) escape '#'"#, r#"ERR"#),
+        (r#"select 1 as a, 2 as a from t where id = 1"#, r#"1,2"#),
+        (r#"select a.* from t a limit 1"#, r#"1,x,10,Hello,1.5,2024-01-15"#),
+        (r#"select count(*) as c from t group by ()"#, r#"ERR"#),
+        (r#"select id from t order by id nulls"#, r#"ERR"#),
+        (r#"select sum(v) from t group by g, rollup()"#, r#"ERR"#),
+        (r#"select 1 from t where exists (select 1) limit 1"#, r#"1"#),
+        (r#"select (select 1 union select 2) from t where id = 1"#, r#"ERR"#),
+        (r#"select id from t where id = (select 1 union all select 1)"#, r#"ERR"#),
+        (r#"select cast(true as string), cast(date '2024-03-05' as string), cast(1.5e0 as string), cast(-0.0 as string), cast(100000000.0 as string), cast(0.00001 as string) from t where id = 1"#, r#"true,2024-03-05,1.5,-0.0,1.0E8,1.0E-5"#),
+        (r#"select cast('2024-03-05 10:20:30' as date), cast(date '2024-03-05' as timestamp), cast('1e3' as double), cast('0x1F' as int) from t where id = 1"#, r#"2024-03-05,2024-03-05 00:00:00,1000,NULL"#),
+        (r#"select cast(2147483648 as int), cast(-129 as tinyint), cast(300 as smallint) from t where id = 1"#, r#"-2147483648,127,300"#),
+        (r#"select 5 / 0, 5 % 0, 0 / 0, -5 / 0 from t where id = 1"#, r#"NULL,NULL,NULL,NULL"#),
+        (r#"select pow(2, 62), pow(2, 64), 9223372036854775807 + 1 from t where id = 1"#, r#"4611686018427387904,18446744073709551616,-9223372036854775808"#),
+        (r#"select round(123.456, -1), round(-123.456, 1), ceil(-0.5), floor(0.5) from t where id = 1"#, r#"120,-123.5,0,0"#),
+        (r#"select 10 % 3, -10 % 3, 10 % -3, 5.5 % 2 from t where id = 1"#, r#"1,-1,1,1.5"#),
+        (r#"select 1 = 1.0, '1' = 1, 'a' = 'a ', true = 1 from t where id = 1"#, r#"true,true,false,true"#),
+        (r#"select least('b', 'a', null), greatest(2, 10, 3.5), greatest('a', 'B') from t where id = 1"#, r#"a,10,a"#),
+    ]);
+}
+
+/// COUNT / SUM / MIN / MAX of integers are integers (cast to text shows it).
+#[test]
+fn integer_aggregates_stay_integers() {
+    check(&[
+        (r#"select cast(sum(v) as string), cast(count(*) as string), cast(min(v) as string), cast(max(id) as string) from t"#, r#"170,6,10,6"#),
+        (r#"select g, cast(sum(v) as string), cast(count(*) as string) from t group by g order by g"#, r#"NULL,60,1|x,30,2|y,30,2|z,50,1"#),
+        (r#"select cast(sum(f) as string), cast(avg(v) as string) from t"#, r#"4.5,34.0"#),
+        (r#"select cast(sum(v) as string) from t where id > 100"#, r#"NULL"#),
+        (r#"select cast(count(distinct g) as string) from t"#, r#"3"#),
+    ]);
+}
+
+/// A NULL grouping key never shares a group with 0, false or ''; VALUES keeps booleans.
+#[test]
+fn null_group_keys_of_every_type() {
+    check(&[
+        (r#"select c, count(distinct n) from (values (0.0, 1), (null, 2), (0.0, 3)) q(c, n) group by c order by c"#, r#"NULL,1|0,2"#),
+        (r#"select c, count(*), sum(n) from (values (0.0, 1), (null, 2), (0.0, 3), (null, 4)) q(c, n) group by c order by c"#, r#"NULL,2,6|0,2,4"#),
+        (r#"select b, count(distinct n) from (values (true, 1), (null, 2), (false, 3), (true, 4)) q(b, n) group by b order by b"#, r#"NULL,1|false,1|true,2"#),
+        (r#"select i, count(distinct n) from (values (0, 1), (null, 2), (0, 3)) q(i, n) group by i order by i"#, r#"NULL,1|0,2"#),
+        (r#"select s, max(n) from (values ('', 1), (null, 2), ('', 3)) q(s, n) group by s order by s"#, r#"NULL,2|,3"#),
+        (r#"select a, b, count(distinct n) from (values (1, null, 5), (1, '', 6), (1, null, 7)) q(a, b, n) group by a, b order by b"#, r#"1,NULL,2|1,,1"#),
+    ]);
+}
+
+#[test]
+fn whitespace_sensitive_results() {
+    let c = ctx();
+    let one = |sql: &str| render(&c.query(sql).unwrap());
+    assert_eq!(one("select ltrim(s) from t where id = 2"), "pad ");
+    assert_eq!(one("select rtrim(s) from t where id = 2"), "  pad");
+    assert_eq!(one("select trim(leading ' ' from s) from t where id = 2"), "pad ");
+    assert_eq!(one("select space(3) from t where id = 1"), "   ");
+    assert_eq!(one("select min(s), max(s) from t"), "  pad ,abc");
+    assert_eq!(one("select collect_list(id) from t where id < 3"), "[1, 2]");
+    assert_eq!(one("select sum(v) over () from t where id = 1"), "10");
+    assert_eq!(one("select g, count(*) c from t group by g order by c desc, g"), "x,2|y,2|NULL,1|z,1");
+}
+
+#[test]
+fn unknown_functions_are_errors_not_nulls() {
+    let c = ctx();
+    for sql in ["select nosuchfn(id) from t", "select id from t where frobnicate(g) = 1", "select soundex('a') from t"] {
+        let e = c.query(sql).unwrap_err().to_string();
+        assert!(e.contains("unknown function"), "{sql}: {e}");
+    }
+}
+
+#[test]
+fn scalar_subquery_with_several_rows_is_an_error() {
+    let c = ctx();
+    assert!(c.query("select id from t where id = (select id from u)").is_err());
+    assert!(c.query("select id, (select w from u where u.id = t.id) from t where id = 2").is_err());
+}

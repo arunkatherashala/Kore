@@ -40,6 +40,11 @@ pub enum Expr {
     Array(Vec<Expr>),
     /// EXPLODE(expr) — flatten array/map into rows
     Explode(Box<Expr>),
+    /// Aggregate call the classic fast paths do not cover: `COUNT(DISTINCT a, b)`, `SUM(x) FILTER (WHERE ..)`,
+    /// `STDDEV_POP`, `PERCENTILE`, `COLLECT_LIST`, ... `name` is upper case. Run by the general aggregation path.
+    AggX { name: String, args: Vec<Expr>, distinct: bool, filter: Option<Box<Expr>> },
+    /// `expr <op> ANY|SOME|ALL (SELECT ...)`
+    QuantSubquery { expr: Box<Expr>, op: BinOpKind, all: bool, subquery: Box<SelectStmt> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,16 +73,24 @@ pub enum WindowFn {
     PercentRank,
     CumeDist,
     Ntile(Box<Expr>),
-    Lag  { expr: Box<Expr>, offset: Box<Expr> },
-    Lead { expr: Box<Expr>, offset: Box<Expr> },
+    Lag  { expr: Box<Expr>, offset: Box<Expr>, default: Option<Box<Expr>> },
+    Lead { expr: Box<Expr>, offset: Box<Expr>, default: Option<Box<Expr>> },
     Agg  { func: AggFunc, expr: Box<Expr> },   // SUM/AVG/... OVER (...)
     CumSum(Box<Expr>),
     FirstValue(Box<Expr>),
     LastValue(Box<Expr>),
+    /// `FIRST_VALUE(x, true)` / `FIRST_VALUE(x) IGNORE NULLS`
+    FirstValueIgnoreNulls(Box<Expr>),
+    LastValueIgnoreNulls(Box<Expr>),
+    NthValue { expr: Box<Expr>, n: Box<Expr> },
+    /// Any other aggregate used as a window function (STDDEV, COLLECT_LIST, ... or with FILTER).
+    AggX { name: String, args: Vec<Expr>, filter: Option<Box<Expr>> },
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct WindowSpec {
+    /// `OVER w` / `OVER (w ORDER BY ..)`: name of a `WINDOW w AS (..)` definition this spec extends.
+    pub base:         Option<String>,
     pub partition_by: Vec<Expr>,
     pub order_by:     Vec<OrderByItem>,
     pub frame:        Option<WindowFrame>,
@@ -148,6 +161,14 @@ pub struct SelectStmt {
     pub group_by:      Vec<String>,
     /// GROUP BY ROLLUP(..) / CUBE(..) expand `group_by` into grouping sets.
     pub grouping:      Grouping,
+    /// General GROUP BY (expressions, ordinals, GROUPING SETS / mixed ROLLUP/CUBE): the distinct grouping
+    /// expressions. When non-empty `group_by` holds placeholder names of the same length and the general
+    /// aggregation path runs.
+    pub group_exprs:   Vec<Expr>,
+    /// Grouping sets as index lists into `group_exprs`; empty means one set holding every expression.
+    pub group_sets:    Vec<Vec<usize>>,
+    /// `WINDOW w AS (...)` definitions.
+    pub windows:       Vec<(String, WindowSpec)>,
     pub having:        Option<Expr>,
     pub qualify:       Option<Expr>,  // QUALIFY (window filter)
     pub order_by:      Vec<OrderByItem>,
@@ -162,6 +183,32 @@ pub struct SelectStmt {
     pub unpivot:       Option<UnpivotClause>,
     /// Query hints: /*+ BROADCAST(t) */ etc.
     pub hints:         Vec<QueryHint>,
+    /// Written as `( SELECT .. )` (an arm of a set operation).
+    pub parenthesized: bool,
+    /// Further arms of `UNION / INTERSECT / EXCEPT` chained to this statement; the statement's own
+    /// ORDER BY / LIMIT / OFFSET then apply to the combined result.
+    pub set_ops:       Vec<(SetOpKind, SelectStmt)>,
+}
+
+impl SelectStmt {
+    /// `SELECT * FROM <from>` with every other clause empty.
+    pub fn star_from(from: TableExpr) -> SelectStmt {
+        SelectStmt {
+            distinct: false, projections: vec![Projection::Star], from, joins: Vec::new(), where_clause: None,
+            group_by: Vec::new(), grouping: Grouping::Plain, group_exprs: Vec::new(), group_sets: Vec::new(),
+            windows: Vec::new(), having: None, qualify: None, order_by: Vec::new(), limit: None, offset: None,
+            scan_limit: None, lateral_views: Vec::new(), pivot: None, unpivot: None, hints: Vec::new(),
+            parenthesized: false, set_ops: Vec::new(),
+        }
+    }
+
+    /// `SELECT * FROM (inner) __arm`: isolates an inner statement that has its own ORDER BY / LIMIT.
+    pub fn wrap(inner: SelectStmt) -> SelectStmt {
+        SelectStmt::star_from(TableExpr {
+            name: "__arm".into(), alias: Some("__arm".into()), subquery: Some(Box::new(inner)),
+            values: None, push_filter: None, col_aliases: Vec::new(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -183,6 +230,8 @@ pub struct TableExpr {
     pub values:   Option<Vec<Vec<Expr>>>,
     /// Set by PredicatePushdownRule: filter pushed down to this table's scan.
     pub push_filter: Option<Box<Expr>>,
+    /// `(subquery) alias(c1, c2)` / `VALUES .. AS t(c1, c2)` column names
+    pub col_aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -192,6 +241,10 @@ pub struct JoinClause {
     pub on:        JoinOn,
     /// Set by PredicatePushdownRule: filter pushed down to the join's table scan.
     pub push_filter: Option<Box<Expr>>,
+    /// `JOIN .. USING (a, b)`
+    pub using:     Vec<String>,
+    /// `NATURAL JOIN`: join on every column name both sides share
+    pub natural:   bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -204,6 +257,8 @@ pub struct JoinOn {
 #[derive(Debug, Clone, PartialEq)]
 pub enum JoinKind {
     Inner, Left, Right, Full, Cross,
+    /// `LEFT SEMI JOIN` / `LEFT ANTI JOIN`: left rows with / without a match, left columns only.
+    Semi, Anti,
     /// `FROM a, b, c`: an inner join whose keys come from equalities in the WHERE clause.
     Implicit,
 }
@@ -220,7 +275,7 @@ pub struct OrderByItem {
 
 /// Set operation kinds: UNION ALL, UNION (dedup), INTERSECT, EXCEPT
 #[derive(Debug, Clone, PartialEq)]
-pub enum SetOpKind { UnionAll, Union, Intersect, Except }
+pub enum SetOpKind { UnionAll, Union, Intersect, Except, IntersectAll, ExceptAll }
 
 /// Full query: `[WITH cte, ...] SELECT ... [UNION/INTERSECT/EXCEPT SELECT ...]`
 #[derive(Debug, Clone, Default)]
@@ -228,6 +283,10 @@ pub struct Query {
     pub ctes:      Vec<CteClause>,
     pub body:      Option<SelectStmt>,
     pub set_ops:   Vec<(SetOpKind, SelectStmt)>,
+    /// ORDER BY / LIMIT / OFFSET that follow a set operation apply to its whole result.
+    pub order_by:  Vec<OrderByItem>,
+    pub limit:     Option<u64>,
+    pub offset:    Option<u64>,
 }
 
 #[derive(Debug, Clone)]
