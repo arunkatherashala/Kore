@@ -71,6 +71,23 @@ fn check(cases: &[(&str, &str)]) {
     assert!(failures.is_empty(), "{} of {} cases failed:\n{}", failures.len(), cases.len(), failures.join("\n"));
 }
 
+/// BIGINT values beyond 2^53 stay exact; JOIN (VALUES ...)
+#[test]
+fn int_precision() {
+    check(&[
+        (r#"select cast(sum(n) as string), cast(min(n) as string), cast(max(n) as string) from (values (9007199254740993), (1), (9007199254740995)) q(n)"#, r#"18014398509481989,1,9007199254740995"#),
+        (r#"select n, count(*) from (values (9007199254740993), (9007199254740992), (9007199254740993)) q(n) group by n order by n"#, r#"9007199254740992,1|9007199254740993,2"#),
+        (r#"select count(distinct n) from (values (9007199254740993), (9007199254740992)) q(n)"#, r#"2"#),
+        (r#"select n from (values (9007199254740993), (9007199254740992)) q(n) order by n desc"#, r#"9007199254740993|9007199254740992"#),
+        (r#"select a.n, b.n from (values (9007199254740993), (9007199254740992)) a(n) join (values (9007199254740992)) b(n) on a.n = b.n"#, r#"9007199254740992,9007199254740992"#),
+        (r#"select n + 1, n * 2 from (values (9007199254740993)) q(n)"#, r#"9007199254740994,18014398509481986"#),
+        (r#"select cast(sum(n) as string) from (values (4611686018427387904), (4611686018427387904)) q(n)"#, r#"-9223372036854775808"#),
+        (r#"select n = 9007199254740992, n > 9007199254740992 from (values (9007199254740993)) q(n)"#, r#"false,true"#),
+        (r#"select sum(n) over (order by n rows unbounded preceding) s from (values (9007199254740993), (1)) q(n) order by s"#, r#"1|9007199254740994"#),
+        (r#"select avg(n) from (values (9007199254740993), (9007199254740993)) q(n)"#, r#"9007199254740992"#),
+    ]);
+}
+
 /// Inputs found by mutation fuzzing that used to crash the engine.
 #[test]
 fn malformed_input_is_an_error_not_a_panic() {

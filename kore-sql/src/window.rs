@@ -326,8 +326,12 @@ pub fn evaluate(func: &WindowFn, spec: &WindowSpec, n: usize, ev: &mut dyn FnMut
                 let m = part.rows.len();
                 // prefix sums over the partition in window order
                 let (mut ps, mut pc, mut pni) = (vec![0.0f64; m + 1], vec![0usize; m + 1], vec![0usize; m + 1]);
+                // exact integer prefix sums (wrapping) for SUM over BIGINT values
+                let mut pi = vec![0i64; m + 1];
                 if fast {
                     for (i, &r) in part.rows.iter().enumerate() {
+                        let iv = if inp.star { 0 } else if let V::Int(x) = &inp.args[0][r] { *x } else { 0 };
+                        pi[i + 1] = pi[i].wrapping_add(iv);
                         let (x, is_int) = if inp.star { (Some(1.0), true) } else {
                             let v = &inp.args[0][r];
                             (if inp.name == "COUNT" { if matches!(v, V::Null) { None } else { Some(1.0) } } else { num(v) }, matches!(v, V::Int(_)))
@@ -348,7 +352,7 @@ pub fn evaluate(func: &WindowFn, spec: &WindowSpec, n: usize, ev: &mut dyn FnMut
                         match inp.name.as_str() {
                             "COUNT" => V::Int(cnt as i64),
                             _ if cnt == 0 => V::Null,
-                            "SUM" => if pni[hi + 1] - pni[lo] == 0 { V::Int(sum.round() as i64) } else { V::Float(sum) },
+                            "SUM" => if pni[hi + 1] - pni[lo] == 0 { V::Int(pi[hi + 1].wrapping_sub(pi[lo])) } else { V::Float(sum) },
                             _ => V::Float(sum / cnt as f64),
                         }
                     } else {

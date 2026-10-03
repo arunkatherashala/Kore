@@ -1077,24 +1077,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     let base_alias  = stmt.from.alias.as_deref().unwrap_or(base_name.as_str());
 
     // FROM VALUES (...) — build inline DataBlock
-    let values_block: Option<DataBlock> = if let Some(rows) = &stmt.from.values {
-        if rows.is_empty() { Some(DataBlock::empty()) } else {
-            let ncols = rows[0].len();
-            let dummy = DataBlock::empty();
-            let mut cols: Vec<Vec<ExprVal>> = vec![Vec::new(); ncols];
-            for row in rows {
-                for (ci, expr) in row.iter().enumerate() {
-                    cols[ci].push(eval_expr(expr, &dummy, 0));
-                }
-            }
-            // typed by what the cells hold (booleans, mixed int / float, text), not by the first cell only
-            let columns: Vec<Column> = cols.into_iter().enumerate().map(|(i, vals)| {
-                let name = stmt.from.col_aliases.get(i).cloned().unwrap_or_else(|| format!("col{}", i+1));
-                crate::general::vals_to_column(name, vals, None)
-            }).collect();
-            Some(DataBlock::new(columns).map_err(|e| KoreError::InvalidArgument(e.to_string()))?)
-        }
-    } else { None };
+    let values_block: Option<DataBlock> = if stmt.from.values.is_some() { Some(values_table_block(&stmt.from)?) } else { None };
 
     // FROM (SELECT ...) subquery — execute it first, then use as temp table
     let subq_block: Option<DataBlock> = if stmt.from.values.is_none() {
@@ -1280,7 +1263,9 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         let right_alias = join.table.alias.as_deref().unwrap_or(right_name.as_str());
 
         // Resolve right side: subquery, view, or regular table
-        let right_block = if let Some(subq) = &join.table.subquery {
+        let right_block = if join.table.values.is_some() {
+            values_table_block(&join.table)?
+        } else if let Some(subq) = &join.table.subquery {
             derived_block(subq, ctx, &join.table.col_aliases)?
         } else if let Some(b) = ctx.get(right_name) {
             b.clone()
@@ -1490,9 +1475,30 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
 
 // ─── Implicit-join helpers ────────────────────────────────────────────────────
 
+/// The block behind `(VALUES (..), (..)) alias(c1, c2)`.
+fn values_table_block(t: &TableExpr) -> Result<DataBlock, KoreError> {
+    let rows = t.values.as_deref().unwrap_or(&[]);
+    if rows.is_empty() { return Ok(DataBlock::empty()); }
+    let dummy = DataBlock::empty();
+    let mut cols: Vec<Vec<ExprVal>> = vec![Vec::new(); rows[0].len()];
+    for row in rows {
+        for (ci, expr) in row.iter().enumerate() {
+            cols[ci].push(eval_expr(expr, &dummy, 0));
+        }
+    }
+    // typed by what the cells hold (booleans, mixed int / float, text), not by the first cell only
+    let columns: Vec<Column> = cols.into_iter().enumerate().map(|(i, vals)| {
+        let name = t.col_aliases.get(i).cloned().unwrap_or_else(|| format!("col{}", i + 1));
+        crate::general::vals_to_column(name, vals, None)
+    }).collect();
+    DataBlock::new(columns).map_err(|e| KoreError::InvalidArgument(e.to_string()))
+}
+
 /// The data behind a joined table reference: a FROM-subquery, a registered table or a view.
 fn resolve_join_table(table: &TableExpr, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
-    if let Some(subq) = &table.subquery {
+    if table.values.is_some() {
+        values_table_block(table)
+    } else if let Some(subq) = &table.subquery {
         derived_block(subq, ctx, &table.col_aliases)
     } else if let Some(b) = ctx.get(&table.name) {
         Ok(b.clone())
@@ -1553,7 +1559,7 @@ impl Src<'_> {
 }
 
 fn table_source<'a>(table: &TableExpr, ctx: &'a KqlContext) -> Result<Src<'a>, KoreError> {
-    if table.subquery.is_none() {
+    if table.subquery.is_none() && table.values.is_none() {
         if let Some(b) = ctx.get(&table.name) { return Ok(Src::B(b)); }
     }
     resolve_join_table(table, ctx).map(Src::O)
@@ -4154,6 +4160,20 @@ fn integral_result(func: &AggFunc, input: Option<&Column>) -> bool {
     }
 }
 
+/// Exact SUM (wrapping, like Spark without ANSI mode) / MIN / MAX over BIGINT values; None when there are no values.
+fn int_reduce(func: &AggFunc, vals: impl Iterator<Item = Option<i64>>) -> Option<i64> {
+    let mut acc: Option<i64> = None;
+    for x in vals.flatten() {
+        acc = Some(match (acc, func) {
+            (None, _) => x,
+            (Some(a), AggFunc::Min) => a.min(x),
+            (Some(a), AggFunc::Max) => a.max(x),
+            (Some(a), _) => a.wrapping_add(x),
+        });
+    }
+    acc
+}
+
 fn agg_column_data(vals: Vec<Option<f64>>, integral: bool) -> ColumnData {
     if integral { ColumnData::Int64(vals.into_iter().map(|v| v.map(|x| x as i64)).collect()) } else { ColumnData::Float64(vals) }
 }
@@ -4244,6 +4264,14 @@ fn global_agg(block: DataBlock, projections: &[Projection]) -> Result<DataBlock,
                     _                 => None,
                 }).collect()
             };
+            // BIGINT sums / extremes are computed on the integers themselves (a double only holds 53 bits)
+            if matches!(func, AggFunc::Sum | AggFunc::Min | AggFunc::Max) {
+                if let Some(ColumnData::Int64(iv)) = agg_col.map(|c| &c.data) {
+                    let name = alias.clone().unwrap_or_else(|| format!("{:?}({})", func, col_name));
+                    new_cols.push(Column { name, data: ColumnData::Int64(vec![int_reduce(func, iv.iter().copied())]) });
+                    continue;
+                }
+            }
             let v: Option<f64> = match func {
                 AggFunc::Count => Some(count_non_null(inner, &block, agg_col, 0..block.num_rows)),
                 AggFunc::CountDistinct => {
@@ -4371,7 +4399,7 @@ fn group_by_fast(block: &DataBlock, group_cols: &[String], projections: &[Projec
     }
 
     // projections: group-key columns and numeric aggregates only
-    enum Out<'a> { Key(&'a Column, Option<&'a String>), Agg { func: &'a AggFunc, vals: Option<Vec<Option<f64>>>, count_col: Option<&'a Column>, name: String, integral: bool } }
+    enum Out<'a> { Key(&'a Column, Option<&'a String>), Agg { func: &'a AggFunc, vals: Option<Vec<Option<f64>>>, count_col: Option<&'a Column>, name: String, integral: bool, int_src: Option<&'a Vec<Option<i64>>> } }
     let mut outs: Vec<Out> = Vec::new();
     for p in projections {
         let Projection::Expr { expr, alias } = p else { return None };
@@ -4394,15 +4422,20 @@ fn group_by_fast(block: &DataBlock, group_cols: &[String], projections: &[Projec
                 let name = alias.clone().unwrap_or_else(|| format!("{:?}({})", func, col_name));
                 if star {
                     if !matches!(func, AggFunc::Count) { return None; }
-                    outs.push(Out::Agg { func, vals: None, count_col: None, name, integral: true });
+                    outs.push(Out::Agg { func, vals: None, count_col: None, name, integral: true, int_src: None });
                 } else if matches!(func, AggFunc::Count) {
                     match inner.as_ref() {
-                        Expr::Col(_) | Expr::QualCol(..) => outs.push(Out::Agg { func, vals: None, count_col: Some(find_col(block, &col_name)?), name, integral: true }),
-                        other => outs.push(Out::Agg { func, vals: Some(crate::vecexpr::num_vec(other, block)?), count_col: None, name, integral: true }),
+                        Expr::Col(_) | Expr::QualCol(..) => outs.push(Out::Agg { func, vals: None, count_col: Some(find_col(block, &col_name)?), name, integral: true, int_src: None }),
+                        other => outs.push(Out::Agg { func, vals: Some(crate::vecexpr::num_vec(other, block)?), count_col: None, name, integral: true, int_src: None }),
                     }
                 } else {
-                    let integral = integral_result(func, match inner.as_ref() { Expr::Col(_) | Expr::QualCol(..) => find_col(block, &col_name), _ => None });
-                    outs.push(Out::Agg { func, vals: Some(crate::vecexpr::num_vec(inner, block)?), count_col: None, name, integral });
+                    let direct = match inner.as_ref() { Expr::Col(_) | Expr::QualCol(..) => find_col(block, &col_name), _ => None };
+                    let integral = integral_result(func, direct);
+                    let int_src = match (direct.map(|c| &c.data), func) {
+                        (Some(ColumnData::Int64(v)), AggFunc::Sum | AggFunc::Min | AggFunc::Max) => Some(v),
+                        _ => None,
+                    };
+                    outs.push(Out::Agg { func, vals: Some(crate::vecexpr::num_vec(inner, block)?), count_col: None, name, integral, int_src });
                 }
             }
             _ => return None,
@@ -4434,7 +4467,22 @@ fn group_by_fast(block: &DataBlock, group_cols: &[String], projections: &[Projec
                 if let Some(a) = alias { c.name = (*a).clone(); }
                 columns.push(c);
             }
-            Out::Agg { func, vals, count_col, name, integral } => {
+            Out::Agg { func, vals, count_col, name, integral, int_src } => {
+                if let Some(iv) = int_src {
+                    // exact integer accumulation
+                    let (mut acc, mut has) = (vec![0i64; ng], vec![false; ng]);
+                    for r in 0..n {
+                        if let Some(x) = iv[r] {
+                            let g = gid[r] as usize;
+                            if !has[g] { acc[g] = x; has[g] = true; }
+                            else {
+                                acc[g] = match func { AggFunc::Min => acc[g].min(x), AggFunc::Max => acc[g].max(x), _ => acc[g].wrapping_add(x) };
+                            }
+                        }
+                    }
+                    columns.push(Column { name: name.clone(), data: ColumnData::Int64((0..ng).map(|g| if has[g] { Some(acc[g]) } else { None }).collect()) });
+                    continue;
+                }
                 let mut count = vec![0u64; ng];
                 let data: Vec<Option<f64>> = match (func, vals) {
                     (AggFunc::Count, None) => {
@@ -4626,6 +4674,16 @@ fn group_by_agg(
                         let agg_col = if is_direct { find_col(&block, &col_name) } else { None };
                         // Arbitrary expression (e.g. col*col): evaluate it once for the whole block
                         let pre_vals = if is_direct { None } else { crate::vecexpr::num_vec(inner, &block) };
+                        if matches!(func, AggFunc::Sum | AggFunc::Min | AggFunc::Max) {
+                            if let Some(ColumnData::Int64(iv)) = agg_col.map(|c| &c.data) {
+                                let out: Vec<Option<i64>> = groups.iter()
+                                    .map(|(_, idxs)| int_reduce(func, idxs.iter().map(|&r| iv.get(r).copied().flatten())))
+                                    .collect();
+                                let name = alias.clone().unwrap_or_else(|| format!("{:?}({})", func, col_name));
+                                new_cols.push(Column { name, data: ColumnData::Int64(out) });
+                                continue;
+                            }
+                        }
                         let mut agg_vals: Vec<Option<f64>> = Vec::new();
                         for (_, idxs) in &groups {
                             // Direct column ref: fast column-at-a-time extraction.
