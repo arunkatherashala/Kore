@@ -1000,6 +1000,10 @@ fn main() {
     let run_parquet = args.iter().any(|a| a == "--parquet");
     let run_sql_vs_native = args.iter().any(|a| a == "--sql-vs-native");
 
+    eprintln!("NOTE: the \"Spark\" figures printed by this binary are constants typed into the source, not measured,");
+    eprintln!("      and several queries here are simplified. Do not quote the speedups. For a live, result-checked");
+    eprintln!("      comparison see benchmarks/tpch_honest (python run_engines.py).");
+
     if run_parquet {
         let parquet_dir = format!("tpch_parquet_sf{scale}");
         println!();

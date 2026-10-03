@@ -1,5 +1,15 @@
 # KORE v1.8.0 Release - September 10, 2026
 
+> **Correction (2026-10):** The Spark / DuckDB speedup figures in this document (for example "339x", "500x" or "5/5 queries")
+> came from comparing KORE with Spark numbers typed into the benchmark source as constants ("published numbers"), using
+> simplified hand-written queries whose answers were never checked. They were **not** measured against a running Spark or DuckDB
+> and must not be quoted. A reproducible comparison against live Spark that checks every result is in
+> [`benchmarks/tpch_honest`](benchmarks/tpch_honest/README.md): all 22 TPC-H queries, same data and SQL for both engines.
+> On one 8-core machine at scale factor 1 (in-memory data, Spark in local mode, TPC-H-shaped data) KORE is faster on 14 of 22
+> queries and about 1.7x faster in geometric mean. That says nothing about larger-than-memory data or clusters, and DuckDB,
+> DataFusion and Polars have not been compared yet.
+
+
 ## 🎯 MISSION: World's Best Analytical Engine
 
 We're not just competing with Spark. We're building **one of the world's best analytical engines** by excelling across **seven pillars**:

@@ -7,6 +7,16 @@ It beats DuckDB by 72x and Spark by 365x on TPC-H Q1 — on the same machine, re
 
 ## Distributed engine — Phases 1–20 complete
 
+> **Correction (2026-10):** The Spark / DuckDB speedup figures in this document (for example "339x", "500x" or "5/5 queries")
+> came from comparing KORE with Spark numbers typed into the benchmark source as constants ("published numbers"), using
+> simplified hand-written queries whose answers were never checked. They were **not** measured against a running Spark or DuckDB
+> and must not be quoted. A reproducible comparison against live Spark that checks every result is in
+> [`benchmarks/tpch_honest`](benchmarks/tpch_honest/README.md): all 22 TPC-H queries, same data and SQL for both engines.
+> On one 8-core machine at scale factor 1 (in-memory data, Spark in local mode, TPC-H-shaped data) KORE is faster on 14 of 22
+> queries and about 1.7x faster in geometric mean. That says nothing about larger-than-memory data or clusters, and DuckDB,
+> DataFusion and Polars have not been compared yet.
+
+
 As of Phase 20, KORE has architectural parity with Spark's core distributed engine:
 
 - **Phase 8** — MessagePack + LZ4 binary wire codec (auto-detected, backward-compatible with JSON peers)
