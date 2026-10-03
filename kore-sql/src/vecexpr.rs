@@ -242,6 +242,22 @@ pub fn filter_mask(pred: &Expr, block: &DataBlock) -> Option<Vec<bool>> {
     Some(out)
 }
 
+/// Indices of the rows for which the predicate is TRUE, ascending; None when not covered.
+pub fn filter_idx(pred: &Expr, block: &DataBlock) -> Option<Vec<usize>> {
+    let wins = windows(block.num_rows);
+    let pick = |w: Win, v: Vec<u8>| -> Vec<usize> {
+        v.iter().enumerate().filter_map(|(i, &x)| if x == TRUE { Some(w.lo + i) } else { None }).collect()
+    };
+    let first = pick(*wins.first()?, tri(pred, block, *wins.first()?)?);
+    let rest: Vec<Option<Vec<usize>>> = wins[1..].par_iter().map(|&w| tri(pred, block, w).map(|v| pick(w, v))).collect();
+    let mut parts = vec![first];
+    for r in rest { parts.push(r?); }
+    let total = parts.iter().map(|p| p.len()).sum();
+    let mut out = Vec::with_capacity(total);
+    for p in parts { out.extend(p); }
+    Some(out)
+}
+
 fn num_win(e: &Expr, block: &DataBlock, w: Win) -> Option<Vec<Option<f64>>> {
     let n = w.len();
     match e {
@@ -302,4 +318,9 @@ pub fn num_vec(e: &Expr, block: &DataBlock) -> Option<Vec<Option<f64>>> {
     out.extend(first);
     for r in rest { out.extend(r?); }
     Some(out)
+}
+
+/// Numeric value of `e` for rows `lo..hi` only (NULL = None); None when the expression is not covered.
+pub fn num_range(e: &Expr, block: &DataBlock, lo: usize, hi: usize) -> Option<Vec<Option<f64>>> {
+    num_win(e, block, Win { lo, hi })
 }

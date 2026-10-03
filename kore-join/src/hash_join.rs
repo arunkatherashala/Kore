@@ -77,7 +77,9 @@ impl HashJoin {
         build_result(left, right, &pairs)
     }
 
-    /// Optimized Int64 hash join — no JoinKey allocation, parallel probe.
+    /// Int64-key hash join: flat (array based) hash table on the build side, chunked parallel probe, and
+    /// a parallel column gather. For inner joins the smaller input is the build side, so a handful of
+    /// filtered dimension rows never forces a hash table over a multi-million-row fact table.
     fn join_int64(
         left: &DataBlock,
         right: &DataBlock,
@@ -85,55 +87,184 @@ impl HashJoin {
         rv: &[Option<i64>],
         cfg: &JoinConfig,
     ) -> Result<DataBlock, KoreError> {
-        use std::collections::HashMap;
-
-        // ── Sequential build: preallocated, direct array access, no JoinKey ───
-        // Sequential is FASTER than parallel for build due to merge overhead.
-        // Key insight: direct rv[i] access eliminates JoinKey enum alloc per row.
-        let n_right = rv.len();
-        let mut table: HashMap<i64, Vec<usize>> = HashMap::with_capacity(n_right / 4 + 16);
-        for i in 0..n_right {
-            if let Some(k) = rv[i] { table.entry(k).or_default().push(i); }
+        const NONE: u32 = u32::MAX;
+        let inner = matches!(cfg.join_type, JoinType::Inner);
+        if lv.len() >= NONE as usize || rv.len() >= NONE as usize {
+            return Self::join_int64_wide(left, right, lv, rv, cfg);
         }
-        let table = Arc::new(table);
+        // build on the right unless this is an inner join and the left side is smaller
+        let swap = inner && lv.len() < rv.len();
+        let (bk, pk) = if swap { (lv, rv) } else { (rv, lv) };
+        let table = FlatTable::build(bk);
 
-        // ── Parallel probe: T threads, each scans its chunk of the probe side ──
-        let n_left   = lv.len();
-        let n_threads = rayon::current_num_threads();
-        let chunk_sz  = ((n_left + n_threads - 1) / n_threads).max(1);
-
-        let local_pairs: Vec<Vec<(Option<usize>, Option<usize>)>> = (0..n_threads)
-            .into_par_iter()
-            .map(|t| {
-                let start = t * chunk_sz;
-                let end   = (start + chunk_sz).min(n_left);
-                if start >= end { return vec![]; }
-                let mut pairs = Vec::new();
-                for l in start..end {
-                    if let Some(k) = lv[l] {
-                        if let Some(right_rows) = table.get(&k) {
-                            for &r in right_rows { pairs.push((Some(l), Some(r))); }
-                        } else if matches!(cfg.join_type, JoinType::Left | JoinType::Full) {
-                            pairs.push((Some(l), None));
+        let n_probe = pk.len();
+        const PCHUNK: usize = 32_768;
+        let keep_unmatched = matches!(cfg.join_type, JoinType::Left | JoinType::Full);
+        let parts: Vec<(Vec<u32>, Vec<u32>)> = (0..n_probe.div_ceil(PCHUNK)).into_par_iter().map(|c| {
+            let lo = c * PCHUNK;
+            let hi = (lo + PCHUNK).min(n_probe);
+            let mut pi: Vec<u32> = Vec::with_capacity(hi - lo);
+            let mut bi: Vec<u32> = Vec::with_capacity(hi - lo);
+            for p in lo..hi {
+                if let Some(k) = pk[p] {
+                    let mut e = table.first(k);
+                    if e == NONE {
+                        if keep_unmatched { pi.push(p as u32); bi.push(NONE); }
+                    } else {
+                        while e != NONE {
+                            pi.push(p as u32);
+                            bi.push(e);
+                            e = table.next[e as usize];
                         }
                     }
                 }
-                pairs
-            })
-            .collect();
-
-        let mut pairs: Vec<(Option<usize>, Option<usize>)> = Vec::new();
-        for lp in local_pairs { pairs.extend(lp); }
+            }
+            (pi, bi)
+        }).collect();
+        let total: usize = parts.iter().map(|p| p.0.len()).sum();
+        let mut pidx: Vec<u32> = Vec::with_capacity(total);
+        let mut bidx: Vec<u32> = Vec::with_capacity(total);
+        for (a, b) in &parts { pidx.extend_from_slice(a); bidx.extend_from_slice(b); }
+        drop(parts);
+        // probe side = left unless we swapped
+        let (mut lidx, mut ridx) = if swap { (bidx, pidx) } else { (pidx, bidx) };
 
         if matches!(cfg.join_type, JoinType::Right | JoinType::Full) {
-            let mut right_matched = vec![false; n_right];
-            for &(_, r) in &pairs { if let Some(ri) = r { right_matched[ri] = true; } }
-            for (r, matched) in right_matched.iter().enumerate() {
-                if !matched { pairs.push((None, Some(r))); }
+            let mut matched = vec![false; rv.len()];
+            for &r in &ridx { if r != NONE { matched[r as usize] = true; } }
+            for (r, m) in matched.iter().enumerate() {
+                if !m { lidx.push(NONE); ridx.push(r as u32); }
             }
         }
+        build_result_idx(left, right, &lidx, &ridx)
+    }
 
+    /// Fallback for inputs too large for 32-bit row ids (never hit in practice).
+    fn join_int64_wide(
+        left: &DataBlock, right: &DataBlock, lv: &[Option<i64>], rv: &[Option<i64>], cfg: &JoinConfig,
+    ) -> Result<DataBlock, KoreError> {
+        let mut table: HashMap<i64, Vec<usize>> = HashMap::with_capacity(rv.len() / 4 + 16);
+        for (i, k) in rv.iter().enumerate() { if let Some(k) = k { table.entry(*k).or_default().push(i); } }
+        let mut pairs: Vec<(Option<usize>, Option<usize>)> = Vec::new();
+        for (l, k) in lv.iter().enumerate() {
+            if let Some(k) = k {
+                if let Some(rows) = table.get(k) { for &r in rows { pairs.push((Some(l), Some(r))); } }
+                else if matches!(cfg.join_type, JoinType::Left | JoinType::Full) { pairs.push((Some(l), None)); }
+            }
+        }
+        if matches!(cfg.join_type, JoinType::Right | JoinType::Full) {
+            let mut matched = vec![false; rv.len()];
+            for &(_, r) in &pairs { if let Some(ri) = r { matched[ri] = true; } }
+            for (r, m) in matched.iter().enumerate() { if !m { pairs.push((None, Some(r))); } }
+        }
         build_result(left, right, &pairs)
+    }
+}
+
+/// Chained hash table over i64 keys: `next[row]` links rows with the same key (ascending row order).
+/// Dense key ranges (surrogate keys) use a direct-address table, everything else open addressing.
+struct FlatTable {
+    min: i64,
+    direct: bool,
+    heads: Vec<u32>,      // direct: indexed by key-min; hashed: head row per slot
+    slot_keys: Vec<i64>,  // hashed only
+    mask: usize,
+    next: Vec<u32>,
+}
+
+impl FlatTable {
+    const NONE: u32 = u32::MAX;
+
+    #[inline(always)]
+    fn hash(k: i64) -> usize {
+        let h = (k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        (h ^ (h >> 32)) as usize
+    }
+
+    fn build(keys: &[Option<i64>]) -> Self {
+        let n = keys.len();
+        let (mut lo, mut hi, mut any) = (i64::MAX, i64::MIN, false);
+        for k in keys.iter().flatten() { any = true; if *k < lo { lo = *k; } if *k > hi { hi = *k; } }
+        let mut next = vec![Self::NONE; n];
+        if !any {
+            return FlatTable { min: 0, direct: true, heads: Vec::new(), slot_keys: Vec::new(), mask: 0, next };
+        }
+        let range = (hi as i128 - lo as i128) as u128 + 1;
+        if range <= (4 * n as u128 + 1024).max(1 << 16).min(1 << 27) {
+            let mut heads = vec![Self::NONE; range as usize];
+            for i in (0..n).rev() {
+                if let Some(k) = keys[i] {
+                    let s = (k as i128 - lo as i128) as usize;
+                    next[i] = heads[s];
+                    heads[s] = i as u32;
+                }
+            }
+            FlatTable { min: lo, direct: true, heads, slot_keys: Vec::new(), mask: 0, next }
+        } else {
+            let cap = (n * 2).next_power_of_two().max(16);
+            let mask = cap - 1;
+            let mut heads = vec![Self::NONE; cap];
+            let mut slot_keys = vec![0i64; cap];
+            for i in (0..n).rev() {
+                if let Some(k) = keys[i] {
+                    let mut s = Self::hash(k) & mask;
+                    loop {
+                        if heads[s] == Self::NONE { slot_keys[s] = k; break; }
+                        if slot_keys[s] == k { break; }
+                        s = (s + 1) & mask;
+                    }
+                    next[i] = heads[s];
+                    heads[s] = i as u32;
+                }
+            }
+            FlatTable { min: 0, direct: false, heads, slot_keys, mask, next }
+        }
+    }
+
+    /// First build row with key `k`, or NONE.
+    #[inline(always)]
+    fn first(&self, k: i64) -> u32 {
+        if self.direct {
+            let d = k as i128 - self.min as i128;
+            if d < 0 || d >= self.heads.len() as i128 { return Self::NONE; }
+            self.heads[d as usize]
+        } else {
+            let mut s = Self::hash(k) & self.mask;
+            loop {
+                let h = self.heads[s];
+                if h == Self::NONE { return Self::NONE; }
+                if self.slot_keys[s] == k { return h; }
+                s = (s + 1) & self.mask;
+            }
+        }
+    }
+}
+
+/// Gather both sides' columns for row-id pairs (u32::MAX = no row, i.e. NULL), one column per task.
+pub(crate) fn build_result_idx(left: &DataBlock, right: &DataBlock, lidx: &[u32], ridx: &[u32]) -> Result<DataBlock, KoreError> {
+    let left_names: std::collections::HashSet<&str> = left.columns.iter().map(|c| c.name.as_str()).collect();
+    let mut jobs: Vec<(String, &kore_core::ColumnData, &[u32])> = Vec::with_capacity(left.columns.len() + right.columns.len());
+    for c in &left.columns { jobs.push((c.name.clone(), &c.data, lidx)); }
+    for c in &right.columns {
+        let name = if left_names.contains(c.name.as_str()) { format!("{}_r", c.name) } else { c.name.clone() };
+        jobs.push((name, &c.data, ridx));
+    }
+    let columns: Vec<Column> = jobs.into_par_iter().map(|(name, data, idx)| Column { name, data: gather(data, idx) }).collect();
+    Ok(DataBlock { columns, num_rows: lidx.len() })
+}
+
+fn gather(src: &kore_core::ColumnData, idx: &[u32]) -> kore_core::ColumnData {
+    use kore_core::ColumnData;
+    const NONE: u32 = u32::MAX;
+    match src {
+        ColumnData::Int64(v) => ColumnData::Int64(idx.iter().map(|&i| if i == NONE { None } else { v[i as usize] }).collect()),
+        ColumnData::Float64(v) => ColumnData::Float64(idx.iter().map(|&i| if i == NONE { None } else { v[i as usize] }).collect()),
+        ColumnData::Bool(v) => ColumnData::Bool(idx.iter().map(|&i| if i == NONE { None } else { v[i as usize] }).collect()),
+        ColumnData::Str(v) => ColumnData::Str(idx.iter().map(|&i| if i == NONE { None } else { v[i as usize].clone() }).collect()),
+        ColumnData::StrDict { codes, dict } => ColumnData::StrDict {
+            codes: idx.iter().map(|&i| if i == NONE { u8::MAX } else { codes[i as usize] }).collect(),
+            dict: dict.clone(),
+        },
     }
 }
 
