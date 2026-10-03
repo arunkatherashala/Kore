@@ -1661,9 +1661,12 @@ impl Parser {
             // NULLS FIRST / NULLS LAST
             let nulls_first = if self.peek_ident_upper() == "NULLS" {
                 self.pos += 1;
-                let first = self.peek_ident_upper() == "FIRST";
-                self.pos += 1; // consume FIRST or LAST
-                Some(first)
+                let word = self.peek_ident_upper();
+                if word != "FIRST" && word != "LAST" {
+                    return Err(KoreError::InvalidArgument(format!("expected FIRST or LAST after NULLS, got {:?}", self.peek())));
+                }
+                self.pos += 1;
+                Some(word == "FIRST")
             } else { None };
             list.push(OrderByItem { expr, col, desc, nulls_first });
             if !self.consume_if(&Token::Comma) { break; }

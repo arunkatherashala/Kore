@@ -167,6 +167,17 @@ impl KqlContext {
     /// Parse + execute a KQL query (supports CTEs and UNION ALL).
     /// Also handles DML statements: INSERT INTO, UPDATE, DELETE.
     pub fn query(&self, sql: &str) -> Result<DataBlock, KoreError> {
+        // failures raised inside scalar functions (bad regex, unsupported CAST type, ...) have no return channel:
+        // whatever is pending when the statement finishes turns the result into an error
+        crate::scalar::take_error();
+        let result = self.query_statement(sql);
+        match (result, crate::scalar::take_error()) {
+            (Ok(_), Some(m)) => Err(KoreError::InvalidArgument(m)),
+            (other, _) => other,
+        }
+    }
+
+    fn query_statement(&self, sql: &str) -> Result<DataBlock, KoreError> {
         let sql_trim = sql.trim();
         let upper = sql_trim.to_ascii_uppercase();
 

@@ -1066,6 +1066,42 @@ fn like_escape_decimal_literals_json_sequence_interval_frames() {
     ]);
 }
 
+/// Syntax and types the engine does not implement are errors; division by zero, overflow and casts at the edges.
+#[test]
+fn unsupported_syntax_is_rejected_and_edge_arithmetic() {
+    check(&[
+        (r#"with recursive r as (select 1 as n union all select n + 1 from r where n < 3) select * from r"#, r#"ERR"#),
+        (r#"select id from t tablesample (50 percent)"#, r#"ERR"#),
+        (r#"select interval 1 day 2 hours from t where id = 1"#, r#"ERR"#),
+        (r#"select from_utc_timestamp('2024-01-01 00:00:00', 'PST') from t where id = 1"#, r#"ERR"#),
+        (r#"select id from t window w as (order by id)"#, r#"1|2|3|4|5|6"#),
+        (r#"select sum(v) over (order by id groups between 1 preceding and current row) from t"#, r#"ERR"#),
+        (r#"select * from t cluster by id"#, r#"ERR"#),
+        (r#"select cast(v as binary) from t"#, r#"ERR"#),
+        (r#"select id from t where v = any (array(10, 20))"#, r#"ERR"#),
+        (r#"select map_from_arrays(array(1), array(2)) from t"#, r#"ERR"#),
+        (r#"select id::int from t"#, r#"ERR"#),
+        (r#"select id from t where id in (1, 2) escape '#'"#, r#"ERR"#),
+        (r#"select 1 as a, 2 as a from t where id = 1"#, r#"1,2"#),
+        (r#"select a.* from t a limit 1"#, r#"1,x,10,Hello,1.5,2024-01-15"#),
+        (r#"select count(*) as c from t group by ()"#, r#"ERR"#),
+        (r#"select id from t order by id nulls"#, r#"ERR"#),
+        (r#"select sum(v) from t group by g, rollup()"#, r#"ERR"#),
+        (r#"select 1 from t where exists (select 1) limit 1"#, r#"1"#),
+        (r#"select (select 1 union select 2) from t where id = 1"#, r#"ERR"#),
+        (r#"select id from t where id = (select 1 union all select 1)"#, r#"ERR"#),
+        (r#"select cast(true as string), cast(date '2024-03-05' as string), cast(1.5e0 as string), cast(-0.0 as string), cast(100000000.0 as string), cast(0.00001 as string) from t where id = 1"#, r#"true,2024-03-05,1.5,-0.0,1.0E8,1.0E-5"#),
+        (r#"select cast('2024-03-05 10:20:30' as date), cast(date '2024-03-05' as timestamp), cast('1e3' as double), cast('0x1F' as int) from t where id = 1"#, r#"2024-03-05,2024-03-05 00:00:00,1000,NULL"#),
+        (r#"select cast(2147483648 as int), cast(-129 as tinyint), cast(300 as smallint) from t where id = 1"#, r#"-2147483648,127,300"#),
+        (r#"select 5 / 0, 5 % 0, 0 / 0, -5 / 0 from t where id = 1"#, r#"NULL,NULL,NULL,NULL"#),
+        (r#"select pow(2, 62), pow(2, 64), 9223372036854775807 + 1 from t where id = 1"#, r#"4611686018427387904,18446744073709551616,-9223372036854775808"#),
+        (r#"select round(123.456, -1), round(-123.456, 1), ceil(-0.5), floor(0.5) from t where id = 1"#, r#"120,-123.5,0,0"#),
+        (r#"select 10 % 3, -10 % 3, 10 % -3, 5.5 % 2 from t where id = 1"#, r#"1,-1,1,1.5"#),
+        (r#"select 1 = 1.0, '1' = 1, 'a' = 'a ', true = 1 from t where id = 1"#, r#"true,true,false,true"#),
+        (r#"select least('b', 'a', null), greatest(2, 10, 3.5), greatest('a', 'B') from t where id = 1"#, r#"a,10,a"#),
+    ]);
+}
+
 /// COUNT / SUM / MIN / MAX of integers are integers (cast to text shows it).
 #[test]
 fn integer_aggregates_stay_integers() {

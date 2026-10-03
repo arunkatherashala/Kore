@@ -159,7 +159,10 @@ pub fn cast(v: V, ty: &str, p: Option<i64>, s: Option<i64>) -> V {
         },
         "DATE" => to_dt(&v).map(|d| V::Str(dt::fmt_date(d.days))).unwrap_or(V::Null),
         "TIMESTAMP" | "TIMESTAMP_NTZ" | "DATETIME" => to_dt(&v).map(|d| V::Str(dt::fmt_ts(d.days, d.secs, d.nanos))).unwrap_or(V::Null),
-        _ => v,
+        other => {
+            set_error(format!("unsupported CAST target type '{}'", other.to_ascii_lowercase()));
+            V::Null
+        }
     }
 }
 
