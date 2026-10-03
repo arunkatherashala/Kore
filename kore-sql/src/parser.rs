@@ -586,6 +586,7 @@ impl Parser {
         };
 
         if self.peek() == &Token::Over {
+            if distinct { return Err(KoreError::InvalidArgument("DISTINCT is not supported in window functions".into())); }
             self.pos += 1;
             let spec = self.parse_window_spec()?;
             let wf = if classic {

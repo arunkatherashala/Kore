@@ -25,6 +25,11 @@ fn ctx() -> KqlContext {
         Column::str_col("w", s(&[Some("p"), Some("q"), Some("r"), Some("s")])),
     ]).unwrap());
     c.register("nn", DataBlock::new(vec![Column::int64("x", vec![Some(1), Some(2), None])]).unwrap());
+    c.register("e", DataBlock::new(vec![
+        Column::int64("a", vec![]),
+        Column::str_col("b", vec![]),
+        Column::float64("c", vec![]),
+    ]).unwrap());
     c
 }
 
@@ -843,6 +848,96 @@ fn pivot_lateral_using_hashes_and_dates() {
         (r#"select date_trunc('month', d) m, count(*) from t where d is not null group by date_trunc('month', d) order by m"#, r#"2023-12-01 00:00:00,1|2024-01-01 00:00:00,2|2024-02-01 00:00:00,1|2024-03-01 00:00:00,1"#),
         (r#"select d, lag(d) over (order by d) from t where d is not null order by d limit 2"#, r#"2023-12-31,NULL|2024-01-01,2023-12-31"#),
         (r#"select datediff(d, lag(d) over (order by d)) from t where d is not null order by d limit 3"#, r#"NULL|1|14"#),
+    ]);
+}
+
+/// Empty tables through every operator, window frame edge cases.
+#[test]
+fn empty_inputs_and_window_frames() {
+    check(&[
+        (r#"select * from e"#, r#""#),
+        (r#"select count(*), sum(a), min(b), max(c), avg(a) from e"#, r#"0,NULL,NULL,NULL,NULL"#),
+        (r#"select count(*), sum(a), min(b) from e group by b"#, r#""#),
+        (r#"select b, count(*) from e group by b"#, r#""#),
+        (r#"select a, row_number() over (order by a) from e"#, r#""#),
+        (r#"select a, sum(a) over (partition by b) from e"#, r#""#),
+        (r#"select distinct b from e"#, r#""#),
+        (r#"select a from e order by a limit 3"#, r#""#),
+        (r#"select a from e union select id from u order by 1"#, r#"1|2|7"#),
+        (r#"select count(*) from e a join e b on a.a = b.a"#, r#"0"#),
+        (r#"select count(*) from t left join e on t.id = e.a"#, r#"6"#),
+        (r#"select count(*) from e right join t on t.id = e.a"#, r#"6"#),
+        (r#"select count(*) from e full join u on u.id = e.a"#, r#"4"#),
+        (r#"select t.id, e.b from t left join e on t.id = e.a where t.id < 3 order by t.id"#, r#"1,NULL|2,NULL"#),
+        (r#"select count(distinct b), count(distinct a, b) from e"#, r#"0,0"#),
+        (r#"select stddev(a), variance(c), median(a), percentile(a, 0.5), collect_list(a), string_agg(b, ',') from e"#, r#"NULL,NULL,NULL,NULL,[],NULL"#),
+        (r#"select b, count(*) from e group by grouping sets ((b), ())"#, r#"NULL,0"#),
+        (r#"select 1 from e"#, r#""#),
+        (r#"select (select count(*) from e), (select max(a) from e) from t where id = 1"#, r#"0,NULL"#),
+        (r#"select id from t where id in (select a from e)"#, r#""#),
+        (r#"select id from t where id not in (select a from e) order by id"#, r#"1|2|3|4|5|6"#),
+        (r#"select id from t where exists (select 1 from e)"#, r#""#),
+        (r#"select id from t where not exists (select 1 from e) order by id"#, r#"1|2|3|4|5|6"#),
+        (r#"select id from t where v > all (select a from e) order by id"#, r#"1|2|3|4|5|6"#),
+        (r#"select id from t where v > any (select a from e)"#, r#""#),
+        (r#"select * from t where 1 = 0 union all select * from t where id = 1"#, r#"1,x,10,Hello,1.5,2024-01-15"#),
+        (r#"select id, ntile(3) over (order by id) from t where id < 3 order by id"#, r#"1,1|2,2"#),
+        (r#"select id, ntile(10) over (order by id) from t where id < 4 order by id"#, r#"1,1|2,2|3,3"#),
+        (r#"select id, nth_value(v, 10) over (order by id) from t where id < 3 order by id"#, r#"1,NULL|2,NULL"#),
+        (r#"select id, lag(v, 10, 0) over (order by id) from t where id < 3 order by id"#, r#"1,0|2,0"#),
+        (r#"select id, first_value(v) over (order by id rows between 5 following and 6 following) from t where id < 3 order by id"#, r#"1,NULL|2,NULL"#),
+        (r#"select id, count(*) over (order by id rows between 1 following and 2 following) from t order by id"#, r#"1,2|2,2|3,2|4,2|5,1|6,0"#),
+        (r#"select id, percent_rank() over (partition by g order by id) from t order by id"#, r#"1,0|2,1|3,0|4,1|5,0|6,0"#),
+        (r#"select id, sum(id) over (order by id desc) from t where id < 4 order by id"#, r#"1,6|2,5|3,3"#),
+        (r#"select count(distinct g) over () from t"#, r#"ERR"#),
+        (r#"select id, sum(v) over (order by id range between 1 following and 2 following) from t where id < 4 order by id"#, r#"1,50|2,30|3,NULL"#),
+        (r#"select -1 * v, v * -1, -v from t where id = 1"#, r#"-10,-10,-10"#),
+        (r#"select id, id % 2 = 0, id % 2 from t where id < 4 order by id"#, r#"1,false,1|2,true,0|3,false,1"#),
+        (r#"select id from t where id % 2 = 0 order by id"#, r#"2|4|6"#),
+        (r#"select id from t where mod(id, 3) = 0 order by id"#, r#"3|6"#),
+        (r#"select max(id) - min(id) + 1 from t"#, r#"6"#),
+        (r#"select sum(1), sum(1.5), sum(true) from t where id < 3"#, r#"2,3,2"#),
+        (r#"select avg(id), avg(f) from t where id < 3"#, r#"1.5,2"#),
+        (r#"select count(1), count('a'), count(null) from t"#, r#"6,6,0"#),
+    ]);
+}
+
+/// Two unaliased aggregates over different expressions must not share a column.
+#[test]
+fn aggregate_output_naming() {
+    check(&[
+        (r#"select sum(v*2), sum(v*3) from t"#, r#"340,510"#),
+        (r#"select g, sum(v*2), sum(v*3) from t group by g order by g"#, r#"NULL,120,180|x,60,90|y,60,90|z,100,150"#),
+        (r#"select sum(v*2) a, sum(v*3) b from t"#, r#"340,510"#),
+        (r#"select count(1), count(null) from t"#, r#"6,0"#),
+        (r#"select sum(v), sum(distinct v) from t"#, r#"170,170"#),
+        (r#"select min(v), min(v + 1) from t"#, r#"10,11"#),
+        (r#"select avg(v), avg(v * 2) from t"#, r#"34,68"#),
+        (r#"select count(v), count(v + 1) from t"#, r#"5,5"#),
+    ]);
+}
+
+/// Grouping, counting and DISTINCT keep NULL and '' apart.
+#[test]
+fn empty_string_is_not_null() {
+    check(&[
+        (r#"select s, count(*) from (values ('a'), (''), (null), ('')) q(s) group by s order by s"#, r#"NULL,1|,2|a,1"#),
+        (r#"select s, count(*), count(s) from (values ('a'), (''), (null), ('')) q(s) group by s order by s"#, r#"NULL,1,0|,2,2|a,1,1"#),
+        (r#"select s, sum(n) from (values ('a', 1), ('', 2), (null, 3), ('', 4)) q(s, n) group by s order by s"#, r#"NULL,3|,6|a,1"#),
+        (r#"select count(distinct s) from (values ('a'), (''), (null), ('')) q(s)"#, r#"2"#),
+    ]);
+}
+
+/// A NULL grouping key never shares a group with 0, false or ''; VALUES keeps booleans.
+#[test]
+fn null_group_keys_of_every_type() {
+    check(&[
+        (r#"select c, count(distinct n) from (values (0.0, 1), (null, 2), (0.0, 3)) q(c, n) group by c order by c"#, r#"NULL,1|0,2"#),
+        (r#"select c, count(*), sum(n) from (values (0.0, 1), (null, 2), (0.0, 3), (null, 4)) q(c, n) group by c order by c"#, r#"NULL,2,6|0,2,4"#),
+        (r#"select b, count(distinct n) from (values (true, 1), (null, 2), (false, 3), (true, 4)) q(b, n) group by b order by b"#, r#"NULL,1|false,1|true,2"#),
+        (r#"select i, count(distinct n) from (values (0, 1), (null, 2), (0, 3)) q(i, n) group by i order by i"#, r#"NULL,1|0,2"#),
+        (r#"select s, max(n) from (values ('', 1), (null, 2), ('', 3)) q(s, n) group by s order by s"#, r#"NULL,2|,3"#),
+        (r#"select a, b, count(distinct n) from (values (1, null, 5), (1, '', 6), (1, null, 7)) q(a, b, n) group by a, b order by b"#, r#"1,NULL,2|1,,1"#),
     ]);
 }
 

@@ -1083,6 +1083,11 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     }
     // shapes outside the specialised paths below (see general.rs) are run by the general tail
     let use_general = crate::general::needs_general(stmt);
+    if !use_general {
+        if let Some(named) = crate::general::name_unaliased_aggregates(stmt) {
+            return execute_select(&named, ctx);
+        }
+    }
     if !use_general && stmt.grouping != Grouping::Plain && !stmt.group_by.is_empty() {
         return execute_grouping_sets(stmt, ctx);
     }
@@ -1109,14 +1114,10 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                     cols[ci].push(eval_expr(expr, &dummy, 0));
                 }
             }
+            // typed by what the cells hold (booleans, mixed int / float, text), not by the first cell only
             let columns: Vec<Column> = cols.into_iter().enumerate().map(|(i, vals)| {
-                let first = vals.iter().find(|v| !matches!(v, ExprVal::Null));
-                let data = match first {
-                    Some(ExprVal::Int(_))   => ColumnData::Int64(vals.iter().map(|v| if let ExprVal::Int(i) = v { Some(*i) } else { None }).collect()),
-                    Some(ExprVal::Float(_)) => ColumnData::Float64(vals.iter().map(|v| if let ExprVal::Float(f) = v { Some(*f) } else { None }).collect()),
-                    _ => ColumnData::Str(vals.iter().map(|v| if let ExprVal::Str(s) = v { Some(s.clone()) } else { None }).collect()),
-                };
-                Column { name: stmt.from.col_aliases.get(i).cloned().unwrap_or_else(|| format!("col{}", i+1)), data }
+                let name = stmt.from.col_aliases.get(i).cloned().unwrap_or_else(|| format!("col{}", i+1));
+                crate::general::vals_to_column(name, vals, None)
             }).collect();
             Some(DataBlock::new(columns).map_err(|e| KoreError::InvalidArgument(e.to_string()))?)
         }
@@ -2788,7 +2789,7 @@ fn eval_expr_ctx(expr: &Expr, block: &DataBlock, row: usize, ctx: &KqlContext) -
         }
         Expr::Not(e) => match eval_expr_ctx(e, block, row, ctx) {
             ExprVal::Bool(b) => ExprVal::Bool(!b),
-            _                => ExprVal::Bool(false),
+            _                => ExprVal::Null,
         },
         Expr::IsNull(e) => match eval_expr_ctx(e, block, row, ctx) {
             ExprVal::Null => ExprVal::Bool(true),
@@ -2798,20 +2799,20 @@ fn eval_expr_ctx(expr: &Expr, block: &DataBlock, row: usize, ctx: &KqlContext) -
             ExprVal::Null => ExprVal::Bool(false),
             _             => ExprVal::Bool(true),
         },
-        // QualCol: try block first, then outer table in ctx (enables correlated subqueries)
+        // QualCol: the block first; only when the block has no such column (a correlated subquery referring to its
+        // outer row, registered as a one-row table under the outer alias) look at the outer table. A NULL *value*
+        // in the block is just NULL: it must not be replaced by the outer table's first row.
         Expr::QualCol(table, col) => {
             let full = format!("{}.{}", table, col);
-            let v = get_cell(block, &full, row);
-            if matches!(v, ExprVal::Null) {
-                // Try outer table in ctx (correlated subquery: m1.kind where m1 is registered)
-                if let Some(outer_block) = ctx.get(table.as_str()) {
-                    if outer_block.num_rows > 0 {
-                        let val = get_cell(outer_block, col.as_str(), 0);
-                        return val;
-                    }
+            if find_col(block, &full).is_some() {
+                return get_cell(block, &full, row);
+            }
+            if let Some(outer_block) = ctx.get(table.as_str()) {
+                if outer_block.num_rows > 0 {
+                    return get_cell(outer_block, col.as_str(), 0);
                 }
             }
-            v
+            ExprVal::Null
         }
         // Col: standard block lookup
         other => eval_expr(other, block, row),
@@ -3962,30 +3963,10 @@ fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, Ko
     Ok(DataBlock { columns: new_cols, num_rows })
 }
 
-/// Convert a Vec<ExprVal> into a typed Column.
+/// Convert a Vec<ExprVal> into a typed Column. The type comes from *all* the values (an expression such as
+/// `COALESCE(float_col, int_col)` yields both), not from the first non-NULL one.
 fn exprvals_to_column(name: String, vals: Vec<ExprVal>) -> Column {
-    // Determine type from first non-null value
-    match vals.iter().find(|v| !matches!(v, ExprVal::Null)) {
-        Some(ExprVal::Int(_)) | Some(ExprVal::Bool(_)) if matches!(vals.iter().find(|v| !matches!(v, ExprVal::Null)), Some(ExprVal::Int(_))) =>
-            Column { name, data: ColumnData::Int64(vals.into_iter().map(|v| match v {
-                ExprVal::Int(i) => Some(i), ExprVal::Float(f) => Some(f as i64), _ => None,
-            }).collect()) },
-        Some(ExprVal::Float(_)) =>
-            Column { name, data: ColumnData::Float64(vals.into_iter().map(|v| match v {
-                ExprVal::Float(f) => Some(f), ExprVal::Int(i) => Some(i as f64), _ => None,
-            }).collect()) },
-        Some(ExprVal::Bool(_)) =>
-            Column { name, data: ColumnData::Bool(vals.into_iter().map(|v| match v {
-                ExprVal::Bool(b) => Some(b), _ => None,
-            }).collect()) },
-        // Str and Null fall here
-        _ =>
-            Column { name, data: ColumnData::Str(vals.into_iter().map(|v| match v {
-                ExprVal::Str(s) => Some(s), ExprVal::Int(i) => Some(i.to_string()),
-                ExprVal::Float(f) => Some(f.to_string()), ExprVal::Bool(b) => Some(b.to_string()),
-                ExprVal::Null => None,
-            }).collect()) },
-    }
+    crate::general::vals_to_column(name, vals, None)
 }
 
 // ─── Fast column extraction helpers ──────────────────────────────────────────
@@ -4492,14 +4473,15 @@ fn group_by_agg(
             let key: u128 = if fallback {
                 let mut k: u128 = 0xcbf29ce484222325_cbf29ce484222325u128;
                 for (i, gc) in group_cols.iter().enumerate() {
-                    let v = match get_cell(&block, gc, row) {
-                        ExprVal::Int(x)   => x as u64,
-                        ExprVal::Float(x) => x.to_bits(),
-                        ExprVal::Str(ref s) => fnv64(s.as_bytes()),
-                        ExprVal::Bool(x)  => x as u64,
-                        ExprVal::Null     => 0xFFFF_FFFF_FFFF_FFFF,
+                    // NULL gets its own bit so it never shares a group with 0, '' or false
+                    let (v, null) = match get_cell(&block, gc, row) {
+                        ExprVal::Int(x)   => (x as u64, false),
+                        ExprVal::Float(x) => (x.to_bits(), false),
+                        ExprVal::Str(ref s) => (fnv64(s.as_bytes()), false),
+                        ExprVal::Bool(x)  => (x as u64, false),
+                        ExprVal::Null     => (0, true),
                     };
-                    k = k.wrapping_add(v as u128)
+                    k = k.wrapping_add(v as u128 | ((null as u128) << 64))
                          .wrapping_mul(0x9e3779b97f4a7c15_f39cc0605cedc835u128)
                          .rotate_left((i as u32 * 11 + 7) % 127);
                 }
@@ -4507,17 +4489,18 @@ fn group_by_agg(
             } else {
                 let mut k: u128 = 0xcbf29ce484222325_cbf29ce484222325u128;
                 for (i, col) in gcols.iter().enumerate() {
-                    let v: u64 = match &col.data {
-                        ColumnData::Int64(v)   => v.get(row).and_then(|x| *x).unwrap_or(i64::MIN) as u64,
-                        ColumnData::Float64(v) => v.get(row).and_then(|x| *x).map(|f| f.to_bits()).unwrap_or(0),
-                        ColumnData::Bool(v)    => v.get(row).and_then(|x| *x).unwrap_or(false) as u64,
-                        ColumnData::Str(v)     => fnv64(v.get(row).and_then(|x| x.as_deref()).unwrap_or("").as_bytes()),
+                    // (value, is NULL): a NULL must not share a group with 0, '' or false
+                    let (v, null): (u64, bool) = match &col.data {
+                        ColumnData::Int64(v)   => match v.get(row).and_then(|x| *x) { Some(x) => (x as u64, false), None => (0, true) },
+                        ColumnData::Float64(v) => match v.get(row).and_then(|x| *x) { Some(f) => (f.to_bits(), false), None => (0, true) },
+                        ColumnData::Bool(v)    => match v.get(row).and_then(|x| *x) { Some(b) => (b as u64, false), None => (0, true) },
+                        ColumnData::Str(v)     => match v.get(row).and_then(|x| x.as_deref()) { Some(t) => (fnv64(t.as_bytes()), false), None => (0, true) },
                         ColumnData::StrDict { codes, dict } => {
                             let c = codes.get(row).copied().unwrap_or(u8::MAX);
-                            if c == u8::MAX { 0 } else { fnv64(dict.get(c as usize).map(|s| s.as_bytes()).unwrap_or(b"")) }
+                            if c == u8::MAX { (0, true) } else { (fnv64(dict.get(c as usize).map(|s| s.as_bytes()).unwrap_or(b"")), false) }
                         }
                     };
-                    k = k.wrapping_add(v as u128)
+                    k = k.wrapping_add(v as u128 | ((null as u128) << 64))
                          .wrapping_mul(0x9e3779b97f4a7c15_f39cc0605cedc835u128)
                          .rotate_left((i as u32 * 11 + 7) % 127);
                 }

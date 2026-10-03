@@ -218,3 +218,61 @@ pub fn walk_own_exprs(s: &SelectStmt, f: &mut dyn FnMut(&Expr)) {
         for o in &w.order_by { walk_expr(&o.expr, false, f); }
     }
 }
+
+/// Spark-flavoured text of an expression, used to name unaliased result columns (`sum((v * 2))`).
+pub fn expr_sql(e: &Expr) -> String {
+    let list = |v: &[Expr]| v.iter().map(expr_sql).collect::<Vec<_>>().join(", ");
+    match e {
+        Expr::Col(c) | Expr::QualCol(_, c) => c.clone(),
+        Expr::Int(i) => i.to_string(),
+        Expr::Float(f) => crate::scalar::fmt_f64(*f),
+        Expr::Str(s) => format!("'{s}'"),
+        Expr::Bool(b) => b.to_string(),
+        Expr::Null => "NULL".into(),
+        Expr::Star => "*".into(),
+        Expr::BinOp { op, left, right } => {
+            let o = match op {
+                BinOpKind::Eq => "=", BinOpKind::Ne => "<>", BinOpKind::Lt => "<", BinOpKind::Le => "<=",
+                BinOpKind::Gt => ">", BinOpKind::Ge => ">=", BinOpKind::And => "AND", BinOpKind::Or => "OR",
+                BinOpKind::Add => "+", BinOpKind::Sub => "-", BinOpKind::Mul => "*", BinOpKind::Div => "/",
+                BinOpKind::Mod => "%", BinOpKind::Concat => "||",
+            };
+            format!("({} {} {})", expr_sql(left), o, expr_sql(right))
+        }
+        Expr::Not(x) => format!("(NOT {})", expr_sql(x)),
+        Expr::IsNull(x) => format!("({} IS NULL)", expr_sql(x)),
+        Expr::IsNotNull(x) => format!("({} IS NOT NULL)", expr_sql(x)),
+        Expr::Agg { func, expr } => {
+            let inner = match expr.as_ref() { Expr::Col(c) if c == "*" => "1".to_string(), other => expr_sql(other) };
+            match func {
+                AggFunc::CountDistinct => format!("count(DISTINCT {inner})"),
+                other => {
+                    let n = format!("{:?}", other);
+                    let n = n.split(|c: char| !c.is_alphanumeric()).next().unwrap_or("agg").to_ascii_lowercase();
+                    format!("{n}({inner})")
+                }
+            }
+        }
+        Expr::AggX { name, args, distinct, .. } => {
+            let a: Vec<String> = args.iter().map(|x| match x { Expr::Col(c) if c == "*" => "1".to_string(), o => expr_sql(o) }).collect();
+            format!("{}({}{})", name.to_ascii_lowercase(), if *distinct { "DISTINCT " } else { "" }, a.join(", "))
+        }
+        Expr::FuncCall { name, args } => format!("{}({})", name.to_ascii_lowercase(), list(args)),
+        Expr::Case { operand, branches, else_val } => {
+            let mut t = String::from("CASE");
+            if let Some(o) = operand { t.push_str(&format!(" {}", expr_sql(o))); }
+            for (c, v) in branches { t.push_str(&format!(" WHEN {} THEN {}", expr_sql(c), expr_sql(v))); }
+            if let Some(x) = else_val { t.push_str(&format!(" ELSE {}", expr_sql(x))); }
+            t.push_str(" END");
+            t
+        }
+        Expr::In { expr, values, negated } => format!("({} {}IN ({}))", expr_sql(expr), if *negated { "NOT " } else { "" }, list(values)),
+        Expr::Between { expr, low, high, negated } => format!("({} {}BETWEEN {} AND {})", expr_sql(expr), if *negated { "NOT " } else { "" }, expr_sql(low), expr_sql(high)),
+        Expr::Like { expr, pattern, negated } => format!("({} {}LIKE {})", expr_sql(expr), if *negated { "NOT " } else { "" }, expr_sql(pattern)),
+        Expr::ILike { expr, pattern, negated } => format!("({} {}ILIKE {})", expr_sql(expr), if *negated { "NOT " } else { "" }, expr_sql(pattern)),
+        Expr::Window { .. } => "window_expr".into(),
+        Expr::Array(items) => format!("array({})", list(items)),
+        Expr::Explode(x) => format!("explode({})", expr_sql(x)),
+        Expr::ScalarSubquery(_) | Expr::InSubquery { .. } | Expr::Exists { .. } | Expr::QuantSubquery { .. } => "subquery".into(),
+    }
+}

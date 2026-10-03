@@ -36,6 +36,7 @@ fn is_grouping_fn(e: &Expr) -> bool {
 
 /// Statements (syntactically) outside what the fast paths in the executor handle.
 pub fn needs_general(s: &SelectStmt) -> bool {
+    if crate::testing::force_general() { return true; }
     if !s.group_exprs.is_empty() || !s.windows.is_empty() || s.qualify.is_some() { return true; }
     if s.grouping != Grouping::Plain && !s.group_by.is_empty() { return true; }
     if s.distinct && (s.limit.is_some() || s.offset.is_some()) { return true; }
@@ -234,10 +235,14 @@ struct Evaluator<'a> {
     ctx: &'a KqlContext,
     cache: RefCell<HashMap<String, SubResult>>,
     error: RefCell<Option<KoreError>>,
+    /// after grouping: input column name -> the grouped block's column that carries it (grouping keys only)
+    outer_map: RefCell<Vec<(String, String)>>,
+    /// table qualifiers of the query's own input (a reference to one of them from a subquery is correlated)
+    outer_aliases: RefCell<HashSet<String>>,
 }
 
 impl<'a> Evaluator<'a> {
-    fn new(ctx: &'a KqlContext) -> Self { Evaluator { ctx, cache: RefCell::new(HashMap::new()), error: RefCell::new(None) } }
+    fn new(ctx: &'a KqlContext) -> Self { Evaluator { ctx, cache: RefCell::new(HashMap::new()), error: RefCell::new(None), outer_map: RefCell::new(Vec::new()), outer_aliases: RefCell::new(HashSet::new()) } }
 
     fn fail(&self, e: KoreError) { let mut slot = self.error.borrow_mut(); if slot.is_none() { *slot = Some(e); } }
 
@@ -256,7 +261,10 @@ impl<'a> Evaluator<'a> {
     }
 
     fn run_sub(&self, sub: &SelectStmt, block: &DataBlock, row: usize) -> Option<SubResult> {
-        let bound = bind_outer(sub, block, row, self.ctx);
+        let bound = match bind_outer(sub, block, row, self.ctx, &self.outer_map.borrow(), &self.outer_aliases.borrow()) {
+            Ok(b) => b,
+            Err(m) => { self.fail(err(m)); return None; }
+        };
         let key = format!("{:?}", bound);
         let want = key.clone();
         if let Some(hit) = self.cache.borrow().get(&want) { return Some(hit.clone()); }
@@ -339,7 +347,10 @@ fn quantified(lhs: &V, set: &[V], op: &BinOpKind, all: bool) -> Option<bool> {
 }
 
 /// Substitute references to the outer row inside a correlated subquery by literals.
-fn bind_outer(sub: &SelectStmt, block: &DataBlock, row: usize, ctx: &KqlContext) -> SelectStmt {
+fn bind_outer(
+    sub: &SelectStmt, block: &DataBlock, row: usize, ctx: &KqlContext,
+    outer_map: &[(String, String)], outer_aliases: &HashSet<String>,
+) -> Result<SelectStmt, String> {
     let mut inner_aliases: HashSet<String> = HashSet::new();
     let mut inner_cols: HashSet<String> = HashSet::new();
     let mut unknown_inner = false;
@@ -368,12 +379,28 @@ fn bind_outer(sub: &SelectStmt, block: &DataBlock, row: usize, ctx: &KqlContext)
     for j in &sub.joins { scope(&j.table); }
 
     let lookup = |name: &str| -> Option<V> {
-        let i = find_col_idx(block, name)?;
-        column_values_at(&block.columns[i], row)
+        if let Some(i) = find_col_idx(block, name) {
+            return column_values_at(&block.columns[i], row);
+        }
+        // grouped stage: only the grouping keys are still available
+        let suffix = format!(".{name}");
+        for (input, g) in outer_map {
+            if input.eq_ignore_ascii_case(name) || input.to_ascii_lowercase().ends_with(&suffix.to_ascii_lowercase()) {
+                if let Some(i) = find_col_idx(block, g) { return column_values_at(&block.columns[i], row); }
+            }
+        }
+        None
     };
+    let mut unresolved: Option<String> = None;
     let mut f = |x: &Expr| -> Option<Expr> {
         match x {
-            Expr::QualCol(q, c) if !inner_aliases.contains(q) => lookup(&format!("{q}.{c}")).map(|v| lit(&v)),
+            Expr::QualCol(q, c) if !inner_aliases.contains(q) => {
+                let v = lookup(&format!("{q}.{c}"));
+                if v.is_none() && outer_aliases.iter().any(|a| a.eq_ignore_ascii_case(q)) && unresolved.is_none() {
+                    unresolved = Some(format!("{q}.{c}"));
+                }
+                v.map(|v| lit(&v))
+            }
             Expr::Col(c) if !unknown_inner && !inner_cols.contains(c) => lookup(c).map(|v| lit(&v)),
             _ => None,
         }
@@ -386,7 +413,10 @@ fn bind_outer(sub: &SelectStmt, block: &DataBlock, row: usize, ctx: &KqlContext)
         j.on.right_col = orig.on.right_col.clone();
         j
     }).collect();
-    bound
+    if let Some(r) = unresolved {
+        return Err(format!("correlated reference to '{r}', which is neither grouped nor aggregated in the outer query"));
+    }
+    Ok(bound)
 }
 
 fn column_values_at(c: &Column, row: usize) -> Option<V> {
@@ -428,15 +458,14 @@ fn default_name(expr: &Expr, block: &DataBlock) -> String {
             // like the fast path, a plain column keeps the name it has in the input (`t.id`)
             find_col_idx(block, &full).map(|i| block.columns[i].name.clone()).unwrap_or_else(|| c.clone())
         }
-        Expr::Agg { func, expr: inner } => {
-            let col = match inner.as_ref() { Expr::Col(c) => c.clone(), Expr::QualCol(_, c) => c.clone(), _ => String::new() };
-            format!("{:?}({})", func, col)
-        }
-        Expr::AggX { name, args, .. } => {
-            let col = args.first().map(|a| match a { Expr::Col(c) => c.clone(), Expr::QualCol(_, c) => c.clone(), _ => String::new() }).unwrap_or_default();
-            format!("{}({})", name.to_ascii_lowercase(), col)
-        }
-        _ => "expr".to_string(),
+        Expr::Agg { func, expr: inner } => match inner.as_ref() {
+            Expr::Col(c) => format!("{:?}({})", func, c),
+            Expr::QualCol(_, c) => format!("{:?}({})", func, c),
+            _ => crate::ast_walk::expr_sql(expr),
+        },
+        Expr::AggX { .. } => crate::ast_walk::expr_sql(expr),
+        // a computed column is named after its expression, as Spark does
+        other => crate::ast_walk::expr_sql(other),
     }
 }
 
@@ -455,6 +484,8 @@ fn subsets(n: usize) -> Vec<Vec<usize>> {
 pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
     let n_in = input.num_rows;
     let evaluator = Evaluator::new(ctx);
+    *evaluator.outer_aliases.borrow_mut() = input.columns.iter()
+        .filter_map(|c| c.name.split_once('.').map(|(q, _)| q.to_string())).collect();
 
     // ── select items ──
     let mut items: Vec<Item> = Vec::new();
@@ -628,6 +659,10 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
         for (j, v) in out_aggs.into_iter().enumerate() { cols.push(vals_to_column(format!("__a{j}"), v, None)); }
         let num_rows = cols.first().map(|c| c.data.len()).unwrap_or_else(|| if spec.sets.is_empty() { 0 } else { 1 });
         g_block = DataBlock { columns: cols, num_rows };
+        // a correlated subquery in the select list can still see the grouping keys of the outer row
+        *evaluator.outer_map.borrow_mut() = spec.exprs.iter().enumerate()
+            .filter_map(|(k, e)| if let Expr::Col(name) = e { Some((name.clone(), format!("__k{k}"))) } else { None })
+            .collect();
 
         // expression rewriter: group expressions and aggregates become references to G's columns
         let gexprs = spec.exprs.clone();
@@ -949,3 +984,19 @@ pub fn execute_compound(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
 
 #[allow(dead_code)]
 fn unused(_: &V, _: &V) -> std::cmp::Ordering { total_cmp(&V::Null, &V::Null) }
+
+/// Unaliased aggregates over computed arguments (`SUM(a * b)`, `COUNT(NULL)`) get a name derived from the
+/// expression: the fast paths name their output by the argument *column*, so two of them used to collide
+/// and the second silently returned the first one's values.
+pub fn name_unaliased_aggregates(s: &SelectStmt) -> Option<SelectStmt> {
+    let needs = |p: &Projection| matches!(p, Projection::Expr { expr: e @ Expr::Agg { expr: inner, .. }, alias: None }
+        if !matches!(inner.as_ref(), Expr::Col(_) | Expr::QualCol(..) | Expr::Star) && { let _ = e; true });
+    if !s.projections.iter().any(needs) { return None; }
+    let mut out = s.clone();
+    for p in &mut out.projections {
+        if needs(p) {
+            if let Projection::Expr { expr, alias } = p { *alias = Some(crate::ast_walk::expr_sql(expr)); }
+        }
+    }
+    Some(out)
+}

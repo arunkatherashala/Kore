@@ -254,6 +254,7 @@ fn windows(n: usize) -> Vec<Win> {
 
 /// Rows for which the predicate is TRUE (NULL counts as not matching), or None when not covered.
 pub fn filter_mask(pred: &Expr, block: &DataBlock) -> Option<Vec<bool>> {
+    if crate::testing::no_vecexpr() { return None; }
     let n = block.num_rows;
     let wins = windows(n);
     // decide coverage on the first chunk (cheap) before fanning out
@@ -322,6 +323,7 @@ fn num_win(e: &Expr, block: &DataBlock, w: Win) -> Option<Vec<Option<f64>>> {
 /// Numeric value of `e` for every row (NULL = None), or None when the expression is not covered.
 /// Mirrors the row interpreter: arithmetic yields floats and propagates NULL.
 pub fn num_vec(e: &Expr, block: &DataBlock) -> Option<Vec<Option<f64>>> {
+    if crate::testing::no_vecexpr() { return None; }
     let n = block.num_rows;
     let wins = windows(n);
     let first = num_win(e, block, *wins.first()?)?;
