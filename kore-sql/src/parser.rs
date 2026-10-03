@@ -1521,6 +1521,20 @@ impl Parser {
                                 a
                             } else { vec![] };
                             self.expect(&Token::RParen)?;
+                            // CONCAT_WS(sep, collect_list(x)) / ARRAY_JOIN(collect_list(x), sep): string aggregation
+                            let collected = |e: &Expr| matches!(e, Expr::AggX { name, .. } if name == "COLLECT_LIST" || name == "COLLECT_SET");
+                            let join_args = match up.as_str() {
+                                "CONCAT_WS" if args.len() == 2 && collected(&args[1]) => Some((args[1].clone(), args[0].clone())),
+                                "ARRAY_JOIN" if args.len() == 2 && collected(&args[0]) => Some((args[0].clone(), args[1].clone())),
+                                _ => None,
+                            };
+                            if let Some((Expr::AggX { name, args: inner, filter, .. }, sep)) = join_args {
+                                let mut a = inner;
+                                a.push(sep);
+                                let agg = Expr::AggX { name: "STRING_AGG".into(), args: a, distinct: name == "COLLECT_SET", filter };
+                                // an empty list joins to the empty string, not NULL
+                                return Ok(Expr::FuncCall { name: "COALESCE".into(), args: vec![agg, Expr::Str(String::new())] });
+                            }
                             // DATEADD(day, 5, d) / TIMESTAMPDIFF(month, a, b): the unit is a bare word
                             if args.len() == 3 && matches!(up.as_str(), "DATEADD" | "DATE_ADD" | "TIMESTAMPADD" | "DATEDIFF" | "DATE_DIFF" | "TIMESTAMPDIFF") {
                                 if let Expr::Col(c) = &args[0] {

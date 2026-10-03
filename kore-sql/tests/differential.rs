@@ -21,7 +21,7 @@ impl Rng {
 fn opt<T>(r: &mut Rng, pct_null: usize, v: T) -> Option<T> { if r.chance(pct_null) { None } else { Some(v) } }
 
 fn tables(r: &mut Rng) -> KqlContext {
-    let n = 40 + r.below(25);
+    let n = std::env::var("DIFF_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(40 + r.below(25));
     let strs = ["ab", "abc", "b", "", "Ab", "ba"];
     let dates = ["2024-01-05", "2024-02-29", "2023-12-31", "2024-03-01"];
     let floats = [-1.5, 0.0, 0.5, 2.0, 2.5, 3.5];
@@ -47,6 +47,27 @@ fn tables(r: &mut Rng) -> KqlContext {
         Column::float64("w", (0..k).map(|_| { let v = *r.pick(&floats); opt(r, 15, v) }).collect()),
     ]).unwrap());
     c
+}
+
+/// The same tables with every text column dictionary-encoded (the representation file loaders produce).
+fn dict_twin(c: &KqlContext) -> KqlContext {
+    let mut out = KqlContext::new();
+    for name in ["t1", "t2", "t3"] {
+        let b = c.get(name).unwrap();
+        let cols: Vec<Column> = b.columns.iter().map(|col| match &col.data {
+            ColumnData::Str(v) => {
+                let mut dict: Vec<String> = Vec::new();
+                let codes: Vec<u8> = v.iter().map(|x| match x {
+                    None => u8::MAX,
+                    Some(t) => match dict.iter().position(|d| d == t) { Some(i) => i as u8, None => { dict.push(t.clone()); (dict.len() - 1) as u8 } },
+                }).collect();
+                Column::str_dict(&col.name, codes, dict)
+            }
+            _ => col.clone(),
+        }).collect();
+        out.register(name, DataBlock::new(cols).unwrap());
+    }
+    out
 }
 
 // ── expression generators ──
@@ -378,9 +399,24 @@ fn random_queries_agree_across_execution_paths() {
     for seed in 1..=seeds {
         let mut r = Rng(seed * 7919);
         let ctx = tables(&mut r);
+        let twin = dict_twin(&ctx);
         for _ in 0..per {
-            let sql = query(&mut r);
+            let mut sql = query(&mut r);
+            // large-table mode: skip the quadratic shapes (self joins, per-row subqueries over t1)
+            if std::env::var("DIFF_ROWS").is_ok() {
+                let mut guard = 0;
+                while (sql.matches("from t1").count() > 1 || sql.contains("t1 x join t1 y")) && guard < 50 { sql = query(&mut r); guard += 1; }
+            }
             total += 1;
+            testing::set_force_general(false);
+            testing::set_no_vecexpr(false);
+            let plain = answer(&ctx, &sql);
+            let dict = answer(&twin, &sql);
+            if !matches!((&plain, &dict), (Ok(a), Ok(b)) if a == b) && !(plain.is_err() && dict.is_err()) {
+                mismatches.push(format!("seed {seed} (dictionary-encoded text): {sql}
+   plain {}
+   dict  {}", show(&plain), show(&dict)));
+            }
             testing::set_force_general(false);
             testing::set_no_vecexpr(false);
             let fast = answer(&ctx, &sql);

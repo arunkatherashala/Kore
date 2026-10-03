@@ -949,10 +949,12 @@ fn validate_functions(q: &Query, ctx: &KqlContext) -> Result<(), KoreError> {
     // ARRAY / MAP / SPLIT values exist only as the argument of element_at, size, array_contains and [i]
     let mut allowed: std::collections::HashSet<*const Expr> = std::collections::HashSet::new();
     crate::ast_walk::walk_query(q, true, &mut |e| {
-        if let Expr::FuncCall { name, args } = e {
-            if matches!(name.as_str(), "ELEMENT_AT" | "SIZE" | "CARDINALITY" | "ARRAY_CONTAINS") {
+        match e {
+            Expr::FuncCall { name, args } if matches!(name.as_str(), "ELEMENT_AT" | "SIZE" | "CARDINALITY" | "ARRAY_CONTAINS") => {
                 if let Some(a) = args.first() { allowed.insert(a as *const Expr); }
             }
+            Expr::Explode(inner) => { allowed.insert(inner.as_ref() as *const Expr); }
+            _ => {}
         }
     });
     let mut complex: Option<String> = None;

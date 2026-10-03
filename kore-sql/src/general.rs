@@ -111,6 +111,19 @@ fn ungrouped_projection(s: &SelectStmt) -> bool {
 /// Needs the general path because of the column types the classic numeric aggregators cannot handle
 /// (MIN / MAX / DISTINCT / SUM over text or boolean columns).
 pub fn block_needs_general(s: &SelectStmt, block: &DataBlock) -> bool {
+    // a select item that refers to an alias defined earlier in the same list (and is not an input column)
+    {
+        let mut seen: Vec<&String> = Vec::new();
+        for p in &s.projections {
+            if let Projection::Expr { expr, alias } = p {
+                if !seen.is_empty() && any_node(expr, &|x| matches!(x, Expr::Col(c)
+                    if seen.iter().any(|a| a.eq_ignore_ascii_case(c)) && find_col_idx(block, c).is_none())) {
+                    return true;
+                }
+                if let Some(a) = alias { seen.push(a); }
+            }
+        }
+    }
     // GROUP BY name that is the alias of a computed select item *and* an input column: SQL groups by the
     // input column, the fast path would group by the alias' expression
     if !s.group_by.is_empty() {
@@ -553,7 +566,16 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
                 if !any { return Err(err(format!("cannot expand '{t}.*': no such table or alias"))); }
             }
             Projection::Expr { expr, alias } => {
-                let e = resolve_cols(expr, &input);
+                let mut e = resolve_cols(expr, &input);
+                // lateral column alias (Spark 3.4+): `SELECT a + 1 AS x, x * 2 AS y` - a name that is not an input
+                // column but an alias defined earlier in the same select list stands for that expression
+                if !proj_alias.is_empty() {
+                    e = map_expr(&e, &mut |x| match x {
+                        Expr::Col(c) if find_col_idx(&input, c).is_none() => proj_alias.iter().rev()
+                            .find(|(a, _)| a.eq_ignore_ascii_case(c)).map(|(_, i)| items[*i].expr.clone()),
+                        _ => None,
+                    });
+                }
                 let name = alias.clone().unwrap_or_else(|| default_name(&e, &input));
                 let src_col = match &e { Expr::Col(c) if alias.is_none() || true => input.columns.iter().position(|x| &x.name == c), _ => None };
                 if let Some(a) = alias { proj_alias.push((a.clone(), items.len())); }
