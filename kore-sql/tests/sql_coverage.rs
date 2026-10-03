@@ -71,6 +71,19 @@ fn check(cases: &[(&str, &str)]) {
     assert!(failures.is_empty(), "{} of {} cases failed:\n{}", failures.len(), cases.len(), failures.join("\n"));
 }
 
+/// Inputs found by mutation fuzzing that used to crash the engine.
+#[test]
+fn malformed_input_is_an_error_not_a_panic() {
+    check(&[
+        (r#"select count() from t"#, r#"ERR"#),
+        (r#"select sum() over () from t"#, r#"ERR"#),
+        (r#"select id, count() over (order by id) from t"#, r#"ERR"#),
+        (r#"select * from (values (1), (1, 2)) q"#, r#"ERR"#),
+        (r#"select s, count(*) from (values ('a'), - (null), ('')) q(s) group by s"#, r#"ERR"#),
+        (r#"select * from (values (1, 2), (3, 4)) q(a, b) where a > 1"#, r#"3,4"#),
+    ]);
+}
+
 /// String, regexp and conditional functions.
 #[test]
 fn strings_regex_conditionals() {

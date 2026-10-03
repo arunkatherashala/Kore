@@ -509,6 +509,9 @@ impl Parser {
             while self.consume_if(&Token::Comma) { args.push(self.parse_expr(0)?); }
         }
         self.expect(&Token::RParen)?;
+        if args.is_empty() {
+            return Err(KoreError::InvalidArgument(format!("{}() requires at least one argument", name.to_ascii_lowercase())));
+        }
 
         // IGNORE NULLS / RESPECT NULLS on FIRST / LAST
         let mut ignore_nulls = false;
@@ -870,6 +873,9 @@ impl Parser {
             rows.push(row);
             // VALUES 1, 2 (bare) is one row per expression; VALUES (1), (2) has parentheses
             if !paren || !self.consume_if(&Token::Comma) { break; }
+        }
+        if rows.iter().any(|r| r.len() != rows[0].len()) {
+            return Err(KoreError::InvalidArgument("VALUES rows must all have the same number of columns".into()));
         }
         Ok(rows)
     }
