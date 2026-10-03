@@ -463,7 +463,7 @@ fn group3(digits: &str) -> String {
 
 /// Functions that must see their arguments unevaluated (handled by the executor).
 pub fn is_lazy(name: &str) -> bool {
-    matches!(name, "COALESCE" | "NVL" | "IFNULL" | "IF" | "IIF" | "NVL2" | "ELEMENT_AT" | "SIZE" | "CARDINALITY" | "ARRAY_CONTAINS" | "INTERVAL" | "GROUPING" | "GROUPING_ID")
+    matches!(name, "COALESCE" | "NVL" | "IFNULL" | "IF" | "IIF" | "NVL2" | "SEQUENCE" | "INTERVAL" | "GROUPING" | "GROUPING_ID")
 }
 
 /// Evaluate a pure scalar function. None = not a function of this library.
@@ -494,6 +494,14 @@ pub fn call(name: &str, a: &[V]) -> Option<V> {
             nn!(0, 1);
             V::Str(trim_chars(&get!(s(0)), &get!(s(1)), name != "__TRIM_TRAILING", name != "__TRIM_LEADING"))
         }
+        "SPLIT" => {
+            nn!(0, 1);
+            let (text, pat) = (get!(s(0)), get!(s(1)));
+            let limit = if n >= 3 { get!(k(2)) } else { -1 };
+            let re = get!(regex_of(&pat));
+            let parts: Vec<&str> = if limit > 0 { re.splitn(&text, limit as usize).collect() } else { re.split(&text).collect() };
+            crate::arrays::encode(&parts.into_iter().map(|p| V::Str(p.to_string())).collect::<Vec<_>>())
+        }
         "SUBSTR" | "SUBSTRING" | "MID" => {
             nn!(0, 1);
             let st = get!(s(0));
@@ -511,11 +519,19 @@ pub fn call(name: &str, a: &[V]) -> Option<V> {
         "CONCAT_WS" => {
             nn!(0);
             let sep = get!(s(0));
-            V::Str(a[1..].iter().filter_map(to_str).collect::<Vec<_>>().join(&sep))
+            // array arguments contribute their (non-NULL) elements
+            let mut parts: Vec<String> = Vec::new();
+            for v in &a[1..] {
+                match crate::arrays::decode(v) {
+                    Some(items) => parts.extend(items.iter().filter_map(to_str)),
+                    None => if let Some(t) = to_str(v) { parts.push(t); },
+                }
+            }
+            V::Str(parts.join(&sep))
         }
         "REPLACE" => { nn!(0, 1); let from = get!(s(1)); let to = if n >= 3 { nn!(2); get!(s(2)) } else { String::new() }; let st = get!(s(0)); V::Str(if from.is_empty() { st } else { st.replace(&from, &to) }) }
         "REPEAT" => { nn!(0, 1); let c = get!(k(1)); V::Str(if c <= 0 { String::new() } else { get!(s(0)).repeat(c as usize) }) }
-        "REVERSE" => { nn!(0); V::Str(get!(s(0)).chars().rev().collect()) }
+        "REVERSE" => { nn!(0); if crate::arrays::is_array(arg(0)) { return crate::arrays::call("REVERSE", a); } V::Str(get!(s(0)).chars().rev().collect()) }
         "LPAD" => { nn!(0, 1); let p = if n >= 3 { get!(s(2)) } else { " ".into() }; V::Str(pad(&get!(s(0)), get!(k(1)), &p, true)) }
         "RPAD" => { nn!(0, 1); let p = if n >= 3 { get!(s(2)) } else { " ".into() }; V::Str(pad(&get!(s(0)), get!(k(1)), &p, false)) }
         "INSTR" | "STRPOS" => { nn!(0, 1); let h = get!(s(0)); let nd = get!(s(1)); V::Int(h.find(&nd).map(|p| h[..p].chars().count() as i64 + 1).unwrap_or(0)) }
@@ -852,7 +868,7 @@ pub fn call(name: &str, a: &[V]) -> Option<V> {
         "BIGINT" | "LONG" => cast(arg(0).clone(), "BIGINT", None, None),
         "DOUBLE" | "FLOAT" => cast(arg(0).clone(), "DOUBLE", None, None),
         "BOOLEAN" => cast(arg(0).clone(), "BOOLEAN", None, None),
-        _ => return None,
+        _ => return crate::arrays::call(name, a),
     })
 }
 
@@ -875,7 +891,9 @@ pub fn is_known(name: &str) -> bool {
         | "DATE_DIFF" | "MONTHS_BETWEEN" | "NEXT_DAY" | "DATE_TRUNC" | "MAKE_DATE" | "TO_DATE" | "DATE" | "TO_TIMESTAMP" | "TIMESTAMP"
         | "TO_TIMESTAMP_NTZ" | "DATE_FORMAT" | "UNIX_TIMESTAMP" | "TO_UNIX_TIMESTAMP" | "FROM_UNIXTIME" | "CURRENT_DATE" | "CURDATE" | "TODAY"
         | "NOW" | "CURRENT_TIMESTAMP" | "LOCALTIMESTAMP" | "GETDATE" | "DAYNAME" | "MONTHNAME" | "STRING" | "INT" | "INTEGER" | "BIGINT" | "LONG"
-        | "DOUBLE" | "FLOAT" | "BOOLEAN" | "SPLIT" | "STRFTIME" | "FORMAT_DATE" | "EXTRACT_YEAR" | "EXTRACT_MONTH" | "EXTRACT_DAY" | "CHARINDEX_"
+        | "DOUBLE" | "FLOAT" | "BOOLEAN" | "SPLIT" | "SIZE" | "CARDINALITY" | "ARRAY_SIZE" | "ELEMENT_AT" | "ARRAY_CONTAINS" | "ARRAY_POSITION" | "ARRAY_JOIN"
+        | "SORT_ARRAY" | "ARRAY_SORT" | "ARRAY_DISTINCT" | "ARRAY_UNION" | "ARRAY_INTERSECT" | "ARRAY_EXCEPT" | "ARRAYS_OVERLAP" | "ARRAY_MAX" | "ARRAY_MIN"
+        | "ARRAY_REMOVE" | "ARRAY_COMPACT" | "ARRAY_APPEND" | "ARRAY_PREPEND" | "ARRAY_REPEAT" | "SLICE" | "FLATTEN" | "STRFTIME" | "FORMAT_DATE" | "EXTRACT_YEAR" | "EXTRACT_MONTH" | "EXTRACT_DAY" | "CHARINDEX_"
         | "ISNUMERIC" | "PROPERCASE" | "POSITION_OF" | "ARRAY" | "EXPLODE")
 }
 

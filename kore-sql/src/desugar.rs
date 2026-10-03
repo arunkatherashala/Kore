@@ -358,7 +358,7 @@ fn rewrite_lateral(mut s: SelectStmt, ctx: &KqlContext) -> Result<(SelectStmt, K
         let mut items: Vec<crate::executor::ExprVal> = Vec::new();
         for r in 0..block.num_rows {
             let vals = crate::executor::array_items(arr, &block, r)
-                .ok_or_else(|| err("EXPLODE is only supported over ARRAY(..) and SPLIT(..) expressions"))?;
+                .ok_or_else(|| err("EXPLODE needs an array argument"))?;
             for it in vals { rows.push(r); items.push(it); }
         }
         let mut next = block.select_rows(&rows);

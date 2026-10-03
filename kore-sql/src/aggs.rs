@@ -165,13 +165,13 @@ pub fn aggregate(inp: &AggInput, rows: &[usize]) -> Result<V, KoreError> {
             V::Str(live.iter().filter_map(|&r| to_str(arg(0, r))).collect::<Vec<_>>().join(&sep))
         }
         "COLLECT_LIST" | "COLLECT_SET" => {
-            let mut items: Vec<String> = Vec::new();
+            let mut items: Vec<V> = Vec::new();
             let mut seen = std::collections::HashSet::new();
             for &r in &live {
                 if name == "COLLECT_SET" && !seen.insert(row_key(&[arg(0, r).clone()])) { continue; }
-                items.push(to_str(arg(0, r)).unwrap_or_default());
+                items.push(arg(0, r).clone());
             }
-            V::Str(format!("[{}]", items.join(",")))
+            crate::arrays::encode(&items)
         }
         "FIRST" | "ANY_VALUE" => {
             let ignore = name == "ANY_VALUE" || inp.args.get(1).and_then(|a| a.first()).map_or(false, |v| matches!(v, V::Bool(true)));

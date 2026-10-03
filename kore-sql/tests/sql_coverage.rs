@@ -573,8 +573,6 @@ fn misc_functions_dates_and_subqueries() {
         (r#"select rtrim('SQL', 'SparkSQL') from t where id=1"#, r#"Spark"#),
         (r#"select btrim('xxhixx', 'x') from t where id=1"#, r#"hi"#),
         (r#"select mode(g) from t"#, r#"x"#),
-        (r#"select split(s, ',') from t where id=5"#, r#"ERR"#),
-        (r#"select array(1,2,3) from t where id=1"#, r#"ERR"#),
         (r#"select map('a', 1) from t where id=1"#, r#"ERR"#),
         (r#"select size(split(s, ',')) from t where id=5"#, r#"3"#),
         (r#"select array_contains(split(s, ','), 'b') from t where id=5"#, r#"true"#),
@@ -672,7 +670,7 @@ fn analytic_query_shapes() {
         (r#"select first(g), last(g) from t"#, r#"x,NULL"#),
         (r#"select first(g, true), last(g, true) from t"#, r#"x,z"#),
         (r#"select any_value(g) from t"#, r#"x"#),
-        (r#"select collect_set(g) from t where g is not null"#, r#"[x,y,z]"#),
+        (r#"select collect_set(g) from t where g is not null"#, r#"[x, y, z]"#),
         (r#"select string_agg(g, '-') from t where g is not null"#, r#"x-x-y-y-z"#),
         (r#"select count(*) from t where s is not null and s <> ''"#, r#"5"#),
         (r#"select sum(f) from t"#, r#"4.5"#),
@@ -966,10 +964,6 @@ fn lateral_aliases_and_unsupported_features() {
         (r#"select named_struct('a', 1) from t where id = 1"#, r#"ERR"#),
         (r#"select to_json(named_struct('a', 1)) from t where id = 1"#, r#"ERR"#),
         (r#"select from_json('{"a":1}', 'a int') from t where id = 1"#, r#"ERR"#),
-        (r#"select array_sort(array(3, 1, 2)) from t where id = 1"#, r#"ERR"#),
-        (r#"select sort_array(array(3, 1, 2)) from t where id = 1"#, r#"ERR"#),
-        (r#"select array_join(array('a', 'b'), ',') from t where id = 1"#, r#"ERR"#),
-        (r#"select flatten(array(array(1), array(2))) from t where id = 1"#, r#"ERR"#),
         (r#"select transform(array(1, 2), x -> x + 1) from t where id = 1"#, r#"ERR"#),
         (r#"select aggregate(array(1, 2), 0, (a, b) -> a + b) from t where id = 1"#, r#"ERR"#),
         (r#"select regexp_extract_all('a1b2', '(\\d)', 1) from t where id = 1"#, r#"ERR"#),
@@ -1066,6 +1060,46 @@ fn like_escape_decimal_literals_json_sequence_interval_frames() {
     ]);
 }
 
+/// ARRAY values: constructors, split, collect_list/set, size, element_at, sort_array, array_join, set operations, explode.
+#[test]
+fn array_functions() {
+    check(&[
+        (r#"select split(s, ',') from t where id = 5"#, r#"[a, b, c]"#),
+        (r#"select array(1, 2, 3) from t where id = 1"#, r#"[1, 2, 3]"#),
+        (r#"select array('a', null, 'c') from t where id = 1"#, r#"[a, null, c]"#),
+        (r#"select [1, 2.5] from t where id = 1"#, r#"[1.0, 2.5]"#),
+        (r#"select size(array(1, 2, 3)), size(split(s, ',')), cardinality(array()) from t where id = 5"#, r#"3,3,0"#),
+        (r#"select split(s, ',')[1], element_at(split(s, ','), -1), element_at(array(1, 2), 5) from t where id = 5"#, r#"b,c,NULL"#),
+        (r#"select array_contains(array(1, 2, null), 2), array_contains(array(1, 2), 3), array_contains(array(1, null), 3) from t where id = 1"#, r#"true,false,NULL"#),
+        (r#"select sort_array(array(3, 1, null, 2)), sort_array(array('b', 'a'), false) from t where id = 1"#, r#"[null, 1, 2, 3],[b, a]"#),
+        (r#"select array_distinct(array(1, 2, 1, 3, 2)), array_union(array(1, 2), array(2, 3)), array_intersect(array(1, 2, 3), array(2, 3, 4)), array_except(array(1, 2, 3), array(2)) from t where id = 1"#, r#"[1, 2, 3],[1, 2, 3],[2, 3],[1, 3]"#),
+        (r#"select array_max(array(3, 1, 2)), array_min(array(3, 1, 2)), array_position(array('a', 'b'), 'b'), array_remove(array(1, 2, 1), 1) from t where id = 1"#, r#"3,1,2,[2]"#),
+        (r#"select array_join(array('a', 'b', null), '-'), array_join(array('a', null), '-', '?'), concat_ws('+', array('x', 'y'), 'z') from t where id = 1"#, r#"a-b,a-?,x+y+z"#),
+        (r#"select slice(array(1, 2, 3, 4), 2, 2), slice(array(1, 2, 3, 4), -2, 2), flatten(array(array(1), array(2, 3))), reverse(array(1, 2, 3)), array_repeat('x', 2) from t where id = 1"#, r#"[2, 3],[3, 4],[1, 2, 3],[3, 2, 1],[x, x]"#),
+        (r#"select arrays_overlap(array(1, 2), array(2, 3)), array_compact(array(1, null, 2)), array_append(array(1), 2), array_prepend(array(1), 0) from t where id = 1"#, r#"true,[1, 2],[1, 2],[0, 1]"#),
+        (r#"select sequence(1, 4), sequence(3, 1), sequence(1, 10, 4) from t where id = 1"#, r#"[1, 2, 3, 4],[3, 2, 1],[1, 5, 9]"#),
+        (r#"select sequence(to_date('2024-01-30'), to_date('2024-02-01')) from t where id = 1"#, r#"[2024-01-30, 2024-01-31, 2024-02-01]"#),
+        (r#"select g, collect_list(v) from t where g is not null group by g order by g"#, r#"x,[10, 20]|y,[30]|z,[50]"#),
+        (r#"select g, size(collect_set(s)) from t group by g order by g"#, r#"NULL,1|x,2|y,1|z,1"#),
+        (r#"select sort_array(collect_list(id)) from t"#, r#"[1, 2, 3, 4, 5, 6]"#),
+        (r#"select g, array_join(sort_array(collect_list(s)), '|') from t where g = 'x' group by g"#, r#"x,  pad |Hello"#),
+        (r#"select e from t lateral view explode(array(1, 2)) q as e where id = 1"#, r#"1|2"#),
+        (r#"select e from t lateral view explode(split(s, ',')) q as e where id = 5"#, r#"a|b|c"#),
+        (r#"select explode(split(s, ',')) from t where id = 5"#, r#"a|b|c"#),
+        (r#"select id, e from (select id, split(s, ',') as parts from t where id in (1, 5)) q lateral view explode(parts) x as e order by id, e"#, r#"1,Hello|5,a|5,b|5,c"#),
+        (r#"select id, size(parts) from (select id, split(s, ',') as parts from t) q order by id"#, r#"1,1|2,1|3,1|4,-1|5,3|6,1"#),
+        (r#"select count(*) from t where array_contains(split(s, ','), 'b')"#, r#"1"#),
+        (r#"select * from (select array(1, 2) as a) q"#, r#"[1, 2]"#),
+        (r#"select a, count(*) from (select array(1, 2) as a union all select array(1, 2)) q group by a"#, r#"[1, 2],2"#),
+        (r#"select array(array(1), array(2, 3)) from t where id = 1"#, r#"[[1], [2, 3]]"#),
+        (r#"select map('a', 1) from t where id = 1"#, r#"ERR"#),
+        (r#"select transform(array(1), x -> x) from t where id = 1"#, r#"ERR"#),
+        (r#"select array_contains(1, 1) from t where id = 1"#, r#"NULL"#),
+        (r#"select size(null) from t where id = 1"#, r#"-1"#),
+        (r#"select sort_array(split(s, ',')) from t where id = 5"#, r#"[a, b, c]"#),
+    ]);
+}
+
 /// Syntax and types the engine does not implement are errors; division by zero, overflow and casts at the edges.
 #[test]
 fn unsupported_syntax_is_rejected_and_edge_arithmetic() {
@@ -1078,7 +1112,6 @@ fn unsupported_syntax_is_rejected_and_edge_arithmetic() {
         (r#"select sum(v) over (order by id groups between 1 preceding and current row) from t"#, r#"ERR"#),
         (r#"select * from t cluster by id"#, r#"ERR"#),
         (r#"select cast(v as binary) from t"#, r#"ERR"#),
-        (r#"select id from t where v = any (array(10, 20))"#, r#"ERR"#),
         (r#"select map_from_arrays(array(1), array(2)) from t"#, r#"ERR"#),
         (r#"select id::int from t"#, r#"ERR"#),
         (r#"select id from t where id in (1, 2) escape '#'"#, r#"ERR"#),
@@ -1136,7 +1169,7 @@ fn whitespace_sensitive_results() {
     assert_eq!(one("select trim(leading ' ' from s) from t where id = 2"), "pad ");
     assert_eq!(one("select space(3) from t where id = 1"), "   ");
     assert_eq!(one("select min(s), max(s) from t"), "  pad ,abc");
-    assert_eq!(one("select collect_list(id) from t where id < 3"), "[1,2]");
+    assert_eq!(one("select collect_list(id) from t where id < 3"), "[1, 2]");
     assert_eq!(one("select sum(v) over () from t where id = 1"), "10");
     assert_eq!(one("select g, count(*) c from t group by g order by c desc, g"), "x,2|y,2|NULL,1|z,1");
 }

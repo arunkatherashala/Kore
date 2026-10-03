@@ -170,14 +170,20 @@ impl KqlContext {
         // failures raised inside scalar functions (bad regex, unsupported CAST type, ...) have no return channel:
         // whatever is pending when the statement finishes turns the result into an error
         crate::scalar::take_error();
+        crate::arrays::take_used();
         let result = self.query_statement(sql);
         match (result, crate::scalar::take_error()) {
             (Ok(_), Some(m)) => Err(KoreError::InvalidArgument(m)),
+            // arrays travel as marked text inside the engine; the caller sees Spark's `[a, b]`
+            (Ok(mut block), None) => {
+                if crate::arrays::take_used() { render_arrays(&mut block); }
+                Ok(block)
+            }
             (other, _) => other,
         }
     }
 
-    fn query_statement(&self, sql: &str) -> Result<DataBlock, KoreError> {
+    pub(crate) fn query_statement(&self, sql: &str) -> Result<DataBlock, KoreError> {
         let sql_trim = sql.trim();
         let upper = sql_trim.to_ascii_uppercase();
 
@@ -932,6 +938,17 @@ impl KqlContext {
     }
 }
 
+/// Replace the internal array encoding in text columns by its printed form.
+fn render_arrays(block: &mut DataBlock) {
+    for c in &mut block.columns {
+        if let ColumnData::Str(v) = &mut c.data {
+            for cell in v.iter_mut() {
+                if let Some(t) = cell { if t.starts_with(crate::arrays::MARK) { *t = crate::arrays::render(t); } }
+            }
+        }
+    }
+}
+
 /// A derived table (FROM subquery): its columns are visible under bare names, optionally renamed by `alias(c1, c2)`.
 fn derived_block(stmt: &SelectStmt, ctx: &KqlContext, col_aliases: &[String]) -> Result<DataBlock, KoreError> {
     let mut b = crate::general::strip_qualifiers(execute_select(stmt, ctx)?);
@@ -957,29 +974,36 @@ fn validate_functions(q: &Query, ctx: &KqlContext) -> Result<(), KoreError> {
     if let Some(n) = unknown {
         return Err(KoreError::InvalidArgument(format!("unknown function: {}", n.to_ascii_lowercase())));
     }
-    // ARRAY / MAP / SPLIT values exist only as the argument of element_at, size, array_contains and [i]
-    let mut allowed: std::collections::HashSet<*const Expr> = std::collections::HashSet::new();
-    crate::ast_walk::walk_query(q, true, &mut |e| {
-        match e {
-            Expr::FuncCall { name, args } if matches!(name.as_str(), "ELEMENT_AT" | "SIZE" | "CARDINALITY" | "ARRAY_CONTAINS") => {
-                if let Some(a) = args.first() { allowed.insert(a as *const Expr); }
-            }
-            Expr::Explode(inner) => { allowed.insert(inner.as_ref() as *const Expr); }
+    // aggregates and window functions are not allowed in WHERE (Spark rejects them; evaluating them row by row gives nonsense)
+    fn where_clause_misuse(s: &SelectStmt) -> bool {
+        let bad = |e: &Expr| crate::ast_walk::any_node(e, &|x| matches!(x, Expr::Agg { .. } | Expr::AggX { .. } | Expr::Window { .. }));
+        if s.where_clause.as_ref().map_or(false, bad) { return true; }
+        let mut found = false;
+        let mut sub = |x: &SelectStmt| { if where_clause_misuse(x) { found = true; } };
+        if let Some(q) = &s.from.subquery { sub(q); }
+        for j in &s.joins { if let Some(q) = &j.table.subquery { sub(q); } }
+        for (_, arm) in &s.set_ops { sub(arm); }
+        crate::ast_walk::walk_own_exprs(s, &mut |e| match e {
+            Expr::ScalarSubquery(x) | Expr::Exists { subquery: x, .. } | Expr::InSubquery { subquery: x, .. } | Expr::QuantSubquery { subquery: x, .. } => sub(x),
             _ => {}
-        }
-    });
-    let mut complex: Option<String> = None;
-    crate::ast_walk::walk_query(q, true, &mut |e| {
-        let is_complex = matches!(e, Expr::Array(_)) || matches!(e, Expr::FuncCall { name, .. } if matches!(name.as_str(), "SPLIT" | "MAP" | "ARRAY"));
-        if is_complex && complex.is_none() && !allowed.contains(&(e as *const Expr)) {
-            complex = Some(match e { Expr::FuncCall { name, .. } => name.to_ascii_lowercase(), _ => "array".to_string() });
-        }
-    });
-    match complex {
-        Some(n) => Err(KoreError::InvalidArgument(format!(
-            "array/map values are not supported as results ({n}); they can only be used inside element_at, size, array_contains or [i]"))),
-        None => Ok(()),
+        });
+        found
     }
+    let mut stmts: Vec<&SelectStmt> = q.ctes.iter().map(|c| &c.body).collect();
+    if let Some(b) = &q.body { stmts.push(b); }
+    stmts.extend(q.set_ops.iter().map(|(_, s)| s));
+    if stmts.into_iter().any(where_clause_misuse) {
+        return Err(KoreError::InvalidArgument("aggregate and window functions are not allowed in WHERE".into()));
+    }
+    // MAP values are not implemented (arrays are, see arrays.rs): reject instead of answering NULL
+    let mut map_used = false;
+    crate::ast_walk::walk_query(q, true, &mut |e| {
+        if matches!(e, Expr::FuncCall { name, .. } if name == "MAP") { map_used = true; }
+    });
+    if map_used {
+        return Err(KoreError::InvalidArgument("MAP values are not supported".into()));
+    }
+    Ok(())
 }
 
 pub fn execute(sql: &str, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
@@ -1166,7 +1190,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         && ctx.get(base_name).is_none() && ctx.views.contains_key(base_name)
     {
         let sql = ctx.views.get(base_name).unwrap().clone();
-        Some(ctx.query(&sql)?)
+        Some(ctx.query_statement(&sql)?)
     } else { None };
 
     let base_ref: &DataBlock = if let Some(ref vb) = values_block { vb }
@@ -1326,7 +1350,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
             b.clone()
         } else if ctx.views.contains_key(right_name.as_str()) {
             let sql = ctx.views.get(right_name.as_str()).unwrap().clone();
-            ctx.query(&sql)?
+            ctx.query_statement(&sql)?
         } else {
             return Err(KoreError::InvalidArgument(format!("unknown table: {right_name}")));
         };
@@ -1537,7 +1561,7 @@ fn resolve_join_table(table: &TableExpr, ctx: &KqlContext) -> Result<DataBlock, 
     } else if let Some(b) = ctx.get(&table.name) {
         Ok(b.clone())
     } else if let Some(sql) = ctx.views.get(table.name.as_str()) {
-        ctx.query(&sql.clone())
+        ctx.query_statement(&sql.clone())
     } else {
         Err(KoreError::InvalidArgument(format!("unknown table: {}", table.name)))
     }
@@ -3288,7 +3312,11 @@ pub(crate) fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
         Expr::ScalarSubquery(_) => ExprVal::Null,
         Expr::InSubquery { negated, .. } => ExprVal::Bool(*negated),
         Expr::Exists { negated, .. }     => ExprVal::Bool(*negated),
-        Expr::Array(_) | Expr::Explode(_) => ExprVal::Null,
+        Expr::Array(items) => {
+            let vals: Vec<ExprVal> = items.iter().map(|i| eval_expr(i, block, row)).collect();
+            crate::arrays::encode(&vals)
+        }
+        Expr::Explode(_) => ExprVal::Null,
         // evaluated by the general path (general.rs); without it there is no value
         Expr::AggX { .. } | Expr::QuantSubquery { .. } => ExprVal::Null,
         // ── CASE WHEN ─────────────────────────────────────────────────────
@@ -3379,58 +3407,11 @@ pub(crate) fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
 
 // ─── Scalar function evaluation ───────────────────────────────────────────────
 
-/// Items of an array-valued expression (`ARRAY(..)`, `SPLIT(str, regex)`), when it is one of those.
+/// Items of an array-valued expression (None when it does not evaluate to an array).
 pub(crate) fn array_items(e: &Expr, block: &DataBlock, row: usize) -> Option<Vec<ExprVal>> {
-    match e {
-        Expr::Array(items) => Some(items.iter().map(|i| eval_expr(i, block, row)).collect()),
-        Expr::FuncCall { name, args } if name == "SEQUENCE" && args.len() >= 2 => {
-            // sequence(start, stop[, step]) over integers, or over dates with an INTERVAL step (default one day)
-            let (a, b) = (eval_expr(&args[0], block, row), eval_expr(&args[1], block, row));
-            if matches!(a, ExprVal::Null) || matches!(b, ExprVal::Null) { return Some(vec![ExprVal::Null]); }
-            const LIMIT: usize = 1_000_000;
-            if let (ExprVal::Int(x), ExprVal::Int(y)) = (&a, &b) {
-                let step = match args.get(2).map(|s| eval_expr(s, block, row)) { Some(ExprVal::Int(s)) if s != 0 => s, Some(_) => return None, None => if y >= x { 1 } else { -1 } };
-                let mut out = Vec::new();
-                let mut cur = *x;
-                while (step > 0 && cur <= *y) || (step < 0 && cur >= *y) {
-                    out.push(ExprVal::Int(cur));
-                    if out.len() > LIMIT { return None; }
-                    cur += step;
-                }
-                return Some(out);
-            }
-            let (da, db) = (crate::scalar::to_dt(&a)?, crate::scalar::to_dt(&b)?);
-            let (n, unit) = match args.get(2) {
-                Some(Expr::FuncCall { name, args: iv }) if name == "INTERVAL" => {
-                    let n = match eval_expr(&iv[0], block, row) { ExprVal::Int(n) => n, ExprVal::Float(f) => f as i64, _ => return None };
-                    let u = match iv.get(1) { Some(Expr::Str(u)) => crate::datetime::norm_unit(u)?, _ => return None };
-                    (n, u)
-                }
-                None => (if db.epoch_secs() >= da.epoch_secs() { 1 } else { -1 }, "day"),
-                _ => return None,
-            };
-            if n == 0 { return None; }
-            let (mut out, mut k) = (Vec::new(), 0i64);
-            loop {
-                let cur = crate::datetime::add_unit(&da, unit, k * n)?;
-                let past = if n > 0 { cur.epoch_secs() > db.epoch_secs() } else { cur.epoch_secs() < db.epoch_secs() };
-                if past || out.len() > LIMIT { break; }
-                out.push(ExprVal::Str(if da.has_time { crate::datetime::fmt_ts(cur.days, cur.secs, cur.nanos) } else { crate::datetime::fmt_date(cur.days) }));
-                k += 1;
-            }
-            Some(out)
-        }
-        Expr::FuncCall { name, args } if name == "SPLIT" && args.len() >= 2 => {
-            let s = eval_expr(&args[0], block, row);
-            let p = eval_expr(&args[1], block, row);
-            let (Some(s), Some(p)) = (crate::scalar::to_str(&s), crate::scalar::to_str(&p)) else { return Some(vec![ExprVal::Null]) };
-            let limit = args.get(2).and_then(|l| match eval_expr(l, block, row) { ExprVal::Int(i) if i > 0 => Some(i as usize), _ => None });
-            let re = regex::Regex::new(&p).ok()?;
-            let parts: Vec<&str> = match limit { Some(l) => re.splitn(&s, l).collect(), None => re.split(&s).collect() };
-            Some(parts.into_iter().map(|x| ExprVal::Str(x.to_string())).collect())
-        }
-        _ => None,
-    }
+    let v = eval_expr(e, block, row);
+    if matches!(v, ExprVal::Null) { return Some(Vec::new()); }
+    crate::arrays::decode(&v)
 }
 
 fn eval_func(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> ExprVal {
@@ -3447,28 +3428,43 @@ fn eval_func(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> ExprVa
         }
         "NVL2" => if matches!(arg(0), ExprVal::Null) { arg(2) } else { arg(1) },
         "IF" | "IIF" => if args.len() >= 3 && eval_bool(&args[0], block, row) { arg(1) } else { arg(2) },
-        // ── arrays (only the shapes that exist as expressions: ARRAY(..) and SPLIT(..)) ──
-        "ELEMENT_AT" => {
-            let (Some(items), idx) = (args.first().and_then(|a| array_items(a, block, row)), arg(1)) else { return ExprVal::Null };
-            let ExprVal::Int(i) = (match idx { ExprVal::Float(f) => ExprVal::Int(f as i64), o => o }) else { return ExprVal::Null };
-            let n = items.len() as i64;
-            let pos = if i > 0 { i - 1 } else if i < 0 { n + i } else { return ExprVal::Null };
-            if pos < 0 || pos >= n { ExprVal::Null } else { items[pos as usize].clone() }
-        }
-        "ARRAY_CONTAINS" => {
-            let Some(items) = args.first().and_then(|a| array_items(a, block, row)) else { return ExprVal::Null };
-            let needle = arg(1);
-            if matches!(needle, ExprVal::Null) { return ExprVal::Null; }
-            let mut unknown = false;
-            for it in &items {
-                match crate::scalar::eq_vals(it, &needle) { Some(true) => return ExprVal::Bool(true), None => unknown = true, _ => {} }
+        "SEQUENCE" if args.len() >= 2 => {
+            // sequence(start, stop[, step]) over integers, or over dates with an INTERVAL step (default one day)
+            let (a, b) = (eval_expr(&args[0], block, row), eval_expr(&args[1], block, row));
+            if matches!(a, ExprVal::Null) || matches!(b, ExprVal::Null) { return ExprVal::Null; }
+            const LIMIT: usize = 1_000_000;
+            if let (ExprVal::Int(x), ExprVal::Int(y)) = (&a, &b) {
+                let step = match args.get(2).map(|s| eval_expr(s, block, row)) { Some(ExprVal::Int(s)) if s != 0 => s, Some(_) => return ExprVal::Null, None => if y >= x { 1 } else { -1 } };
+                let mut out = Vec::new();
+                let mut cur = *x;
+                while (step > 0 && cur <= *y) || (step < 0 && cur >= *y) {
+                    out.push(ExprVal::Int(cur));
+                    if out.len() > LIMIT { return ExprVal::Null; }
+                    cur += step;
+                }
+                return crate::arrays::encode(&out);
             }
-            if unknown { ExprVal::Null } else { ExprVal::Bool(false) }
+            let (Some(da), Some(db)) = (crate::scalar::to_dt(&a), crate::scalar::to_dt(&b)) else { return ExprVal::Null };
+            let (n, unit) = match args.get(2) {
+                Some(Expr::FuncCall { name, args: iv }) if name == "INTERVAL" => {
+                    let n = match eval_expr(&iv[0], block, row) { ExprVal::Int(n) => n, ExprVal::Float(f) => f as i64, _ => return ExprVal::Null };
+                    let u = match iv.get(1) { Some(Expr::Str(u)) => crate::datetime::norm_unit(u), _ => None };
+                    match u { Some(u) => (n, u), None => return ExprVal::Null }
+                }
+                None => (if db.epoch_secs() >= da.epoch_secs() { 1 } else { -1 }, "day"),
+                _ => return ExprVal::Null,
+            };
+            if n == 0 { return ExprVal::Null; }
+            let (mut out, mut k) = (Vec::new(), 0i64);
+            loop {
+                let Some(cur) = crate::datetime::add_unit(&da, unit, k * n) else { break };
+                let past = if n > 0 { cur.epoch_secs() > db.epoch_secs() } else { cur.epoch_secs() < db.epoch_secs() };
+                if past || out.len() > LIMIT { break; }
+                out.push(ExprVal::Str(if da.has_time { crate::datetime::fmt_ts(cur.days, cur.secs, cur.nanos) } else { crate::datetime::fmt_date(cur.days) }));
+                k += 1;
+            }
+            crate::arrays::encode(&out)
         }
-        "SIZE" | "CARDINALITY" => match args.first().and_then(|a| array_items(a, block, row)) {
-            Some(items) => ExprVal::Int(items.len() as i64),
-            None => ExprVal::Int(-1),
-        },
         "INTERVAL" => ExprVal::Null, // only meaningful as an operand of + / - (see eval_interval)
         "CAST" | "TRY_CAST" | "CONVERT" => {
             let val = arg(0);
@@ -3492,7 +3488,7 @@ fn eval_func(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> ExprVa
             let field = &name[8..];
             crate::scalar::to_dt(&arg(0)).and_then(|d| crate::scalar::date_part(field, &d)).unwrap_or(ExprVal::Null)
         }
-        "MAP" | "ARRAY" | "EXPLODE" => ExprVal::Null,
+        "MAP" | "EXPLODE" => ExprVal::Null,
         _ => {
             let vals: Vec<ExprVal> = args.iter().map(|a| eval_expr(a, block, row)).collect();
             if let Some(v) = crate::scalar::call(name, &vals) { return v; }
