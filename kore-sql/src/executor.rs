@@ -1135,10 +1135,7 @@ fn join_blocks(ctx: &KqlContext, left: DataBlock, right: DataBlock, cfg: &JoinCo
     }
 }
 
-fn prof(label: &str, t: &std::time::Instant) { if std::env::var_os("KORE_PROF").is_some() { eprintln!("[prof] {label}: {:.1} ms", t.elapsed().as_secs_f64()*1000.0); } }
-
 pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
-    let t_prof = std::time::Instant::now();
     // UNION / INTERSECT / EXCEPT chained onto this statement
     if !stmt.set_ops.is_empty() {
         return crate::general::execute_compound(stmt, ctx);
@@ -1275,7 +1272,6 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         prefix_columns(base_block, base_alias)
     };
 
-    prof("load_table", &t_prof);
     if n_implicit > 0 {
         let mut pending: Vec<DataBlock> = Vec::with_capacity(n_implicit);
         for join in &stmt.joins[..n_implicit] {
@@ -1510,7 +1506,6 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         if let Some(p) = crate::rewrite::and_all(leftovers) { result = run_old_path(p, result)?; }
     }
 
-    prof("joins+where", &t_prof);
     // 3.5 anything the numeric fast paths below cannot do correctly
     if !agg_done && (use_general || crate::general::block_needs_general(stmt, &result)) {
         return crate::general::run(stmt, result, ctx);
@@ -1533,13 +1528,11 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         result = global_agg(result, &stmt.projections)?;
     }
 
-    prof("aggregate", &t_prof);
     // 4.1 HAVING — filter on aggregated result
     if let Some(having) = &stmt.having {
         result = filter_block(result, having)?;
     }
 
-    prof("having", &t_prof);
     // 5. Projection — done BEFORE ORDER BY so ORDER BY can reference SELECT aliases
     // (especially important when GROUP BY uses CASE expression aliases)
     let has_order = !stmt.order_by.is_empty();
@@ -1788,7 +1781,6 @@ fn load_table(
     let (Some(needed), Some(after_where)) = (needed, needed_wo_where) else {
         return Ok(prefix_columns(src.clone(), alias));
     };
-    let t_lt = std::time::Instant::now();
     let prefix = format!("{alias}.");
     let mut mine = Vec::new();
     let mut rest = Vec::new();
@@ -1830,7 +1822,6 @@ fn load_table(
         Some(p) => crate::vecexpr::filter_idx(p, src),
         None => None,
     };
-    prof("  filter_idx", &t_lt);
     if pred.is_some() && idx.is_none() {
         // not covered by the fast evaluator: copy what the whole statement needs, filter the copy
         let block = prefix_columns(prune_block(src.clone(), &Some(needed.clone())), alias);

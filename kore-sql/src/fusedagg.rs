@@ -368,7 +368,6 @@ impl WinOut {
 
 /// Many groups: partition rows by key hash, then one thread per partition builds that partition's groups.
 fn run_partitioned(job: &Job) -> Option<Groups> {
-    let t0 = std::time::Instant::now();
     let n = job.block.num_rows;
     let nspecs = job.specs.len();
     let nwin = n.div_ceil(WIN);
@@ -421,7 +420,6 @@ fn run_partitioned(job: &Job) -> Option<Groups> {
             Some(WinOut { lo, rows, off, vals })
         }).collect();
     let outs: Vec<WinOut> = outs.into_iter().collect::<Option<Vec<_>>>()?;
-    if std::env::var_os("KORE_PROF").is_some() { eprintln!("[prof]  part A {:.1}", t0.elapsed().as_secs_f64()*1e3); }
 
     struct PartAgg { first: Vec<usize>, acc: Vec<Vec<f64>>, cnt: Vec<Vec<u64>> }
     // fold row `r` (window output `wo`) into group `g`
@@ -496,14 +494,12 @@ fn run_partitioned(job: &Job) -> Option<Groups> {
         }
         pa
     }).collect();
-    if std::env::var_os("KORE_PROF").is_some() { eprintln!("[prof]  part B {:.1}", t0.elapsed().as_secs_f64()*1e3); }
 
     // restore first-appearance order: scatter every group to the row where it first appeared, then sweep the rows
     let mut slot: Vec<u64> = vec![u64::MAX; n];
     for (pi, pa) in parts.iter().enumerate() {
         for (gi, &f) in pa.first.iter().enumerate() { slot[f] = ((pi as u64) << 32) | gi as u64; }
     }
-    if std::env::var_os("KORE_PROF").is_some() { eprintln!("[prof]  part C1 {:.1}", t0.elapsed().as_secs_f64()*1e3); }
     let chunks: Vec<Vec<(u32, u64)>> = slot.par_chunks(1 << 16).enumerate().map(|(ci, c)| {
         c.iter().enumerate().filter(|(_, &v)| v != u64::MAX).map(|(i, &v)| (((ci << 16) + i) as u32, v)).collect()
     }).collect();
@@ -512,7 +508,6 @@ fn run_partitioned(job: &Job) -> Option<Groups> {
     let first: Vec<usize> = entries.par_iter().map(|e| e.0 as usize).collect();
     let acc: Vec<Vec<f64>> = (0..nspecs).map(|si| entries.par_iter().map(|&(_, v)| parts[(v >> 32) as usize].acc[si][(v & 0xFFFF_FFFF) as usize]).collect()).collect();
     let cnt: Vec<Vec<u64>> = (0..nspecs).map(|si| entries.par_iter().map(|&(_, v)| parts[(v >> 32) as usize].cnt[si][(v & 0xFFFF_FFFF) as usize]).collect()).collect();
-    if std::env::var_os("KORE_PROF").is_some() { eprintln!("[prof]  part C {:.1}", t0.elapsed().as_secs_f64()*1e3); }
     Some(Groups { first, acc, cnt })
 }
 
@@ -619,11 +614,8 @@ pub(crate) fn run(req: Request) -> Option<DataBlock> {
     if req.group_cols.is_empty() && outs.iter().any(|o| matches!(o, Out::Key(..))) { return None; }
 
     let job = Job { block, pred: req.pred, parts, specs, nodes: plan.nodes, dict_keys };
-    let t0 = std::time::Instant::now();
     let hc = looks_high_cardinality(&job);
-    if std::env::var_os("KORE_PROF").is_some() { eprintln!("[prof] fused hc={hc} probe {:.1}", t0.elapsed().as_secs_f64()*1e3); }
     let groups = if hc { run_partitioned(&job)? } else { run_local(&job)? };
-    if std::env::var_os("KORE_PROF").is_some() { eprintln!("[prof] fused groups {:.1}", t0.elapsed().as_secs_f64()*1e3); }
     let ng = groups.first.len();
     if ng == 0 { return None; }
 
@@ -662,7 +654,6 @@ pub(crate) fn run(req: Request) -> Option<DataBlock> {
             }
         }
     }
-    if std::env::var_os("KORE_PROF").is_some() { eprintln!("[prof] fused output built {:.1}", t0.elapsed().as_secs_f64()*1e3); }
     Some(DataBlock { columns, num_rows: ng })
 }
 
