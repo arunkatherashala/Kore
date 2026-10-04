@@ -333,7 +333,7 @@ impl DataBlock {
             }
             ColumnData::Str(v) => {
                 let mut indices: Vec<usize> = (0..self.num_rows).collect();
-                indices.sort_by(|&a, &b| {
+                indices.par_sort_by(|&a, &b| {
                     let sa = v[a].as_deref().unwrap_or("");
                     let sb = v[b].as_deref().unwrap_or("");
                     if ascending { sa.cmp(sb) } else { sb.cmp(sa) }
@@ -342,7 +342,7 @@ impl DataBlock {
             }
             ColumnData::StrDict { codes, dict } => {
                 let mut indices: Vec<usize> = (0..self.num_rows).collect();
-                indices.sort_by(|&a, &b| {
+                indices.par_sort_by(|&a, &b| {
                     let ca = codes[a]; let cb = codes[b];
                     let sa = if ca == u8::MAX { "" } else { dict.get(ca as usize).map(|s| s.as_str()).unwrap_or("") };
                     let sb = if cb == u8::MAX { "" } else { dict.get(cb as usize).map(|s| s.as_str()).unwrap_or("") };

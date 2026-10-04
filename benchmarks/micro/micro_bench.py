@@ -1,6 +1,6 @@
 """Non-TPC-H micro-benchmarks for KORE: sort, DISTINCT, high-cardinality GROUP BY, skewed join, window, string scans.
 
-    python micro_bench.py --gen            # writes data/*.csv (10M-row fact table t, 5M-row w, 100k-row dim)
+    python micro_bench.py --gen            # writes data/*.csv (2M-row fact table t, 1M-row w (pass bigger n to gen() for 10M/5M), 100k-row dim)
     python micro_bench.py [--only M1,M5]   # prints min-of-N ms per query plus the first result rows
 
 Queries are wrapped (count/limit) so the FFI JSON stays small. Compare the printed rows by eye / against
@@ -19,13 +19,13 @@ ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 DATA = os.path.join(HERE, "data")
 
 
-def gen(n=10_000_000, nw=5_000_000):
+def gen(n=2_000_000, nw=1_000_000):
     import pyarrow as pa
     import pyarrow.csv as pc
     os.makedirs(DATA, exist_ok=True)
     rng = np.random.default_rng(7)
     ids = rng.permutation(n).astype(np.int64)
-    k_hi = rng.integers(0, 2_000_000, n)
+    k_hi = rng.integers(0, max(n // 5, 1), n)
     k_low = rng.integers(0, 1000, n)
     k_skew = np.minimum(rng.zipf(1.3, n), 100_000).astype(np.int64)   # heavy hitters: key 1 holds a large share
     v = np.round(rng.random(n) * 1000, 2)
@@ -42,9 +42,9 @@ def gen(n=10_000_000, nw=5_000_000):
 
 
 QUERIES = {
-    "M1 sort 10M top-5":        "select id, v from t order by v desc, id limit 5",
-    "M1b sort 10M full (tail)": "select id, v from t order by v, id limit 5 offset 9999995",
-    "M1c sort 10M by string":   "select id from t order by s, id limit 5 offset 9999995",
+    "M1 sort 2M top-5":        "select id, v from t order by v desc, id limit 5",
+    "M1b sort 2M full (tail)": "select id, v from t order by v, id limit 5 offset 1999995",
+    "M1c sort 2M by string":   "select id from t order by s, id limit 5 offset 1999995",
     "M2 distinct high-card":    "select count(*) as c from (select distinct k_hi from t) x",
     "M2b distinct low-card":    "select count(*) as c from (select distinct k_low from t) x",
     "M2c distinct 2 cols":      "select count(*) as c from (select distinct k_low, k_skew from t) x",
@@ -57,10 +57,10 @@ QUERIES = {
     "M4 join skewed keys":      "select count(*) as c, sum(t.v * dim.w) as sv from t join dim on t.k_skew = dim.k",
     "M4b left join":            "select count(*) as c, count(dim.k) as m from t left join dim on t.k_hi = dim.k",
     "M4c join + group":         "select dim.grp, count(*) as c, sum(t.v) as sv from t join dim on t.k_skew = dim.k group by dim.grp order by dim.grp limit 3",
-    "M5 window row_number 5M":  "select count(*) as c, sum(rn) as s from (select row_number() over (partition by k_low order by v) as rn from w) x",
-    "M5b window sum part 5M":   "select count(*) as c, sum(sv) as s from (select sum(v) over (partition by k_low) as sv from w) x",
-    "M5c window rank+lag 5M":   "select count(*) as c, sum(r) as s from (select rank() over (partition by k_low order by v) as r, lag(v) over (partition by k_low order by id) as lg from w) x",
-    "M5d running sum 5M":       "select count(*) as c, max(rs) as m from (select sum(v) over (order by id rows between unbounded preceding and current row) as rs from w) x",
+    "M5 window row_number 1M":  "select count(*) as c, sum(rn) as s from (select row_number() over (partition by k_low order by v) as rn from w) x",
+    "M5b window sum part 1M":   "select count(*) as c, sum(sv) as s from (select sum(v) over (partition by k_low) as sv from w) x",
+    "M5c window rank+lag 1M":   "select count(*) as c, sum(r) as s from (select rank() over (partition by k_low order by v) as r, lag(v) over (partition by k_low order by id) as lg from w) x",
+    "M5d running sum 1M":       "select count(*) as c, max(rs) as m from (select sum(v) over (order by id rows between unbounded preceding and current row) as rs from w) x",
     "M6 like %x%":              "select count(*) as c from t where s like '%alpha_1%'",
     "M6b like prefix":          "select count(*) as c from t where s like 'delta_9%'",
     "M6c like suffix":          "select count(*) as c from t where s like '%_special'",
