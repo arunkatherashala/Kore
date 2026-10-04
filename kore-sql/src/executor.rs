@@ -5334,12 +5334,25 @@ fn group_by_agg(
     group_by_agg_ex(block, group_cols, projections).map(|r| r.0)
 }
 
-/// FNV-1a over bytes.
+/// 64-bit hash of a byte string, eight bytes per step (FNV-1a took one dependent multiply per byte).
 #[inline(always)]
 fn fnv64(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 14695981039346656037;
-    for &b in bytes { h ^= b as u64; h = h.wrapping_mul(1099511628211); }
-    h
+    const M: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ (bytes.len() as u64).wrapping_mul(M);
+    let mut chunks = bytes.chunks_exact(8);
+    for c in &mut chunks {
+        let w = u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+        h = (h ^ w).wrapping_mul(M).rotate_left(29);
+    }
+    let rem = chunks.remainder();
+    if !rem.is_empty() {
+        let mut w = 0u64;
+        for (i, &b) in rem.iter().enumerate() { w |= (b as u64) << (8 * i); }
+        h = (h ^ w).wrapping_mul(M).rotate_left(29);
+    }
+    h ^= h >> 32;
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    h ^ (h >> 29)
 }
 
 /// u128 grouping key of one row (no String allocation). This DEFINES group equality
@@ -5452,13 +5465,9 @@ pub(crate) fn group_by_agg_ex(
     }
 
     // Reconstruct ordered groups vec for downstream processing
+    // (the key values themselves are not needed: output keys are read from each group's first row)
     let groups: Vec<(Vec<ExprVal>, Vec<usize>)> = key_order.iter().map(|k| {
-        let idxs = group_map[k].clone();
-        let first = idxs[0];
-        let key_vals: Vec<ExprVal> = group_cols.iter()
-            .map(|c| get_cell(&block, c, first))
-            .collect();
-        (key_vals, idxs)
+        (Vec::new(), group_map.remove(k).unwrap_or_default())
     }).collect();
 
     prof!(__tg, "gb_ex groups built n={}", groups.len());
