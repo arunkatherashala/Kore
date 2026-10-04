@@ -51,6 +51,8 @@ enum Val<'a> {
     S(&'a [Option<String>]),
     D(&'a [u8], &'a [String]),
     Text(&'a str),
+    /// SUBSTR(text operand, literal start, literal length) as a borrowed slice (no per-row String)
+    Sub(Box<Val<'a>>, usize, Option<usize>),
 }
 
 impl Val<'_> {
@@ -71,6 +73,7 @@ impl Val<'_> {
             Val::S(v) => v[i].as_deref(),
             Val::D(codes, dict) => if codes[i] == u8::MAX { None } else { dict.get(codes[i] as usize).map(|s| s.as_str()) },
             Val::Text(t) => Some(t),
+            Val::Sub(inner, start, len) => inner.text(i).map(|s| sub_slice(s, *start, *len)),
             _ => None,
         }
     }
@@ -81,7 +84,32 @@ impl Val<'_> {
         match self { Val::I(v) => v[i], Val::NumI(c) => Some(*c), _ => None }
     }
     fn is_int(&self) -> bool { matches!(self, Val::I(_) | Val::NumI(_)) }
-    fn is_text(&self) -> bool { matches!(self, Val::S(_) | Val::D(..) | Val::Text(_)) }
+    fn is_text(&self) -> bool { matches!(self, Val::S(_) | Val::D(..) | Val::Text(_) | Val::Sub(..)) }
+}
+
+/// Characters `start..start+len` of `s` (0-based start) as a slice.
+#[inline]
+fn sub_slice(s: &str, start: usize, len: Option<usize>) -> &str {
+    let b = s.as_bytes();
+    // ASCII prefix: byte offsets are character offsets
+    let probe = match len { Some(l) => (start + l).min(b.len()), None => b.len() };
+    if b[..probe].is_ascii() {
+        let lo = start.min(b.len());
+        let hi = match len { Some(l) => (start + l).min(b.len()), None => b.len() };
+        return &s[lo..hi.max(lo)];
+    }
+    let mut it = s.char_indices();
+    let lo = match it.nth(start) { Some((i, _)) => i, None => return "" };
+    match len {
+        None => &s[lo..],
+        Some(0) => "",
+        Some(l) => {
+            let mut hi = s.len();
+            let mut taken = 1;
+            for (i, _) in s[lo..].char_indices().skip(1) { if taken == l { hi = lo + i; break; } taken += 1; }
+            &s[lo..hi]
+        }
+    }
 }
 
 fn operand<'a>(e: &'a Expr, block: &'a DataBlock, w: Win, c: &Cache) -> Option<Val<'a>> {
@@ -96,6 +124,14 @@ fn operand<'a>(e: &'a Expr, block: &'a DataBlock, w: Win, c: &Cache) -> Option<V
             ColumnData::StrDict { codes, dict } => Some(Val::D(&codes[w.lo..w.hi], dict)),
             ColumnData::Bool(_) => None,
         },
+        Expr::FuncCall { name, args } if (name.eq_ignore_ascii_case("SUBSTR") || name.eq_ignore_ascii_case("SUBSTRING")) && (args.len() == 2 || args.len() == 3) => {
+            let inner = operand(&args[0], block, w, c)?;
+            if !matches!(inner, Val::S(_) | Val::D(..)) { return None; }
+            let Expr::Int(start) = &args[1] else { return None };
+            if *start < 1 { return None; }
+            let len = match args.get(2) { None => None, Some(Expr::Int(l)) => Some((*l).max(0) as usize), _ => return None };
+            Some(Val::Sub(Box::new(inner), (*start - 1) as usize, len))
+        }
         Expr::BinOp { op: BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul | BinOpKind::Div | BinOpKind::Mod, .. }
         | Expr::Case { .. } => num_win(e, block, w, c).map(Val::Owned),
         _ => None,
@@ -214,12 +250,14 @@ fn compare(op: &BinOpKind, l: &Val, r: &Val, n: usize) -> Option<Vec<u8>> {
     }
 }
 
+type FxSet<T> = std::collections::HashSet<T, std::hash::BuildHasherDefault<crate::executor::FxHasher>>;
+
 /// Per-call cache of IN-list hash sets, keyed by the address of the list inside the predicate being evaluated
 /// (valid for the duration of one top-level call), so each set is built once instead of once per chunk.
 #[derive(Default)]
 struct Cache {
-    ints: std::sync::Mutex<std::collections::HashMap<usize, std::sync::Arc<std::collections::HashSet<i64>>>>,
-    nums: std::sync::Mutex<std::collections::HashMap<usize, std::sync::Arc<std::collections::HashSet<u64>>>>,
+    ints: std::sync::Mutex<std::collections::HashMap<usize, std::sync::Arc<FxSet<i64>>>>,
+    nums: std::sync::Mutex<std::collections::HashMap<usize, std::sync::Arc<FxSet<u64>>>>,
 }
 
 /// LIKE pattern made only of literal text and `%` (no `_`, no escapes): matched with substring search
@@ -295,11 +333,11 @@ fn tri<'a>(e: &'a Expr, block: &'a DataBlock, w: Win, c: &Cache) -> Option<Vec<u
         Expr::In { expr, values, negated } => {
             let v = operand(expr, block, w, c)?;
             let key_id = values.as_ptr() as usize;
-            let int_set: Option<std::sync::Arc<std::collections::HashSet<i64>>> = if v.is_int() {
+            let int_set: Option<std::sync::Arc<FxSet<i64>>> = if v.is_int() {
                 let cached = c.ints.lock().unwrap().get(&key_id).cloned();
                 match cached {
                     Some(h) => Some(h),
-                    None => values.iter().map(|x| if let Expr::Int(i) = x { Some(*i) } else { None }).collect::<Option<std::collections::HashSet<i64>>>()
+                    None => values.iter().map(|x| if let Expr::Int(i) = x { Some(*i) } else { None }).collect::<Option<FxSet<i64>>>()
                         .map(|h| { let h = std::sync::Arc::new(h); c.ints.lock().unwrap().insert(key_id, h.clone()); h }),
                 }
             } else { None };
@@ -308,10 +346,10 @@ fn tri<'a>(e: &'a Expr, block: &'a DataBlock, w: Win, c: &Cache) -> Option<Vec<u
             } else if v.is_num() {
                 let key = |f: f64| if f == 0.0 { 0.0f64.to_bits() } else { f.to_bits() };
                 let cached = c.nums.lock().unwrap().get(&key_id).cloned();
-                let big: Option<std::sync::Arc<std::collections::HashSet<u64>>> = match cached {
+                let big: Option<std::sync::Arc<FxSet<u64>>> = match cached {
                     Some(h) => Some(h),
                     None if values.len() > 8 => {
-                        let mut hs = std::collections::HashSet::with_capacity(values.len());
+                        let mut hs = FxSet::<u64>::with_capacity_and_hasher(values.len(), Default::default());
                         for x in values {
                             match x { Expr::Int(i) => { hs.insert(key(*i as f64)); } Expr::Float(f) => { hs.insert(key(*f)); } _ => return None }
                         }
@@ -340,14 +378,22 @@ fn tri<'a>(e: &'a Expr, block: &'a DataBlock, w: Win, c: &Cache) -> Option<Vec<u
                     }).collect()
                 }
             } else if v.is_text() {
-                let mut set = std::collections::HashSet::with_capacity(values.len());
+                let mut set: Vec<&str> = Vec::with_capacity(values.len());
                 for x in values {
-                    match x { Expr::Str(s) => { set.insert(s.as_str()); } _ => return None }
+                    match x { Expr::Str(s) => set.push(s.as_str()), _ => return None }
                 }
-                (0..n).map(|i| match v.text(i) {
-                    None => NULL,
-                    Some(a) => if set.contains(a) { TRUE } else { FALSE },
-                }).collect()
+                if set.len() <= 16 {
+                    (0..n).map(|i| match v.text(i) {
+                        None => NULL,
+                        Some(a) => if set.iter().any(|b| *b == a) { TRUE } else { FALSE },
+                    }).collect()
+                } else {
+                    let hs: std::collections::HashSet<&str> = set.into_iter().collect();
+                    (0..n).map(|i| match v.text(i) {
+                        None => NULL,
+                        Some(a) => if hs.contains(a) { TRUE } else { FALSE },
+                    }).collect()
+                }
             } else {
                 return None;
             };
@@ -414,7 +460,12 @@ pub fn filter_mask(pred: &Expr, block: &DataBlock) -> Option<Vec<bool>> {
 pub fn filter_idx(pred: &Expr, block: &DataBlock) -> Option<Vec<usize>> {
     let wins = windows(block.num_rows);
     let pick = |w: Win, v: Vec<u8>| -> Vec<usize> {
-        v.iter().enumerate().filter_map(|(i, &x)| if x == TRUE { Some(w.lo + i) } else { None }).collect()
+        // exact capacity: no doubling reallocations (large allocations are expensive page-fault wise)
+        let cnt = v.iter().filter(|&&x| x == TRUE).count();
+        let mut out = Vec::with_capacity(cnt);
+        if cnt == v.len() { out.extend(w.lo..w.hi); return out; }
+        if cnt > 0 { for (i, &x) in v.iter().enumerate() { if x == TRUE { out.push(w.lo + i); } } }
+        out
     };
     let c = &Cache::default();
     let first = pick(*wins.first()?, tri(pred, block, *wins.first()?, c)?);

@@ -85,6 +85,29 @@ pub fn and_all(mut v: Vec<Expr>) -> Option<Expr> {
     Some(v.into_iter().fold(first, |acc, e| Expr::BinOp { op: BinOpKind::And, left: Box::new(acc), right: Box::new(e) }))
 }
 
+/// Rewrite unqualified column references to `alias.col` using `owner` (bare name -> alias, None when the name
+/// is unknown or ambiguous). None when `e` holds anything that is not a plain scalar expression or a column
+/// cannot be attributed to exactly one table.
+pub fn qualify_cols(e: &Expr, owner: &dyn Fn(&str) -> Option<String>) -> Option<Expr> {
+    let q = |x: &Expr| qualify_cols(x, owner).map(Box::new);
+    Some(match e {
+        Expr::Col(c) if !c.contains('.') => Expr::QualCol(owner(c)?, c.clone()),
+        Expr::Col(_) | Expr::QualCol(..) | Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null => e.clone(),
+        Expr::BinOp { op, left, right } => Expr::BinOp { op: op.clone(), left: q(left)?, right: q(right)? },
+        Expr::Not(x) => Expr::Not(q(x)?),
+        Expr::IsNull(x) => Expr::IsNull(q(x)?),
+        Expr::IsNotNull(x) => Expr::IsNotNull(q(x)?),
+        Expr::In { expr, values, negated } => Expr::In {
+            expr: q(expr)?, values: values.iter().map(|v| qualify_cols(v, owner)).collect::<Option<Vec<_>>>()?, negated: *negated,
+        },
+        Expr::Between { expr, low, high, negated } => Expr::Between { expr: q(expr)?, low: q(low)?, high: q(high)?, negated: *negated },
+        Expr::Like { expr, pattern, negated } => Expr::Like { expr: q(expr)?, pattern: q(pattern)?, negated: *negated },
+        Expr::ILike { expr, pattern, negated } => Expr::ILike { expr: q(expr)?, pattern: q(pattern)?, negated: *negated },
+        Expr::FuncCall { name, args } => Expr::FuncCall { name: name.clone(), args: args.iter().map(|a| qualify_cols(a, owner)).collect::<Option<Vec<_>>>()? },
+        _ => return None,
+    })
+}
+
 /// Rewrite `alias.col` references to plain `col` so the expression can be evaluated on a table whose
 /// columns are not prefixed yet. Other qualifiers are left alone.
 pub fn unqualify(e: &Expr, alias: &str) -> Expr {
