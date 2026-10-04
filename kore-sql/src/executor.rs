@@ -89,8 +89,13 @@ impl KqlContext {
     }
 
     /// Drop a view.
+    pub fn view_exists(&self, name: &str) -> bool {
+        self.views.keys().any(|k| k.eq_ignore_ascii_case(name))
+    }
+
     pub fn drop_view(&mut self, name: &str) -> bool {
-        self.views.remove(name).is_some()
+        let key = self.views.keys().find(|k| k.eq_ignore_ascii_case(name)).cloned();
+        key.map_or(false, |k| self.views.remove(&k).is_some())
     }
 
     /// Drop a table.
@@ -323,6 +328,12 @@ impl KqlContext {
     pub fn execute_dml(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
         let sql_trim = sql.trim();
         let upper = sql_trim.to_uppercase();
+
+        // INSERT / UPDATE / DELETE / TRUNCATE / CREATE TABLE|VIEW / DROP: see dml.rs
+        if let Some(res) = crate::dml::execute(self, sql_trim) {
+            // CREATE TABLE ... STORED AS PARQUET is a query-level statement handled elsewhere
+            if !(upper.starts_with("CREATE TABLE") && upper.contains("STORED AS PARQUET")) { return res; }
+        }
 
         if upper.starts_with("INSERT INTO") {
             return self.dml_insert(sql_trim);

@@ -423,7 +423,15 @@ fn java_format(fmt: &str, args: &[V]) -> String {
         let mut body = match conv {
             'd' => match int(&arg) { Some(n) => { let mut s = n.abs().to_string(); if flags.contains(',') { s = group3(&s); } if n < 0 { format!("-{s}") } else if flags.contains('+') { format!("+{s}") } else { s } } None => "null".into() },
             'f' => match num(&arg) { Some(x) => { let mut s = format!("{:.*}", prec.unwrap_or(6), x.abs()); if flags.contains(',') { let (a, b) = s.split_once('.').map(|(a, b)| (a.to_string(), format!(".{b}"))).unwrap_or((s.clone(), String::new())); s = format!("{}{}", group3(&a), b); } if x < 0.0 { format!("-{s}") } else if flags.contains('+') { format!("+{s}") } else { s } } None => "null".into() },
-            'e' | 'E' => num(&arg).map(|x| format!("{:.*e}", prec.unwrap_or(6), x)).unwrap_or("null".into()),
+            'e' | 'E' => num(&arg).map(|x| {
+                // Java: d.dddddde+XX (sign and at least two exponent digits)
+                let s = format!("{:.*e}", prec.unwrap_or(6), x);
+                let (m, e) = s.split_once('e').unwrap_or((&s, "0"));
+                let ev: i32 = e.parse().unwrap_or(0);
+                let r = format!("{m}e{}{:02}", if ev < 0 { '-' } else { '+' }, ev.abs());
+                if conv == 'E' { r.to_uppercase() } else { r }
+            }).unwrap_or("null".into()),
+            'o' => int(&arg).map(|n| format!("{:o}", n)).unwrap_or("null".into()),
             's' | 'S' => { let s = to_str(&arg).unwrap_or("null".into()); let s = match prec { Some(p) => s.chars().take(p).collect(), None => s }; if conv == 'S' { s.to_uppercase() } else { s } }
             'x' => int(&arg).map(|n| format!("{:x}", n)).unwrap_or("null".into()),
             'X' => int(&arg).map(|n| format!("{:X}", n)).unwrap_or("null".into()),
@@ -597,7 +605,8 @@ pub fn call(name: &str, a: &[V]) -> Option<V> {
         "FORMAT_NUMBER" => {
             nn!(0, 1);
             let (x, d) = (get!(f(0)), get!(k(1)).max(0) as usize);
-            let r = format!("{:.*}", d, round_half_up(x.abs(), d as i64));
+            // Spark documents HALF_EVEN; Rust's float formatting rounds the exact binary value, ties to even
+            let r = format!("{:.*}", d, x.abs());
             let (ip, fp) = r.split_once('.').map(|(a, b)| (a.to_string(), format!(".{b}"))).unwrap_or((r.clone(), String::new()));
             V::Str(format!("{}{}{}", if x < 0.0 { "-" } else { "" }, group3(&ip), fp))
         }
