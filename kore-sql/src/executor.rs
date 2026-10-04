@@ -1125,12 +1125,13 @@ fn run_recursive_cte(cte: &CteClause, ctx: &KqlContext) -> Result<DataBlock, Kor
 
 /// Hash join; when a memory limit is set and the inputs exceed it, a grace-hash join
 /// that partitions both sides to disk. Unlimited (default) = plain `HashJoin::join`.
-fn join_blocks(ctx: &KqlContext, left: &DataBlock, right: &DataBlock, cfg: &JoinConfig) -> Result<DataBlock, KoreError> {
+/// Takes the inputs by value so the in-memory join can free each source column once it is gathered.
+fn join_blocks(ctx: &KqlContext, left: DataBlock, right: DataBlock, cfg: &JoinConfig) -> Result<DataBlock, KoreError> {
     match ctx.memory_limit {
         Some(lim) if left.num_rows + right.num_rows > 0
-            && estimate_bytes(left) + estimate_bytes(right) > lim =>
-            spill_ops::partitioned_join(left, right, cfg, &ctx.spill_ctx(lim)),
-        _ => HashJoin::join(left, right, cfg),
+            && estimate_bytes(&left) + estimate_bytes(&right) > lim =>
+            spill_ops::partitioned_join(&left, &right, cfg, &ctx.spill_ctx(lim)),
+        _ => HashJoin::join_owned(left, right, cfg),
     }
 }
 
@@ -1300,7 +1301,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                     let pb = pending.remove(pi);
                     conjuncts.remove(ci);
                     let cfg = JoinConfig { left_key: lk, right_key: rk, join_type: JoinType::Inner };
-                    result = join_blocks(ctx, &result, &pb, &cfg)?;
+                    result = join_blocks(ctx, std::mem::replace(&mut result, DataBlock::empty()), pb, &cfg)?;
                 }
                 Some((pi, links)) => {
                     // Several equalities connect the two sides (e.g. ps_partkey = l_partkey AND
@@ -1312,7 +1313,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                     add_composite_key(&mut result, &lcols, "__jkL");
                     add_composite_key(&mut pb, &rcols, "__jkR");
                     let cfg = JoinConfig { left_key: "__jkL".into(), right_key: "__jkR".into(), join_type: JoinType::Inner };
-                    result = join_blocks(ctx, &result, &pb, &cfg)?;
+                    result = join_blocks(ctx, std::mem::replace(&mut result, DataBlock::empty()), pb, &cfg)?;
                     result.columns.retain(|c| c.name != "__jkL" && c.name != "__jkR");
                 }
                 None => {
@@ -1437,9 +1438,9 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         if join.join_type == JoinKind::Right {
             // RIGHT JOIN = LEFT JOIN with the sides exchanged, so the keys swap sides as well
             let swapped = JoinConfig { left_key: cfg.right_key.clone(), right_key: cfg.left_key.clone(), join_type: JoinType::Left };
-            result = join_blocks(ctx, &right_block, &probe, &swapped)?;
+            result = join_blocks(ctx, right_block, probe, &swapped)?;
         } else {
-            result = join_blocks(ctx, &probe, &right_block, &cfg)?;
+            result = join_blocks(ctx, probe, right_block, &cfg)?;
         }
     }
 
@@ -1489,7 +1490,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
             match semi_join_mask(&result, subquery, *negated, ctx)? {
                 Some(mask) => {
                     let keep: Vec<usize> = mask.iter().enumerate().filter_map(|(i, &k)| if k { Some(i) } else { None }).collect();
-                    result = result.select_rows(&keep);
+                    result = select_rows_owned(std::mem::replace(&mut result, DataBlock::empty()), &keep);
                 }
                 None => leftovers.push(e),
             }
@@ -2336,6 +2337,26 @@ fn filter_block(block: DataBlock, pred: &Expr) -> Result<DataBlock, KoreError> {
     filter_block_ctx(block, pred, &KqlContext::new())
 }
 
+/// `block.select_rows(keep)` that consumes the block: each source column is freed as soon as it has been
+/// gathered, and text values are moved rather than cloned. `keep` must be strictly ascending (as a filter's
+/// row list is); anything else takes the plain copying path.
+fn select_rows_owned(block: DataBlock, keep: &[usize]) -> DataBlock {
+    if !keep.windows(2).all(|w| w[0] < w[1]) { return block.select_rows(keep); }
+    use rayon::prelude::*;
+    let num_rows = keep.len();
+    let columns: Vec<Column> = block.columns.into_par_iter().map(|c| {
+        let Column { name, data } = c;
+        let in_range = keep.last().map_or(true, |&l| l < data.len());
+        let data = match data {
+            ColumnData::Str(mut v) if in_range =>
+                ColumnData::Str(keep.iter().map(|&i| std::mem::take(&mut v[i])).collect()),
+            other => other.take_rows(keep),
+        };
+        Column { name, data }
+    }).collect();
+    DataBlock { columns, num_rows }
+}
+
 /// Filter with context — supports scalar/IN/EXISTS subqueries.
 fn filter_block_ctx(block: DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
     // Pre-compute all IN subqueries ONCE into value sets (avoids O(n*m) re-execution per row)
@@ -2345,7 +2366,8 @@ fn filter_block_ctx(block: DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<D
     // interpreter below handles whatever it does not cover (subqueries, scalar functions, ...).
     if let Some(mask) = crate::vecexpr::filter_mask(pred, &block) {
         let keep: Vec<usize> = mask.iter().enumerate().filter_map(|(i, &k)| if k { Some(i) } else { None }).collect();
-        return Ok(block.select_rows(&keep));
+        drop(mask);
+        return Ok(select_rows_owned(block, &keep));
     }
     let n = block.num_rows;
     // subqueries that survived the decorrelation rewrites run once per row, bound to that row
@@ -2361,7 +2383,7 @@ fn filter_block_ctx(block: DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<D
     let indices: Vec<usize> = keep.iter().enumerate()
         .filter_map(|(i, &k)| if k { Some(i) } else { None })
         .collect();
-    Ok(block.select_rows(&indices))
+    Ok(select_rows_owned(block, &indices))
 }
 
 /// Decorrelate scalar subqueries by pre-computing per-key results.

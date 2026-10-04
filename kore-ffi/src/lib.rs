@@ -386,6 +386,9 @@ pub unsafe extern "C" fn kore_session_query(
     match kore_sql::query(sql_str, &(*sess).ctx) {
         Ok(block)  => {
             let json = block_to_json_stripped(&block);
+            drop(block);
+            // moves the buffer into the CString (no second copy); fails only on an interior NUL, which
+            // serde_json never emits (it escapes control characters)
             CString::new(json).map(|cs| cs.into_raw()).unwrap_or(std::ptr::null_mut())
         }
         Err(e) => { set_error(format!("{e}")); std::ptr::null_mut() }
@@ -479,10 +482,14 @@ fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(
     let mut any_val:   Vec<bool> = vec![false; nc];
     let mut nsampled = 0usize;
 
+    let hdr_bytes = hdr.len();
+    let mut sample_bytes = 0usize;
+    let mut sample_eof = false;
     let mut line = String::new();
     while nsampled < SAMPLE {
         line.clear();
-        if r1.read_line(&mut line).map_err(|e| e.to_string())? == 0 { break; }
+        if r1.read_line(&mut line).map_err(|e| e.to_string())? == 0 { sample_eof = true; break; }
+        sample_bytes += line.len();
         let trimmed = line.trim_end();
         if trimmed.is_empty() { continue; }
         let mut vals = Vec::with_capacity(nc);
@@ -521,7 +528,16 @@ fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(
     let mut skip = String::new();
     r2.read_line(&mut skip).map_err(|e| e.to_string())?;   // skip header
 
-    let cap = 1_100_000usize;
+    // Size every column once from the file length and the sampled line length. A fixed small capacity
+    // that doubles on demand leaves up to 2x slack per column (and copies the column on each growth).
+    let cap = if sample_eof || nsampled == 0 {
+        nsampled
+    } else {
+        let file_len = std::fs::metadata(path).map(|m| m.len() as usize).unwrap_or(0);
+        let avg = (sample_bytes as f64 / nsampled as f64).max(1.0);
+        let est = (file_len.saturating_sub(hdr_bytes) as f64 / avg * 1.03) as usize;
+        est.max(nsampled) + 1024
+    };
     let mut i64_cols:  Vec<Vec<Option<i64>>>    = (0..nc).map(|i| if col_types[i]==CT::Int64   { Vec::with_capacity(cap) } else { vec![] }).collect();
     let mut f64_cols:  Vec<Vec<Option<f64>>>    = (0..nc).map(|i| if col_types[i]==CT::Float64 { Vec::with_capacity(cap) } else { vec![] }).collect();
     let mut str_cols:  Vec<Vec<Option<String>>> = (0..nc).map(|i| if col_types[i]==CT::Str     { Vec::with_capacity(cap) } else { vec![] }).collect();
@@ -578,13 +594,14 @@ fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(
     let mut columns = vec![];
     for (i, name) in headers.iter().enumerate() {
         let data = match col_types[i] {
-            CT::Int64   => ColumnData::Int64(std::mem::take(&mut i64_cols[i])),
-            CT::Float64 => ColumnData::Float64(std::mem::take(&mut f64_cols[i])),
-            CT::Str     => ColumnData::Str(std::mem::take(&mut str_cols[i])),
-            CT::StrDict => ColumnData::StrDict {
-                codes: std::mem::take(&mut sd_codes[i]),
-                dict:  std::mem::take(&mut sd_dict[i]),
-            },
+            CT::Int64   => { let mut v = std::mem::take(&mut i64_cols[i]); v.shrink_to_fit(); ColumnData::Int64(v) }
+            CT::Float64 => { let mut v = std::mem::take(&mut f64_cols[i]); v.shrink_to_fit(); ColumnData::Float64(v) }
+            CT::Str     => { let mut v = std::mem::take(&mut str_cols[i]); v.shrink_to_fit(); ColumnData::Str(v) }
+            CT::StrDict => {
+                let mut codes = std::mem::take(&mut sd_codes[i]);
+                codes.shrink_to_fit();
+                ColumnData::StrDict { codes, dict: std::mem::take(&mut sd_dict[i]) }
+            }
         };
         columns.push(Column { name: name.clone(), data });
     }
@@ -592,7 +609,46 @@ fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(
     Ok(())
 }
 
-fn block_to_json_stripped(block: &DataBlock) -> String {
+/// Stream the rows straight into one buffer (no per-row serde_json maps). Keys are written in sorted
+/// order, exactly what the map-based path produced. Falls back to that path if stripped names collide.
+fn block_to_json_stripped(block: &DataBlock) -> Vec<u8> {
+    let mut keys: Vec<(String, usize)> = block.columns.iter().enumerate()
+        .map(|(i, col)| (col.name.rfind('.').map(|p| &col.name[p+1..]).unwrap_or(&col.name).to_string(), i))
+        .collect();
+    keys.sort();
+    if keys.windows(2).any(|w| w[0].0 == w[1].0) {
+        return block_to_json_via_map(block).into_bytes();
+    }
+    let key_json: Vec<Vec<u8>> = keys.iter().map(|(k, _)| {
+        let mut b = serde_json::to_vec(k).unwrap_or_else(|_| b"\"\"".to_vec());
+        b.push(b':');
+        b
+    }).collect();
+    let mut out: Vec<u8> = Vec::with_capacity(64 + block.num_rows * 16 * keys.len().max(1));
+    out.push(b'[');
+    for r in 0..block.num_rows {
+        if r > 0 { out.push(b','); }
+        out.push(b'{');
+        for (n, (_, ci)) in keys.iter().enumerate() {
+            if n > 0 { out.push(b','); }
+            out.extend_from_slice(&key_json[n]);
+            match block.columns[*ci].data.get_value(r) {
+                kore_core::Value::Int(i)   => { let _ = serde_json::to_writer(&mut out, &i); }
+                kore_core::Value::Float(f) => { let _ = serde_json::to_writer(&mut out, &f); }
+                kore_core::Value::Bool(b)  => { let _ = serde_json::to_writer(&mut out, &b); }
+                kore_core::Value::Str(s)   => { let _ = serde_json::to_writer(&mut out, &s); }
+                kore_core::Value::Array(_) => out.extend_from_slice(b"[]"),
+                kore_core::Value::Map(_)   => out.extend_from_slice(b"{}"),
+                kore_core::Value::Null     => out.extend_from_slice(b"null"),
+            }
+        }
+        out.push(b'}');
+    }
+    out.push(b']');
+    out
+}
+
+fn block_to_json_via_map(block: &DataBlock) -> String {
     let mut rows = vec![];
     for r in 0..block.num_rows {
         let mut obj = serde_json::Map::new();
