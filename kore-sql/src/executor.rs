@@ -1255,6 +1255,25 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
             crate::rewrite::derive_table_filters_from_or(&mut conjuncts);
         }
     }
+    // NOT IN (list / uncorrelated subquery) rarely removes many rows: copying a big table just to apply
+    // it before the join costs more than applying it on the (usually much smaller) joined result.
+    let mut deferred: Vec<Expr> = Vec::new();
+    if planned && n_implicit > 0 {
+        let mut keep = Vec::with_capacity(conjuncts.len());
+        for c in conjuncts.drain(..) {
+            match &c {
+                Expr::In { negated: true, .. } => deferred.push(c),
+                Expr::InSubquery { negated: true, subquery, .. } if is_uncorrelated(subquery, ctx) => {
+                    match precompute_in_subqueries(&c, ctx) {
+                        d @ Expr::In { negated: true, .. } => deferred.push(d),
+                        other => keep.push(other),
+                    }
+                }
+                _ => keep.push(c),
+            }
+        }
+        conjuncts = keep;
+    }
 
     let mut result = if planned {
         load_table(base_ref, base_alias, &mut conjuncts, &needed, &needed_wo_where, ctx)?
@@ -1336,6 +1355,7 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
             }
             result = push_down_conjuncts(&mut conjuncts, result, ctx)?;
         }
+        conjuncts.append(&mut deferred);
         where_pred = crate::rewrite::and_all(std::mem::take(&mut conjuncts));
     } else if planned {
         where_pred = crate::rewrite::and_all(std::mem::take(&mut conjuncts));
@@ -1606,6 +1626,29 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
             }
         }
     }
+    // Full ORDER BY over NULL-free plain columns: one multi-key permutation, then a single gather,
+    // instead of one stable sort (and a copy of the whole block) per key.
+    if !spill_sorted && !stmt.order_by.is_empty() && result.num_rows > 1
+        && kore_spill::SpillManager::estimate_bytes(&result) <= 256 * 1024 * 1024
+    {
+        let mut keys: Vec<(usize, bool)> = Vec::new();
+        for item in &stmt.order_by {
+            if item.col.is_empty() || item.nulls_first.is_some() { break; }
+            let col_raw = resolve_col_name(&item.col, "");
+            let col = find_order_col_in_result(&col_raw, &result, &stmt.projections).unwrap_or(col_raw);
+            match sort_col_name(&result, &col).and_then(|n| result.columns.iter().position(|c| c.name == n)) {
+                Some(i) => keys.push((i, item.desc)),
+                None => break,
+            }
+        }
+        if keys.len() == stmt.order_by.len() {
+            let n = result.num_rows;
+            if let Some(idx) = top_n_indices(&result, &keys, n) {
+                result = result.select_rows(&idx);
+                spill_sorted = true;
+            }
+        }
+    }
     let order_items = if spill_sorted { &stmt.order_by[..0] } else { &stmt.order_by[..] };
     for item in order_items.iter().rev() {
         if !item.col.is_empty() {
@@ -1827,10 +1870,12 @@ fn load_table(
     };
 
     let pred = crate::rewrite::and_all(mine.iter().map(|c| crate::rewrite::unqualify(c, alias)).collect());
+    let __tl = std::time::Instant::now();
     let idx: Option<Vec<usize>> = match &pred {
         Some(p) => crate::vecexpr::filter_idx(p, src),
         None => None,
     };
+    prof!(__tl, "load_table {} filter_idx n={:?} src={}", alias, idx.as_ref().map(|v| v.len()), src.num_rows);
     if pred.is_some() && idx.is_none() {
         // not covered by the fast evaluator: copy what the whole statement needs, filter the copy
         let block = prefix_columns(prune_block(src.clone(), &Some(needed.clone())), alias);
@@ -1850,6 +1895,7 @@ fn load_table(
         data: match &idx { Some(ix) => c.data.take_rows(ix), None => c.data.clone() },
     }).collect();
     let num_rows = idx.as_ref().map_or(src.num_rows, |ix| ix.len());
+    prof!(__tl, "load_table {} take_rows done", alias);
     *conjuncts = rest;
     Ok(prefix_columns(DataBlock { columns, num_rows }, alias))
 }
@@ -2126,9 +2172,17 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
         all_cols.extend(cols.iter().map(&bare));
     }
     let __ts = std::time::Instant::now();
-    let inner = load_table(src.get(), &alias, &mut inner_filters, &Some(all_cols), &Some(key_cols), ctx)?;
+    // Without inner filters the catalog table itself is the inner side: no copy of its key columns.
+    let inner_owned: DataBlock;
+    let inner: &DataBlock = if inner_filters.is_empty() {
+        for p in eqs.iter_mut().chain(nes.iter_mut()) { p.0 = crate::rewrite::unqualify(&p.0, &alias); }
+        src.get()
+    } else {
+        inner_owned = load_table(src.get(), &alias, &mut inner_filters, &Some(all_cols), &Some(key_cols), ctx)?;
+        if !inner_filters.is_empty() { return Ok(None); }
+        &inner_owned
+    };
     prof!(__ts, "semi load_table rows={}", inner.num_rows);
-    if !inner_filters.is_empty() { return Ok(None); }
 
     // Fast path: one or two numeric keys (the usual surrogate-key joins), no per-row allocation.
     // The (small) outer side defines the set of keys that matter; the inner side is then scanned once, in
@@ -2388,6 +2442,7 @@ fn filter_block_ctx(block: DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<D
     if let Some(mask) = crate::vecexpr::filter_mask(pred, &block) {
         let keep: Vec<usize> = mask.iter().enumerate().filter_map(|(i, &k)| if k { Some(i) } else { None }).collect();
         drop(mask);
+        if keep.len() == block.num_rows { return Ok(block); }
         return Ok(select_rows_owned(block, &keep));
     }
     let n = block.num_rows;
@@ -2653,7 +2708,8 @@ fn correlated_scalar_values(outer: &DataBlock, sq: &SelectStmt, ctx: &KqlContext
 
     // Only the keys that occur in the outer rows matter: aggregating every group of a big inner table
     // (all 200k parts when the outer query kept 2k of them) is wasted work.
-    if corr.len() == 1 {
+    {
+        let inner_rows = ctx.get(&sq.from.name).map_or(usize::MAX, |b| b.num_rows);
         if let Some(ok) = crate::vecexpr::num_vec(&corr[0].1, outer) {
             let mut seen = std::collections::HashSet::new();
             let mut list: Vec<Expr> = Vec::new();
@@ -2661,7 +2717,7 @@ fn correlated_scalar_values(outer: &DataBlock, sq: &SelectStmt, ctx: &KqlContext
                 if seen.insert(v.to_bits()) { list.push(Expr::Float(*v)); }
                 if list.len() > 2_000_000 { list.clear(); break; }
             }
-            if !list.is_empty() {
+            if !list.is_empty() && list.len().saturating_mul(2) < inner_rows {
                 inner_filters.push(Expr::In { expr: Box::new(corr[0].0.clone()), values: list, negated: false });
             }
         }
@@ -4128,6 +4184,11 @@ fn top_n_indices(block: &DataBlock, keys: &[(usize, bool)], k: usize) -> Option<
         a.cmp(&b)
     };
     let n = block.num_rows;
+    if k >= n {
+        let mut all: Vec<usize> = (0..n).collect();
+        all.par_sort_unstable_by(|&a, &b| cmp(a, b));
+        return Some(all);
+    }
     const CHUNK: usize = 1 << 18;
     let mut cand: Vec<usize> = (0..n.div_ceil(CHUNK)).into_par_iter().flat_map_iter(|ci| {
         let mut v: Vec<usize> = (ci * CHUNK..((ci + 1) * CHUNK).min(n)).collect();
@@ -5085,7 +5146,9 @@ fn group_by_agg(
     group_cols: &[String],
     projections: &[Projection],
 ) -> Result<DataBlock, KoreError> {
-    if let Some(done) = group_by_fast(&block, group_cols, projections) { return Ok(done); }
+    let __tg = std::time::Instant::now();
+    if let Some(done) = group_by_fast(&block, group_cols, projections) { prof!(__tg, "group_by_fast hit"); return Ok(done); }
+    prof!(__tg, "group_by_fast miss");
     group_by_agg_ex(block, group_cols, projections).map(|r| r.0)
 }
 
@@ -5154,6 +5217,7 @@ pub(crate) fn group_by_agg_ex(
 ) -> Result<(DataBlock, Vec<usize>), KoreError> {
     use rayon::prelude::*;
     use std::collections::HashMap;
+    let __tg = std::time::Instant::now();
 
     // Pre-locate group-by columns once
     let gcols: Vec<&Column> = group_cols.iter()
@@ -5194,6 +5258,7 @@ pub(crate) fn group_by_agg_ex(
         (0..nchunks).into_par_iter().map(build_chunk).collect()
     };
 
+    prof!(__tg, "gb_ex local maps");
     // ── Merge phase ───────────────────────────────────────────────────────────
     let mut group_map: HashMap<u128, Vec<usize>> = HashMap::new();
     let mut key_order: Vec<u128>                 = Vec::new();
@@ -5214,6 +5279,7 @@ pub(crate) fn group_by_agg_ex(
         (key_vals, idxs)
     }).collect();
 
+    prof!(__tg, "gb_ex groups built n={}", groups.len());
     // Build result block from aggregated groups
     let first_rows: Vec<usize> = groups.iter().map(|(_, idxs)| idxs[0]).collect();
     let agg_block = block.select_rows(&first_rows);
@@ -5396,6 +5462,7 @@ pub(crate) fn group_by_agg_ex(
         }
     }
 
+    prof!(__tg, "gb_ex aggs done");
     let num_rows = groups.len();
     Ok((DataBlock { columns: new_cols, num_rows }, first_rows))
 }
