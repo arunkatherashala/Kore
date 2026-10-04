@@ -9,7 +9,7 @@ pub mod hash_join;
 pub mod broadcast_join;
 pub mod sort_merge_join;
 
-pub use hash_join::HashJoin;
+pub use hash_join::{HashJoin, gather_rows};
 pub use broadcast_join::BroadcastJoin;
 pub use sort_merge_join::SortMergeJoin;
 

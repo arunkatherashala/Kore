@@ -1298,7 +1298,11 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
             }).collect();
             let lookup = linked.iter()
                 .filter(|(pi, links)| links.len() == 1 && pending[*pi].num_rows <= 2_000_000
-                    && *unique_cache.entry(links[0].2.clone()).or_insert_with(|| is_unique_key(&pending[*pi], &links[0].2)))
+                    && *unique_cache.entry(links[0].2.clone()).or_insert_with(|| match &lazies[*pi] {
+                        Some(lz) => lz.keys.iter().find(|(_, n)| *n == links[0].2).map_or(false, |(ci, n)| is_unique_key(
+                            &DataBlock { num_rows: pending[*pi].num_rows, columns: vec![Column { name: n.clone(), data: lz.key_data(*ci) }] }, n)),
+                        None => is_unique_key(&pending[*pi], &links[0].2),
+                    }))
                 .min_by_key(|(pi, _)| pending[*pi].num_rows).map(|(pi, _)| *pi);
             if let Ok(__f) = std::env::var("KORE_JPROF") { jprof(&__f, format!("[jprof] select t={:?}", __t0.elapsed())); }
             let link = match lookup {
@@ -1313,8 +1317,18 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                     if let Ok(__f) = std::env::var("KORE_JPROF") { jprof(&__f, format!("[jprof] single-join {}={} left={} right={}", lk, rk, result.num_rows, pb.num_rows)); }
                     conjuncts.remove(ci);
                     let cfg = JoinConfig { left_key: lk, right_key: rk, join_type: JoinType::Inner };
-                    result = join_blocks(ctx, std::mem::replace(&mut result, DataBlock::empty()), pb, &cfg)?;
-                    if let Some(lz) = lz { result = finish_lazy(result, lz); }
+                    let left = std::mem::replace(&mut result, DataBlock::empty());
+                    result = match lz {
+                        Some(lz) if ctx.memory_limit.is_none() => match lazy_inner_join(left, &cfg.left_key, &lz, &cfg.right_key) {
+                            Ok(b) => b,
+                            Err(left) => {
+                                let j = join_blocks(ctx, left, fill_keys(pb, &lz), &cfg)?;
+                                finish_lazy(j, lz)
+                            }
+                        },
+                        Some(lz) => { let j = join_blocks(ctx, left, fill_keys(pb, &lz), &cfg)?; finish_lazy(j, lz) }
+                        None => join_blocks(ctx, left, pb, &cfg)?,
+                    };
                 }
                 Some((pi, links)) => {
                     // Several equalities connect the two sides (e.g. ps_partkey = l_partkey AND
@@ -1323,6 +1337,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                     let mut pb = pending.remove(pi);
                     let lz = lazies.remove(pi);
                     if let Ok(__f) = std::env::var("KORE_JPROF") { jprof(&__f, format!("[jprof] multi-join {:?} left={} right={}", links, result.num_rows, pb.num_rows)); }
+                    if let Some(lz) = &lz { pb = fill_keys(pb, lz); }
                     let lcols: Vec<String> = links.iter().map(|l| l.1.clone()).collect();
                     let rcols: Vec<String> = links.iter().map(|l| l.2.clone()).collect();
                     add_composite_key(&mut result, &lcols, "__jkL");
@@ -1336,7 +1351,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                     // no equality connects the remaining tables: fall back to a cross product (smallest first)
                     let pi = pending.iter().enumerate().min_by_key(|(_, b)| b.num_rows).map(|(i, _)| i).unwrap();
                     let mut pb = pending.remove(pi);
-                    if let Some(lz) = lazies.remove(pi) { pb = finish_lazy(pb, lz); }
+                    if let Some(lz) = lazies.remove(pi) { pb = finish_lazy(fill_keys(pb, &lz), lz); }
                     result = cross_join(&result, &pb);
                 }
             }
@@ -1786,7 +1801,62 @@ fn jprof(f: &str, m: String) { use std::io::Write; if let Ok(mut h) = std::fs::O
 /// Columns of a filtered table that are not needed until after its joins: only the join keys (plus a
 /// `__rid` row number) are materialised up front, the rest is gathered once from `src` for the rows that
 /// survive the join (late materialisation).
-struct LazyCols<'a> { rid: String, src: &'a DataBlock, idx: Option<Vec<usize>>, cols: Vec<(usize, String)> }
+struct LazyCols<'a> {
+    rid: String, src: &'a DataBlock, idx: Option<Vec<usize>>,
+    /// payload columns (source column index, output name)
+    cols: Vec<(usize, String)>,
+    /// join-key columns; the pending block holds only empty placeholders for them until `fill_keys`
+    keys: Vec<(usize, String)>,
+}
+
+impl LazyCols<'_> {
+    /// Key column `ci` restricted to the filtered rows.
+    fn key_data(&self, ci: usize) -> ColumnData {
+        match &self.idx { Some(ix) => self.src.columns[ci].data.take_rows(ix), None => self.src.columns[ci].data.clone() }
+    }
+}
+
+/// Replace the placeholder key columns of a pending block with real data and add the `__rid` column.
+fn fill_keys(mut block: DataBlock, lz: &LazyCols<'_>) -> DataBlock {
+    for (ci, name) in &lz.keys {
+        if let Some(c) = block.columns.iter_mut().find(|c| c.name == *name) { c.data = lz.key_data(*ci); }
+    }
+    block.columns.push(Column { name: lz.rid.clone(), data: ColumnData::Int64((0..block.num_rows as i64).map(Some).collect()) });
+    block
+}
+
+/// Inner join of `left` with a lazy table on single Int64 keys, without copying the right side's key column
+/// (borrowed from the source when unfiltered) and gathering its other columns once, for the matching rows only.
+fn lazy_inner_join(left: DataBlock, lk: &str, lz: &LazyCols<'_>, rk: &str) -> Result<DataBlock, DataBlock> {
+    use rayon::prelude::*;
+    let lpos = match left.columns.iter().position(|c| c.name == lk) { Some(p) => p, None => return Err(left) };
+    let Some(&(rci, _)) = lz.keys.iter().find(|(_, n)| n == rk) else { return Err(left) };
+    let (ColumnData::Int64(lv), ColumnData::Int64(rsrc)) = (&left.columns[lpos].data, &lz.src.columns[rci].data) else { return Err(left) };
+    if lv.len() >= u32::MAX as usize || rsrc.len() >= u32::MAX as usize { return Err(left); }
+    let taken: Vec<Option<i64>>;
+    let rv: &[Option<i64>] = match &lz.idx {
+        None => rsrc,
+        Some(ix) => { taken = ix.iter().map(|&i| rsrc[i]).collect(); &taken }
+    };
+    let (lidx, ridx) = kore_join::HashJoin::inner_join_row_ids(lv, rv);
+    // row ids of the source table
+    let src_rows: Vec<u32> = match &lz.idx {
+        None => ridx,
+        Some(ix) => ridx.iter().map(|&r| ix[r as usize] as u32).collect(),
+    };
+    let n = lidx.len();
+    enum Job<'x> { L(String, ColumnData, &'x [u32]), R(usize, String) }
+    let mut jobs: Vec<Job> = Vec::new();
+    for c in left.columns { jobs.push(Job::L(c.name, c.data, &lidx)); }
+    let mut right: Vec<(usize, String)> = lz.keys.iter().chain(lz.cols.iter()).cloned().collect();
+    right.sort_by_key(|(ci, _)| *ci);
+    for (ci, name) in right { jobs.push(Job::R(ci, name)); }
+    let columns: Vec<Column> = jobs.into_par_iter().map(|j| match j {
+        Job::L(name, data, ix) => { let g = kore_join::gather_rows(&data, ix); drop(data); Column { name, data: g } }
+        Job::R(ci, name) => Column { name, data: kore_join::gather_rows(&lz.src.columns[ci].data, &src_rows) },
+    }).collect();
+    Ok(DataBlock { columns, num_rows: n })
+}
 
 /// Append the lazy columns of `lz` to `block`, which carries a `__rid` column (row numbers of the filtered table).
 fn finish_lazy(mut block: DataBlock, lz: LazyCols<'_>) -> DataBlock {
@@ -1852,10 +1922,12 @@ fn load_table<'a>(
     };
 
     let pred = crate::rewrite::and_all(mine.iter().map(|c| crate::rewrite::unqualify(c, alias)).collect());
+    let __t = std::time::Instant::now();
     let idx: Option<Vec<usize>> = match &pred {
         Some(p) => crate::vecexpr::filter_idx(p, src),
         None => None,
     };
+    if let Ok(__f) = std::env::var("KORE_JPROF") { jprof(&__f, format!("[jprof]   filter_idx {} rows={} -> {:?} t={:?}", alias, src.num_rows, idx.as_ref().map(|i| i.len()), __t.elapsed())); }
     if pred.is_some() && idx.is_none() {
         // not covered by the fast evaluator: copy what the whole statement needs, filter the copy
         let block = prefix_columns(prune_block(src.clone(), &Some(needed.clone())), alias);
@@ -1892,14 +1964,16 @@ fn load_table<'a>(
             }
         }
         if !lazy_cols.is_empty() && !key_cols.is_empty() {
-            let mut columns: Vec<Column> = key_cols.par_iter().map(|c| Column {
-                name: c.name.clone(),
-                data: match &idx { Some(ix) => c.data.take_rows(ix), None => c.data.clone() },
-            }).collect();
+            let keys: Vec<(usize, String)> = src.columns.iter().enumerate()
+                .filter(|(_, c)| key_cols.iter().any(|k| std::ptr::eq(*k, *c)))
+                .map(|(ci, c)| (ci, if c.name.contains('.') { c.name.clone() } else { format!("{alias}.{}", c.name) }))
+                .collect();
+            let columns: Vec<Column> = keys.iter()
+                .map(|(_, n)| Column { name: n.clone(), data: ColumnData::Int64(Vec::new()) }).collect();
             let num_rows = idx.as_ref().map_or(src.num_rows, |ix| ix.len());
-            columns.push(Column { name: "__rid".into(), data: ColumnData::Int64((0..num_rows as i64).map(Some).collect()) });
             *conjuncts = rest;
-            return Ok((prefix_columns(DataBlock { columns, num_rows }, alias), Some(LazyCols { rid: format!("{alias}.__rid"), src, idx, cols: lazy_cols })));
+            return Ok((DataBlock { columns, num_rows },
+                Some(LazyCols { rid: format!("{alias}.__rid"), src, idx, cols: lazy_cols, keys })));
         }
     }
     let columns: Vec<Column> = wanted.par_iter().map(|c| Column {
