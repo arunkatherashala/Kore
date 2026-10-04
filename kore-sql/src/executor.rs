@@ -6349,6 +6349,84 @@ mod tests {
         assert_eq!(r.num_rows, 4); // Alice, Bob, Charlie, Eve (Alice deduped)
     }
 
+    fn big_join_ctx() -> KqlContext {
+        let mut ctx = KqlContext::new();
+        let n = 150_000usize;
+        ctx.register("big", DataBlock { num_rows: n, columns: vec![
+            Column { name: "k".into(), data: ColumnData::Int64((0..n as i64).map(|i| if i % 1000 == 999 { None } else { Some(i % 5000) }).collect()) },
+            Column { name: "j".into(), data: ColumnData::Int64((0..n as i64).map(|i| Some(i % 7)).collect()) },
+            Column { name: "v".into(), data: ColumnData::Float64((0..n).map(|i| Some(i as f64)).collect()) },
+        ]});
+        ctx.register("mid", DataBlock { num_rows: 5000, columns: vec![
+            Column { name: "mk".into(), data: ColumnData::Int64((0..5000).map(Some).collect()) },
+            Column { name: "g".into(), data: ColumnData::Int64((0..5000).map(|i| Some(i % 50)).collect()) },
+        ]});
+        ctx.register("small", DataBlock { num_rows: 3, columns: vec![
+            Column { name: "g2".into(), data: ColumnData::Int64(vec![Some(3), Some(7), None]) },
+        ]});
+        ctx
+    }
+
+    #[test]
+    fn test_comma_join_key_passing_matches_explicit_join() {
+        let ctx = big_join_ctx();
+        let a = ctx.query("SELECT count(*) AS c, sum(v) AS s FROM big, mid, small WHERE k = mk AND g = g2 AND j < 5").unwrap();
+        let b = ctx.query("SELECT count(*) AS c, sum(v) AS s FROM big JOIN mid ON k = mk JOIN small ON g = g2 WHERE j < 5").unwrap();
+        let get = |r: &DataBlock, n: &str| match &r.columns.iter().find(|c| c.name == n).unwrap().data {
+            ColumnData::Int64(v) => v[0].unwrap() as f64, ColumnData::Float64(v) => v[0].unwrap(), _ => panic!() };
+        assert_eq!(get(&a, "c"), get(&b, "c"));
+        assert!((get(&a, "s") - get(&b, "s")).abs() < 1e-6);
+        assert!(get(&a, "c") > 0.0);
+    }
+
+    #[test]
+    fn test_correlated_avg_two_keys_parallel() {
+        let ctx = big_join_ctx();
+        // outer: mid rows with g < 3; inner big grouped by (k, j)
+        let r = ctx.query("SELECT mk, (SELECT sum(v) FROM big WHERE k = mk AND j = 2) AS s FROM mid WHERE g < 3 ORDER BY mk").unwrap();
+        let mk = match &r.columns[0].data { ColumnData::Int64(v) => v.clone(), _ => panic!() };
+        let _ = mk;
+        let r2 = ctx.query("SELECT count(*) AS c FROM mid WHERE g < 3 AND 1.5 * (SELECT count(v) FROM big WHERE k = mk AND j = 2) > 3").unwrap();
+        // k = mk occurs 30 times in 150000 rows; j = 2 for about 1/7 of them: expected count computed directly
+        let direct = ctx.query("SELECT mk FROM mid WHERE g < 3").unwrap();
+        let n_direct = direct.num_rows;
+        assert!(n_direct > 0);
+        let c = match &r2.columns[0].data { ColumnData::Int64(v) => v[0].unwrap(), _ => panic!() };
+        let mut expect = 0;
+        for m in 0..5000i64 {
+            if m % 50 >= 3 { continue; }
+            let cnt = (0..150_000i64).filter(|i| i % 1000 != 999 && i % 5000 == m && i % 7 == 2).count();
+            if 1.5 * cnt as f64 > 3.0 { expect += 1; }
+        }
+        assert_eq!(c, expect);
+    }
+
+    #[test]
+    fn test_order_by_multi_key_strings_desc() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock { num_rows: 6, columns: vec![
+            Column { name: "a".into(), data: ColumnData::Int64(vec![Some(1), Some(2), Some(1), Some(2), Some(1), Some(2)]) },
+            Column { name: "s".into(), data: ColumnData::Str(vec![Some("b".into()), Some("a".into()), Some("b".into()), Some("c".into()), Some("a".into()), Some("a".into())]) },
+            Column { name: "id".into(), data: ColumnData::Int64((0..6).map(Some).collect()) },
+        ]});
+        let r = ctx.query("SELECT id FROM t ORDER BY a DESC, s ASC").unwrap();
+        let ids: Vec<i64> = match &r.columns[0].data { ColumnData::Int64(v) => v.iter().map(|x| x.unwrap()).collect(), _ => panic!() };
+        // a=2: s=a (ids 1,5, input order), then c (3); a=1: s=a (4), then b (0,2)
+        assert_eq!(ids, vec![1, 5, 3, 4, 0, 2]);
+    }
+
+    #[test]
+    fn test_substr_filter_non_ascii_and_in() {
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock { num_rows: 5, columns: vec![
+            Column { name: "p".into(), data: ColumnData::Str(vec![Some("13-abc".into()), Some("\u{e9}\u{e9}-x".into()), None, Some("1".into()), Some("31-q".into())]) },
+        ]});
+        let r = ctx.query("SELECT p FROM t WHERE substr(p, 1, 2) IN ('13', '31', '\u{e9}\u{e9}')").unwrap();
+        assert_eq!(r.num_rows, 3);
+        let r = ctx.query("SELECT p FROM t WHERE substr(p, 2, 1) = '3'").unwrap();
+        assert_eq!(r.num_rows, 1);
+    }
+
     #[test]
     fn test_sql_union_all_combined() {
         let mut ctx = make_test_ctx();
