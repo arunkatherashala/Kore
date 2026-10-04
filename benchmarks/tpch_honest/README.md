@@ -35,45 +35,46 @@ Five engines, same data and SQL text, all answers compared with Spark (the refer
 
 | Query | Spark | KORE | DuckDB | DataFusion | Polars |
 |---|---|---|---|---|---|
-| Q1 | 1088 | 293 | 86 | 166 | 321 |
-| Q2 | 1251 | 41 | 22 | 103 | unsupported |
-| Q3 | 1503 | 240 | 57 | 252 | 80 |
-| Q4 | 1429 | 152 | 64 | 163 | 104 |
-| Q5 | 1846 | 233 | 31 | 294 | 149 |
-| Q6 | 410 | 73 | 24 | 116 | 41 |
-| Q7 | 1791 | 452 | 58 | 337 | 456 |
-| Q8 | 1566 | 238 | 28 | 268 | 717 |
-| Q9 | 2765 | 698 | 98 | 467 | 3171 |
-| Q10 | 1754 | 271 | 66 | 299 | 126 |
-| Q11 | 1026 | 120 | 13 | 75 | 34 |
-| Q12 | 1548 | 171 | 78 | 254 | 154 |
-| Q13 | 2110 | 770 | 73 | 202 | unsupported |
-| Q14 | 605 | 89 | 36 | 146 | 50 |
-| Q15 | 1159 | 79 | 30 | result differs* | 44 |
-| Q16 | 1928 | 97 | 52 | 181 | 79 |
-| Q17 | 1216 | 228 | 17 | 424 | unsupported |
-| Q18 | 3116 | 756 | 78 | 772 | 2337 |
-| Q19 | 608 | 106 | 78 | 235 | 105 |
-| Q20 | 1372 | 618 | 47 | 218 | 284 |
-| Q21 | 4156 | 685 | 203 | 432 | 3520 |
-| Q22 | 1216 | 282 | 26 | 71 | 31 |
+| Q1 | 1088 | 74 | 113 | 131 | 298 |
+| Q2 | 1251 | 31 | 30 | 73 | unsupported |
+| Q3 | 1503 | 160 | 58 | 163 | 56 |
+| Q4 | 1429 | 155 | 70 | 129 | 96 |
+| Q5 | 1846 | 86 | 43 | 221 | 126 |
+| Q6 | 410 | 45 | 29 | 89 | 28 |
+| Q7 | 1791 | 112 | 58 | 244 | 222 |
+| Q8 | 1566 | 54 | 33 | 207 | 571 |
+| Q9 | 2765 | 339 | 114 | 283 | 2904 |
+| Q10 | 1754 | 309 | 76 | 236 | 115 |
+| Q11 | 1026 | 20 | 9 | 61 | 40 |
+| Q12 | 1548 | 170 | 95 | 162 | 164 |
+| Q13 | 2110 | 850 | 87 | 137 | unsupported |
+| Q14 | 605 | 66 | 50 | 115 | 49 |
+| Q15 | 1159 | 49 | 38 | result differs* | 59 |
+| Q16 | 1928 | 79 | 65 | 154 | 78 |
+| Q17 | 1216 | 82 | 24 | 291 | unsupported |
+| Q18 | 3116 | 215 | 88 | 541 | 1906 |
+| Q19 | 608 | 132 | 106 | 141 | 59 |
+| Q20 | 1372 | 128 | 54 | 159 | 197 |
+| Q21 | 4156 | 278 | 227 | 410 | 2941 |
+| Q22 | 1216 | 36 | 29 | 59 | 19 |
 
 Answers agreeing with Spark: Spark 22/22 (reference), KORE 22/22, DuckDB 22/22, DataFusion 21/22, Polars 19/22.
-Geometric mean over the 18 queries every engine answered correctly: Spark 1425 ms, KORE 238 ms, DuckDB 52 ms, DataFusion 223 ms, Polars 203 ms.
-DuckDB was fastest on all 22 queries, about 4.6x faster than KORE in geometric mean.
+Geometric mean over the 18 queries every engine answered correctly: Spark 1425 ms, KORE 106 ms, DuckDB 60 ms, DataFusion 166 ms, Polars 164 ms.
+DuckDB was fastest on 16 of 22 queries, Polars on 5, KORE on 1 (Q1). KORE is about 1.8x slower than DuckDB in geometric mean, faster than
+DataFusion and Polars overall, and about 13x faster than Spark local mode.
 
 \* DataFusion returned no rows for Q15: the query compares a sum with `max()` of the same sum using float equality, and a different summation
 order gives a slightly different float. This is a property of the query, not necessarily a DataFusion bug. Polars' SQL layer rejects Q2, Q13 and Q17
 (correlated subquery / `NOT LIKE` in a join condition).
 
+Timings: all five engines were re-run back to back on a quiet machine on 2026-10-04 (Spark's times are from its earlier cached run on the same machine).
 Read this with care: one machine (8 cores, 32 GB, Windows), SF 1, in-memory, TPC-H-shaped data (not dbgen), best of 3 after a warm-up, roughly
-+/-20% noise (more for KORE in this run, which was timed while other programs were running: earlier quiet runs gave Q1 217-236 ms and
-Q9 561-616 ms). Engines were installed from conda-forge: DuckDB 1.5.6, DataFusion 54.0.0, Polars 1.44.2, Spark 4.2.0 (local mode).
++/-20% noise . Engines were installed from conda-forge: DuckDB 1.5.6, DataFusion 54.0.0, Polars 1.44.2, Spark 4.2.0 (local mode).
 
 Full tables: `results/`. Read these numbers with care:
 
 * Spark here is a single-JVM local-mode run on a data set that fits in memory; its strengths (scale-out, spilling,
   fault tolerance) are not exercised. The comparison says nothing about 100 GB+ data or multiple nodes.
-* DuckDB is clearly faster than KORE on this workload. KORE is in the same range as DataFusion and Polars, and faster than Spark local mode.
+* DuckDB is still faster than KORE on most queries (about 1.8x in geometric mean). KORE is faster than DataFusion and Polars overall and faster than Spark local mode.
 * KORE keeps every table fully in memory as row-oriented `Option<T>` vectors; data much larger than RAM does not work.
 * The data is TPC-H-shaped, not the official dbgen output, and no official TPC-H result is claimed.

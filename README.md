@@ -5,8 +5,8 @@
 KORE is a high-performance columnar query engine + Digital Life framework, written from scratch in Rust.  
 On a single 8-core machine with in-memory data (TPC-H-shaped, scale factor 1), its SQL engine returned the same results as live Apache Spark
 on all 22 TPC-H queries and was faster than Spark local mode on every one of them (see [Verified status](#verified-status-2026-10-04)).
-Against other single-node engines it is **slower than DuckDB** (DuckDB won all 22 queries, about 4.6x faster in geometric mean) and in the same range as DataFusion
-and Polars. It does not replace Spark for large data or clusters.
+Against other single-node engines it is **slower than DuckDB** (about 1.8x in geometric mean; DuckDB won 16 of 22 queries) and faster than DataFusion
+and Polars overall. It does not replace Spark for large data or clusters.
 
 ## Distributed engine — Phases 1–20 complete
 
@@ -24,12 +24,12 @@ Measured against a live Spark 4.2.0 (local mode) on one 8-core, 32 GB machine, s
 |---|---|
 | Queries | all 22 TPC-H-shaped queries, SF 1 (about 6M lineitem rows) |
 | Result agreement with Spark | 22 of 22 |
-| Speed (in-memory, KORE time / Spark time) | faster on all 22; between 0.04x and 0.46x of Spark's time in the final run (timings vary by about +/-20%, more on a busy machine) |
-| Tests | 217 pass in `kore-sql`, `kore-join`, `kore-ffi` (including a SQLite oracle over 60k generated queries) |
+| Speed (in-memory, KORE time / Spark time) | faster on all 22; between 0.02x and 0.6x of Spark's time in the final quiet-machine run (timings vary by about +/-20%) |
+| Tests | 223 pass in `kore-sql`, `kore-join`, `kore-ffi` (including a SQLite oracle over 60k generated queries) |
 | Memory | about 2.4-2.5 GB of table data at SF 1; peak commit 2.6-3.3 GB per query |
 
 What this does **not** show: larger-than-memory data (spill-to-disk bounds operator working state only), clusters and fault tolerance,
-or the Spark ecosystem. In a same-day comparison DuckDB 1.5.6 was faster than KORE on every query; see
+or the Spark ecosystem. In a same-day comparison DuckDB 1.5.6 was faster than KORE on most queries; see
 [`benchmarks/tpch_honest`](benchmarks/tpch_honest/README.md) for the five-engine table. The data is TPC-H-shaped (not the official dbgen output), so
 this is not an official TPC-H result. Several silent wrong-answer bugs were found and fixed while building this check, and more may remain.
 Treat the engine as a strong prototype, not a production database. SQL coverage is listed in [`docs/SQL_SUPPORT.md`](docs/SQL_SUPPORT.md).
