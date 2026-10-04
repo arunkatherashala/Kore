@@ -1246,7 +1246,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     }
 
     let mut result = if planned {
-        load_table(base_ref, base_alias, &mut conjuncts, &needed, &needed_wo_where, ctx)?
+        load_table(base_ref, base_alias, &mut conjuncts, &needed, &needed_wo_where, ctx, false)?.0
     } else {
         let base_block: DataBlock = match &needed {
             Some(needed) => DataBlock {
@@ -1265,20 +1265,29 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     };
 
     if n_implicit > 0 {
+        let __t0 = std::time::Instant::now();
         let mut pending: Vec<DataBlock> = Vec::with_capacity(n_implicit);
+        let mut lazies: Vec<Option<LazyCols>> = Vec::with_capacity(n_implicit);
+        let mut unique_cache: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
         for join in &stmt.joins[..n_implicit] {
             let name = &join.table.name;
             let alias = join.table.alias.as_deref().unwrap_or(name.as_str());
             let src = table_source(&join.table, ctx)?;
-            let block = if planned {
-                load_table(src.get(), alias, &mut conjuncts, &needed, &needed_wo_where, ctx)?
+            let (block, lz) = if planned {
+                match src.borrowed() {
+                    Some(b) => load_table(b, alias, &mut conjuncts, &needed, &needed_wo_where, ctx, true)?,
+                    None => (load_table(src.get(), alias, &mut conjuncts, &needed, &needed_wo_where, ctx, false)?.0, None),
+                }
             } else {
                 let block = prefix_columns(prune_block(src.into_owned(), &needed), alias);
-                push_down_conjuncts(&mut conjuncts, block, ctx)?
+                (push_down_conjuncts(&mut conjuncts, block, ctx)?, None)
             };
+            lazies.push(lz);
+            if let Ok(__f) = std::env::var("KORE_JPROF") { jprof(&__f, format!("[jprof] load {} rows={} t={:?}", alias, block.num_rows, __t0.elapsed())); }
             pending.push(block);
         }
         result = push_down_conjuncts(&mut conjuncts, result, ctx)?;
+        if let Ok(__f) = std::env::var("KORE_JPROF") { jprof(&__f, format!("[jprof] base rows={} t={:?}", result.num_rows, __t0.elapsed())); }
         while !pending.is_empty() {
             // Tables that join on a unique key can only shrink or keep the result (a lookup), so those
             // go first, smallest first: selective dimension tables then cut the fact tables down before
@@ -1289,8 +1298,9 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
             }).collect();
             let lookup = linked.iter()
                 .filter(|(pi, links)| links.len() == 1 && pending[*pi].num_rows <= 2_000_000
-                    && is_unique_key(&pending[*pi], &links[0].2))
+                    && *unique_cache.entry(links[0].2.clone()).or_insert_with(|| is_unique_key(&pending[*pi], &links[0].2)))
                 .min_by_key(|(pi, _)| pending[*pi].num_rows).map(|(pi, _)| *pi);
+            if let Ok(__f) = std::env::var("KORE_JPROF") { jprof(&__f, format!("[jprof] select t={:?}", __t0.elapsed())); }
             let link = match lookup {
                 Some(pi) => linked.into_iter().find(|(i, _)| *i == pi),
                 None => linked.into_iter().next(),
@@ -1299,15 +1309,20 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                 Some((pi, links)) if links.len() == 1 => {
                     let (ci, lk, rk) = links.into_iter().next().unwrap();
                     let pb = pending.remove(pi);
+                    let lz = lazies.remove(pi);
+                    if let Ok(__f) = std::env::var("KORE_JPROF") { jprof(&__f, format!("[jprof] single-join {}={} left={} right={}", lk, rk, result.num_rows, pb.num_rows)); }
                     conjuncts.remove(ci);
                     let cfg = JoinConfig { left_key: lk, right_key: rk, join_type: JoinType::Inner };
                     result = join_blocks(ctx, std::mem::replace(&mut result, DataBlock::empty()), pb, &cfg)?;
+                    if let Some(lz) = lz { result = finish_lazy(result, lz); }
                 }
                 Some((pi, links)) => {
                     // Several equalities connect the two sides (e.g. ps_partkey = l_partkey AND
                     // ps_suppkey = l_suppkey): hash on all of them at once. A hash collision only adds
                     // a candidate row; the equalities stay in `conjuncts` and are applied exactly below.
                     let mut pb = pending.remove(pi);
+                    let lz = lazies.remove(pi);
+                    if let Ok(__f) = std::env::var("KORE_JPROF") { jprof(&__f, format!("[jprof] multi-join {:?} left={} right={}", links, result.num_rows, pb.num_rows)); }
                     let lcols: Vec<String> = links.iter().map(|l| l.1.clone()).collect();
                     let rcols: Vec<String> = links.iter().map(|l| l.2.clone()).collect();
                     add_composite_key(&mut result, &lcols, "__jkL");
@@ -1315,15 +1330,19 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                     let cfg = JoinConfig { left_key: "__jkL".into(), right_key: "__jkR".into(), join_type: JoinType::Inner };
                     result = join_blocks(ctx, std::mem::replace(&mut result, DataBlock::empty()), pb, &cfg)?;
                     result.columns.retain(|c| c.name != "__jkL" && c.name != "__jkR");
+                    if let Some(lz) = lz { result = finish_lazy(result, lz); }
                 }
                 None => {
                     // no equality connects the remaining tables: fall back to a cross product (smallest first)
                     let pi = pending.iter().enumerate().min_by_key(|(_, b)| b.num_rows).map(|(i, _)| i).unwrap();
-                    let pb = pending.remove(pi);
+                    let mut pb = pending.remove(pi);
+                    if let Some(lz) = lazies.remove(pi) { pb = finish_lazy(pb, lz); }
                     result = cross_join(&result, &pb);
                 }
             }
+            if let Ok(__f) = std::env::var("KORE_JPROF") { jprof(&__f, format!("[jprof] joined rows={} cols={:?} t={:?}", result.num_rows, result.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), __t0.elapsed())); }
             result = push_down_conjuncts(&mut conjuncts, result, ctx)?;
+            if let Ok(__f) = std::env::var("KORE_JPROF") { jprof(&__f, format!("[jprof]   pushdown rows={} t={:?}", result.num_rows, __t0.elapsed())); }
         }
         where_pred = crate::rewrite::and_all(std::mem::take(&mut conjuncts));
     } else if planned {
@@ -1719,7 +1738,8 @@ fn is_uncorrelated(sub: &SelectStmt, ctx: &KqlContext) -> bool {
 /// A joined table's data, borrowed from the catalog when possible.
 enum Src<'a> { B(&'a DataBlock), O(DataBlock) }
 
-impl Src<'_> {
+impl<'a> Src<'a> {
+    fn borrowed(&self) -> Option<&'a DataBlock> { match self { Src::B(b) => Some(*b), Src::O(_) => None } }
     fn get(&self) -> &DataBlock { match self { Src::B(b) => b, Src::O(b) => b } }
     fn into_owned(self) -> DataBlock { match self { Src::B(b) => b.clone(), Src::O(b) => b } }
 }
@@ -1762,14 +1782,38 @@ fn exists_outer_cols(sub: &SelectStmt, ctx: &KqlContext) -> Option<std::collecti
 /// the borrowed source (no copy of the full table) and consumed; only the rows that pass and the columns
 /// still needed afterwards are copied. Falls back to prune-then-filter when the predicate is not one the
 /// column-at-a-time evaluator covers.
-fn load_table(
-    src: &DataBlock, alias: &str, conjuncts: &mut Vec<Expr>,
+fn jprof(f: &str, m: String) { use std::io::Write; if let Ok(mut h) = std::fs::OpenOptions::new().create(true).append(true).open(f) { let _ = writeln!(h, "{m}"); } }
+/// Columns of a filtered table that are not needed until after its joins: only the join keys (plus a
+/// `__rid` row number) are materialised up front, the rest is gathered once from `src` for the rows that
+/// survive the join (late materialisation).
+struct LazyCols<'a> { rid: String, src: &'a DataBlock, idx: Option<Vec<usize>>, cols: Vec<(usize, String)> }
+
+/// Append the lazy columns of `lz` to `block`, which carries a `__rid` column (row numbers of the filtered table).
+fn finish_lazy(mut block: DataBlock, lz: LazyCols<'_>) -> DataBlock {
+    use rayon::prelude::*;
+    let Some(pos) = block.columns.iter().position(|c| c.name == lz.rid) else { return block };
+    let rid = block.columns.remove(pos);
+    let ColumnData::Int64(v) = rid.data else { return block };
+    let comp: Vec<usize> = v.iter().map(|x| {
+        let r = x.unwrap_or(0) as usize;
+        match &lz.idx { Some(ix) => ix[r], None => r }
+    }).collect();
+    drop(v);
+    let cols: Vec<Column> = lz.cols.par_iter().map(|(ci, name)| Column {
+        name: name.clone(), data: lz.src.columns[*ci].data.take_rows(&comp),
+    }).collect();
+    block.columns.extend(cols);
+    block
+}
+
+fn load_table<'a>(
+    src: &'a DataBlock, alias: &str, conjuncts: &mut Vec<Expr>,
     needed: &Option<std::collections::HashSet<String>>,
     needed_wo_where: &Option<std::collections::HashSet<String>>,
-    ctx: &KqlContext,
-) -> Result<DataBlock, KoreError> {
+    ctx: &KqlContext, lazy: bool,
+) -> Result<(DataBlock, Option<LazyCols<'a>>), KoreError> {
     let (Some(needed), Some(after_where)) = (needed, needed_wo_where) else {
-        return Ok(prefix_columns(src.clone(), alias));
+        return Ok((prefix_columns(src.clone(), alias), None));
     };
     let prefix = format!("{alias}.");
     let mut mine = Vec::new();
@@ -1817,7 +1861,7 @@ fn load_table(
         let block = prefix_columns(prune_block(src.clone(), &Some(needed.clone())), alias);
         *conjuncts = rest;
         conjuncts.extend(mine);
-        return push_down_conjuncts(conjuncts, block, ctx);
+        return push_down_conjuncts(conjuncts, block, ctx).map(|b| (b, None));
     }
 
     let after = keep_cols(&rest);
@@ -1826,13 +1870,45 @@ fn load_table(
         needs_col(&after, bare) || needs_col(&after, c.name.as_str())
     }).collect();
     use rayon::prelude::*;
+    if lazy {
+        // join keys: columns of equalities between two columns among the remaining conjuncts
+        let mut keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for c in &rest {
+            if let Expr::BinOp { op: BinOpKind::Eq, left: a, right: b } = c {
+                if let (Some(x), Some(y)) = (crate::rewrite::col_ref(a), crate::rewrite::col_ref(b)) {
+                    for n in [x, y] { keys.insert(n.rsplit('.').next().unwrap_or(&n).to_ascii_lowercase()); }
+                }
+            }
+        }
+        let mut key_cols: Vec<&Column> = Vec::new();
+        let mut lazy_cols: Vec<(usize, String)> = Vec::new();
+        for (ci, c) in src.columns.iter().enumerate() {
+            if !wanted.iter().any(|w| std::ptr::eq(*w, c)) { continue; }
+            let bare = c.name.rsplit('.').next().unwrap_or(&c.name).to_ascii_lowercase();
+            if keys.contains(&bare) { key_cols.push(c); }
+            else {
+                let name = if c.name.contains('.') { c.name.clone() } else { format!("{alias}.{}", c.name) };
+                lazy_cols.push((ci, name));
+            }
+        }
+        if !lazy_cols.is_empty() && !key_cols.is_empty() {
+            let mut columns: Vec<Column> = key_cols.par_iter().map(|c| Column {
+                name: c.name.clone(),
+                data: match &idx { Some(ix) => c.data.take_rows(ix), None => c.data.clone() },
+            }).collect();
+            let num_rows = idx.as_ref().map_or(src.num_rows, |ix| ix.len());
+            columns.push(Column { name: "__rid".into(), data: ColumnData::Int64((0..num_rows as i64).map(Some).collect()) });
+            *conjuncts = rest;
+            return Ok((prefix_columns(DataBlock { columns, num_rows }, alias), Some(LazyCols { rid: format!("{alias}.__rid"), src, idx, cols: lazy_cols })));
+        }
+    }
     let columns: Vec<Column> = wanted.par_iter().map(|c| Column {
         name: c.name.clone(),
         data: match &idx { Some(ix) => c.data.take_rows(ix), None => c.data.clone() },
     }).collect();
     let num_rows = idx.as_ref().map_or(src.num_rows, |ix| ix.len());
     *conjuncts = rest;
-    Ok(prefix_columns(DataBlock { columns, num_rows }, alias))
+    Ok((prefix_columns(DataBlock { columns, num_rows }, alias), None))
 }
 
 /// Apply (and remove) every conjunct that only needs columns present in `block`.
@@ -1869,6 +1945,21 @@ fn prune_block(block: DataBlock, needed: &Option<std::collections::HashSet<Strin
 fn is_unique_key(block: &DataBlock, key: &str) -> bool {
     let Some(col) = find_col_in_block(key, block).and_then(|k| block.columns.iter().find(|c| c.name == k)) else { return false };
     let ColumnData::Int64(v) = &col.data else { return false };
+    let (mut lo, mut hi) = (i64::MAX, i64::MIN);
+    for x in v {
+        match x { Some(k) => { if *k < lo { lo = *k; } if *k > hi { hi = *k; } } None => return false }
+    }
+    if v.is_empty() { return true; }
+    let range = (hi as i128 - lo as i128) as u128 + 1;
+    if range <= (1u128 << 28) {
+        // dense-ish keys: a bitmap beats hashing
+        let mut bits = vec![0u64; (range as usize).div_ceil(64)];
+        return v.iter().all(|x| {
+            let d = (x.unwrap() as i128 - lo as i128) as usize;
+            let (w, b) = (d >> 6, 1u64 << (d & 63));
+            if bits[w] & b != 0 { false } else { bits[w] |= b; true }
+        });
+    }
     let mut seen: std::collections::HashSet<i64, std::hash::BuildHasherDefault<FxHasher>> =
         std::collections::HashSet::with_capacity_and_hasher(v.len(), Default::default());
     v.iter().all(|x| matches!(x, Some(k) if seen.insert(*k)))
@@ -2106,7 +2197,7 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
         crate::rewrite::referenced_cols(f, &mut cols);
         all_cols.extend(cols.iter().map(&bare));
     }
-    let inner = load_table(src.get(), &alias, &mut inner_filters, &Some(all_cols), &Some(key_cols), ctx)?;
+    let inner = load_table(src.get(), &alias, &mut inner_filters, &Some(all_cols), &Some(key_cols), ctx, false)?.0;
     if !inner_filters.is_empty() { return Ok(None); }
 
     // Fast path: one or two numeric keys (the usual surrogate-key joins), no per-row allocation.
@@ -6442,6 +6533,23 @@ mod tests {
         ).unwrap();
         // id=1 left only, id=2,3 matched, id=4 right only → 4 rows
         assert_eq!(r.num_rows, 4);
+    }
+
+    #[test]
+    fn test_implicit_lazy_join() {
+        let mut ctx = KqlContext::new();
+        ctx.register("ta", DataBlock { num_rows: 4, columns: vec![
+            Column { name: "k".into(), data: ColumnData::Int64(vec![Some(1), Some(2), Some(3), None]) },
+            Column { name: "x".into(), data: ColumnData::Int64(vec![Some(10), Some(20), Some(30), Some(40)]) },
+        ]});
+        ctx.register("tb", DataBlock { num_rows: 3, columns: vec![
+            Column { name: "bk".into(), data: ColumnData::Int64(vec![Some(3), Some(1), Some(9)]) },
+            Column { name: "y".into(), data: ColumnData::Str(vec![Some("c".into()), Some("a".into()), Some("z".into())]) },
+            Column { name: "f".into(), data: ColumnData::Int64(vec![Some(1), Some(1), Some(0)]) },
+        ]});
+        let r = ctx.query("SELECT x, y FROM ta, tb WHERE k = bk AND f = 1 ORDER BY x").unwrap();
+        assert_eq!(r.num_rows, 2);
+        assert_eq!(r.columns.len(), 2);
     }
 
     #[test]
