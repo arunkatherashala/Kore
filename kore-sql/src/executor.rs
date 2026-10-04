@@ -1251,6 +1251,32 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
     if planned || n_implicit > 0 {
         if let Some(w) = &where_pred { crate::rewrite::split_conjuncts(w, &mut conjuncts); }
         if n_implicit > 0 {
+            // `a OR b` over bare column names: attribute every column to its table so the per-table parts of
+            // each branch can be derived (and applied while loading the table) as well.
+            if conjuncts.iter().any(|c| matches!(c, Expr::BinOp { op: BinOpKind::Or, .. })) {
+                let tables: Vec<(String, &DataBlock)> = std::iter::once((base_alias.to_string(), base_ref))
+                    .chain(stmt.joins[..n_implicit].iter().filter_map(|j| {
+                        if j.table.subquery.is_some() || j.table.values.is_some() { return None; }
+                        ctx.get(&j.table.name).map(|b| (j.table.alias.as_deref().unwrap_or(j.table.name.as_str()).to_string(), b))
+                    })).collect();
+                if tables.len() == n_implicit + 1 {
+                    let owner = |c: &str| -> Option<String> {
+                        let mut hit: Option<String> = None;
+                        for (alias, b) in &tables {
+                            if b.columns.iter().any(|col| col.name == c) {
+                                if hit.is_some() { return None; }
+                                hit = Some(alias.clone());
+                            }
+                        }
+                        hit
+                    };
+                    for c in conjuncts.iter_mut() {
+                        if matches!(c, Expr::BinOp { op: BinOpKind::Or, .. }) {
+                            if let Some(q) = crate::rewrite::qualify_cols(c, &owner) { *c = q; }
+                        }
+                    }
+                }
+            }
             crate::rewrite::factor_common_from_or(&mut conjuncts);
             crate::rewrite::derive_table_filters_from_or(&mut conjuncts);
         }
@@ -1330,9 +1356,11 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
                 let mut blocks: Vec<&mut DataBlock> = std::iter::once(&mut result).chain(pending.iter_mut()).collect();
                 sip_reduce(&mut blocks, &src_rows, &loaded, &conjuncts);
             }
+            // smaller tables first: once filtered they restrict the bigger ones
             let mut order: Vec<usize> = Vec::new();
             if base_deferred { order.push(0); }
             order.extend(deferred_pending.iter().map(|(d, _)| d + 1));
+            order.sort_by_key(|&slot| src_rows[slot]);
             for slot in order {
                 let (alias, src_block): (String, &DataBlock) = if slot == 0 {
                     (base_alias.to_string(), base_ref)
