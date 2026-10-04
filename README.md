@@ -1,21 +1,38 @@
-﻿# KORE — The Fastest Embeddable Columnar Engine
+﻿# KORE — A Rust Columnar Query Engine
 
 > Pure Rust · Zero JVM · 75 crates · ACID · MCP AI Tools · SQL · Parquet · Delta · Digital Life
 
 KORE is a high-performance columnar query engine + Digital Life framework, written from scratch in Rust.  
-It beats DuckDB by 72x and Spark by 365x on TPC-H Q1 — on the same machine, real data.
+On a single 8-core machine with in-memory data (TPC-H-shaped, scale factor 1), its SQL engine returned the same results as live Apache Spark
+on all 22 TPC-H queries and was faster than Spark local mode on every one of them (see [Verified status](#verified-status-2026-10-04)).
+It has not been compared with DuckDB, DataFusion or Polars, and it does not replace Spark for large data or clusters.
 
 ## Distributed engine — Phases 1–20 complete
 
-> **Correction (2026-10):** The Spark / DuckDB speedup figures in this document (for example "339x", "500x" or "5/5 queries")
-> came from comparing KORE with Spark numbers typed into the benchmark source as constants ("published numbers"), using
-> simplified hand-written queries whose answers were never checked. They were **not** measured against a running Spark or DuckDB
-> and must not be quoted. A reproducible comparison against live Spark that checks every result is in
-> [`benchmarks/tpch_honest`](benchmarks/tpch_honest/README.md): all 22 TPC-H queries, same data and SQL for both engines.
-> On one 8-core machine at scale factor 1 (in-memory data, Spark in local mode, TPC-H-shaped data) KORE is faster on 14 of 22
-> queries and about 1.7x faster in geometric mean. That says nothing about larger-than-memory data or clusters, and DuckDB,
-> DataFusion and Polars have not been compared yet.
+> **Correction (2026-10):** Earlier versions of this README and the release notes claimed large speedups over Spark and DuckDB
+> (for example "339x", "365x", "500x" or "5/5 queries"). Those figures came from comparing KORE with Spark numbers typed into the
+> benchmark source as constants, using simplified hand-written queries whose answers were never checked. They were **not**
+> measured against a running Spark or DuckDB and must not be quoted. The verified comparison is
+> [`benchmarks/tpch_honest`](benchmarks/tpch_honest/README.md) and [`docs/ENGINE_STATUS_2026-10-04.md`](docs/ENGINE_STATUS_2026-10-04.md).
 
+## Verified status (2026-10-04)
+
+Measured against a live Spark 4.2.0 (local mode) on one 8-core, 32 GB machine, same data and same SQL text, results compared:
+
+| | |
+|---|---|
+| Queries | all 22 TPC-H-shaped queries, SF 1 (about 6M lineitem rows) |
+| Result agreement with Spark | 22 of 22 |
+| Speed (in-memory, KORE time / Spark time) | faster on all 22; between 0.04x and 0.46x of Spark's time in the final run (timings vary by about +/-20%, more on a busy machine) |
+| Tests | 217 pass in `kore-sql`, `kore-join`, `kore-ffi` (including a SQLite oracle over 60k generated queries) |
+| Memory | about 2.4-2.5 GB of table data at SF 1; peak commit 2.6-3.3 GB per query |
+
+What this does **not** show: larger-than-memory data (spill-to-disk bounds operator working state only), clusters and fault tolerance,
+the Spark ecosystem, or any comparison with DuckDB, DataFusion or Polars. The data is TPC-H-shaped (not the official dbgen output), so
+this is not an official TPC-H result. Several silent wrong-answer bugs were found and fixed while building this check, and more may remain.
+Treat the engine as a strong prototype, not a production database. SQL coverage is listed in [`docs/SQL_SUPPORT.md`](docs/SQL_SUPPORT.md).
+
+> The distributed-engine phases listed below (workers, coordinator, shuffle, TLS, ...) were **not** part of this verification.
 
 As of Phase 20, KORE has architectural parity with Spark's core distributed engine:
 
@@ -45,26 +62,26 @@ cargo test -p kore-net -p kore-worker -p kore-coord -p kore-shuffle \
 
 ---
 
-## Benchmark Results  (TPC-H SF-1 · 6,000,000 rows · real measurements)
+## Benchmark Results
 
-| Query | **KORE** | DuckDB | Spark | ClickHouse† | vs DuckDB | vs Spark |
-|---|---|---|---|---|---|---|
-| Q1 GROUP BY | **11.5 ms** | 832 ms | 4,200 ms | ~25 ms | **72x** | **365x** |
-| Q6 Filter+SUM | **22 ms** | 983 ms | 2,800 ms | ~10 ms | **45x** | **127x** |
-| Q3 Hash join | **355 ms** | 1,177 ms | 8,700 ms | ~80 ms | **3x** | **25x** |
-| S1 Sort 6M rows | **88 ms** | 859 ms | 5,100 ms | ~60 ms | **10x** | **58x** |
-| W1 Window fns | **463 ms** | 10,132 ms | 6,500 ms | ~200 ms | **22x** | **14x** |
+The previous table in this section (KORE vs DuckDB vs Spark vs ClickHouse, with speedups of 3x to 365x) has been removed: the DuckDB and
+ClickHouse figures could not be reproduced and the Spark figures in the related benchmark code were constants. Use the reproducible
+comparison instead:
 
-KORE wins **5/5 queries** vs DuckDB and **5/5** vs Spark.
+```bash
+cd benchmarks/tpch_honest
+python gen_data.py --sf 1 --out data/sf1
+python run_engines.py --data data/sf1 --sf 1        # live Spark and KORE, results compared
+```
 
-> DuckDB & Spark measured live on this machine (cold CSV reads, median of 3).  
-> † ClickHouse = published SF-1 numbers, warm MergeTree.
+See [`benchmarks/tpch_honest/README.md`](benchmarks/tpch_honest/README.md) for the latest per-query table and
+[`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) for method and caveats.
 
 ---
 
-## TPC-H SQL Coverage — 15/15 COMPLETE
+## TPC-H SQL Coverage — 22/22 checked against Spark
 
-KORE SQL passes **all 15 tested TPC-H queries**:
+All 22 TPC-H-shaped queries return the same results as live Spark (SF 1). The 15 queries listed here were the ones tested earlier:
 
 | Q1 | Q3 | Q4 | Q5 | Q6 | Q7 | Q12 | Q13 | Q14 | Q17 | Q18 | Q19 | Q20 | Q21 | Q22 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -80,7 +97,10 @@ Key SQL engine capabilities proven by TPC-H:
 
 ---
 
-## SQL Feature Coverage (22/22)
+## SQL Feature Coverage
+
+> The DuckDB and Spark columns are general knowledge, not something this repository tests. For what KORE supports, partly supports
+> or rejects, see [`docs/SQL_SUPPORT.md`](docs/SQL_SUPPORT.md).
 
 | Feature | KORE | DuckDB | Spark |
 |---|---|---|---|
@@ -144,7 +164,7 @@ cd Kore
 # Build everything
 cargo build --release
 
-# TPC-H benchmark (generates 7.8M rows, 17 queries, beats Spark 100x+)
+# Older TPC-H demo (compares against hard-coded Spark constants: do not quote its speedups; use benchmarks/tpch_honest)
 cargo run --release -p kore-tpch
 
 # kore-self: Living AI Twin (84+ MCP tools, autonomous heartbeat)
@@ -215,7 +235,7 @@ python direct_sql_test.py
 # TPC-H SQL (15/15)
 python tpch_sql_bench.py
 
-# Full battle test (KORE vs DuckDB vs Spark vs ClickHouse)
+# Older comparison script (historical; not verified: use benchmarks/tpch_honest for the live-Spark comparison)
 python battle_test.py
 
 # Full validation (34/34)

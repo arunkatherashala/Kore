@@ -30,15 +30,17 @@ Needs Python with `pyspark`, `pyarrow`, `numpy`, Java 17+ for Spark, and `cargo 
   fault tolerance and its ecosystem. Competing engines that matter on a single node (DuckDB, DataFusion, Polars)
   were not installable offline here; add them to `run_engines.py` when they are.
 
-## Latest results (this machine: 8 cores, 32 GB; Spark 4.2.0 local mode, tables cached in memory)
+## Latest results (2026-10-04; this machine: 8 cores, 32 GB; Spark 4.2.0 local mode, tables cached in memory)
 
 All 22 query results agree with Spark at SF 0.1 and SF 1. Timings are the best of 2-3 runs after a warm-up and are
-noisy by roughly +/-20% between runs.
+noisy by roughly +/-20% between runs (more when other programs use the machine).
 
 | SF 1 (6M lineitem rows) | |
 |---|---|
-| KORE faster than Spark | 22 of 22 (previously slowest: Q1 0.25x, Q9 0.3x, Q8 0.2x, Q13 0.4-0.5x, Q21 0.1x of Spark time) |
-| all 22 results agree with Spark | yes |
+| Results agreeing with Spark | 22 of 22 |
+| KORE faster than Spark | 22 of 22 in the final run (KORE time / Spark time between 0.04x and 0.46x) |
+| Slowest ratios | Q1 0.46x, Q13 0.41x, Q20 0.40x (Q1 alone: about 0.2x) |
+| Peak memory per query process | 2.6-3.3 GB (commit), of which about 2.4-2.5 GB is the table data |
 
 Full tables: `results/`. Read these numbers with care:
 
