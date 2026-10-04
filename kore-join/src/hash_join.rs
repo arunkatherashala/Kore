@@ -119,6 +119,13 @@ impl HashJoin {
         }
     }
 
+    /// Row-id pairs (left, right) of an INNER join of two key slices (NULL keys never match).
+    /// Both slices must be shorter than u32::MAX.
+    pub fn inner_join_row_ids(lv: &[Option<i64>], rv: &[Option<i64>]) -> (Vec<u32>, Vec<u32>) {
+        let cfg = JoinConfig { left_key: String::new(), right_key: String::new(), join_type: JoinType::Inner };
+        Self::join_int64_idx(lv, rv, &cfg)
+    }
+
     /// Row-id pairs (left, right) of the join; u32::MAX = no row. Keys must be shorter than u32::MAX rows.
     fn join_int64_idx(lv: &[Option<i64>], rv: &[Option<i64>], cfg: &JoinConfig) -> (Vec<u32>, Vec<u32>) {
         const NONE: u32 = u32::MAX;
@@ -303,6 +310,9 @@ fn build_result_idx_owned(left: DataBlock, right: DataBlock, lidx: &[u32], ridx:
     }).collect();
     DataBlock { columns, num_rows: lidx.len() }
 }
+
+/// Take rows `idx` of `src` (u32::MAX = NULL).
+pub fn gather_rows(src: &kore_core::ColumnData, idx: &[u32]) -> kore_core::ColumnData { gather(src, idx) }
 
 fn gather(src: &kore_core::ColumnData, idx: &[u32]) -> kore_core::ColumnData {
     use kore_core::ColumnData;
