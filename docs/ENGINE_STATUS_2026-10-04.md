@@ -1,0 +1,120 @@
+# KORE SQL engine: status and honest assessment
+
+**Date:** 2026-10-04
+**Branch / commit:** `master-kore-engine` @ `cfbb7575`
+**Scope:** the `kore-sql` engine (parser, executor, joins, spill-to-disk) as measured on one machine.
+
+## Verdict in one paragraph
+
+KORE's SQL engine is real: a Rust parser and executor whose answers were checked against live Apache Spark on
+all 22 TPC-H-shaped queries, with 0 mismatches. On one machine, with data that fits in memory (SF1, about 6M
+lineitem rows), it was faster than Spark local mode on every query. It is a strong prototype. It is not
+production-ready, it has not been compared with DuckDB, DataFusion or Polars, and it does not replace Spark for
+large data, clusters or fault tolerance.
+
+## What was wrong before and was corrected
+
+| Earlier claim | Reality |
+|---|---|
+| "339x faster than Spark" (README, release notes, `kore-tpch`) | The Spark numbers were constants typed into the code, never measured, and the queries were simplified. Banners were added to the affected documents. Do not quote those figures. |
+| 22 queries supported | At the start of this work 2 of 22 queries returned correct results. Roughly 15 silent wrong-answer bugs were found and fixed (parser dropping tokens, nested aggregates, NULL handling in joins and `GROUP BY`, correlated subqueries, unstable sort, integer typing, `UPDATE` that changed nothing, and others). |
+
+## How the measurement works
+
+- Both engines read identical data and run identical SQL text (`benchmarks/tpch_honest`).
+- Spark 4.2.0 in local mode on all cores, tables cached in memory before timing. KORE has tables loaded in memory before timing.
+- Each query runs once as a warm-up, then the minimum of the timed runs is reported.
+- KORE's results are compared with Spark's by column name (floats to 1e-6 relative). A difference is reported as `MISMATCH`.
+- Machine: 8 cores, 32 GB RAM, Windows. Timings vary by about +/-20% between runs, and more when other
+  programs are using the machine.
+
+## Results at SF1 (final run on this commit, milliseconds)
+
+All 22 results agree with Spark (22 ok, 0 mismatch, 0 error, 0 timeout).
+
+| Query | Spark | KORE | KORE / Spark | | Query | Spark | KORE | KORE / Spark |
+|---|---|---|---|---|---|---|---|---|
+| Q1 | 1088 | 497 | 0.46 | | Q12 | 1548 | 205 | 0.13 |
+| Q2 | 1251 | 47 | 0.04 | | Q13 | 2111 | 868 | 0.41 |
+| Q3 | 1503 | 413 | 0.27 | | Q14 | 605 | 87 | 0.14 |
+| Q4 | 1429 | 163 | 0.11 | | Q15 | 1159 | 84 | 0.07 |
+| Q5 | 1846 | 282 | 0.15 | | Q16 | 1928 | 88 | 0.05 |
+| Q6 | 410 | 124 | 0.30 | | Q17 | 1216 | 152 | 0.13 |
+| Q7 | 1791 | 586 | 0.33 | | Q18 | 3116 | 611 | 0.20 |
+| Q8 | 1567 | 295 | 0.19 | | Q19 | 608 | 110 | 0.18 |
+| Q9 | 2765 | 667 | 0.24 | | Q20 | 1372 | 555 | 0.40 |
+| Q10 | 1755 | 247 | 0.14 | | Q21 | 4156 | 354 | 0.09 |
+| Q11 | 1026 | 63 | 0.06 | | Q22 | 1216 | 212 | 0.17 |
+
+Notes on the table:
+- This was a single full run on a machine that was still busy at times. Re-running a few queries alone gave
+  Q1 217-236 ms, Q6 68-94 ms and Q9 561-616 ms, so some entries above are inflated by load.
+- Spark local mode has fixed JVM and planning overhead that is large for queries that take about a second. The
+  ratios say little about 100 GB+ data.
+- Spark times are from a cached live Spark run on this machine, not from published benchmarks.
+
+## What was added in this round
+
+- Join planning: filters derived from `OR` branches, unique-key (lookup) tables joined first.
+- Execution speed: parallel flat hash join, parallel group-by, semi-join rewrite for `EXISTS`, faster `LIKE`,
+  shared `IN` sets, top-N for `ORDER BY ... LIMIT`, hash-based `DISTINCT` (exact: hash-equal rows are confirmed
+  cell by cell).
+- Correctness and coverage: window frames with correct NULLs, `ROLLUP`/`CUBE`/`GROUPING SETS`, MAP values, lambdas
+  and higher-order functions, `WITH RECURSIVE`, working `INSERT`/`UPDATE`/`DELETE`/`CREATE`/`DROP`, many string,
+  date and JSON functions. See `SQL_SUPPORT.md` for the full matrix.
+- Memory: peak commit at SF1 down 22-30% per query (for example Q9 4.44 GB to 3.32 GB). The table data itself is
+  about 2.4-2.5 GB at SF1.
+- Spill to disk: `KqlContext::set_memory_limit` makes `ORDER BY`, `GROUP BY` and hash joins partition to temporary
+  files when their working state exceeds the limit. Default is unlimited, so normal speed is unaffected.
+
+## Test evidence
+
+- 217 tests pass across `kore-sql`, `kore-join` and `kore-ffi`, including about 960 hand-derived regression
+  cases, a differential test across execution paths, and a SQLite oracle over 60k generated queries.
+- A mutation fuzzer ran about 1.6M mutants with no panics (reported by the SQL-coverage work, not re-run here).
+- Not run: the whole workspace, because a Python-binding crate does not build against Python 3.14 here.
+
+## Known limits (do not claim otherwise)
+
+| Area | Limit |
+|---|---|
+| Scale | Everything is in memory as row vectors of `Option<T>`. Spilling bounds operator working state only, not input tables or results. A skewed key can still exceed the budget. |
+| SF3 (18M lineitem rows) | Earlier run needed 8-10 GB per query process and one run failed with an out-of-memory error while other programs were running. Not re-run on the final commit. |
+| Strings | `Option<String>` columns that cannot be dictionary-encoded (dictionary holds at most 254 values) dominate memory and are slow to sort and group. |
+| Other engines | No comparison with DuckDB, DataFusion or Polars (no network access on the test machine). They are the real single-node competitors and may be faster. |
+| Distributed | No cluster execution, no fault tolerance, no connectors (S3, Hive, JDBC, Kafka), no streaming or ML. |
+| SQL | No STRUCT, TABLESAMPLE or native DECIMAL (DECIMAL is a double). A DATE compared with a TIMESTAMP is a string comparison. `EXPLAIN`/`DESCRIBE` output differs from Spark. |
+| Data | TPC-H-shaped data from `gen_data.py`, not the official dbgen. This is not an official TPC-H result. |
+| Output order | Inner joins can return rows in a different order, so unordered `LIMIT` queries may return a different set of tied rows. Spark behaves the same way. |
+| Unverified | `format_number(0.5, 0)` now rounds half-even, taken from Spark's documentation, not from a Spark run. |
+
+## Maturity assessment
+
+| Question | Answer |
+|---|---|
+| Is it a real SQL engine? | Yes. |
+| Are the results correct? | On the 22 TPC-H-shaped queries, yes, checked against live Spark. In general, no guarantee: bugs are still being found at a rate of several per round. |
+| Faster than Spark on one machine, in-memory? | Yes at SF1, by 2x to 25x in these runs. |
+| Replacement for Spark? | No. |
+| Production ready? | No. |
+| Best description | Strong research-grade prototype. |
+
+## What would be needed next, in order
+
+1. Compare against DuckDB and DataFusion (needs network access).
+2. Run SF3 and SF10 on a machine with enough RAM; reduce string memory (compact string type or per-column loading).
+3. Parallelise the remaining single-threaded paths (Q20 inner aggregation, string-key group-by, string sort).
+4. Keep widening the differential and oracle tests: every round so far found new silent wrong answers.
+
+## How to reproduce
+
+```
+cd kore
+cargo build --release -p kore-ffi --offline
+cd benchmarks/tpch_honest
+python gen_data.py --sf 1 --out data/sf1
+python run_engines.py --data data/sf1 --sf 1          # Spark and KORE, with result comparison
+python run_engines.py --data data/sf1 --sf 1 --engines kore --only Q1,Q9
+```
+
+Needs Python with `pyspark`, `pyarrow`, `numpy`, and Java 17+ for Spark. See `BENCHMARKING.md` for details.
