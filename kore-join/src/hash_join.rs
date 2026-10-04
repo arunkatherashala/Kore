@@ -90,11 +90,39 @@ impl HashJoin {
         rv: &[Option<i64>],
         cfg: &JoinConfig,
     ) -> Result<DataBlock, KoreError> {
-        const NONE: u32 = u32::MAX;
-        let inner = matches!(cfg.join_type, JoinType::Inner);
-        if lv.len() >= NONE as usize || rv.len() >= NONE as usize {
+        if lv.len() >= u32::MAX as usize || rv.len() >= u32::MAX as usize {
             return Self::join_int64_wide(left, right, lv, rv, cfg);
         }
+        let (lidx, ridx) = Self::join_int64_idx(lv, rv, cfg);
+        build_result_idx(left, right, &lidx, &ridx)
+    }
+
+    /// Like [`HashJoin::join`], but consumes both inputs and frees every source column as soon as it has been
+    /// gathered, so the peak is the output plus the not-yet-gathered inputs instead of inputs plus output.
+    pub fn join_owned(left: DataBlock, right: DataBlock, cfg: &JoinConfig) -> Result<DataBlock, KoreError> {
+        let idx = {
+            let lc = left.columns.iter().find(|c| c.name == cfg.left_key);
+            let rc = right.columns.iter().find(|c| c.name == cfg.right_key);
+            match (lc, rc) {
+                (Some(lc), Some(rc)) => match (&lc.data, &rc.data) {
+                    (kore_core::ColumnData::Int64(lv), kore_core::ColumnData::Int64(rv))
+                        if lv.len() < u32::MAX as usize && rv.len() < u32::MAX as usize =>
+                        Some(Self::join_int64_idx(lv, rv, cfg)),
+                    _ => None,
+                },
+                _ => None,
+            }
+        };
+        match idx {
+            Some((lidx, ridx)) => Ok(build_result_idx_owned(left, right, &lidx, &ridx)),
+            None => Self::join(&left, &right, cfg),
+        }
+    }
+
+    /// Row-id pairs (left, right) of the join; u32::MAX = no row. Keys must be shorter than u32::MAX rows.
+    fn join_int64_idx(lv: &[Option<i64>], rv: &[Option<i64>], cfg: &JoinConfig) -> (Vec<u32>, Vec<u32>) {
+        const NONE: u32 = u32::MAX;
+        let inner = matches!(cfg.join_type, JoinType::Inner);
         // build on the right unless this is an inner join and the left side is smaller
         let swap = inner && lv.len() < rv.len();
         let (bk, pk) = if swap { (lv, rv) } else { (rv, lv) };
@@ -142,7 +170,7 @@ impl HashJoin {
                 if !m { lidx.push(NONE); ridx.push(r as u32); }
             }
         }
-        build_result_idx(left, right, &lidx, &ridx)
+        (lidx, ridx)
     }
 
     /// Fallback for inputs too large for 32-bit row ids (never hit in practice).
@@ -257,6 +285,23 @@ pub(crate) fn build_result_idx(left: &DataBlock, right: &DataBlock, lidx: &[u32]
     }
     let columns: Vec<Column> = jobs.into_par_iter().map(|(name, data, idx)| Column { name, data: gather(data, idx) }).collect();
     Ok(DataBlock { columns, num_rows: lidx.len() })
+}
+
+/// Same output as [`build_result_idx`], but each input column is dropped right after it has been gathered.
+fn build_result_idx_owned(left: DataBlock, right: DataBlock, lidx: &[u32], ridx: &[u32]) -> DataBlock {
+    let left_names: std::collections::HashSet<String> = left.columns.iter().map(|c| c.name.clone()).collect();
+    let mut jobs: Vec<(String, kore_core::ColumnData, &[u32])> = Vec::with_capacity(left.columns.len() + right.columns.len());
+    for c in left.columns { jobs.push((c.name, c.data, lidx)); }
+    for c in right.columns {
+        let name = if left_names.contains(c.name.as_str()) { format!("{}_r", c.name) } else { c.name };
+        jobs.push((name, c.data, ridx));
+    }
+    let columns: Vec<Column> = jobs.into_par_iter().map(|(name, data, idx)| {
+        let g = gather(&data, idx);
+        drop(data);
+        Column { name, data: g }
+    }).collect();
+    DataBlock { columns, num_rows: lidx.len() }
 }
 
 fn gather(src: &kore_core::ColumnData, idx: &[u32]) -> kore_core::ColumnData {
