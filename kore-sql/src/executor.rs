@@ -4138,7 +4138,7 @@ fn merge_single_row(left: &DataBlock, li: usize, right: &DataBlock, ri: usize) -
 /// 1e-10 resolution and NULL is its own value, as before.
 fn deduplicate(block: DataBlock) -> DataBlock {
     use rayon::prelude::*;
-    use std::collections::HashSet;
+    use std::collections::HashMap;
     use std::hash::BuildHasherDefault;
     let n = block.num_rows;
     let mut hashes: Vec<u128> = vec![0xcbf29ce484222325_cbf29ce484222325u128; n];
@@ -4163,10 +4163,35 @@ fn deduplicate(block: DataBlock) -> DataBlock {
             }
         }
     }
-    let mut seen: HashSet<(u64, u64), BuildHasherDefault<FxHasher>> = HashSet::with_capacity_and_hasher(n.min(1 << 22), Default::default());
+    // The hash only buckets rows; equal hashes are confirmed cell by cell, so a collision can never drop a row.
+    let same_row = |i: usize, j: usize| -> bool {
+        block.columns.iter().all(|c| match &c.data {
+            ColumnData::Int64(v) => v[i] == v[j],
+            ColumnData::Bool(v) => v[i] == v[j],
+            ColumnData::Float64(v) => match (v[i], v[j]) {
+                (None, None) => true,
+                (Some(a), Some(b)) => if a.is_finite() && b.is_finite() && a.abs() < 9.0e8 && b.abs() < 9.0e8 {
+                    (a * 1e10).round() as i64 == (b * 1e10).round() as i64
+                } else { a.to_bits() == b.to_bits() },
+                _ => false,
+            },
+            ColumnData::Str(v) => v[i] == v[j],
+            ColumnData::StrDict { .. } => c.data.get_str(i) == c.data.get_str(j),
+        })
+    };
+    let mut first_of: HashMap<(u64, u64), usize, BuildHasherDefault<FxHasher>> = HashMap::with_capacity_and_hasher(n.min(1 << 22), Default::default());
+    let mut overflow: HashMap<(u64, u64), Vec<usize>> = HashMap::new();
     let mut keep: Vec<usize> = Vec::new();
     for (i, h) in hashes.iter().enumerate() {
-        if seen.insert(((*h >> 64) as u64, *h as u64)) { keep.push(i); }
+        let key = ((*h >> 64) as u64, *h as u64);
+        match first_of.entry(key) {
+            std::collections::hash_map::Entry::Vacant(e) => { e.insert(i); keep.push(i); }
+            std::collections::hash_map::Entry::Occupied(e) => {
+                if same_row(i, *e.get()) { continue; }
+                let list = overflow.entry(key).or_default();
+                if !list.iter().any(|&k| same_row(i, k)) { list.push(i); keep.push(i); }
+            }
+        }
     }
     if keep.len() == n { return block; }
     block.select_rows(&keep)
