@@ -18,7 +18,9 @@ thread_local! {
 /// Did the current statement create any array? (lets the final rendering step be skipped otherwise)
 pub fn take_used() -> bool { USED.with(|u| u.replace(false)) }
 
-fn to_json(v: &V) -> serde_json::Value {
+pub(crate) fn mark_used() { USED.with(|u| u.set(true)); }
+
+pub(crate) fn to_json(v: &V) -> serde_json::Value {
     match v {
         V::Null => serde_json::Value::Null,
         V::Int(i) => serde_json::Value::from(*i),
@@ -28,7 +30,7 @@ fn to_json(v: &V) -> serde_json::Value {
     }
 }
 
-fn from_json(j: &serde_json::Value) -> V {
+pub(crate) fn from_json(j: &serde_json::Value) -> V {
     match j {
         serde_json::Value::Null => V::Null,
         serde_json::Value::Bool(b) => V::Bool(*b),
@@ -72,6 +74,7 @@ pub fn render(s: &str) -> String {
         match v {
             V::Null => "null".into(),
             V::Str(s) if s.starts_with(MARK) => render(s),
+            V::Str(s) if s.starts_with(crate::maps::MARK) => crate::maps::render(s),
             V::Float(f) => fmt_f64(*f),
             other => to_str(other).unwrap_or_default(),
         }
@@ -94,7 +97,14 @@ pub fn call(name: &str, a: &[V]) -> Option<V> {
     let arg = |i: usize| a.get(i).unwrap_or(&V::Null);
     let arr = |i: usize| decode(arg(i));
     macro_rules! need { ($e:expr) => { match $e { Some(v) => v, None => return Some(V::Null) } } }
+    if let Some(r) = crate::maps::call(name, a) { return Some(r); }
     Some(match name {
+        // arr[i]: zero-based, out of range (including negative) is NULL
+        "__SUBSCRIPT" => {
+            let items = need!(arr(0));
+            let i = need!(crate::scalar::num(arg(1))) as i64;
+            if i < 0 || i as usize >= items.len() { V::Null } else { items[i as usize].clone() }
+        }
         "ARRAY" => encode(a),
         "SIZE" | "CARDINALITY" | "ARRAY_SIZE" => match arr(0) { Some(x) => V::Int(x.len() as i64), None => if matches!(arg(0), V::Null) { V::Int(-1) } else { V::Null } },
         "ELEMENT_AT" => {
@@ -192,7 +202,7 @@ pub fn call(name: &str, a: &[V]) -> Option<V> {
 pub fn names() -> &'static [&'static str] {
     &["ARRAY", "SIZE", "CARDINALITY", "ARRAY_SIZE", "ELEMENT_AT", "ARRAY_CONTAINS", "ARRAY_POSITION", "ARRAY_JOIN", "SORT_ARRAY", "ARRAY_SORT",
       "ARRAY_DISTINCT", "ARRAY_UNION", "ARRAY_INTERSECT", "ARRAY_EXCEPT", "ARRAYS_OVERLAP", "ARRAY_MAX", "ARRAY_MIN", "ARRAY_REMOVE",
-      "ARRAY_COMPACT", "ARRAY_APPEND", "ARRAY_PREPEND", "ARRAY_REPEAT", "SLICE", "FLATTEN"]
+      "ARRAY_COMPACT", "ARRAY_APPEND", "ARRAY_PREPEND", "ARRAY_REPEAT", "SLICE", "FLATTEN", "__SUBSCRIPT"]
 }
 
 #[cfg(test)]

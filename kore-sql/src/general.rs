@@ -745,8 +745,10 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
                     }
                     if name == "GROUPING_ID" {
                         let mut acc: Option<Expr> = None;
-                        let k = args.len();
-                        for (pos, a) in args.iter().enumerate() {
+                        // grouping_id() without arguments covers every grouping expression
+                        let all_args: Vec<Expr> = if args.is_empty() { gexprs.clone() } else { args.clone() };
+                        let k = all_args.len();
+                        for (pos, a) in all_args.iter().enumerate() {
                             match gexprs.iter().position(|g| g == a) {
                                 Some(i) => {
                                     let term = Expr::BinOp { op: BinOpKind::Mul, left: Box::new(Expr::Col(format!("__gf{i}"))), right: Box::new(Expr::Int(1i64 << (k - 1 - pos))) };

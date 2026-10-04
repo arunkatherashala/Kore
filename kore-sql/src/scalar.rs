@@ -843,6 +843,72 @@ pub fn call(name: &str, a: &[V]) -> Option<V> {
             if !dt::valid_ymd(y, m, d) { return Some(V::Null); }
             V::Str(dt::fmt_date(dt::days_from_civil(y, m, d)))
         }
+        "MAKE_TIMESTAMP" => {
+            nn!(0, 1, 2, 3, 4, 5);
+            let (y, mo, d, h, mi) = (get!(k(0)), get!(k(1)), get!(k(2)), get!(k(3)), get!(k(4)));
+            let sec = get!(f(5));
+            if !dt::valid_ymd(y, mo, d) || !(0..24).contains(&h) || !(0..60).contains(&mi) || !(0.0..60.0).contains(&sec) { return Some(V::Null); }
+            let whole = sec.floor();
+            let mut t = Dt::from_epoch_secs(dt::days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + whole as i64);
+            t.nanos = ((sec - whole) * 1e9).round() as i64;
+            ts_v(t)
+        }
+        "UNIX_SECONDS" => { nn!(0); V::Int(get!(to_dt(arg(0))).epoch_secs()) }
+        "UNIX_MILLIS" => { nn!(0); let d = get!(to_dt(arg(0))); V::Int(d.epoch_secs() * 1000 + d.nanos / 1_000_000) }
+        "UNIX_MICROS" => { nn!(0); let d = get!(to_dt(arg(0))); V::Int(d.epoch_secs() * 1_000_000 + d.nanos / 1000) }
+        "CURRENT_TIMEZONE" => V::Str("UTC".into()),
+        "REGEXP_EXTRACT_ALL" => {
+            nn!(0, 1);
+            let idx = if n >= 3 { get!(k(2)).max(0) as usize } else { 1 };
+            let re = get!(regex_of(&get!(s(1))));
+            let text = get!(s(0));
+            let out: Vec<V> = re.captures_iter(&text).map(|c| V::Str(c.get(idx).map(|m| m.as_str().to_string()).unwrap_or_default())).collect();
+            crate::arrays::encode(&out)
+        }
+        "JSON_ARRAY_LENGTH" => {
+            nn!(0);
+            match serde_json::from_str::<serde_json::Value>(&get!(s(0))) { Ok(serde_json::Value::Array(a)) => V::Int(a.len() as i64), _ => V::Null }
+        }
+        "TO_JSON" => {
+            nn!(0);
+            fn conv(v: &V) -> serde_json::Value {
+                if let Some(items) = crate::arrays::decode(v) { return serde_json::Value::Array(items.iter().map(conv).collect()); }
+                if let Some(pairs) = crate::maps::decode(v) {
+                    return serde_json::Value::Object(pairs.iter().map(|(k, x)| (to_str(k).unwrap_or_default(), conv(x))).collect());
+                }
+                crate::arrays::to_json(v)
+            }
+            V::Str(conv(arg(0)).to_string())
+        }
+        "FROM_JSON" => {
+            nn!(0, 1);
+            let schema = get!(s(1)).trim().to_ascii_lowercase();
+            let parsed = match serde_json::from_str::<serde_json::Value>(&get!(s(0))) { Ok(j) => j, Err(_) => return Some(V::Null) };
+            fn conv(j: &serde_json::Value, ty: &str) -> V {
+                let ty = ty.trim();
+                if let Some(inner) = ty.strip_prefix("array<").and_then(|t| t.strip_suffix('>')) {
+                    return match j { serde_json::Value::Array(a) => crate::arrays::encode(&a.iter().map(|x| conv(x, inner)).collect::<Vec<_>>()), _ => V::Null };
+                }
+                if let Some(inner) = ty.strip_prefix("map<").and_then(|t| t.strip_suffix('>')) {
+                    let vt = inner.split_once(',').map(|(_, v)| v).unwrap_or("string");
+                    return match j {
+                        serde_json::Value::Object(o) => crate::maps::encode(&o.iter().map(|(k, x)| (V::Str(k.clone()), conv(x, vt))).collect::<Vec<_>>()),
+                        _ => V::Null,
+                    };
+                }
+                match (ty, j) {
+                    (_, serde_json::Value::Null) => V::Null,
+                    ("int" | "integer" | "bigint" | "long" | "smallint" | "tinyint", serde_json::Value::Number(n)) => n.as_i64().map(V::Int).unwrap_or(V::Null),
+                    ("double" | "float" | "decimal", serde_json::Value::Number(n)) => n.as_f64().map(V::Float).unwrap_or(V::Null),
+                    ("boolean", serde_json::Value::Bool(b)) => V::Bool(*b),
+                    ("string", serde_json::Value::String(s)) => V::Str(s.clone()),
+                    ("string", other) => V::Str(other.to_string()),
+                    _ => V::Null,
+                }
+            }
+            if schema.starts_with("array<") || schema.starts_with("map<") { conv(&parsed, &schema) }
+            else { set_error("from_json supports ARRAY<..> and MAP<..> schemas only (STRUCT values are not supported)"); V::Null }
+        }
         "TO_DATE" | "DATE" => {
             nn!(0);
             if n >= 2 { nn!(1); let d = get!(dt::parse_pattern(&get!(s(0)), &get!(s(1)))); date_v(d) }
@@ -881,7 +947,7 @@ pub fn call(name: &str, a: &[V]) -> Option<V> {
 
 /// Names that exist as scalar functions, for "unknown function" detection.
 pub fn is_known(name: &str) -> bool {
-    is_lazy(name) || matches!(name,
+    is_lazy(name) || crate::maps::names().contains(&name) || crate::hof::names().contains(&name) || matches!(name,
         "CAST" | "TRY_CAST" | "CONVERT" | "MAP" | "UPPER" | "UCASE" | "LOWER" | "LCASE" | "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "LEN"
         | "OCTET_LENGTH" | "BIT_LENGTH" | "TRIM" | "BTRIM" | "LTRIM" | "RTRIM" | "__TRIM_BOTH" | "__TRIM_LEADING" | "__TRIM_TRAILING"
         | "SUBSTR" | "SUBSTRING" | "MID" | "LEFT" | "RIGHT" | "CONCAT" | "CONCAT_WS" | "REPLACE" | "REPEAT" | "REVERSE" | "LPAD" | "RPAD"
@@ -901,7 +967,8 @@ pub fn is_known(name: &str) -> bool {
         | "DOUBLE" | "FLOAT" | "BOOLEAN" | "SPLIT" | "SIZE" | "CARDINALITY" | "ARRAY_SIZE" | "ELEMENT_AT" | "ARRAY_CONTAINS" | "ARRAY_POSITION" | "ARRAY_JOIN"
         | "SORT_ARRAY" | "ARRAY_SORT" | "ARRAY_DISTINCT" | "ARRAY_UNION" | "ARRAY_INTERSECT" | "ARRAY_EXCEPT" | "ARRAYS_OVERLAP" | "ARRAY_MAX" | "ARRAY_MIN"
         | "ARRAY_REMOVE" | "ARRAY_COMPACT" | "ARRAY_APPEND" | "ARRAY_PREPEND" | "ARRAY_REPEAT" | "SLICE" | "FLATTEN" | "STRFTIME" | "FORMAT_DATE" | "EXTRACT_YEAR" | "EXTRACT_MONTH" | "EXTRACT_DAY" | "CHARINDEX_"
-        | "ISNUMERIC" | "PROPERCASE" | "POSITION_OF" | "ARRAY" | "EXPLODE")
+        | "ISNUMERIC" | "PROPERCASE" | "POSITION_OF" | "ARRAY" | "EXPLODE" | "MAKE_TIMESTAMP" | "UNIX_SECONDS" | "UNIX_MILLIS" | "UNIX_MICROS"
+        | "CURRENT_TIMEZONE" | "REGEXP_EXTRACT_ALL" | "JSON_ARRAY_LENGTH" | "TO_JSON" | "FROM_JSON")
 }
 
 #[cfg(test)]
