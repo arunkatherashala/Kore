@@ -244,12 +244,14 @@ fn compare(op: &BinOpKind, l: &Val, r: &Val, n: usize) -> Option<Vec<u8>> {
     }
 }
 
+type FxSet<T> = std::collections::HashSet<T, std::hash::BuildHasherDefault<crate::executor::FxHasher>>;
+
 /// Per-call cache of IN-list hash sets, keyed by the address of the list inside the predicate being evaluated
 /// (valid for the duration of one top-level call), so each set is built once instead of once per chunk.
 #[derive(Default)]
 struct Cache {
-    ints: std::sync::Mutex<std::collections::HashMap<usize, std::sync::Arc<std::collections::HashSet<i64>>>>,
-    nums: std::sync::Mutex<std::collections::HashMap<usize, std::sync::Arc<std::collections::HashSet<u64>>>>,
+    ints: std::sync::Mutex<std::collections::HashMap<usize, std::sync::Arc<FxSet<i64>>>>,
+    nums: std::sync::Mutex<std::collections::HashMap<usize, std::sync::Arc<FxSet<u64>>>>,
 }
 
 /// LIKE pattern made only of literal text and `%` (no `_`, no escapes): matched with substring search
@@ -325,11 +327,11 @@ fn tri<'a>(e: &'a Expr, block: &'a DataBlock, w: Win, c: &Cache) -> Option<Vec<u
         Expr::In { expr, values, negated } => {
             let v = operand(expr, block, w, c)?;
             let key_id = values.as_ptr() as usize;
-            let int_set: Option<std::sync::Arc<std::collections::HashSet<i64>>> = if v.is_int() {
+            let int_set: Option<std::sync::Arc<FxSet<i64>>> = if v.is_int() {
                 let cached = c.ints.lock().unwrap().get(&key_id).cloned();
                 match cached {
                     Some(h) => Some(h),
-                    None => values.iter().map(|x| if let Expr::Int(i) = x { Some(*i) } else { None }).collect::<Option<std::collections::HashSet<i64>>>()
+                    None => values.iter().map(|x| if let Expr::Int(i) = x { Some(*i) } else { None }).collect::<Option<FxSet<i64>>>()
                         .map(|h| { let h = std::sync::Arc::new(h); c.ints.lock().unwrap().insert(key_id, h.clone()); h }),
                 }
             } else { None };
@@ -338,10 +340,10 @@ fn tri<'a>(e: &'a Expr, block: &'a DataBlock, w: Win, c: &Cache) -> Option<Vec<u
             } else if v.is_num() {
                 let key = |f: f64| if f == 0.0 { 0.0f64.to_bits() } else { f.to_bits() };
                 let cached = c.nums.lock().unwrap().get(&key_id).cloned();
-                let big: Option<std::sync::Arc<std::collections::HashSet<u64>>> = match cached {
+                let big: Option<std::sync::Arc<FxSet<u64>>> = match cached {
                     Some(h) => Some(h),
                     None if values.len() > 8 => {
-                        let mut hs = std::collections::HashSet::with_capacity(values.len());
+                        let mut hs = FxSet::<u64>::with_capacity_and_hasher(values.len(), Default::default());
                         for x in values {
                             match x { Expr::Int(i) => { hs.insert(key(*i as f64)); } Expr::Float(f) => { hs.insert(key(*f)); } _ => return None }
                         }

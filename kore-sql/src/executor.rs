@@ -4922,7 +4922,7 @@ fn global_agg(block: DataBlock, projections: &[Projection]) -> Result<DataBlock,
 
 /// Multiplicative hasher for small integer keys (std's SipHash dominates a 6M-row group-by otherwise).
 #[derive(Default, Clone, Copy)]
-struct FxHasher(u64);
+pub(crate) struct FxHasher(u64);
 
 impl std::hash::Hasher for FxHasher {
     fn finish(&self) -> u64 { self.0.rotate_left(26) } // the multiply leaves the low bits weak; hashbrown indexes by them
