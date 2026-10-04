@@ -1513,6 +1513,30 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
             }
         }
     }
+    // ORDER BY ... LIMIT k on NULL-free plain columns: keep the k best rows instead of sorting everything.
+    if !spill_sorted && !stmt.order_by.is_empty() {
+        if let (Some(lim), None) = (stmt.limit, stmt.offset) {
+            let k = lim as usize;
+            if k > 0 && k <= 100_000 && result.num_rows > k.saturating_mul(8).max(50_000) {
+                let mut keys: Vec<(usize, bool)> = Vec::new();
+                for item in &stmt.order_by {
+                    if item.col.is_empty() || item.nulls_first.is_some() { break; }
+                    let col_raw = resolve_col_name(&item.col, "");
+                    let col = find_order_col_in_result(&col_raw, &result, &stmt.projections).unwrap_or(col_raw);
+                    match sort_col_name(&result, &col).and_then(|n| result.columns.iter().position(|c| c.name == n)) {
+                        Some(i) => keys.push((i, item.desc)),
+                        None => break,
+                    }
+                }
+                if keys.len() == stmt.order_by.len() {
+                    if let Some(idx) = top_n_indices(&result, &keys, k) {
+                        result = result.select_rows(&idx);
+                        spill_sorted = true; // already ordered; skip the full sorts below
+                    }
+                }
+            }
+        }
+    }
     let order_items = if spill_sorted { &stmt.order_by[..0] } else { &stmt.order_by[..] };
     for item in order_items.iter().rev() {
         if !item.col.is_empty() {
@@ -3925,6 +3949,49 @@ fn sort_block_nulls(block: DataBlock, col: &str, desc: bool, nulls_first: Option
 
 // ─── Limit ────────────────────────────────────────────────────────────────────
 
+/// Row indices of the first `k` rows of a stable multi-key sort (ties keep input order), computed with
+/// per-chunk partial selection. None when a key column has NULLs / NaN or an unsupported type (the full
+/// sort then handles it).
+fn top_n_indices(block: &DataBlock, keys: &[(usize, bool)], k: usize) -> Option<Vec<usize>> {
+    use rayon::prelude::*;
+    use std::cmp::Ordering;
+    enum K<'a> { I(&'a [Option<i64>]), F(&'a [Option<f64>]), S(&'a [Option<String>]), D(&'a [u8], &'a [String]) }
+    let mut cols: Vec<(K, bool)> = Vec::new();
+    for &(ci, desc) in keys {
+        let k = match &block.columns[ci].data {
+            ColumnData::Int64(v) if v.iter().all(|x| x.is_some()) => K::I(v),
+            ColumnData::Float64(v) if v.iter().all(|x| matches!(x, Some(f) if !f.is_nan())) => K::F(v),
+            ColumnData::Str(v) if v.iter().all(|x| x.is_some()) => K::S(v),
+            ColumnData::StrDict { codes, dict } if codes.iter().all(|&c| c != u8::MAX && (c as usize) < dict.len()) => K::D(codes, dict),
+            _ => return None,
+        };
+        cols.push((k, desc));
+    }
+    let cmp = |a: usize, b: usize| -> Ordering {
+        for (kc, desc) in &cols {
+            let o = match kc {
+                K::I(v) => v[a].cmp(&v[b]),
+                K::F(v) => v[a].partial_cmp(&v[b]).unwrap_or(Ordering::Equal),
+                K::S(v) => v[a].as_deref().cmp(&v[b].as_deref()),
+                K::D(c, d) => d[c[a] as usize].cmp(&d[c[b] as usize]),
+            };
+            let o = if *desc { o.reverse() } else { o };
+            if o != Ordering::Equal { return o; }
+        }
+        a.cmp(&b)
+    };
+    let n = block.num_rows;
+    const CHUNK: usize = 1 << 18;
+    let mut cand: Vec<usize> = (0..n.div_ceil(CHUNK)).into_par_iter().flat_map_iter(|ci| {
+        let mut v: Vec<usize> = (ci * CHUNK..((ci + 1) * CHUNK).min(n)).collect();
+        if v.len() > k { v.select_nth_unstable_by(k - 1, |&a, &b| cmp(a, b)); v.truncate(k); }
+        v.into_iter()
+    }).collect();
+    if cand.len() > k { cand.select_nth_unstable_by(k - 1, |&a, &b| cmp(a, b)); cand.truncate(k); }
+    cand.sort_by(|&a, &b| cmp(a, b));
+    Some(cand)
+}
+
 fn limit_block(block: DataBlock, n: usize) -> DataBlock {
     let take = n.min(block.num_rows);
     let indices: Vec<usize> = (0..take).collect();
@@ -4066,28 +4133,42 @@ fn merge_single_row(left: &DataBlock, li: usize, right: &DataBlock, ri: usize) -
     DataBlock { num_rows: 1, columns }
 }
 
-/// Remove duplicate rows (for SELECT DISTINCT).
-/// Builds a string key per row; keeps first occurrence.
+/// Remove duplicate rows (for SELECT DISTINCT), keeping the first occurrence.
+/// Rows are identified by a 128-bit hash built column by column (no per-row String); floats compare at
+/// 1e-10 resolution and NULL is its own value, as before.
 fn deduplicate(block: DataBlock) -> DataBlock {
+    use rayon::prelude::*;
     use std::collections::HashSet;
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut keep: Vec<usize> = Vec::new();
-    for i in 0..block.num_rows {
-        let key: String = block.columns.iter().map(|c| {
-            match c.data.get_value(i) {
-                Value::Null      => "∅".to_string(),
-                Value::Int(n)    => n.to_string(),
-                Value::Float(f)  => format!("{f:.10}"),
-                Value::Bool(b)   => b.to_string(),
-                Value::Str(s)    => s,
-                Value::Array(values) => format!("{values:?}"),
-                Value::Map(values)   => format!("{values:?}"),
+    use std::hash::BuildHasherDefault;
+    let n = block.num_rows;
+    let mut hashes: Vec<u128> = vec![0xcbf29ce484222325_cbf29ce484222325u128; n];
+    const M: u128 = 0x9e3779b97f4a7c15_f39cc0605cedc835u128;
+    for (ci, col) in block.columns.iter().enumerate() {
+        let rot = (ci as u32 * 13 + 7) % 127;
+        let mix = |h: &mut u128, v: u64, tag: u64| {
+            *h = h.wrapping_add(v as u128 | ((tag as u128) << 64)).wrapping_mul(M).rotate_left(rot);
+        };
+        match &col.data {
+            ColumnData::Int64(v) => hashes.par_iter_mut().zip(v.par_iter()).for_each(|(h, x)| match x { Some(x) => mix(h, *x as u64, 1), None => mix(h, 0, 0) }),
+            ColumnData::Float64(v) => hashes.par_iter_mut().zip(v.par_iter()).for_each(|(h, x)| match x {
+                Some(f) if f.is_finite() && f.abs() < 9.0e8 => mix(h, ((f * 1e10).round() as i64 + 0) as u64, 2),
+                Some(f) => mix(h, f.to_bits(), 3),
+                None => mix(h, 0, 0),
+            }),
+            ColumnData::Bool(v) => hashes.par_iter_mut().zip(v.par_iter()).for_each(|(h, x)| match x { Some(b) => mix(h, *b as u64, 4), None => mix(h, 0, 0) }),
+            ColumnData::Str(v) => hashes.par_iter_mut().zip(v.par_iter()).for_each(|(h, x)| match x { Some(t) => mix(h, fnv64(t.as_bytes()) ^ (t.len() as u64).rotate_left(40), 5), None => mix(h, 0, 0) }),
+            ColumnData::StrDict { codes, dict } => {
+                let dh: Vec<u64> = dict.iter().map(|t| fnv64(t.as_bytes()) ^ (t.len() as u64).rotate_left(40)).collect();
+                hashes.par_iter_mut().zip(codes.par_iter()).for_each(|(h, &c)| if c == u8::MAX { mix(h, 0, 0) } else { mix(h, dh.get(c as usize).copied().unwrap_or(0), 5) })
             }
-        }).collect::<Vec<_>>().join("\x00");
-        if seen.insert(key) {
-            keep.push(i);
         }
     }
+    let mut seen: HashSet<(u64, u64), BuildHasherDefault<FxHasher>> = HashSet::with_capacity_and_hasher(n.min(1 << 22), Default::default());
+    let mut keep: Vec<usize> = Vec::new();
+    for (i, h) in hashes.iter().enumerate() {
+        if seen.insert(((*h >> 64) as u64, *h as u64)) { keep.push(i); }
+    }
+    if keep.len() == n { return block; }
     block.select_rows(&keep)
 }
 

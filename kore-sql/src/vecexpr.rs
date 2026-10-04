@@ -84,7 +84,7 @@ impl Val<'_> {
     fn is_text(&self) -> bool { matches!(self, Val::S(_) | Val::D(..) | Val::Text(_)) }
 }
 
-fn operand<'a>(e: &'a Expr, block: &'a DataBlock, w: Win) -> Option<Val<'a>> {
+fn operand<'a>(e: &'a Expr, block: &'a DataBlock, w: Win, c: &Cache) -> Option<Val<'a>> {
     match e {
         Expr::Int(i) => Some(Val::NumI(*i)),
         Expr::Float(f) => Some(Val::Num(*f)),
@@ -97,7 +97,7 @@ fn operand<'a>(e: &'a Expr, block: &'a DataBlock, w: Win) -> Option<Val<'a>> {
             ColumnData::Bool(_) => None,
         },
         Expr::BinOp { op: BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul | BinOpKind::Div | BinOpKind::Mod, .. }
-        | Expr::Case { .. } => num_win(e, block, w).map(Val::Owned),
+        | Expr::Case { .. } => num_win(e, block, w, c).map(Val::Owned),
         _ => None,
     }
 }
@@ -155,6 +155,54 @@ fn compare(op: &BinOpKind, l: &Val, r: &Val, n: usize) -> Option<Vec<u8>> {
     }
 }
 
+/// Per-call cache of IN-list hash sets, keyed by the address of the list inside the predicate being evaluated
+/// (valid for the duration of one top-level call), so each set is built once instead of once per chunk.
+#[derive(Default)]
+struct Cache {
+    ints: std::sync::Mutex<std::collections::HashMap<usize, std::sync::Arc<std::collections::HashSet<i64>>>>,
+    nums: std::sync::Mutex<std::collections::HashMap<usize, std::sync::Arc<std::collections::HashSet<u64>>>>,
+}
+
+/// LIKE pattern made only of literal text and `%` (no `_`, no escapes): matched with substring search
+/// instead of the byte-at-a-time wildcard matcher.
+struct LikePlan { segs: Vec<String>, anchored_start: bool, anchored_end: bool }
+
+impl LikePlan {
+    fn new(p: &str) -> Option<LikePlan> {
+        if p.is_empty() || p.contains('_') || p.contains('\\') { return None; }
+        Some(LikePlan {
+            segs: p.split('%').filter(|s| !s.is_empty()).map(str::to_string).collect(),
+            anchored_start: !p.starts_with('%'),
+            anchored_end: !p.ends_with('%'),
+        })
+    }
+    fn matches(&self, s: &str) -> bool {
+        let n = self.segs.len();
+        if n == 0 { return true; } // only '%'
+        let mut rest = s;
+        let mut first = 0;
+        let mut last = n;
+        if self.anchored_start {
+            let Some(r) = rest.strip_prefix(self.segs[0].as_str()) else { return false };
+            rest = r;
+            first = 1;
+        }
+        if self.anchored_end {
+            if n == 1 && self.anchored_start { return rest.is_empty(); }
+            let Some(r) = rest.strip_suffix(self.segs[n - 1].as_str()) else { return false };
+            rest = r;
+            last = n - 1;
+        }
+        for seg in &self.segs[first..last] {
+            match rest.find(seg.as_str()) {
+                Some(pos) => rest = &rest[pos + seg.len()..],
+                None => return false,
+            }
+        }
+        true
+    }
+}
+
 fn not(v: Vec<u8>) -> Vec<u8> {
     v.into_iter().map(|x| match x { TRUE => FALSE, FALSE => TRUE, o => o }).collect()
 }
@@ -164,42 +212,64 @@ fn and3(l: &[u8], r: &[u8]) -> Vec<u8> {
 }
 
 /// Three-valued truth value of `e` for the rows in `w`, or None if the expression is not covered.
-fn tri<'a>(e: &'a Expr, block: &'a DataBlock, w: Win) -> Option<Vec<u8>> {
+fn tri<'a>(e: &'a Expr, block: &'a DataBlock, w: Win, c: &Cache) -> Option<Vec<u8>> {
     let n = w.len();
     match e {
         Expr::Bool(b) => Some(vec![if *b { TRUE } else { FALSE }; n]),
-        Expr::Not(x) => Some(not(tri(x, block, w)?)),
-        Expr::BinOp { op: BinOpKind::And, left, right } => Some(and3(&tri(left, block, w)?, &tri(right, block, w)?)),
+        Expr::Not(x) => Some(not(tri(x, block, w, c)?)),
+        Expr::BinOp { op: BinOpKind::And, left, right } => Some(and3(&tri(left, block, w, c)?, &tri(right, block, w, c)?)),
         Expr::BinOp { op: BinOpKind::Or, left, right } => {
-            let (l, r) = (tri(left, block, w)?, tri(right, block, w)?);
+            let (l, r) = (tri(left, block, w, c)?, tri(right, block, w, c)?);
             Some(l.iter().zip(&r).map(|(&a, &b)| if a == TRUE || b == TRUE { TRUE } else if a == FALSE && b == FALSE { FALSE } else { NULL }).collect())
         }
         Expr::BinOp { op: op @ (BinOpKind::Eq | BinOpKind::Ne | BinOpKind::Lt | BinOpKind::Le | BinOpKind::Gt | BinOpKind::Ge), left, right } => {
-            let (l, r) = (operand(left, block, w)?, operand(right, block, w)?);
+            let (l, r) = (operand(left, block, w, c)?, operand(right, block, w, c)?);
             compare(op, &l, &r, n)
         }
         Expr::Between { expr, low, high, negated } => {
-            let (v, lo, hi) = (operand(expr, block, w)?, operand(low, block, w)?, operand(high, block, w)?);
+            let (v, lo, hi) = (operand(expr, block, w, c)?, operand(low, block, w, c)?, operand(high, block, w, c)?);
             let ge = compare(&BinOpKind::Ge, &v, &lo, n)?;
             let le = compare(&BinOpKind::Le, &v, &hi, n)?;
             let both = and3(&ge, &le);
             Some(if *negated { not(both) } else { both })
         }
         Expr::In { expr, values, negated } => {
-            let v = operand(expr, block, w)?;
-            let int_set: Option<Vec<i64>> = if v.is_int() { values.iter().map(|x| if let Expr::Int(i) = x { Some(*i) } else { None }).collect() } else { None };
-            let out: Vec<u8> = if let Some(set) = int_set {
-                let hs: std::collections::HashSet<i64> = set.into_iter().collect();
+            let v = operand(expr, block, w, c)?;
+            let key_id = values.as_ptr() as usize;
+            let int_set: Option<std::sync::Arc<std::collections::HashSet<i64>>> = if v.is_int() {
+                let cached = c.ints.lock().unwrap().get(&key_id).cloned();
+                match cached {
+                    Some(h) => Some(h),
+                    None => values.iter().map(|x| if let Expr::Int(i) = x { Some(*i) } else { None }).collect::<Option<std::collections::HashSet<i64>>>()
+                        .map(|h| { let h = std::sync::Arc::new(h); c.ints.lock().unwrap().insert(key_id, h.clone()); h }),
+                }
+            } else { None };
+            let out: Vec<u8> = if let Some(hs) = int_set {
                 (0..n).map(|i| match v.int(i) { None => NULL, Some(a) => if hs.contains(&a) { TRUE } else { FALSE } }).collect()
             } else if v.is_num() {
-                let mut set = Vec::with_capacity(values.len());
-                for x in values {
-                    match x { Expr::Int(i) => set.push(*i as f64), Expr::Float(f) => set.push(*f), _ => return None }
+                let key = |f: f64| if f == 0.0 { 0.0f64.to_bits() } else { f.to_bits() };
+                let cached = c.nums.lock().unwrap().get(&key_id).cloned();
+                let big: Option<std::sync::Arc<std::collections::HashSet<u64>>> = match cached {
+                    Some(h) => Some(h),
+                    None if values.len() > 8 => {
+                        let mut hs = std::collections::HashSet::with_capacity(values.len());
+                        for x in values {
+                            match x { Expr::Int(i) => { hs.insert(key(*i as f64)); } Expr::Float(f) => { hs.insert(key(*f)); } _ => return None }
+                        }
+                        let h = std::sync::Arc::new(hs);
+                        c.nums.lock().unwrap().insert(key_id, h.clone());
+                        Some(h)
+                    }
+                    None => None,
+                };
+                let mut set = Vec::new();
+                if big.is_none() {
+                    for x in values {
+                        match x { Expr::Int(i) => set.push(*i as f64), Expr::Float(f) => set.push(*f), _ => return None }
+                    }
                 }
-                if set.len() > 8 {
+                if let Some(hs) = big {
                     // long lists (decorrelated IN subqueries): exact-value hash set instead of a linear scan
-                    let key = |f: f64| if f == 0.0 { 0.0f64.to_bits() } else { f.to_bits() };
-                    let hs: std::collections::HashSet<u64> = set.iter().map(|&f| key(f)).collect();
                     (0..n).map(|i| match v.num(i) {
                         None => NULL,
                         Some(a) => if hs.contains(&key(a)) { TRUE } else { FALSE },
@@ -225,12 +295,23 @@ fn tri<'a>(e: &'a Expr, block: &'a DataBlock, w: Win) -> Option<Vec<u8>> {
             Some(if *negated { not(out) } else { out })
         }
         Expr::Like { expr, pattern, negated } => {
-            let (Expr::Str(p), v) = (pattern.as_ref(), operand(expr, block, w)?) else { return None };
+            let (Expr::Str(p), v) = (pattern.as_ref(), operand(expr, block, w, c)?) else { return None };
             if !v.is_text() { return None; }
-            let out: Vec<u8> = (0..n).map(|i| match v.text(i) {
-                None => NULL,
-                Some(s) => if crate::executor::like_match(s, p) { TRUE } else { FALSE },
-            }).collect();
+            let plan = LikePlan::new(p);
+            let matches = |s: &str| match &plan {
+                Some(pl) => pl.matches(s),
+                None => crate::executor::like_match(s, p),
+            };
+            let out: Vec<u8> = if let Val::D(codes, dict) = &v {
+                // dictionary column: decide once per distinct value
+                let table: Vec<u8> = dict.iter().map(|s| if matches(s) { TRUE } else { FALSE }).collect();
+                codes.iter().map(|&c| if c == u8::MAX { NULL } else { table.get(c as usize).copied().unwrap_or(NULL) }).collect()
+            } else {
+                (0..n).map(|i| match v.text(i) {
+                    None => NULL,
+                    Some(s) => if matches(s) { TRUE } else { FALSE },
+                }).collect()
+            };
             Some(if *negated { not(out) } else { out })
         }
         Expr::IsNull(x) | Expr::IsNotNull(x) => {
@@ -258,10 +339,11 @@ pub fn filter_mask(pred: &Expr, block: &DataBlock) -> Option<Vec<bool>> {
     let n = block.num_rows;
     let wins = windows(n);
     // decide coverage on the first chunk (cheap) before fanning out
-    let first = tri(pred, block, *wins.first()?)?;
+    let c = &Cache::default();
+    let first = tri(pred, block, *wins.first()?, c)?;
     let mut parts: Vec<Vec<bool>> = vec![first.into_iter().map(|v| v == TRUE).collect()];
     let rest: Vec<Option<Vec<bool>>> = wins[1..].par_iter()
-        .map(|&w| tri(pred, block, w).map(|v| v.into_iter().map(|x| x == TRUE).collect()))
+        .map(|&w| tri(pred, block, w, c).map(|v| v.into_iter().map(|x| x == TRUE).collect()))
         .collect();
     for r in rest { parts.push(r?); }
     let mut out = Vec::with_capacity(n);
@@ -275,8 +357,9 @@ pub fn filter_idx(pred: &Expr, block: &DataBlock) -> Option<Vec<usize>> {
     let pick = |w: Win, v: Vec<u8>| -> Vec<usize> {
         v.iter().enumerate().filter_map(|(i, &x)| if x == TRUE { Some(w.lo + i) } else { None }).collect()
     };
-    let first = pick(*wins.first()?, tri(pred, block, *wins.first()?)?);
-    let rest: Vec<Option<Vec<usize>>> = wins[1..].par_iter().map(|&w| tri(pred, block, w).map(|v| pick(w, v))).collect();
+    let c = &Cache::default();
+    let first = pick(*wins.first()?, tri(pred, block, *wins.first()?, c)?);
+    let rest: Vec<Option<Vec<usize>>> = wins[1..].par_iter().map(|&w| tri(pred, block, w, c).map(|v| pick(w, v))).collect();
     let mut parts = vec![first];
     for r in rest { parts.push(r?); }
     let total = parts.iter().map(|p| p.len()).sum();
@@ -285,7 +368,7 @@ pub fn filter_idx(pred: &Expr, block: &DataBlock) -> Option<Vec<usize>> {
     Some(out)
 }
 
-fn num_win(e: &Expr, block: &DataBlock, w: Win) -> Option<Vec<Option<f64>>> {
+fn num_win(e: &Expr, block: &DataBlock, w: Win, c: &Cache) -> Option<Vec<Option<f64>>> {
     let n = w.len();
     match e {
         Expr::Int(i) => Some(vec![Some(*i as f64); n]),
@@ -297,7 +380,7 @@ fn num_win(e: &Expr, block: &DataBlock, w: Win) -> Option<Vec<Option<f64>>> {
             _ => None,
         },
         Expr::BinOp { op: op @ (BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul | BinOpKind::Div | BinOpKind::Mod), left, right } => {
-            let (l, r) = (num_win(left, block, w)?, num_win(right, block, w)?);
+            let (l, r) = (num_win(left, block, w, c)?, num_win(right, block, w, c)?);
             Some(l.iter().zip(&r).map(|(a, b)| match (a, b) {
                 // x / 0 and x % 0 are NULL (Spark semantics), not inf / NaN
                 (Some(_), Some(b)) if *b == 0.0 && matches!(op, BinOpKind::Div | BinOpKind::Mod) => None,
@@ -315,17 +398,17 @@ fn num_win(e: &Expr, block: &DataBlock, w: Win) -> Option<Vec<Option<f64>>> {
             let mut out: Vec<Option<f64>> = vec![None; n];
             let mut decided = vec![false; n];
             for (cond, val) in branches {
-                let c = tri(cond, block, w)?;
-                let v = num_win(val, block, w)?;
+                let cv = tri(cond, block, w, c)?;
+                let v = num_win(val, block, w, c)?;
                 for i in 0..n {
-                    if !decided[i] && c[i] == TRUE {
+                    if !decided[i] && cv[i] == TRUE {
                         decided[i] = true;
                         out[i] = v[i];
                     }
                 }
             }
             if let Some(ev) = else_val {
-                let v = num_win(ev, block, w)?;
+                let v = num_win(ev, block, w, c)?;
                 for i in 0..n {
                     if !decided[i] { out[i] = v[i]; }
                 }
@@ -342,8 +425,9 @@ pub fn num_vec(e: &Expr, block: &DataBlock) -> Option<Vec<Option<f64>>> {
     if crate::testing::no_vecexpr() { return None; }
     let n = block.num_rows;
     let wins = windows(n);
-    let first = num_win(e, block, *wins.first()?)?;
-    let rest: Vec<Option<Vec<Option<f64>>>> = wins[1..].par_iter().map(|&w| num_win(e, block, w)).collect();
+    let c = &Cache::default();
+    let first = num_win(e, block, *wins.first()?, c)?;
+    let rest: Vec<Option<Vec<Option<f64>>>> = wins[1..].par_iter().map(|&w| num_win(e, block, w, c)).collect();
     let mut out = Vec::with_capacity(n);
     out.extend(first);
     for r in rest { out.extend(r?); }
@@ -352,5 +436,25 @@ pub fn num_vec(e: &Expr, block: &DataBlock) -> Option<Vec<Option<f64>>> {
 
 /// Numeric value of `e` for rows `lo..hi` only (NULL = None); None when the expression is not covered.
 pub fn num_range(e: &Expr, block: &DataBlock, lo: usize, hi: usize) -> Option<Vec<Option<f64>>> {
-    num_win(e, block, Win { lo, hi })
+    num_win(e, block, Win { lo, hi }, &Cache::default())
+}
+
+#[cfg(test)]
+mod like_plan_tests {
+    use super::LikePlan;
+
+    /// The substring-search plan must agree with the general wildcard matcher on every pattern it accepts.
+    #[test]
+    fn like_plan_agrees_with_like_match() {
+        let pats = ["%", "a", "a%", "%a", "%a%", "a%b", "a%a", "%a%b%", "ab%ab", "%special%requests%", "x%y%z", "%%a%%", "aa%aa", "é%"];
+        let vals = ["", "a", "b", "aa", "ab", "aba", "abab", "ba", "xyz", "xxyyzz", "zyx", "special requests", "a special request", "requests special",
+                    "special  requests!", "aaa", "aaaa", "éa", "a%b"];
+        for p in pats {
+            let plan = LikePlan::new(p).expect("plain pattern");
+            for v in vals {
+                assert_eq!(plan.matches(v), crate::executor::like_match(v, p), "pattern {p:?} value {v:?}");
+            }
+        }
+        assert!(LikePlan::new("a_b").is_none() && LikePlan::new("").is_none());
+    }
 }
