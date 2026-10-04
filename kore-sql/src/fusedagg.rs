@@ -359,25 +359,57 @@ fn run_local(job: &Job) -> Option<Groups> {
 }
 
 /// Selected rows of one window grouped by key partition, plus the values of the computed aggregate inputs.
-struct WinOut { lo: usize, lists: Vec<Vec<u32>>, vals: Vec<Vec<Option<f64>>> }
+struct WinOut { lo: usize, rows: Vec<u32>, off: [u32; NPART + 1], vals: Vec<Vec<Option<f64>>> }
+
+impl WinOut {
+    #[inline]
+    fn list(&self, p: usize) -> &[u32] { &self.rows[self.off[p] as usize..self.off[p + 1] as usize] }
+}
 
 /// Many groups: partition rows by key hash, then one thread per partition builds that partition's groups.
 fn run_partitioned(job: &Job) -> Option<Groups> {
+    let t0 = std::time::Instant::now();
     let n = job.block.num_rows;
     let nspecs = job.specs.len();
     let nwin = n.div_ceil(WIN);
     // which node feeds each Node spec, and where its window values go in WinOut::vals
+    // a single integer key with a moderate value range and no NULLs: groups are addressed directly by key value
+    let single_int: Option<&[Option<i64>]> = match job.parts.as_slice() { [KeyPart::I(v)] => Some(v), _ => None };
+    let dense: Option<(i64, usize)> = single_int.and_then(|kv| {
+        let (mn, mx, nulls) = kv.par_chunks(1 << 16).map(|c| {
+            let (mut mn, mut mx, mut nl) = (i64::MAX, i64::MIN, 0usize);
+            for x in c { match x { Some(k) => { mn = mn.min(*k); mx = mx.max(*k); } None => nl += 1 } }
+            (mn, mx, nl)
+        }).reduce(|| (i64::MAX, i64::MIN, 0), |a, b| (a.0.min(b.0), a.1.max(b.1), a.2 + b.2));
+        if nulls > 0 || mn > mx { return None; }
+        let range = (mx as i128 - mn as i128 + 1) as u128;
+        if range <= (1u128 << 25) && range <= 8 * n as u128 { Some((mn, range as usize)) } else { None }
+    });
     let node_specs: Vec<usize> = job.specs.iter().enumerate().filter_map(|(i, s)| if matches!(s.src, Src::Node(_)) { Some(i) } else { None }).collect();
     let outs: Vec<Option<WinOut>> = (0..nwin).into_par_iter().map_init(
         || (WinCtx::new(), Vec::with_capacity(WIN)),
         |(wc, sel), wi| {
             let (lo, hi) = (wi * WIN, ((wi + 1) * WIN).min(n));
             job.select(lo, hi, wc, sel)?;
-            let mut lists: Vec<Vec<u32>> = vec![Vec::new(); NPART];
+            // counting sort of the selected rows by key partition: one allocation per window
+            let mut pid: Vec<u8> = Vec::with_capacity(sel.len());
+            let mut off = [0u32; NPART + 1];
             for &i in sel.iter() {
                 let r = lo + i as usize;
-                let p = (key_hash(&key_of(&job.parts, r)) >> (64 - PART_BITS)) as usize;
-                lists[p].push(r as u32);
+                let p = match (dense, single_int) {
+                    (Some((base, range)), Some(kv)) => ((kv[r].unwrap_or(base).wrapping_sub(base) as u64 * NPART as u64) / range as u64) as usize,
+                    _ => (key_hash(&key_of(&job.parts, r)) >> (64 - PART_BITS)) as usize,
+                };
+                pid.push(p as u8);
+                off[p + 1] += 1;
+            }
+            for p in 0..NPART { off[p + 1] += off[p]; }
+            let mut pos = off;
+            let mut rows: Vec<u32> = vec![0; sel.len()];
+            for (j, &i) in sel.iter().enumerate() {
+                let p = pid[j] as usize;
+                rows[pos[p] as usize] = (lo + i as usize) as u32;
+                pos[p] += 1;
             }
             let vals = if node_specs.is_empty() || sel.is_empty() { vec![Vec::new(); node_specs.len()] } else {
                 let res = eval_nodes(&job.nodes, job.block, lo, hi, wc)?;
@@ -386,55 +418,101 @@ fn run_partitioned(job: &Job) -> Option<Groups> {
                     (0..hi - lo).map(|i| res[k].at(i)).collect()
                 }).collect()
             };
-            Some(WinOut { lo, lists, vals })
+            Some(WinOut { lo, rows, off, vals })
         }).collect();
     let outs: Vec<WinOut> = outs.into_iter().collect::<Option<Vec<_>>>()?;
+    if std::env::var_os("KORE_PROF").is_some() { eprintln!("[prof]  part A {:.1}", t0.elapsed().as_secs_f64()*1e3); }
 
-    let parts: Vec<Local> = (0..NPART).into_par_iter().map(|p| {
-        let mut l = Local::new(nspecs, false);
-        for wo in &outs {
-            for &r32 in &wo.lists[p] {
-                let r = r32 as usize;
-                let key = key_of(&job.parts, r);
-                let next = l.keys.len() as u32;
-                let g = match l.index.get(&key) {
-                    Some(&g) => g as usize,
-                    None => { l.new_group(key, r, &job.specs); l.index.insert(key, next); next as usize }
-                };
-                let mut nk = 0usize;
-                for (si, s) in job.specs.iter().enumerate() {
-                    let x: Option<f64> = match &s.src {
-                        Src::Star => { l.cnt[si][g] += 1; continue }
-                        Src::NonNull(c) => { if !is_null_at(c, r) { l.cnt[si][g] += 1; } continue }
-                        Src::ColF(v) => v[r],
-                        Src::ColI(v) => v[r].map(|x| x as f64),
-                        Src::Node(_) => { let x = wo.vals[nk][r - wo.lo]; nk += 1; x }
-                    };
-                    if let Some(x) = x {
-                        l.cnt[si][g] += 1;
-                        let a = &mut l.acc[si][g];
-                        match s.func {
-                            AggFunc::Min => if x < *a { *a = x },
-                            AggFunc::Max => if x > *a { *a = x },
-                            _ => *a += x,
-                        }
-                    }
+    struct PartAgg { first: Vec<usize>, acc: Vec<Vec<f64>>, cnt: Vec<Vec<u64>> }
+    // fold row `r` (window output `wo`) into group `g`
+    let update = |pa: &mut PartAgg, g: usize, r: usize, wo: &WinOut| {
+        let mut nk = 0usize;
+        for (si, s) in job.specs.iter().enumerate() {
+            let x: Option<f64> = match &s.src {
+                Src::Star => { pa.cnt[si][g] += 1; continue }
+                Src::NonNull(c) => { if !is_null_at(c, r) { pa.cnt[si][g] += 1; } continue }
+                Src::ColF(v) => v[r],
+                Src::ColI(v) => v[r].map(|x| x as f64),
+                Src::Node(_) => { let x = wo.vals[nk][r - wo.lo]; nk += 1; x }
+            };
+            if let Some(x) = x {
+                pa.cnt[si][g] += 1;
+                let a = &mut pa.acc[si][g];
+                match s.func {
+                    AggFunc::Min => if x < *a { *a = x },
+                    AggFunc::Max => if x > *a { *a = x },
+                    _ => *a += x,
                 }
             }
         }
-        l
+    };
+    let parts: Vec<PartAgg> = (0..NPART).into_par_iter().map(|p| {
+        let rows: usize = outs.iter().map(|wo| wo.list(p).len()).sum();
+        if let (Some((base, range)), Some(kv)) = (dense, single_int) {
+            // direct addressing: slot = key - base - first key of this partition
+            let i0 = (p * range).div_ceil(NPART);
+            let size = ((p + 1) * range).div_ceil(NPART) - i0;
+            let off = base.wrapping_add(i0 as i64);
+            let mut pa = PartAgg { first: vec![usize::MAX; size], acc: job.specs.iter().map(|s| vec![init(s.func); size]).collect(), cnt: vec![vec![0u64; size]; nspecs] };
+            for wo in &outs {
+                for &r32 in wo.list(p) {
+                    let r = r32 as usize;
+                    let g = kv[r].unwrap().wrapping_sub(off) as usize;
+                    if pa.first[g] == usize::MAX { pa.first[g] = r; }
+                    update(&mut pa, g, r, wo);
+                }
+            }
+            // compact to the groups that occurred
+            let live: Vec<usize> = (0..size).filter(|&g| pa.first[g] != usize::MAX).collect();
+            return PartAgg {
+                first: live.iter().map(|&g| pa.first[g]).collect(),
+                acc: pa.acc.iter().map(|a| live.iter().map(|&g| a[g]).collect()).collect(),
+                cnt: pa.cnt.iter().map(|c| live.iter().map(|&g| c[g]).collect()).collect(),
+            };
+        }
+        let cap = rows / 4 + 16;
+        let mut pa = PartAgg { first: Vec::with_capacity(cap), acc: vec![Vec::with_capacity(cap); nspecs], cnt: vec![Vec::with_capacity(cap); nspecs] };
+        let mut index: KeyMap = HashMap::default();
+        let mut index1: HashMap<i64, u32, BuildHasherDefault<FxHasher>> = HashMap::default();
+        if single_int.is_some() { index1.reserve(cap); } else { index.reserve(cap); }
+        let mut null_gid = u32::MAX;
+        for wo in &outs {
+            for &r32 in wo.list(p) {
+                let r = r32 as usize;
+                let next = pa.first.len() as u32;
+                let g = match single_int {
+                    Some(kv) => match kv[r] {
+                        Some(k) => *index1.entry(k).or_insert(next),
+                        None => { if null_gid == u32::MAX { null_gid = next; } null_gid }
+                    },
+                    None => *index.entry(key_of(&job.parts, r)).or_insert(next),
+                };
+                if g == next {
+                    pa.first.push(r);
+                    for (si, s) in job.specs.iter().enumerate() { pa.acc[si].push(init(s.func)); pa.cnt[si].push(0); }
+                }
+                update(&mut pa, g as usize, r, wo);
+            }
+        }
+        pa
     }).collect();
+    if std::env::var_os("KORE_PROF").is_some() { eprintln!("[prof]  part B {:.1}", t0.elapsed().as_secs_f64()*1e3); }
 
-    // concatenate the partitions and restore first-appearance order
-    let total: usize = parts.iter().map(|l| l.keys.len()).sum();
-    let mut order: Vec<(usize, u32, u32)> = Vec::with_capacity(total);
-    for (pi, l) in parts.iter().enumerate() {
-        for (gi, &f) in l.first.iter().enumerate() { order.push((f, pi as u32, gi as u32)); }
+    // restore first-appearance order: scatter every group to the row where it first appeared, then sweep the rows
+    let mut slot: Vec<u64> = vec![u64::MAX; n];
+    for (pi, pa) in parts.iter().enumerate() {
+        for (gi, &f) in pa.first.iter().enumerate() { slot[f] = ((pi as u64) << 32) | gi as u64; }
     }
-    order.par_sort_unstable_by_key(|t| t.0);
-    let first: Vec<usize> = order.iter().map(|t| t.0).collect();
-    let acc: Vec<Vec<f64>> = (0..nspecs).map(|si| order.iter().map(|&(_, p, g)| parts[p as usize].acc[si][g as usize]).collect()).collect();
-    let cnt: Vec<Vec<u64>> = (0..nspecs).map(|si| order.iter().map(|&(_, p, g)| parts[p as usize].cnt[si][g as usize]).collect()).collect();
+    if std::env::var_os("KORE_PROF").is_some() { eprintln!("[prof]  part C1 {:.1}", t0.elapsed().as_secs_f64()*1e3); }
+    let chunks: Vec<Vec<(u32, u64)>> = slot.par_chunks(1 << 16).enumerate().map(|(ci, c)| {
+        c.iter().enumerate().filter(|(_, &v)| v != u64::MAX).map(|(i, &v)| (((ci << 16) + i) as u32, v)).collect()
+    }).collect();
+    drop(slot);
+    let entries: Vec<(u32, u64)> = chunks.concat();
+    let first: Vec<usize> = entries.par_iter().map(|e| e.0 as usize).collect();
+    let acc: Vec<Vec<f64>> = (0..nspecs).map(|si| entries.par_iter().map(|&(_, v)| parts[(v >> 32) as usize].acc[si][(v & 0xFFFF_FFFF) as usize]).collect()).collect();
+    let cnt: Vec<Vec<u64>> = (0..nspecs).map(|si| entries.par_iter().map(|&(_, v)| parts[(v >> 32) as usize].cnt[si][(v & 0xFFFF_FFFF) as usize]).collect()).collect();
+    if std::env::var_os("KORE_PROF").is_some() { eprintln!("[prof]  part C {:.1}", t0.elapsed().as_secs_f64()*1e3); }
     Some(Groups { first, acc, cnt })
 }
 
@@ -541,7 +619,11 @@ pub(crate) fn run(req: Request) -> Option<DataBlock> {
     if req.group_cols.is_empty() && outs.iter().any(|o| matches!(o, Out::Key(..))) { return None; }
 
     let job = Job { block, pred: req.pred, parts, specs, nodes: plan.nodes, dict_keys };
-    let groups = if looks_high_cardinality(&job) { run_partitioned(&job)? } else { run_local(&job)? };
+    let t0 = std::time::Instant::now();
+    let hc = looks_high_cardinality(&job);
+    if std::env::var_os("KORE_PROF").is_some() { eprintln!("[prof] fused hc={hc} probe {:.1}", t0.elapsed().as_secs_f64()*1e3); }
+    let groups = if hc { run_partitioned(&job)? } else { run_local(&job)? };
+    if std::env::var_os("KORE_PROF").is_some() { eprintln!("[prof] fused groups {:.1}", t0.elapsed().as_secs_f64()*1e3); }
     let ng = groups.first.len();
     if ng == 0 { return None; }
 
@@ -580,6 +662,7 @@ pub(crate) fn run(req: Request) -> Option<DataBlock> {
             }
         }
     }
+    if std::env::var_os("KORE_PROF").is_some() { eprintln!("[prof] fused output built {:.1}", t0.elapsed().as_secs_f64()*1e3); }
     Some(DataBlock { columns, num_rows: ng })
 }
 

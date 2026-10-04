@@ -1539,6 +1539,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         result = filter_block(result, having)?;
     }
 
+    prof("having", &t_prof);
     // 5. Projection — done BEFORE ORDER BY so ORDER BY can reference SELECT aliases
     // (especially important when GROUP BY uses CASE expression aliases)
     let has_order = !stmt.order_by.is_empty();

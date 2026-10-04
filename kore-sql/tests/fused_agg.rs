@@ -19,6 +19,7 @@ fn table(n: usize) -> KqlContext {
     let modes = ["AIR", "MAIL", "SHIP", "RAIL", "TRUCK"];
     let flags = ["A", "N", "R"];
     let key: Vec<Option<i64>> = (0..n).map(|_| if r.below(50) == 0 { None } else { Some(r.below(n / 4) as i64) }).collect();
+    let kd: Vec<Option<i64>> = (0..n).map(|_| Some(1000 + r.below(n / 4) as i64)).collect();
     let k2: Vec<Option<i64>> = (0..n).map(|_| Some(r.below(3) as i64)).collect();
     let qty: Vec<Option<f64>> = (0..n).map(|_| if r.below(20) == 0 { None } else { Some((r.below(50) + 1) as f64) }).collect();
     let price: Vec<Option<f64>> = (0..n).map(|_| Some(r.below(100_000) as f64 / 100.0)).collect();
@@ -30,7 +31,7 @@ fn table(n: usize) -> KqlContext {
     let skey: Vec<Option<String>> = (0..n).map(|_| Some(format!("k{}", r.below(n / 8)))).collect();
     let mut c = KqlContext::new();
     c.register("t", DataBlock::new(vec![
-        Column::int64("k", key), Column::int64("k2", k2), Column::float64("qty", qty), Column::float64("price", price),
+        Column::int64("k", key), Column::int64("kd", kd), Column::int64("k2", k2), Column::float64("qty", qty), Column::float64("price", price),
         Column::float64("disc", disc), Column::int64("ival", ival), Column::str_col("d", date), Column::str_col("mode", mode),
         Column::str_dict("flag", flag_codes, flags.iter().map(|s| s.to_string()).collect()), Column::str_col("sk", skey),
     ]).unwrap());
@@ -63,6 +64,9 @@ fn fused_matches_ordinary_path() {
         "select sum(price) as s from t where qty > 1000",
         "select k, sum(qty) as sq, count(*) as n from t group by k",
         "select k, sum(price * (1 - disc)) as rev, count(qty) as c, min(ival) as mn, max(qty) as mx, avg(disc) as a from t where d < '1996-01-01' and mode in ('AIR', 'MAIL') group by k",
+        "select kd, sum(qty) as sq, count(*) as n, avg(price) as ap, min(qty) as mn from t group by kd",
+        "select kd, sum(price * (1 - disc)) as rev, count(qty) as c from t where d < '1995-01-01' and mode = 'AIR' group by kd",
+        "select kd, sum(qty) as sq from t group by kd having sum(qty) > 150",
         "select k, k2, sum(qty) as sq from t group by k, k2",
         "select sk, count(*) as n, sum(case when mode = 'AIR' then 1 else 0 end) as air from t group by sk",
         "select k, sum(qty) as sq from t group by k having sum(qty) > 150",
