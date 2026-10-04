@@ -293,4 +293,6 @@ pub struct Query {
 pub struct CteClause {
     pub name: String,
     pub body: SelectStmt,
+    /// `WITH RECURSIVE`: the body is `anchor UNION [ALL] recursive-term` and may refer to its own name.
+    pub recursive: bool,
 }

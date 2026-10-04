@@ -20,7 +20,11 @@ pub fn parse_query(sql: &str) -> Result<Query, KoreError> {
     // WITH clause (CTEs)
     let ctes = if p.peek() == &Token::With {
         p.pos += 1;
-        p.parse_cte_list()?
+        let recursive = p.peek_ident_upper() == "RECURSIVE";
+        if recursive { p.pos += 1; }
+        let mut list = p.parse_cte_list()?;
+        for c in &mut list { c.recursive = recursive; }
+        list
     } else { vec![] };
 
     // Main statement: SELECT arms joined by UNION / INTERSECT / EXCEPT / MINUS, optional trailing ORDER BY / LIMIT
@@ -309,15 +313,31 @@ impl Parser {
         self.parse_select()
     }
 
+    /// A LIMIT / OFFSET operand: an integer literal or any constant expression (`1 + 1`, `CAST('3' AS INT)`).
+    fn parse_row_count(&mut self, what: &str) -> Result<u64, KoreError> {
+        let e = self.parse_expr(4)?;
+        if let Expr::Int(n) = &e {
+            return if *n >= 0 { Ok(*n as u64) } else { Err(KoreError::InvalidArgument(format!("{what} expects a non-negative integer, got {n}"))) };
+        }
+        if crate::ast_walk::any_node(&e, &|x| matches!(x, Expr::Agg { .. } | Expr::AggX { .. } | Expr::Window { .. } | Expr::ScalarSubquery(_))) {
+            return Err(KoreError::InvalidArgument(format!("{what} expects a constant expression")));
+        }
+        let v = crate::executor::eval_expr(&e, &kore_core::DataBlock::empty(), 0);
+        let n = match v { crate::executor::ExprVal::Int(n) => Some(n), crate::executor::ExprVal::Float(f) if f.fract() == 0.0 => Some(f as i64), _ => None };
+        match n {
+            Some(n) if n >= 0 => Ok(n as u64),
+            _ => Err(KoreError::InvalidArgument(format!("{what} expects a non-negative integer constant"))),
+        }
+    }
+
     /// `LIMIT n`, `OFFSET m [ROWS]`, `FETCH FIRST n ROWS ONLY` in any sensible order.
     fn parse_limit_offset(&mut self) -> Result<(Option<u64>, Option<u64>), KoreError> {
         let (mut limit, mut offset) = (None, None);
         loop {
             if self.consume_if(&Token::Limit) {
-                match self.advance() {
-                    Token::Int(n) if n >= 0 => limit = Some(n as u64),
-                    Token::All => {}
-                    other => return Err(KoreError::InvalidArgument(format!("LIMIT expects a non-negative integer, got {:?}", other))),
+                if self.consume_if(&Token::All) {
+                } else {
+                    limit = Some(self.parse_row_count("LIMIT")?);
                 }
             } else if self.peek_ident_upper() == "FETCH" {
                 // FETCH FIRST n ROWS ONLY
@@ -330,10 +350,7 @@ impl Parser {
                 limit = Some(n);
             } else if self.peek_ident_upper() == "OFFSET" {
                 self.pos += 1;
-                match self.advance() {
-                    Token::Int(n) if n >= 0 => offset = Some(n as u64),
-                    other => return Err(KoreError::InvalidArgument(format!("OFFSET expects a non-negative integer, got {:?}", other))),
-                }
+                offset = Some(self.parse_row_count("OFFSET")?);
                 if self.peek_ident_upper() == "ROWS" || self.peek() == &Token::Rows { self.pos += 1; }
             } else {
                 break;
@@ -487,7 +504,7 @@ impl Parser {
                     values: None, push_filter: None, col_aliases,
                 });
             }
-            ctes.push(CteClause { name, body });
+            ctes.push(CteClause { name, body, recursive: false });
             if !self.consume_if(&Token::Comma) { break; }
         }
         Ok(ctes)
@@ -731,17 +748,24 @@ impl Parser {
             Token::Ident(s) if s.eq_ignore_ascii_case("VIEW") => { self.pos += 1; }
             _ => return Err(KoreError::InvalidArgument("expected VIEW after LATERAL".into())),
         }
-        // EXPLODE(expr)
-        self.expect(&Token::Explode)?;
+        // EXPLODE / POSEXPLODE / EXPLODE_OUTER / POSEXPLODE_OUTER (expr)
+        let kind = match self.peek().clone() {
+            Token::Explode => "EXPLODE".to_string(),
+            Token::Ident(s) if matches!(s.to_ascii_uppercase().as_str(), "POSEXPLODE" | "EXPLODE_OUTER" | "POSEXPLODE_OUTER") => s.to_ascii_uppercase(),
+            other => return Err(KoreError::InvalidArgument(format!("expected a generator (EXPLODE, POSEXPLODE, ..) after LATERAL VIEW, got {:?}", other))),
+        };
+        self.pos += 1;
         self.expect(&Token::LParen)?;
         let expr = self.parse_expr(0)?;
         self.expect(&Token::RParen)?;
         // table_alias
         let table_alias = self.expect_ident()?;
-        // AS col_alias
+        // AS col_alias [, col_alias2]  (POSEXPLODE and EXPLODE over a MAP produce several columns)
         self.expect(&Token::As)?;
-        let col_alias = self.expect_alias()?;
-        Ok(LateralView { expr: Expr::Explode(Box::new(expr)), table_alias, col_alias })
+        let mut col_alias = self.expect_alias()?;
+        while self.consume_if(&Token::Comma) { col_alias.push(','); col_alias.push_str(&self.expect_alias()?); }
+        let inner = if kind == "EXPLODE" { expr } else { Expr::FuncCall { name: format!("__{kind}"), args: vec![expr] } };
+        Ok(LateralView { expr: Expr::Explode(Box::new(inner)), table_alias, col_alias })
     }
 
     // ─── PIVOT ─────────────────────────────────────────────────────────────
@@ -1084,8 +1108,8 @@ impl Parser {
                 self.pos += 1;
                 let idx = self.parse_expr(0)?;
                 self.expect(&Token::RBracket)?;
-                let one_based = Expr::BinOp { op: BinOpKind::Add, left: Box::new(idx), right: Box::new(Expr::Int(1)) };
-                lhs = Expr::FuncCall { name: "ELEMENT_AT".to_string(), args: vec![lhs, one_based] };
+                // arrays: 0-based index (out of range -> NULL); maps: lookup by key
+                lhs = Expr::FuncCall { name: "__SUBSCRIPT".to_string(), args: vec![lhs, idx] };
                 continue;
             }
             // Predicate operators (IS, [NOT] LIKE/IN/BETWEEN/RLIKE) bind tighter than AND/OR/NOT but
@@ -1246,7 +1270,10 @@ impl Parser {
     fn parse_unary(&mut self) -> Result<Expr, KoreError> {
         // EXISTS (SELECT ...)
         if let Token::Ident(ref s) = self.peek().clone() {
-            if s.eq_ignore_ascii_case("EXISTS") {
+            // EXISTS(array, x -> ...) is the higher-order function; EXISTS (SELECT ...) the subquery predicate
+            let is_subq = matches!(self.tokens.get(self.pos + 1), Some(Token::LParen))
+                && matches!(self.tokens.get(self.pos + 2), Some(Token::Select) | Some(Token::LParen) | Some(Token::With));
+            if s.eq_ignore_ascii_case("EXISTS") && is_subq {
                 self.pos += 1;
                 self.expect(&Token::LParen)?;
                 let stmt = self.parse_compound()?;
@@ -1520,10 +1547,10 @@ impl Parser {
                             if let Some(special) = self.parse_special_call(&up)? { return Ok(special); }
                             // Scalar function call: UPPER(x), ROUND(x,2), etc.
                             let mut args = if self.peek() != &Token::RParen {
-                                let first = self.parse_expr(0)?;
+                                let first = self.parse_arg()?;
                                 let mut a = vec![first];
                                 while self.consume_if(&Token::Comma) {
-                                    a.push(self.parse_expr(0)?);
+                                    a.push(self.parse_arg()?);
                                 }
                                 a
                             } else { vec![] };
@@ -1541,6 +1568,9 @@ impl Parser {
                                 let agg = Expr::AggX { name: "STRING_AGG".into(), args: a, distinct: name == "COLLECT_SET", filter };
                                 // an empty list joins to the empty string, not NULL
                                 return Ok(Expr::FuncCall { name: "COALESCE".into(), args: vec![agg, Expr::Str(String::new())] });
+                            }
+                            if matches!(up.as_str(), "POSEXPLODE" | "EXPLODE_OUTER" | "POSEXPLODE_OUTER") && args.len() == 1 {
+                                return Ok(Expr::Explode(Box::new(Expr::FuncCall { name: format!("__{up}"), args })));
                             }
                             // DATEADD(day, 5, d) / TIMESTAMPDIFF(month, a, b): the unit is a bare word
                             if args.len() == 3 && matches!(up.as_str(), "DATEADD" | "DATE_ADD" | "TIMESTAMPADD" | "DATEDIFF" | "DATE_DIFF" | "TIMESTAMPDIFF") {
@@ -1610,6 +1640,38 @@ impl Parser {
     }
 
     // ── List helpers ───────────────────────────────────────────────────────
+
+    /// Function argument: an expression or a lambda `x -> body` / `(x, y) -> body`. A lambda is stored as
+    /// `FuncCall("__LAMBDA", [Str(param).., body])` so every AST walker handles it without a new node type.
+    fn parse_arg(&mut self) -> Result<Expr, KoreError> {
+        let arrow = |t: &[Token], i: usize| matches!((t.get(i), t.get(i + 1)), (Some(Token::Minus), Some(Token::Gt)));
+        let mut params: Vec<String> = Vec::new();
+        let mut skip = 0usize;
+        match self.tokens.get(self.pos) {
+            Some(Token::Ident(p)) if arrow(&self.tokens, self.pos + 1) => { params.push(p.clone()); skip = 3; }
+            Some(Token::LParen) => {
+                let mut i = self.pos + 1;
+                let mut ok = false;
+                let mut ps = Vec::new();
+                while let Some(Token::Ident(p)) = self.tokens.get(i) {
+                    ps.push(p.clone());
+                    match self.tokens.get(i + 1) {
+                        Some(Token::Comma) => i += 2,
+                        Some(Token::RParen) => { ok = arrow(&self.tokens, i + 2); i += 2; break; }
+                        _ => break,
+                    }
+                }
+                if ok { params = ps; skip = i + 2 - self.pos; }
+            }
+            _ => {}
+        }
+        if params.is_empty() { return self.parse_expr(0); }
+        self.pos += skip;
+        let body = self.parse_expr(0)?;
+        let mut args: Vec<Expr> = params.into_iter().map(Expr::Str).collect();
+        args.push(body);
+        Ok(Expr::FuncCall { name: "__LAMBDA".into(), args })
+    }
 
     fn parse_expr_list(&mut self) -> Result<Vec<Expr>, KoreError> {
         let mut list = vec![self.parse_expr(0)?];
@@ -1966,7 +2028,7 @@ mod tests {
     fn parse_element_at_bracket_syntax() {
         let stmt = parse("SELECT arr[1] AS elem FROM t").unwrap();
         if let Projection::Expr { expr: Expr::FuncCall { name, args }, .. } = &stmt.projections[0] {
-            assert_eq!(name, "ELEMENT_AT");
+            assert_eq!(name, "__SUBSCRIPT");
             assert_eq!(args.len(), 2);
         } else {
             panic!("expected ELEMENT_AT function from bracket syntax");

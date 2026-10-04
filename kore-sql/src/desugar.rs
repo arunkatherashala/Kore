@@ -331,7 +331,18 @@ fn rewrite_unpivot(mut s: SelectStmt, ctx: &KqlContext) -> Result<SelectStmt, Ko
 
 // ─── LATERAL VIEW EXPLODE / EXPLODE in the select list ────────────────────────
 
+/// (positional, outer, inner) of a generator: `__POSEXPLODE(x)` -> (true, false, x)
+fn generator_kind(e: &Expr) -> (bool, bool, &Expr) {
+    match e {
+        Expr::FuncCall { name, args } if args.len() == 1 && matches!(name.as_str(), "__POSEXPLODE" | "__EXPLODE_OUTER" | "__POSEXPLODE_OUTER") => {
+            (name.contains("POS"), name.ends_with("OUTER"), &args[0])
+        }
+        other => (false, false, other),
+    }
+}
+
 fn rewrite_lateral(mut s: SelectStmt, ctx: &KqlContext) -> Result<(SelectStmt, KqlContext), KoreError> {
+    use crate::executor::ExprVal as V;
     let mut views = std::mem::take(&mut s.lateral_views);
     // SELECT explode(x) ...  ==  LATERAL VIEW explode(x) __gen AS col
     let mut projections = Vec::new();
@@ -339,32 +350,78 @@ fn rewrite_lateral(mut s: SelectStmt, ctx: &KqlContext) -> Result<(SelectStmt, K
         match p {
             Projection::Expr { expr: Expr::Explode(inner), alias } => {
                 let n = views.len();
-                let (talias, calias) = (format!("__gen{n}"), alias.clone().unwrap_or_else(|| "col".to_string()));
-                views.push(LateralView { expr: Expr::Explode(inner), table_alias: talias.clone(), col_alias: calias.clone() });
-                projections.push(Projection::Expr { expr: Expr::QualCol(talias, calias.clone()), alias: Some(calias) });
+                let talias = format!("__gen{n}");
+                // the generator's output columns are only known once the item type is (maps give key and value)
+                let calias = alias.clone().unwrap_or_default();
+                views.push(LateralView { expr: Expr::Explode(inner), table_alias: talias.clone(), col_alias: calias });
+                projections.push(Projection::Expr { expr: Expr::Star, alias: Some(format!("__gen:{talias}")) });
             }
             other => projections.push(other),
         }
     }
-    s.projections = projections;
 
-    // evaluate FROM + JOINs, then fan every row out over the array items
+    // evaluate FROM + JOINs, then fan every row out over the generated items
     let mut base = SelectStmt::star_from(s.from.clone());
     base.joins = std::mem::take(&mut s.joins);
     let mut block = execute_select(&base, ctx)?;
+    let mut generated: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     for v in &views {
-        let Expr::Explode(arr) = &v.expr else { return Err(err("LATERAL VIEW needs EXPLODE(..)")) };
-        let mut rows: Vec<usize> = Vec::new();
-        let mut items: Vec<crate::executor::ExprVal> = Vec::new();
+        let Expr::Explode(gen) = &v.expr else { return Err(err("LATERAL VIEW needs EXPLODE(..)")) };
+        let (pos, outer, arr) = generator_kind(gen);
+        let mut is_map = false;
+        // row -> items -> columns of the item
+        let mut per_row: Vec<Vec<Vec<V>>> = Vec::new();
         for r in 0..block.num_rows {
-            let vals = crate::executor::array_items(arr, &block, r)
-                .ok_or_else(|| err("EXPLODE needs an array argument"))?;
-            for it in vals { rows.push(r); items.push(it); }
+            let v0 = crate::executor::eval_expr(arr, &block, r);
+            let items: Vec<Vec<V>> = if crate::maps::is_map(&v0) {
+                is_map = true;
+                crate::maps::decode(&v0).unwrap_or_default().into_iter().map(|(k, x)| vec![k, x]).collect()
+            } else if matches!(v0, V::Null) {
+                Vec::new()
+            } else {
+                crate::arrays::decode(&v0).ok_or_else(|| err("EXPLODE needs an array or map argument"))?.into_iter().map(|x| vec![x]).collect()
+            };
+            per_row.push(items);
         }
+        let ncols = if is_map { 2 } else { 1 } + pos as usize;
+        let mut cols: Vec<Vec<V>> = vec![Vec::new(); ncols];
+        let mut rows: Vec<usize> = Vec::new();
+        for (r, items) in per_row.into_iter().enumerate() {
+            if items.is_empty() {
+                if outer { rows.push(r); for c in cols.iter_mut() { c.push(V::Null); } }
+                continue;
+            }
+            for (i, it) in items.into_iter().enumerate() {
+                rows.push(r);
+                let mut k = 0;
+                if pos { cols[0].push(V::Int(i as i64)); k = 1; }
+                for x in it { cols[k].push(x); k += 1; }
+            }
+        }
+        let defaults: Vec<&str> = match (pos, is_map) { (false, false) => vec!["col"], (true, false) => vec!["pos", "col"], (false, true) => vec!["key", "value"], (true, true) => vec!["pos", "key", "value"] };
+        let given: Vec<String> = v.col_alias.split(',').filter(|x| !x.is_empty()).map(|x| x.to_string()).collect();
+        let names: Vec<String> = (0..ncols).map(|i| given.get(i).cloned().unwrap_or_else(|| defaults[i].to_string())).collect();
         let mut next = block.select_rows(&rows);
-        next.columns.push(crate::general::vals_to_column(format!("{}.{}", v.table_alias, v.col_alias), items, None));
+        for (name, vals) in names.iter().zip(cols) {
+            next.columns.push(crate::general::vals_to_column(format!("{}.{}", v.table_alias, name), vals, None));
+        }
+        generated.insert(v.table_alias.clone(), names);
         block = next;
     }
+    // expand the placeholders of select-list generators
+    let mut expanded = Vec::new();
+    for p in projections {
+        match &p {
+            Projection::Expr { expr: Expr::Star, alias: Some(a) } if a.starts_with("__gen:") => {
+                let talias = &a["__gen:".len()..];
+                for n in generated.get(talias).cloned().unwrap_or_default() {
+                    expanded.push(Projection::Expr { expr: Expr::QualCol(talias.to_string(), n.clone()), alias: Some(n) });
+                }
+            }
+            _ => expanded.push(p),
+        }
+    }
+    s.projections = expanded;
     let mut c2 = ctx.clone();
     c2.register("__lateral", block);
     s.from = TableExpr { name: "__lateral".into(), alias: Some("__lateral".into()), subquery: None, values: None, push_filter: None, col_aliases: Vec::new() };

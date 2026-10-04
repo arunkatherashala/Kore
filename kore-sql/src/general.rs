@@ -745,8 +745,10 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
                     }
                     if name == "GROUPING_ID" {
                         let mut acc: Option<Expr> = None;
-                        let k = args.len();
-                        for (pos, a) in args.iter().enumerate() {
+                        // grouping_id() without arguments covers every grouping expression
+                        let all_args: Vec<Expr> = if args.is_empty() { gexprs.clone() } else { args.clone() };
+                        let k = all_args.len();
+                        for (pos, a) in all_args.iter().enumerate() {
                             match gexprs.iter().position(|g| g == a) {
                                 Some(i) => {
                                     let term = Expr::BinOp { op: BinOpKind::Mul, left: Box::new(Expr::Col(format!("__gf{i}"))), right: Box::new(Expr::Int(1i64 << (k - 1 - pos))) };
@@ -810,6 +812,7 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
 
     // ── windows ──
     let mut windows: Vec<Expr> = Vec::new();
+    let mut last_window_spec: Option<crate::ast::WindowSpec> = None;
     {
         let mut collect = |e: &Expr| {
             walk_expr(e, false, &mut |x| { if matches!(x, Expr::Window { .. }) && !windows.contains(x) { windows.push(x.clone()); } });
@@ -824,11 +827,8 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
         for (k, w) in windows.iter().enumerate() {
             let Expr::Window { func, spec } = w else { unreachable!() };
             let mut ev = |e: &Expr, r: usize| evaluator.eval(e, &g_block, r);
-            let mut vals = window::evaluate(func, spec, nrows, &mut ev)?;
-            // ranking columns have always been exposed as DOUBLE by this engine; callers (and tests) depend on it
-            if matches!(func, WindowFn::RowNumber | WindowFn::Rank | WindowFn::DenseRank | WindowFn::Ntile(_)) {
-                for v in vals.iter_mut() { if let V::Int(i) = v { *v = V::Float(*i as f64); } }
-            }
+            let vals = window::evaluate(func, spec, nrows, &mut ev)?;
+            last_window_spec = Some(spec.clone());
             new_cols.push(vals_to_column(format!("__w{k}"), vals, None));
         }
         evaluator.check()?;
@@ -899,6 +899,20 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
         order.sort_by(|&a, &b| {
             for (k, item) in stmt.order_by.iter().enumerate() {
                 let o = cmp_keys(&keys[k][a], &keys[k][b], item);
+                if o != std::cmp::Ordering::Equal { return o; }
+            }
+            std::cmp::Ordering::Equal
+        });
+    } else if let Some(spec) = &last_window_spec {
+        // no outer ORDER BY: rows come out in the order of the last window (partition keys, then its ORDER BY),
+        // as they leave a window operator in Spark, instead of in input order
+        let items: Vec<OrderByItem> = spec.partition_by.iter()
+            .map(|e| OrderByItem { expr: e.clone(), col: String::new(), desc: false, nulls_first: None })
+            .chain(spec.order_by.iter().cloned()).collect();
+        let wkeys: Vec<Vec<V>> = items.iter().map(|it| (0..n).map(|r| evaluator.eval(&it.expr, &g_block, r)).collect()).collect();
+        order.sort_by(|&a, &b| {
+            for (k, item) in items.iter().enumerate() {
+                let o = cmp_keys(&wkeys[k][a], &wkeys[k][b], item);
                 if o != std::cmp::Ordering::Equal { return o; }
             }
             std::cmp::Ordering::Equal

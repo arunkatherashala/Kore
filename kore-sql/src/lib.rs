@@ -29,6 +29,9 @@ pub mod scalar;
 pub mod datetime;
 pub mod vec_path;
 pub mod spill;
+pub mod dml;
+pub mod maps;
+pub mod hof;
 pub(crate) mod spill_ops;
 
 pub use ast::*;

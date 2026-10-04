@@ -89,8 +89,13 @@ impl KqlContext {
     }
 
     /// Drop a view.
+    pub fn view_exists(&self, name: &str) -> bool {
+        self.views.keys().any(|k| k.eq_ignore_ascii_case(name))
+    }
+
     pub fn drop_view(&mut self, name: &str) -> bool {
-        self.views.remove(name).is_some()
+        let key = self.views.keys().find(|k| k.eq_ignore_ascii_case(name)).cloned();
+        key.map_or(false, |k| self.views.remove(&k).is_some())
     }
 
     /// Drop a table.
@@ -323,6 +328,12 @@ impl KqlContext {
     pub fn execute_dml(&mut self, sql: &str) -> Result<(String, usize), KoreError> {
         let sql_trim = sql.trim();
         let upper = sql_trim.to_uppercase();
+
+        // INSERT / UPDATE / DELETE / TRUNCATE / CREATE TABLE|VIEW / DROP: see dml.rs
+        if let Some(res) = crate::dml::execute(self, sql_trim) {
+            // CREATE TABLE ... STORED AS PARQUET is a query-level statement handled elsewhere
+            if !(upper.starts_with("CREATE TABLE") && upper.contains("STORED AS PARQUET")) { return res; }
+        }
 
         if upper.starts_with("INSERT INTO") {
             return self.dml_insert(sql_trim);
@@ -971,7 +982,10 @@ fn render_arrays(block: &mut DataBlock) {
     for c in &mut block.columns {
         if let ColumnData::Str(v) = &mut c.data {
             for cell in v.iter_mut() {
-                if let Some(t) = cell { if t.starts_with(crate::arrays::MARK) { *t = crate::arrays::render(t); } }
+                if let Some(t) = cell {
+                    if t.starts_with(crate::arrays::MARK) { *t = crate::arrays::render(t); }
+                    else if t.starts_with(crate::maps::MARK) { *t = crate::maps::render(t); }
+                }
             }
         }
     }
@@ -1023,14 +1037,6 @@ fn validate_functions(q: &Query, ctx: &KqlContext) -> Result<(), KoreError> {
     if stmts.into_iter().any(where_clause_misuse) {
         return Err(KoreError::InvalidArgument("aggregate and window functions are not allowed in WHERE".into()));
     }
-    // MAP values are not implemented (arrays are, see arrays.rs): reject instead of answering NULL
-    let mut map_used = false;
-    crate::ast_walk::walk_query(q, true, &mut |e| {
-        if matches!(e, Expr::FuncCall { name, .. } if name == "MAP") { map_used = true; }
-    });
-    if map_used {
-        return Err(KoreError::InvalidArgument("MAP values are not supported".into()));
-    }
     Ok(())
 }
 
@@ -1048,7 +1054,8 @@ pub fn execute_query(query: &Query, ctx: &KqlContext) -> Result<DataBlock, KoreE
     } else {
         let mut l = ctx.clone();
         for cte in &query.ctes {
-            let result = crate::general::strip_qualifiers(execute_select(&cte.body, &l)?);
+            let raw = if cte.recursive { run_recursive_cte(cte, &l)? } else { execute_select(&cte.body, &l)? };
+            let result = crate::general::strip_qualifiers(raw);
             l.register(cte.name.clone(), result);
         }
         extended = l;
@@ -1071,6 +1078,49 @@ pub fn execute_query(query: &Query, ctx: &KqlContext) -> Result<DataBlock, KoreE
     }
 
     Ok(result)
+}
+
+/// `WITH RECURSIVE name AS (anchor UNION [ALL] step)`: iterate the step over the rows produced by the previous
+/// round until it yields nothing new (UNION also drops rows seen before). Capped to avoid runaway recursion.
+fn run_recursive_cte(cte: &CteClause, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
+    const MAX_ROUNDS: usize = 1_000;
+    const MAX_ROWS: usize = 5_000_000;
+    // `WITH r(a, b) AS (..)` wraps the body in a renaming subquery
+    let (stmt, aliases): (&SelectStmt, Vec<String>) = match &cte.body.from.subquery {
+        Some(inner) if cte.body.from.name == cte.name && !cte.body.from.col_aliases.is_empty() => (inner.as_ref(), cte.body.from.col_aliases.clone()),
+        _ => (&cte.body, Vec::new()),
+    };
+    if stmt.set_ops.is_empty() { return execute_select(&cte.body, ctx); }
+    let mut head = stmt.clone();
+    head.set_ops = Vec::new();
+    let mut acc = crate::general::strip_qualifiers(execute_select(&head, ctx)?);
+    if !aliases.is_empty() {
+        if aliases.len() != acc.columns.len() { return Err(KoreError::InvalidArgument("recursive CTE: column alias count differs from the anchor".into())); }
+        for (c, a) in acc.columns.iter_mut().zip(&aliases) { c.name = a.clone(); }
+    }
+    let names: Vec<String> = acc.columns.iter().map(|c| c.name.clone()).collect();
+    let mut working = acc.clone();
+    let mut local = ctx.clone();
+    for _round in 0..MAX_ROUNDS {
+        if working.num_rows == 0 { return Ok(acc); }
+        local.register(cte.name.clone(), working.clone());
+        let mut produced: Option<DataBlock> = None;
+        for (kind, arm) in &stmt.set_ops {
+            let mut r = crate::general::strip_qualifiers(execute_select(arm, &local)?);
+            if r.columns.len() != names.len() { return Err(KoreError::InvalidArgument("recursive CTE: the recursive term has a different column count than the anchor".into())); }
+            for (c, n) in r.columns.iter_mut().zip(&names) { c.name = n.clone(); }
+            if matches!(kind, SetOpKind::Union) {
+                r = crate::general::apply_set_op(r, acc.clone(), &SetOpKind::Except)?;
+            }
+            produced = Some(match produced { None => r, Some(p) => crate::general::apply_set_op(p, r, &SetOpKind::UnionAll)? });
+        }
+        let new = produced.unwrap_or_else(DataBlock::empty);
+        if new.num_rows == 0 { return Ok(acc); }
+        acc = crate::general::apply_set_op(acc, new.clone(), &SetOpKind::UnionAll)?;
+        if acc.num_rows > MAX_ROWS { return Err(KoreError::InvalidArgument("recursive CTE produced too many rows".into())); }
+        working = new;
+    }
+    Err(KoreError::InvalidArgument("recursive CTE did not terminate within 1000 iterations".into()))
 }
 
 /// Hash join; when a memory limit is set and the inputs exceed it, a grace-hash join
@@ -3643,7 +3693,10 @@ fn eval_func(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> ExprVa
             let field = &name[8..];
             crate::scalar::to_dt(&arg(0)).and_then(|d| crate::scalar::date_part(field, &d)).unwrap_or(ExprVal::Null)
         }
-        "MAP" | "EXPLODE" => ExprVal::Null,
+        "EXPLODE" => ExprVal::Null,
+        // higher-order functions take lambdas, which need the row to be evaluated lazily
+        "TRANSFORM" | "FILTER" | "EXISTS" | "FORALL" | "AGGREGATE" | "REDUCE" | "ZIP_WITH" | "MAP_FILTER" | "TRANSFORM_KEYS"
+        | "TRANSFORM_VALUES" | "MAP_ZIP_WITH" | "ARRAY_SORT" if name != "ARRAY_SORT" || crate::hof::has_lambda(args) => crate::hof::call(name, args, block, row),
         _ => {
             let vals: Vec<ExprVal> = args.iter().map(|a| eval_expr(a, block, row)).collect();
             if let Some(v) = crate::scalar::call(name, &vals) { return v; }
@@ -3823,6 +3876,23 @@ fn eval_binop(op: &BinOpKind, l: ExprVal, r: ExprVal) -> ExprVal {
             BinOpKind::Mod => if b == 0.0 { ExprVal::Null } else { ExprVal::Float(a % b) },
             _ => ExprVal::Null,
         };
+    }
+    // date +/- days (Spark's DateAdd/DateSub coercion); date - date and other mixes are not supported
+    if matches!(op, BinOpKind::Add | BinOpKind::Sub) {
+        let shift = |d: &ExprVal, n: &ExprVal, sign: i64| -> Option<ExprVal> {
+            let (ExprVal::Str(_), ExprVal::Int(k)) = (d, n) else { return None };
+            let dt = crate::scalar::to_dt(d)?;
+            let r = crate::datetime::add_unit(&dt, "day", k * sign)?;
+            Some(ExprVal::Str(if dt.has_time { crate::datetime::fmt_ts(r.days, r.secs, r.nanos) } else { crate::datetime::fmt_date(r.days) }))
+        };
+        let sign = if matches!(op, BinOpKind::Add) { 1 } else { -1 };
+        if let Some(v) = shift(&l, &r, sign) { return v; }
+        if sign == 1 { if let Some(v) = shift(&r, &l, 1) { return v; } }
+        if let (ExprVal::Str(_), ExprVal::Str(_)) = (&l, &r) {
+            if matches!(op, BinOpKind::Sub) && crate::scalar::to_dt(&l).is_some() && crate::scalar::to_dt(&r).is_some() {
+                crate::scalar::set_error("date/timestamp subtraction yields an INTERVAL, which is not supported; use datediff() or unix_timestamp()");
+            }
+        }
     }
     ExprVal::Null
 }
@@ -5680,14 +5750,11 @@ mod tests {
         ).unwrap();
         assert_eq!(r.num_rows, 4);
         let rn_col = r.columns.iter().find(|c| c.name == "rn").expect("rn column");
-        if let ColumnData::Float64(vals) = &rn_col.data {
-            // Ordered by id (1,2,3,4) → row_numbers 1,2,3,4
-            assert_eq!(vals[0], Some(1.0));
-            assert_eq!(vals[1], Some(2.0));
-            assert_eq!(vals[2], Some(3.0));
-            assert_eq!(vals[3], Some(4.0));
+        // ranking columns are BIGINT; rows leave the window in window order (id 1,2,3,4)
+        if let ColumnData::Int64(vals) = &rn_col.data {
+            assert_eq!(vals, &vec![Some(1), Some(2), Some(3), Some(4)]);
         } else {
-            panic!("expected Float64 for window column");
+            panic!("expected Int64 for window column");
         }
     }
 
@@ -5696,18 +5763,13 @@ mod tests {
         let mut ctx = KqlContext::new();
         ctx.register("t", make_orders());
         let r = ctx.query(
-            "SELECT cust_id, score, SUM(score) OVER (PARTITION BY cust_id) AS cust_total FROM t"
+            "SELECT cust_id, score, SUM(score) OVER (PARTITION BY cust_id) AS cust_total FROM t ORDER BY cust_id, score"
         ).unwrap();
         assert_eq!(r.num_rows, 4);
         let total_col = r.columns.iter().find(|c| c.name == "cust_total").expect("cust_total column");
         if let ColumnData::Float64(vals) = &total_col.data {
-            // cust_id=10: scores 90+85 = 175 (rows 0 and 2)
-            assert_eq!(vals[0], Some(175.0));
-            assert_eq!(vals[2], Some(175.0));
-            // cust_id=20: score 70 (row 1)
-            assert_eq!(vals[1], Some(70.0));
-            // cust_id=30: score 60 (row 3)
-            assert_eq!(vals[3], Some(60.0));
+            // cust 10: scores 85, 90 -> 175 each; cust 20: 70; cust 30: 60
+            assert_eq!(vals, &vec![Some(175.0), Some(175.0), Some(70.0), Some(60.0)]);
         } else {
             panic!("expected Float64 for window column");
         }
@@ -5718,19 +5780,15 @@ mod tests {
         let mut ctx = KqlContext::new();
         ctx.register("t", make_orders());
         let r = ctx.query(
-            "SELECT *, RANK() OVER (ORDER BY score DESC) AS rnk FROM t"
+            "SELECT score, RANK() OVER (ORDER BY score DESC) AS rnk FROM t ORDER BY score DESC"
         ).unwrap();
         assert_eq!(r.num_rows, 4);
         let rnk_col = r.columns.iter().find(|c| c.name == "rnk").expect("rnk column");
-        if let ColumnData::Float64(vals) = &rnk_col.data {
-            // Scores: 90(row0), 70(row1), 85(row2), 60(row3)
-            // Ordered DESC: 90→1, 85→2, 70→3, 60→4
-            assert_eq!(vals[0], Some(1.0)); // score 90 → rank 1
-            assert_eq!(vals[1], Some(3.0)); // score 70 → rank 3
-            assert_eq!(vals[2], Some(2.0)); // score 85 → rank 2
-            assert_eq!(vals[3], Some(4.0)); // score 60 → rank 4
+        if let ColumnData::Int64(vals) = &rnk_col.data {
+            // scores 90, 85, 70, 60 -> ranks 1..4
+            assert_eq!(vals, &vec![Some(1), Some(2), Some(3), Some(4)]);
         } else {
-            panic!("expected Float64 for window column");
+            panic!("expected Int64 for window column");
         }
     }
 
