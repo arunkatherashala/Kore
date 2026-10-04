@@ -9,8 +9,9 @@
 KORE's SQL engine is real: a Rust parser and executor whose answers were checked against live Apache Spark on
 all 22 TPC-H-shaped queries, with 0 mismatches. On one machine, with data that fits in memory (SF1, about 6M
 lineitem rows), it was faster than Spark local mode on every query. It is a strong prototype. It is not
-production-ready, it has not been compared with DuckDB, DataFusion or Polars, and it does not replace Spark for
-large data, clusters or fault tolerance.
+production-ready, it does not replace Spark for large data, clusters or fault tolerance, and **DuckDB is clearly
+faster than KORE**: in a later same-day comparison (below) DuckDB won all 22 queries, about 4.6x faster than KORE in
+geometric mean, while KORE was in the same range as DataFusion and Polars.
 
 ## What was wrong before and was corrected
 
@@ -53,6 +54,23 @@ Notes on the table:
   ratios say little about 100 GB+ data.
 - Spark times are from a cached live Spark run on this machine, not from published benchmarks.
 
+## Comparison with other single-node engines (added 2026-10-04, after network access to conda-forge)
+
+Same machine, same Parquet data, same SQL text, answers compared with Spark. Times in ms; best of 3 after a warm-up.
+
+| Engine | Answers agreeing with Spark | Geometric mean over the 18 queries all engines answered correctly |
+|---|---|---|
+| DuckDB 1.5.6 | 22 of 22 | 52 ms |
+| Polars 1.44.2 | 19 of 22 (SQL layer rejects Q2, Q13, Q17) | 203 ms |
+| DataFusion 54.0.0 | 21 of 22 (Q15 returns no rows: float-equality artifact of the query) | 223 ms |
+| **KORE** | 22 of 22 | 238 ms |
+| Spark 4.2.0 local | 22 of 22 (reference) | 1425 ms |
+
+DuckDB was fastest on every query. Per-query table: `benchmarks/tpch_honest/README.md`. Caveats: one machine, SF 1,
+in-memory, TPC-H-shaped data, about +/-20% noise (KORE's numbers in this run were taken while other programs were
+running; quiet runs were faster, for example Q1 217-236 ms and Q9 561-616 ms). KORE beats DuckDB on no query here, so
+the honest claim is "faster than Spark local mode, comparable to DataFusion and Polars, slower than DuckDB".
+
 ## What was added in this round
 
 - Join planning: filters derived from `OR` branches, unique-key (lookup) tables joined first.
@@ -81,7 +99,7 @@ Notes on the table:
 | Scale | Everything is in memory as row vectors of `Option<T>`. Spilling bounds operator working state only, not input tables or results. A skewed key can still exceed the budget. |
 | SF3 (18M lineitem rows) | Earlier run needed 8-10 GB per query process and one run failed with an out-of-memory error while other programs were running. Not re-run on the final commit. |
 | Strings | `Option<String>` columns that cannot be dictionary-encoded (dictionary holds at most 254 values) dominate memory and are slow to sort and group. |
-| Other engines | No comparison with DuckDB, DataFusion or Polars (no network access on the test machine). They are the real single-node competitors and may be faster. |
+| Other engines | DuckDB is about 4.6x faster than KORE (geometric mean at SF1) and won every query. KORE is in the DataFusion/Polars range. |
 | Distributed | No cluster execution, no fault tolerance, no connectors (S3, Hive, JDBC, Kafka), no streaming or ML. |
 | SQL | No STRUCT, TABLESAMPLE or native DECIMAL (DECIMAL is a double). A DATE compared with a TIMESTAMP is a string comparison. `EXPLAIN`/`DESCRIBE` output differs from Spark. |
 | Data | TPC-H-shaped data from `gen_data.py`, not the official dbgen. This is not an official TPC-H result. |
@@ -95,13 +113,14 @@ Notes on the table:
 | Is it a real SQL engine? | Yes. |
 | Are the results correct? | On the 22 TPC-H-shaped queries, yes, checked against live Spark. In general, no guarantee: bugs are still being found at a rate of several per round. |
 | Faster than Spark on one machine, in-memory? | Yes at SF1, by 2x to 25x in these runs. |
+| Faster than DuckDB? | No. DuckDB was faster on all 22 queries (about 4.6x in geometric mean). |
 | Replacement for Spark? | No. |
 | Production ready? | No. |
 | Best description | Strong research-grade prototype. |
 
 ## What would be needed next, in order
 
-1. Compare against DuckDB and DataFusion (needs network access).
+1. Find out why DuckDB is 4.6x faster (vectorised pipelines, join and aggregation implementation) and close the biggest gaps first (Q1, Q9, Q13, Q18, Q20, Q21).
 2. Run SF3 and SF10 on a machine with enough RAM; reduce string memory (compact string type or per-column loading).
 3. Parallelise the remaining single-threaded paths (Q20 inner aggregation, string-key group-by, string sort).
 4. Keep widening the differential and oracle tests: every round so far found new silent wrong answers.
@@ -114,6 +133,8 @@ cargo build --release -p kore-ffi --offline
 cd benchmarks/tpch_honest
 python gen_data.py --sf 1 --out data/sf1
 python run_engines.py --data data/sf1 --sf 1          # Spark and KORE, with result comparison
+python run_other_engines.py --engine duckdb --data data/sf1 --sf 1   # also polars, datafusion (needs those installed, e.g. from conda-forge)
+python compare_all.py --sf 1                          # combined table
 python run_engines.py --data data/sf1 --sf 1 --engines kore --only Q1,Q9
 ```
 

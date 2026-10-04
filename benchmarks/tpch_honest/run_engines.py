@@ -177,6 +177,11 @@ def main():
     if "kore" in engines:
         print("Running KORE...", flush=True)
         kore = run_kore(data, a.sf, names, a.repeats, a.kore_timeout)
+        os.makedirs(a.out, exist_ok=True)  # cached like the other engines so compare_all.py can use it
+        kc = os.path.join(a.out, f"kore_cache_sf{a.sf}.json")
+        kold = json.load(open(kc, encoding="utf-8")) if os.path.exists(kc) else {}
+        kold.update(kore)
+        json.dump(kold, open(kc, "w", encoding="utf-8"), default=str)
 
     lines = [f"TPC-H-shaped data, SF {a.sf}, {os.cpu_count()} cores, best of {a.repeats} after a warm-up run"]
     if spark:
