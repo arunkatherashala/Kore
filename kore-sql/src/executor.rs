@@ -1135,7 +1135,17 @@ fn join_blocks(ctx: &KqlContext, left: DataBlock, right: DataBlock, cfg: &JoinCo
     }
 }
 
+fn prof_on() -> bool { static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new(); *P.get_or_init(|| std::env::var_os("KORE_PROF").is_some()) }
+macro_rules! prof { ($t:expr, $($a:tt)*) => { if prof_on() { eprintln!("[prof] {:>8.1} ms  {}", $t.elapsed().as_secs_f64()*1000.0, format!($($a)*)); } } }
+
 pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
+    let __t0 = std::time::Instant::now();
+    let r = execute_select_inner(stmt, ctx);
+    prof!(__t0, "execute_select from={} rows_out={}", stmt.from.name, r.as_ref().map(|b| b.num_rows).unwrap_or(0));
+    r
+}
+
+fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
     // UNION / INTERSECT / EXCEPT chained onto this statement
     if !stmt.set_ops.is_empty() {
         return crate::general::execute_compound(stmt, ctx);
@@ -1162,6 +1172,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         }
     }
 
+    let __tf = std::time::Instant::now();
     // 1. Resolve FROM table (or execute FROM subquery / VALUES / __dual__)
     let base_name   = &stmt.from.name;
     let base_alias  = stmt.from.alias.as_deref().unwrap_or(base_name.as_str());
@@ -1461,6 +1472,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         }
     }
 
+    prof!(__tf, "  from+joins from={} rows={}", stmt.from.name, result.num_rows);
     // 3. WHERE filter
     if let Some(pred) = &where_pred {
         // Top-level EXISTS / NOT EXISTS conjuncts run as hash semi/anti joins, after the cheap predicates
@@ -1472,13 +1484,17 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         let run_old_path = |pred: Expr, result: DataBlock| -> Result<DataBlock, KoreError> {
             let mut result = result;
             let mut corr_counter = 0usize;
+            let __tr = std::time::Instant::now();
             let pred = decorrelate_principled(&pred, &mut result, ctx, &mut corr_counter);
+            prof!(__tr, "run_old_path decorrelate_principled");
             let resolved = resolve_subqueries(&pred, ctx);
             // Decorrelate correlated scalar subqueries → O(n²) to O(n)
             let (new_pred, new_block) = decorrelate_scalar_subqueries(&resolved, result, ctx);
             // Decorrelate correlated EXISTS → IN list
             let (new_pred2, new_block2) = decorrelate_exists(&new_pred, new_block, ctx);
+            prof!(__tr, "run_old_path before filter");
             let filtered = filter_block_ctx(new_block2, &new_pred2, ctx);
+            prof!(__tr, "run_old_path after filter");
             if let Some(m) = SUBQ_ERROR.with(|e| e.borrow_mut().take()) {
                 return Err(KoreError::InvalidArgument(m));
             }
@@ -1498,6 +1514,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         if let Some(p) = crate::rewrite::and_all(leftovers) { result = run_old_path(p, result)?; }
     }
 
+    prof!(__tf, "  after where rows={}", result.num_rows);
     // 3.5 anything the numeric fast paths below cannot do correctly
     if use_general || crate::general::block_needs_general(stmt, &result) {
         return crate::general::run(stmt, result, ctx);
@@ -1518,6 +1535,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         result = global_agg(result, &stmt.projections)?;
     }
 
+    prof!(__tf, "  after groupby rows={}", result.num_rows);
     // 4.1 HAVING — filter on aggregated result
     if let Some(having) = &stmt.having {
         result = filter_block(result, having)?;
@@ -1612,6 +1630,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         }
     }
 
+    prof!(__tf, "  after order rows={}", result.num_rows);
     // 7. LIMIT + OFFSET
     if let Some(off) = stmt.offset {
         let off = off as usize;
@@ -2106,7 +2125,9 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
         crate::rewrite::referenced_cols(f, &mut cols);
         all_cols.extend(cols.iter().map(&bare));
     }
+    let __ts = std::time::Instant::now();
     let inner = load_table(src.get(), &alias, &mut inner_filters, &Some(all_cols), &Some(key_cols), ctx)?;
+    prof!(__ts, "semi load_table rows={}", inner.num_rows);
     if !inner_filters.is_empty() { return Ok(None); }
 
     // Fast path: one or two numeric keys (the usual surrogate-key joins), no per-row allocation.
@@ -2667,7 +2688,9 @@ fn correlated_scalar_values(outer: &DataBlock, sq: &SelectStmt, ctx: &KqlContext
         limit: None, offset: None, scan_limit: None,
         lateral_views: Vec::new(), pivot: None, unpivot: None, hints: Vec::new(),
     };
+    let __tc = std::time::Instant::now();
     let rows = execute_select(&inner, ctx)?;
+    prof!(__tc, "corr inner select rows={}", rows.num_rows);
 
     #[derive(Clone, Default)]
     struct Acc { sum: f64, count: u64, min: Option<f64>, max: Option<f64> }
@@ -2682,53 +2705,85 @@ fn correlated_scalar_values(outer: &DataBlock, sq: &SelectStmt, ctx: &KqlContext
         to_f64(&eval_expr(&rewritten, &b, 0))
     };
 
-    // Fast path: one or two numeric correlation keys. Columns are read once and keys hashed as raw
-    // bits, instead of formatting a column name and allocating a key for every row.
+    // Fast path: one or two numeric correlation keys. Only the keys present in the outer rows get an
+    // accumulator slot; the inner rows are then aggregated in parallel chunks (no hash table over the
+    // inner side) and the per-chunk states merged in a fixed order.
     if corr.len() <= 2 {
-        let ik: Option<Vec<Vec<Option<f64>>>> = (0..corr.len())
-            .map(|i| crate::vecexpr::num_vec(&Expr::Col(format!("__k{i}")), &rows)).collect();
-        let ok: Option<Vec<Vec<Option<f64>>>> = corr.iter().map(|(_, oe)| crate::vecexpr::num_vec(oe, outer)).collect();
-        let av: Option<Vec<Vec<Option<f64>>>> = (0..funcs.len())
-            .map(|j| crate::vecexpr::num_vec(&Expr::Col(format!("__a{j}")), &rows)).collect();
+        let ik: Option<Vec<KeyCol>> = (0..corr.len()).map(|i| key_col(&Expr::Col(format!("__k{i}")), &rows)).collect();
+        let ok: Option<Vec<KeyCol>> = corr.iter().map(|(_, oe)| key_col(oe, outer)).collect();
+        let av: Option<Vec<KeyCol>> = (0..funcs.len()).map(|j| key_col(&Expr::Col(format!("__a{j}")), &rows)).collect();
         if let (Some(ik), Some(ok), Some(av)) = (ik, ok, av) {
-            let bits = |f: f64| if f == 0.0 { 0.0f64.to_bits() } else { f.to_bits() };
-            let key = |cols: &Vec<Vec<Option<f64>>>, r: usize| -> Option<(u64, u64)> {
-                let a = bits(cols[0][r]?);
-                let b = if cols.len() > 1 { bits(cols[1][r]?) } else { 0 };
+            use rayon::prelude::*;
+            let key = |cols: &Vec<KeyCol>, r: usize| -> Option<(u64, u64)> {
+                let a = cols[0].bits(r)?;
+                let b = if cols.len() > 1 { cols[1].bits(r)? } else { 0 };
                 Some((a, b))
             };
-            let mut groups: HashMap<(u64, u64), Vec<Acc>> = HashMap::with_capacity(rows.num_rows.min(1 << 22));
-            for r in 0..rows.num_rows {
-                let Some(k) = key(&ik, r) else { continue };
-                let accs = groups.entry(k).or_insert_with(|| vec![Acc::default(); funcs.len()]);
-                for (j, acc) in accs.iter_mut().enumerate() {
-                    if let Some(x) = av[j][r] {
-                        acc.count += 1;
-                        acc.sum += x;
-                        acc.min = Some(acc.min.map_or(x, |m| m.min(x)));
-                        acc.max = Some(acc.max.map_or(x, |m| m.max(x)));
+            const NO: u32 = u32::MAX;
+            let mut slots: HashMap<(u64, u64), u32, std::hash::BuildHasherDefault<FxHasher>> = HashMap::default();
+            let outer_slot: Vec<u32> = (0..outer.num_rows).map(|r| match key(&ok, r) {
+                None => NO,
+                Some(k) => { let next = slots.len() as u32; *slots.entry(k).or_insert(next) }
+            }).collect();
+            let ns = slots.len();
+            let nf = funcs.len();
+            #[derive(Clone)]
+            struct FAcc { sum: f64, count: u64, min: f64, max: f64 }
+            let init = FAcc { sum: 0.0, count: 0, min: f64::INFINITY, max: f64::NEG_INFINITY };
+            let mut nthreads = rayon::current_num_threads().max(1);
+            while nthreads > 1 && ns * nf.max(1) * nthreads > (1 << 24) { nthreads /= 2; }
+            if rows.num_rows < 50_000 { nthreads = 1; }
+            let chunk = rows.num_rows.div_ceil(nthreads).max(1);
+            let parts: Vec<Vec<FAcc>> = (0..nthreads).into_par_iter().map(|t| {
+                let mut st = vec![init.clone(); ns * nf];
+                let lo = (t * chunk).min(rows.num_rows);
+                let hi = ((t + 1) * chunk).min(rows.num_rows);
+                for r in lo..hi {
+                    let Some(k) = key(&ik, r) else { continue };
+                    let Some(&s) = slots.get(&k) else { continue };
+                    let base = s as usize * nf;
+                    for j in 0..nf {
+                        if let Some(bits) = av[j].bits(r) {
+                            let x = f64::from_bits(bits);
+                            let acc = &mut st[base + j];
+                            acc.count += 1;
+                            acc.sum += x;
+                            if x < acc.min { acc.min = x; }
+                            if x > acc.max { acc.max = x; }
+                        }
                     }
                 }
+                st
+            }).collect();
+            let mut merged = vec![init.clone(); ns * nf];
+            for part in &parts {
+                for (m, p) in merged.iter_mut().zip(part) {
+                    if p.count == 0 { continue; }
+                    m.count += p.count;
+                    m.sum += p.sum;
+                    if p.min < m.min { m.min = p.min; }
+                    if p.max > m.max { m.max = p.max; }
+                }
             }
-            let keys: Vec<(u64, u64)> = groups.keys().copied().collect();
+            prof!(__tc, "corr groups done n={}", ns);
             let cols: Vec<Column> = funcs.iter().enumerate().map(|(j, func)| {
-                let vals: Vec<Option<f64>> = keys.iter().map(|k| {
-                    let a = &groups[k][j];
+                let vals: Vec<Option<f64>> = (0..ns).map(|s| {
+                    let a = &merged[s * nf + j];
                     match func {
                         AggFunc::Count => Some(a.count as f64),
                         AggFunc::Sum   => if a.count == 0 { None } else { Some(a.sum) },
                         AggFunc::Avg   => if a.count == 0 { None } else { Some(a.sum / a.count as f64) },
-                        AggFunc::Min   => a.min,
-                        _              => a.max,
+                        AggFunc::Min   => if a.count == 0 { None } else { Some(a.min) },
+                        _              => if a.count == 0 { None } else { Some(a.max) },
                     }
                 }).collect();
                 Column { name: aggs[j].0.clone(), data: ColumnData::Float64(vals) }
             }).collect();
-            let agg_block = DataBlock { columns: cols, num_rows: keys.len() };
+            let agg_block = DataBlock { columns: cols, num_rows: ns };
             let finals = crate::vecexpr::num_vec(&rewritten, &agg_block)
-                .unwrap_or_else(|| (0..keys.len()).map(|i| to_f64(&eval_expr(&rewritten, &agg_block, i))).collect());
-            let value_of: HashMap<(u64, u64), Option<f64>> = keys.iter().copied().zip(finals).collect();
-            let out = (0..outer.num_rows).map(|r| match key(&ok, r).and_then(|k| value_of.get(&k).copied()) { Some(v) => v, None => empty_val }).collect();
+                .unwrap_or_else(|| (0..ns).map(|i| to_f64(&eval_expr(&rewritten, &agg_block, i))).collect());
+            let out = outer_slot.iter().map(|&s| if s == NO { empty_val } else { finals[s as usize] }).collect();
+            prof!(__tc, "corr out done");
             return Ok(Some(out));
         }
     }
