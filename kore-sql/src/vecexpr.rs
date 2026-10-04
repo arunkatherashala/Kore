@@ -133,7 +133,66 @@ fn cmp_int(op: &BinOpKind, a: i64, b: i64) -> bool {
     }
 }
 
+/// One tight loop per comparison operator (the operator is matched once, outside the loop).
+fn cmp_loop<T: Copy>(op: &BinOpKind, v: &[Option<T>], lt: impl Fn(T) -> bool + Copy, le: impl Fn(T) -> bool + Copy,
+                     gt: impl Fn(T) -> bool + Copy, ge: impl Fn(T) -> bool + Copy, eq: impl Fn(T) -> bool + Copy,
+                     ne: impl Fn(T) -> bool + Copy) -> Option<Vec<u8>> {
+    #[inline(always)]
+    fn run<T: Copy>(v: &[Option<T>], f: impl Fn(T) -> bool) -> Vec<u8> {
+        v.iter().map(|x| match x { Some(a) => f(*a) as u8, None => NULL }).collect()
+    }
+    Some(match op {
+        BinOpKind::Lt => run(v, lt), BinOpKind::Le => run(v, le), BinOpKind::Gt => run(v, gt),
+        BinOpKind::Ge => run(v, ge), BinOpKind::Eq => run(v, eq), BinOpKind::Ne => run(v, ne),
+        _ => return None,
+    })
+}
+
+/// Column-versus-constant comparisons without per-element operand dispatch; None = use the general loop.
+fn compare_const(op: &BinOpKind, l: &Val, r: &Val) -> Option<Vec<u8>> {
+    match (l, r) {
+        (Val::F(_) | Val::Owned(_), Val::Num(_) | Val::NumI(_)) => {
+            let v: &[Option<f64>] = match l { Val::F(v) => v, Val::Owned(v) => v, _ => unreachable!() };
+            let c = match r { Val::Num(c) => *c, Val::NumI(c) => *c as f64, _ => unreachable!() };
+            cmp_loop(op, v, |a| a < c, |a| a <= c, |a| a > c, |a| a >= c, |a| (a - c).abs() < 1e-10, |a| (a - c).abs() >= 1e-10)
+        }
+        (Val::I(v), Val::NumI(c)) => {
+            let c = *c;
+            cmp_loop(op, v, |a| a < c, |a| a <= c, |a| a > c, |a| a >= c, |a| a == c, |a| a != c)
+        }
+        (Val::I(v), Val::Num(c)) => {
+            let c = *c;
+            Some(match op {
+                BinOpKind::Lt | BinOpKind::Le | BinOpKind::Gt | BinOpKind::Ge | BinOpKind::Eq | BinOpKind::Ne =>
+                    v.iter().map(|x| match x { Some(a) => cmp_ok(op, *a as f64, c) as u8, None => NULL }).collect(),
+                _ => return None,
+            })
+        }
+        (Val::S(v), Val::Text(t)) => {
+            let t: &str = t;
+            let run = |f: &dyn Fn(&str) -> bool| -> Vec<u8> { v.iter().map(|x| match x { Some(a) => f(a.as_str()) as u8, None => NULL }).collect() };
+            Some(match op {
+                BinOpKind::Lt => v.iter().map(|x| match x { Some(a) => (a.as_str() < t) as u8, None => NULL }).collect(),
+                BinOpKind::Le => v.iter().map(|x| match x { Some(a) => (a.as_str() <= t) as u8, None => NULL }).collect(),
+                BinOpKind::Gt => v.iter().map(|x| match x { Some(a) => (a.as_str() > t) as u8, None => NULL }).collect(),
+                BinOpKind::Ge => v.iter().map(|x| match x { Some(a) => (a.as_str() >= t) as u8, None => NULL }).collect(),
+                BinOpKind::Eq => v.iter().map(|x| match x { Some(a) => (a.as_str() == t) as u8, None => NULL }).collect(),
+                BinOpKind::Ne => run(&|a| a != t),
+                _ => return None,
+            })
+        }
+        (Val::D(codes, dict), Val::Text(t)) => {
+            // decide once per dictionary entry
+            let table: Vec<u8> = dict.iter().map(|s| cmp_text(op, s, t) as u8).collect();
+            if !matches!(op, BinOpKind::Lt | BinOpKind::Le | BinOpKind::Gt | BinOpKind::Ge | BinOpKind::Eq | BinOpKind::Ne) { return None; }
+            Some(codes.iter().map(|&c| if c == u8::MAX { NULL } else { table.get(c as usize).copied().unwrap_or(NULL) }).collect())
+        }
+        _ => None,
+    }
+}
+
 fn compare(op: &BinOpKind, l: &Val, r: &Val, n: usize) -> Option<Vec<u8>> {
+    if let Some(v) = compare_const(op, l, r) { return Some(v); }
     if l.is_int() && r.is_int() {
         return Some((0..n).map(|i| match (l.int(i), r.int(i)) {
             (Some(a), Some(b)) => if cmp_int(op, a, b) { TRUE } else { FALSE },
@@ -457,4 +516,22 @@ mod like_plan_tests {
         }
         assert!(LikePlan::new("a_b").is_none() && LikePlan::new("").is_none());
     }
+}
+
+/// Evaluation context shared by the windowed entry points below.
+pub(crate) struct WinCtx(Cache);
+
+impl WinCtx {
+    pub(crate) fn new() -> Self { WinCtx(Cache::default()) }
+}
+
+/// Three-valued truth of `pred` on rows `lo..hi` (1 = TRUE, 0 = FALSE, 2 = NULL); None when not covered.
+pub(crate) fn tri_window(pred: &Expr, block: &DataBlock, lo: usize, hi: usize, c: &WinCtx) -> Option<Vec<u8>> {
+    if crate::testing::no_vecexpr() { return None; }
+    tri(pred, block, Win { lo, hi }, &c.0)
+}
+
+/// Numeric value of `e` on rows `lo..hi` (NULL = None); None when not covered.
+pub(crate) fn num_window(e: &Expr, block: &DataBlock, lo: usize, hi: usize, c: &WinCtx) -> Option<Vec<Option<f64>>> {
+    num_win(e, block, Win { lo, hi }, &c.0)
 }

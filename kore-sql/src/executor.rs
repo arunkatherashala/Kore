@@ -1135,7 +1135,10 @@ fn join_blocks(ctx: &KqlContext, left: DataBlock, right: DataBlock, cfg: &JoinCo
     }
 }
 
+fn prof(label: &str, t: &std::time::Instant) { if std::env::var_os("KORE_PROF").is_some() { eprintln!("[prof] {label}: {:.1} ms", t.elapsed().as_secs_f64()*1000.0); } }
+
 pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
+    let t_prof = std::time::Instant::now();
     // UNION / INTERSECT / EXCEPT chained onto this statement
     if !stmt.set_ops.is_empty() {
         return crate::general::execute_compound(stmt, ctx);
@@ -1245,7 +1248,15 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         }
     }
 
-    let mut result = if planned {
+    // Single-table filter + aggregate: aggregate straight off the borrowed table (fusedagg.rs).
+    let fused: Option<DataBlock> = if planned && stmt.joins.is_empty() && !use_general && ctx.memory_limit.is_none() && stmt.pivot.is_none() {
+        crate::fusedagg::try_fused(stmt, base_ref, base_alias, &conjuncts)
+    } else { None };
+    let agg_done = fused.is_some();
+    let mut result = if let Some(done) = fused {
+        conjuncts.clear();
+        done
+    } else if planned {
         load_table(base_ref, base_alias, &mut conjuncts, &needed, &needed_wo_where, ctx)?
     } else {
         let base_block: DataBlock = match &needed {
@@ -1264,6 +1275,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         prefix_columns(base_block, base_alias)
     };
 
+    prof("load_table", &t_prof);
     if n_implicit > 0 {
         let mut pending: Vec<DataBlock> = Vec::with_capacity(n_implicit);
         for join in &stmt.joins[..n_implicit] {
@@ -1462,7 +1474,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     }
 
     // 3. WHERE filter
-    if let Some(pred) = &where_pred {
+    if let (false, Some(pred)) = (agg_done, &where_pred) {
         // Top-level EXISTS / NOT EXISTS conjuncts run as hash semi/anti joins, after the cheap predicates
         // have shrunk the input. Shapes the semi-join cannot handle fall back to the older path below.
         let mut conj = Vec::new();
@@ -1498,14 +1510,17 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         if let Some(p) = crate::rewrite::and_all(leftovers) { result = run_old_path(p, result)?; }
     }
 
+    prof("joins+where", &t_prof);
     // 3.5 anything the numeric fast paths below cannot do correctly
-    if use_general || crate::general::block_needs_general(stmt, &result) {
+    if !agg_done && (use_general || crate::general::block_needs_general(stmt, &result)) {
         return crate::general::run(stmt, result, ctx);
     }
 
     // 4. GROUP BY  (or global aggregation if no GROUP BY but has aggregates)
     let has_agg = stmt.projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Agg { .. }, .. }));
-    if !stmt.group_by.is_empty() {
+    if agg_done {
+        // already aggregated by the fused path
+    } else if !stmt.group_by.is_empty() {
         // Materialize any GROUP BY columns that are SELECT expression aliases
         // e.g. GROUP BY l_year where l_year is alias for CASE WHEN ... END
         result = materialize_groupby_aliases(result, &stmt.group_by, &stmt.projections);
@@ -1518,6 +1533,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         result = global_agg(result, &stmt.projections)?;
     }
 
+    prof("aggregate", &t_prof);
     // 4.1 HAVING — filter on aggregated result
     if let Some(having) = &stmt.having {
         result = filter_block(result, having)?;
@@ -1771,6 +1787,7 @@ fn load_table(
     let (Some(needed), Some(after_where)) = (needed, needed_wo_where) else {
         return Ok(prefix_columns(src.clone(), alias));
     };
+    let t_lt = std::time::Instant::now();
     let prefix = format!("{alias}.");
     let mut mine = Vec::new();
     let mut rest = Vec::new();
@@ -1812,6 +1829,7 @@ fn load_table(
         Some(p) => crate::vecexpr::filter_idx(p, src),
         None => None,
     };
+    prof("  filter_idx", &t_lt);
     if pred.is_some() && idx.is_none() {
         // not covered by the fast evaluator: copy what the whole statement needs, filter the copy
         let block = prefix_columns(prune_block(src.clone(), &Some(needed.clone())), alias);
@@ -4662,7 +4680,7 @@ fn extract_f64_all(col: &Column) -> Vec<f64> {
     }
 }
 
-fn is_null_at(c: &Column, r: usize) -> bool {
+pub(crate) fn is_null_at(c: &Column, r: usize) -> bool {
     match &c.data {
         ColumnData::Int64(v)   => v.get(r).map_or(true, |x| x.is_none()),
         ColumnData::Float64(v) => v.get(r).map_or(true, |x| x.is_none()),
@@ -4805,7 +4823,7 @@ fn global_agg(block: DataBlock, projections: &[Projection]) -> Result<DataBlock,
 
 /// Multiplicative hasher for small integer keys (std's SipHash dominates a 6M-row group-by otherwise).
 #[derive(Default, Clone, Copy)]
-struct FxHasher(u64);
+pub(crate) struct FxHasher(u64);
 
 impl std::hash::Hasher for FxHasher {
     fn finish(&self) -> u64 { self.0.rotate_left(26) } // the multiply leaves the low bits weak; hashbrown indexes by them
@@ -4824,205 +4842,8 @@ impl std::hash::Hasher for FxHasher {
 /// expressions. Rows get a group id in one hashed pass, then every aggregate is a straight loop over
 /// flat accumulator arrays. Returns None for anything else (the general path then runs).
 fn group_by_fast(block: &DataBlock, group_cols: &[String], projections: &[Projection]) -> Option<DataBlock> {
-    use std::collections::HashMap;
-    use std::hash::BuildHasherDefault;
-    use rayon::prelude::*;
-    let n = block.num_rows;
-    if group_cols.is_empty() || group_cols.len() > 3 || n == 0 { return None; }
-
-    // key columns, read in place (strings are interned to ids once)
-    enum KeyPart<'a> { I(&'a [Option<i64>]), D(&'a [u8]), O(Vec<Option<i64>>) }
-    impl KeyPart<'_> {
-        /// (value, is_null)
-        #[inline(always)]
-        fn get(&self, r: usize) -> (i64, bool) {
-            match self {
-                KeyPart::I(v) => match v[r] { Some(x) => (x, false), None => (0, true) },
-                KeyPart::D(c) => if c[r] == u8::MAX { (0, true) } else { (c[r] as i64, false) },
-                KeyPart::O(v) => match v[r] { Some(x) => (x, false), None => (0, true) },
-            }
-        }
-    }
-    let mut key_cols: Vec<&Column> = Vec::new();
-    let mut parts: Vec<KeyPart> = Vec::new();
-    for g in group_cols {
-        let col = find_col(block, g)?;
-        key_cols.push(col);
-        parts.push(match &col.data {
-            ColumnData::Int64(v) => KeyPart::I(v),
-            ColumnData::StrDict { codes, .. } => KeyPart::D(codes),
-            ColumnData::Str(v) => {
-                let mut ids: HashMap<&str, i64, BuildHasherDefault<FxHasher>> = HashMap::default();
-                KeyPart::O(v.iter().map(|s| s.as_deref().map(|t| { let next = ids.len() as i64; *ids.entry(t).or_insert(next) })).collect())
-            }
-            _ => return None,
-        });
-    }
-
-    // projections: group-key columns and numeric aggregates only
-    enum Out<'a> { Key(&'a Column, Option<&'a String>), Agg { func: &'a AggFunc, expr: Option<&'a Expr>, count_col: Option<&'a Column>, name: String, integral: bool } }
-    let mut outs: Vec<Out> = Vec::new();
-    for p in projections {
-        let Projection::Expr { expr, alias } = p else { return None };
-        match expr {
-            Expr::Col(_) | Expr::QualCol(..) => {
-                let c = match expr { Expr::Col(c) => c.clone(), Expr::QualCol(t, c) => format!("{t}.{c}"), _ => unreachable!() };
-                let col = find_col(block, &c)?;
-                // must be one of the grouping columns
-                if !key_cols.iter().any(|k| std::ptr::eq(*k, col)) { return None; }
-                outs.push(Out::Key(col, alias.as_ref()));
-            }
-            Expr::Agg { func, expr: inner } => {
-                if !matches!(func, AggFunc::Sum | AggFunc::Avg | AggFunc::Count | AggFunc::Min | AggFunc::Max) { return None; }
-                let star = matches!(inner.as_ref(), Expr::Star) || matches!(inner.as_ref(), Expr::Col(c) if c == "*");
-                let col_name = match inner.as_ref() {
-                    Expr::Col(c) => c.clone(),
-                    Expr::QualCol(t, c) => format!("{t}.{c}"),
-                    _ => String::new(),
-                };
-                let name = alias.clone().unwrap_or_else(|| format!("{:?}({})", func, col_name));
-                if star {
-                    if !matches!(func, AggFunc::Count) { return None; }
-                    outs.push(Out::Agg { func, expr: None, count_col: None, name, integral: false });
-                } else if matches!(func, AggFunc::Count) {
-                    match inner.as_ref() {
-                        Expr::Col(_) | Expr::QualCol(..) => outs.push(Out::Agg { func, expr: None, count_col: Some(find_col(block, &col_name)?), name, integral: false }),
-                        other => {
-                            crate::vecexpr::num_range(other, block, 0, 1)?;
-                            outs.push(Out::Agg { func, expr: Some(other), count_col: None, name, integral: false })
-                        }
-                    }
-                } else {
-                    // SUM/MIN/MAX of an integer column are integers (checked for exactness below)
-                    let integral = matches!(func, AggFunc::Sum | AggFunc::Min | AggFunc::Max)
-                        && matches!(inner.as_ref(), Expr::Col(_) | Expr::QualCol(..))
-                        && matches!(find_col(block, &col_name).map(|c| &c.data), Some(ColumnData::Int64(_)));
-                    crate::vecexpr::num_range(inner, block, 0, 1)?;
-                    outs.push(Out::Agg { func, expr: Some(inner.as_ref()), count_col: None, name, integral });
-                }
-            }
-            _ => return None,
-        }
-    }
-    if !outs.iter().any(|o| matches!(o, Out::Agg { .. })) { return None; }
-
-    // aggregate slots in output order
-    struct Spec<'a> { func: &'a AggFunc, expr: Option<&'a Expr>, count_col: Option<&'a Column> }
-    let specs: Vec<Spec> = outs.iter().filter_map(|o| match o {
-        Out::Agg { func, expr, count_col, .. } => Some(Spec { func, expr: *expr, count_col: *count_col }),
-        _ => None,
-    }).collect();
-    let init = |f: &AggFunc| match f { AggFunc::Min => f64::INFINITY, AggFunc::Max => f64::NEG_INFINITY, _ => 0.0 };
-    type Key = (i64, i64, i64, u8);
-
-    // Pass 1 (parallel over row ranges): group ids and per-range partial aggregates, a window at a time.
-    struct Local { keys: Vec<Key>, first: Vec<usize>, acc: Vec<Vec<f64>>, cnt: Vec<Vec<u64>> }
-    const WIN: usize = 32_768;
-    let nparts = if n >= 100_000 { rayon::current_num_threads().max(1) * 2 } else { 1 };
-    let span = n.div_ceil(nparts).max(1);
-    let locals: Vec<Option<Local>> = (0..nparts).into_par_iter().map(|pi| {
-        let (lo, hi) = ((pi * span).min(n), ((pi + 1) * span).min(n));
-        let mut l = Local { keys: Vec::new(), first: Vec::new(), acc: vec![Vec::new(); specs.len()], cnt: vec![Vec::new(); specs.len()] };
-        let mut index: HashMap<Key, u32, BuildHasherDefault<FxHasher>> = HashMap::default();
-        let mut gid: Vec<u32> = Vec::with_capacity(WIN);
-        let mut w = lo;
-        while w < hi {
-            let we = (w + WIN).min(hi);
-            gid.clear();
-            for r in w..we {
-                let mut key: Key = (0, 0, 0, 0);
-                for (i, p) in parts.iter().enumerate() {
-                    let (v, null) = p.get(r);
-                    match i { 0 => key.0 = v, 1 => key.1 = v, _ => key.2 = v }
-                    if null { key.3 |= 1 << i; }
-                }
-                let next = l.keys.len() as u32;
-                let id = *index.entry(key).or_insert_with(|| {
-                    l.keys.push(key);
-                    l.first.push(r);
-                    for (si, s) in specs.iter().enumerate() { l.acc[si].push(init(s.func)); l.cnt[si].push(0); }
-                    next
-                });
-                gid.push(id);
-            }
-            for (si, s) in specs.iter().enumerate() {
-                let (acc, cnt) = (&mut l.acc[si], &mut l.cnt[si]);
-                match (s.expr, s.count_col) {
-                    (None, None) => for &g in &gid { cnt[g as usize] += 1; },
-                    (None, Some(c)) => for (i, &g) in gid.iter().enumerate() { if !is_null_at(c, w + i) { cnt[g as usize] += 1; } },
-                    (Some(e), _) => {
-                        let Some(vals) = crate::vecexpr::num_range(e, block, w, we) else { return None };
-                        match s.func {
-                            AggFunc::Min => for (i, &g) in gid.iter().enumerate() { if let Some(x) = vals[i] { cnt[g as usize] += 1; if x < acc[g as usize] { acc[g as usize] = x } } },
-                            AggFunc::Max => for (i, &g) in gid.iter().enumerate() { if let Some(x) = vals[i] { cnt[g as usize] += 1; if x > acc[g as usize] { acc[g as usize] = x } } },
-                            _ => for (i, &g) in gid.iter().enumerate() { if let Some(x) = vals[i] { cnt[g as usize] += 1; acc[g as usize] += x; } },
-                        }
-                    }
-                }
-            }
-            w = we;
-        }
-        Some(l)
-    }).collect();
-    let locals: Vec<Local> = locals.into_iter().collect::<Option<Vec<_>>>()?;
-
-    // Pass 2: merge the partial results; groups keep their order of first appearance.
-    let mut global: HashMap<Key, u32, BuildHasherDefault<FxHasher>> = HashMap::default();
-    let mut first_rows: Vec<usize> = Vec::new();
-    let mut acc: Vec<Vec<f64>> = vec![Vec::new(); specs.len()];
-    let mut cnt: Vec<Vec<u64>> = vec![Vec::new(); specs.len()];
-    for l in &locals {
-        for (lg, key) in l.keys.iter().enumerate() {
-            let next = first_rows.len() as u32;
-            let g = *global.entry(*key).or_insert_with(|| {
-                first_rows.push(l.first[lg]);
-                for (si, s) in specs.iter().enumerate() { acc[si].push(init(s.func)); cnt[si].push(0); }
-                next
-            }) as usize;
-            for (si, s) in specs.iter().enumerate() {
-                let (a, c) = (l.acc[si][lg], l.cnt[si][lg]);
-                cnt[si][g] += c;
-                match s.func {
-                    AggFunc::Min => if a < acc[si][g] { acc[si][g] = a },
-                    AggFunc::Max => if a > acc[si][g] { acc[si][g] = a },
-                    AggFunc::Count => {}
-                    _ => acc[si][g] += a,
-                }
-            }
-        }
-    }
-    let ng = first_rows.len();
-
-    let mut columns: Vec<Column> = Vec::with_capacity(outs.len());
-    let mut si = 0usize;
-    for o in &outs {
-        match o {
-            Out::Key(col, alias) => {
-                let mut c = Column { name: col.name.clone(), data: col.data.take_rows(&first_rows) };
-                if let Some(a) = alias { c.name = (*a).clone(); }
-                columns.push(c);
-            }
-            Out::Agg { func, name, integral, .. } => {
-                let data: Vec<Option<f64>> = (0..ng).map(|g| match func {
-                    AggFunc::Count => Some(cnt[si][g] as f64),
-                    _ if cnt[si][g] == 0 => None,
-                    AggFunc::Avg => Some(acc[si][g] / cnt[si][g] as f64),
-                    _ => Some(acc[si][g]),
-                }).collect();
-                si += 1;
-                if matches!(func, AggFunc::Count) {
-                    columns.push(Column { name: name.clone(), data: ColumnData::Int64(data.into_iter().map(|v| v.map(|x| x as i64)).collect()) });
-                } else if *integral {
-                    // f64 holds integers exactly up to 2^53; beyond that the general (exact i64) path decides
-                    if data.iter().flatten().any(|x| x.abs() > 4.5e15) { return None; }
-                    columns.push(Column { name: name.clone(), data: ColumnData::Int64(data.into_iter().map(|v| v.map(|x| x as i64)).collect()) });
-                } else {
-                    columns.push(Column { name: name.clone(), data: ColumnData::Float64(data) });
-                }
-            }
-        }
-    }
-    Some(DataBlock { columns, num_rows: ng })
+    if group_cols.is_empty() { return None; }
+    crate::fusedagg::run(crate::fusedagg::Request { block, pred: None, group_cols, projections, key_prefix: None })
 }
 
 fn group_by_agg(

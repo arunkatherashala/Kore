@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) static FORCE_GENERAL: AtomicBool = AtomicBool::new(false);
 pub(crate) static NO_VECEXPR: AtomicBool = AtomicBool::new(false);
+pub(crate) static NO_FUSED: AtomicBool = AtomicBool::new(false);
 
 /// Run every SELECT through the general tail (general.rs) instead of the specialised executor paths.
 pub fn set_force_general(on: bool) { FORCE_GENERAL.store(on, Ordering::Relaxed); }
@@ -17,3 +18,9 @@ pub(crate) fn force_general() -> bool { FORCE_GENERAL.load(Ordering::Relaxed) }
 
 #[inline]
 pub(crate) fn no_vecexpr() -> bool { NO_VECEXPR.load(Ordering::Relaxed) }
+
+/// Disable the fused filter+aggregate path (fusedagg.rs) so it can be compared with the ordinary one.
+pub fn set_no_fused(on: bool) { NO_FUSED.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_fused() -> bool { NO_FUSED.load(Ordering::Relaxed) }

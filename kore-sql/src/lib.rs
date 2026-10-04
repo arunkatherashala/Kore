@@ -24,6 +24,7 @@ pub mod hashes;
 pub mod arrays;
 pub mod testing;
 pub mod vecexpr;
+pub mod fusedagg;
 pub mod window;
 pub mod scalar;
 pub mod datetime;
