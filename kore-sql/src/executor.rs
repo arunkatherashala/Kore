@@ -1892,7 +1892,8 @@ fn load_table(
     use rayon::prelude::*;
     let columns: Vec<Column> = wanted.par_iter().map(|c| Column {
         name: c.name.clone(),
-        data: match &idx { Some(ix) => c.data.take_rows(ix), None => c.data.clone() },
+        // every row survives: a straight copy is cheaper than an indexed gather
+        data: match &idx { Some(ix) if ix.len() != src.num_rows => c.data.take_rows(ix), _ => c.data.clone() },
     }).collect();
     let num_rows = idx.as_ref().map_or(src.num_rows, |ix| ix.len());
     prof!(__tl, "load_table {} take_rows done", alias);

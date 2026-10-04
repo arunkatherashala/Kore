@@ -169,7 +169,60 @@ fn cmp_int(op: &BinOpKind, a: i64, b: i64) -> bool {
     }
 }
 
+/// Column-versus-literal comparisons with the operator resolved once per chunk (not once per row).
+fn compare_lit(op: &BinOpKind, l: &Val, r: &Val) -> Option<Vec<u8>> {
+    #[inline(always)]
+    fn run_s<F: Fn(&str) -> bool>(v: &[Option<String>], f: F) -> Vec<u8> {
+        v.iter().map(|x| match x { Some(s) => f(s.as_str()) as u8, None => NULL }).collect()
+    }
+    #[inline(always)]
+    fn run_f<F: Fn(f64) -> bool>(v: &[Option<f64>], f: F) -> Vec<u8> {
+        v.iter().map(|x| match x { Some(a) => f(*a) as u8, None => NULL }).collect()
+    }
+    #[inline(always)]
+    fn run_i<F: Fn(i64) -> bool>(v: &[Option<i64>], f: F) -> Vec<u8> {
+        v.iter().map(|x| match x { Some(a) => f(*a) as u8, None => NULL }).collect()
+    }
+    match (l, r) {
+        (Val::S(v), Val::Text(t)) => {
+            let t = *t;
+            Some(match op {
+                BinOpKind::Eq => run_s(v, |s| s == t), BinOpKind::Ne => run_s(v, |s| s != t),
+                BinOpKind::Lt => run_s(v, |s| s < t), BinOpKind::Le => run_s(v, |s| s <= t),
+                BinOpKind::Gt => run_s(v, |s| s > t), BinOpKind::Ge => run_s(v, |s| s >= t),
+                _ => return None,
+            })
+        }
+        (Val::D(codes, dict), Val::Text(t)) => {
+            // one comparison per dictionary entry, then a table lookup per row
+            let mut table = [NULL; 256];
+            for (i, d) in dict.iter().enumerate().take(255) { table[i] = cmp_text(op, d.as_str(), t) as u8; }
+            Some(codes.iter().map(|&c| table[c as usize]).collect())
+        }
+        (Val::I(v), Val::NumI(c)) => {
+            let c = *c;
+            Some(match op {
+                BinOpKind::Eq => run_i(v, |a| a == c), BinOpKind::Ne => run_i(v, |a| a != c),
+                BinOpKind::Lt => run_i(v, |a| a < c), BinOpKind::Le => run_i(v, |a| a <= c),
+                BinOpKind::Gt => run_i(v, |a| a > c), BinOpKind::Ge => run_i(v, |a| a >= c),
+                _ => return None,
+            })
+        }
+        (Val::F(v), Val::Num(_) | Val::NumI(_)) => {
+            let c = match r { Val::Num(c) => *c, Val::NumI(c) => *c as f64, _ => unreachable!() };
+            Some(match op {
+                BinOpKind::Eq => run_f(v, |a| (a - c).abs() < 1e-10), BinOpKind::Ne => run_f(v, |a| (a - c).abs() >= 1e-10),
+                BinOpKind::Lt => run_f(v, |a| a < c), BinOpKind::Le => run_f(v, |a| a <= c),
+                BinOpKind::Gt => run_f(v, |a| a > c), BinOpKind::Ge => run_f(v, |a| a >= c),
+                _ => return None,
+            })
+        }
+        _ => None,
+    }
+}
+
 fn compare(op: &BinOpKind, l: &Val, r: &Val, n: usize) -> Option<Vec<u8>> {
+    if let Some(v) = compare_lit(op, l, r) { return Some(v); }
     if l.is_int() && r.is_int() {
         return Some((0..n).map(|i| match (l.int(i), r.int(i)) {
             (Some(a), Some(b)) => if cmp_int(op, a, b) { TRUE } else { FALSE },
@@ -399,7 +452,12 @@ pub fn filter_mask(pred: &Expr, block: &DataBlock) -> Option<Vec<bool>> {
 pub fn filter_idx(pred: &Expr, block: &DataBlock) -> Option<Vec<usize>> {
     let wins = windows(block.num_rows);
     let pick = |w: Win, v: Vec<u8>| -> Vec<usize> {
-        v.iter().enumerate().filter_map(|(i, &x)| if x == TRUE { Some(w.lo + i) } else { None }).collect()
+        // exact capacity: no doubling reallocations (large allocations are expensive page-fault wise)
+        let cnt = v.iter().filter(|&&x| x == TRUE).count();
+        let mut out = Vec::with_capacity(cnt);
+        if cnt == v.len() { out.extend(w.lo..w.hi); return out; }
+        if cnt > 0 { for (i, &x) in v.iter().enumerate() { if x == TRUE { out.push(w.lo + i); } } }
+        out
     };
     let c = &Cache::default();
     let first = pick(*wins.first()?, tri(pred, block, *wins.first()?, c)?);
