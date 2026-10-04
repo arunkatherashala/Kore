@@ -1265,7 +1265,6 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
     };
 
     if n_implicit > 0 {
-        let __t0 = std::time::Instant::now();
         let mut pending: Vec<DataBlock> = Vec::with_capacity(n_implicit);
         let mut lazies: Vec<Option<LazyCols>> = Vec::with_capacity(n_implicit);
         let mut unique_cache: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
@@ -1283,11 +1282,9 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                 (push_down_conjuncts(&mut conjuncts, block, ctx)?, None)
             };
             lazies.push(lz);
-            if let Ok(__f) = std::env::var("KORE_JPROF") { jprof(&__f, format!("[jprof] load {} rows={} t={:?}", alias, block.num_rows, __t0.elapsed())); }
             pending.push(block);
         }
         result = push_down_conjuncts(&mut conjuncts, result, ctx)?;
-        if let Ok(__f) = std::env::var("KORE_JPROF") { jprof(&__f, format!("[jprof] base rows={} t={:?}", result.num_rows, __t0.elapsed())); }
         while !pending.is_empty() {
             // Tables that join on a unique key can only shrink or keep the result (a lookup), so those
             // go first, smallest first: selective dimension tables then cut the fact tables down before
@@ -1304,7 +1301,6 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                         None => is_unique_key(&pending[*pi], &links[0].2),
                     }))
                 .min_by_key(|(pi, _)| pending[*pi].num_rows).map(|(pi, _)| *pi);
-            if let Ok(__f) = std::env::var("KORE_JPROF") { jprof(&__f, format!("[jprof] select t={:?}", __t0.elapsed())); }
             let link = match lookup {
                 Some(pi) => linked.into_iter().find(|(i, _)| *i == pi),
                 None => linked.into_iter().next(),
@@ -1314,7 +1310,6 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                     let (ci, lk, rk) = links.into_iter().next().unwrap();
                     let pb = pending.remove(pi);
                     let lz = lazies.remove(pi);
-                    if let Ok(__f) = std::env::var("KORE_JPROF") { jprof(&__f, format!("[jprof] single-join {}={} left={} right={}", lk, rk, result.num_rows, pb.num_rows)); }
                     conjuncts.remove(ci);
                     let cfg = JoinConfig { left_key: lk, right_key: rk, join_type: JoinType::Inner };
                     let left = std::mem::replace(&mut result, DataBlock::empty());
@@ -1336,7 +1331,6 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                     // a candidate row; the equalities stay in `conjuncts` and are applied exactly below.
                     let mut pb = pending.remove(pi);
                     let lz = lazies.remove(pi);
-                    if let Ok(__f) = std::env::var("KORE_JPROF") { jprof(&__f, format!("[jprof] multi-join {:?} left={} right={}", links, result.num_rows, pb.num_rows)); }
                     if let Some(lz) = &lz { pb = fill_keys(pb, lz); }
                     let lcols: Vec<String> = links.iter().map(|l| l.1.clone()).collect();
                     let rcols: Vec<String> = links.iter().map(|l| l.2.clone()).collect();
@@ -1355,9 +1349,7 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
                     result = cross_join(&result, &pb);
                 }
             }
-            if let Ok(__f) = std::env::var("KORE_JPROF") { jprof(&__f, format!("[jprof] joined rows={} cols={:?} t={:?}", result.num_rows, result.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), __t0.elapsed())); }
             result = push_down_conjuncts(&mut conjuncts, result, ctx)?;
-            if let Ok(__f) = std::env::var("KORE_JPROF") { jprof(&__f, format!("[jprof]   pushdown rows={} t={:?}", result.num_rows, __t0.elapsed())); }
         }
         where_pred = crate::rewrite::and_all(std::mem::take(&mut conjuncts));
     } else if planned {
@@ -1797,7 +1789,6 @@ fn exists_outer_cols(sub: &SelectStmt, ctx: &KqlContext) -> Option<std::collecti
 /// the borrowed source (no copy of the full table) and consumed; only the rows that pass and the columns
 /// still needed afterwards are copied. Falls back to prune-then-filter when the predicate is not one the
 /// column-at-a-time evaluator covers.
-fn jprof(f: &str, m: String) { use std::io::Write; if let Ok(mut h) = std::fs::OpenOptions::new().create(true).append(true).open(f) { let _ = writeln!(h, "{m}"); } }
 /// Columns of a filtered table that are not needed until after its joins: only the join keys (plus a
 /// `__rid` row number) are materialised up front, the rest is gathered once from `src` for the rows that
 /// survive the join (late materialisation).
@@ -1922,12 +1913,10 @@ fn load_table<'a>(
     };
 
     let pred = crate::rewrite::and_all(mine.iter().map(|c| crate::rewrite::unqualify(c, alias)).collect());
-    let __t = std::time::Instant::now();
     let idx: Option<Vec<usize>> = match &pred {
         Some(p) => crate::vecexpr::filter_idx(p, src),
         None => None,
     };
-    if let Ok(__f) = std::env::var("KORE_JPROF") { jprof(&__f, format!("[jprof]   filter_idx {} rows={} -> {:?} t={:?}", alias, src.num_rows, idx.as_ref().map(|i| i.len()), __t.elapsed())); }
     if pred.is_some() && idx.is_none() {
         // not covered by the fast evaluator: copy what the whole statement needs, filter the copy
         let block = prefix_columns(prune_block(src.clone(), &Some(needed.clone())), alias);
