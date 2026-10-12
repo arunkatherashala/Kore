@@ -751,20 +751,24 @@ impl Parser {
         // EXPLODE / POSEXPLODE / EXPLODE_OUTER / POSEXPLODE_OUTER (expr)
         let kind = match self.peek().clone() {
             Token::Explode => "EXPLODE".to_string(),
-            Token::Ident(s) if matches!(s.to_ascii_uppercase().as_str(), "POSEXPLODE" | "EXPLODE_OUTER" | "POSEXPLODE_OUTER") => s.to_ascii_uppercase(),
+            Token::Ident(s) if matches!(s.to_ascii_uppercase().as_str(), "POSEXPLODE" | "EXPLODE_OUTER" | "POSEXPLODE_OUTER" | "INLINE" | "INLINE_OUTER" | "STACK" | "JSON_TUPLE") => s.to_ascii_uppercase(),
             other => return Err(KoreError::InvalidArgument(format!("expected a generator (EXPLODE, POSEXPLODE, ..) after LATERAL VIEW, got {:?}", other))),
         };
         self.pos += 1;
         self.expect(&Token::LParen)?;
-        let expr = self.parse_expr(0)?;
+        let mut gen_args = vec![self.parse_expr(0)?];
+        while self.consume_if(&Token::Comma) { gen_args.push(self.parse_expr(0)?); }
         self.expect(&Token::RParen)?;
+        let expr = gen_args[0].clone();
         // table_alias
         let table_alias = self.expect_ident()?;
         // AS col_alias [, col_alias2]  (POSEXPLODE and EXPLODE over a MAP produce several columns)
-        self.expect(&Token::As)?;
-        let mut col_alias = self.expect_alias()?;
-        while self.consume_if(&Token::Comma) { col_alias.push(','); col_alias.push_str(&self.expect_alias()?); }
-        let inner = if kind == "EXPLODE" { expr } else { Expr::FuncCall { name: format!("__{kind}"), args: vec![expr] } };
+        let mut col_alias = String::new();
+        if self.consume_if(&Token::As) {
+            col_alias = self.expect_alias()?;
+            while self.consume_if(&Token::Comma) { col_alias.push(','); col_alias.push_str(&self.expect_alias()?); }
+        }
+        let inner = if kind == "EXPLODE" { expr } else if matches!(kind.as_str(), "INLINE" | "INLINE_OUTER" | "STACK" | "JSON_TUPLE") { Expr::FuncCall { name: format!("__{kind}"), args: gen_args } } else { Expr::FuncCall { name: format!("__{kind}"), args: vec![expr] } };
         Ok(LateralView { expr: Expr::Explode(Box::new(inner)), table_alias, col_alias })
     }
 
@@ -1103,6 +1107,13 @@ impl Parser {
     fn parse_expr(&mut self, min_prec: u8) -> Result<Expr, KoreError> {
         let mut lhs = self.parse_unary()?;
         loop {
+            // postfix field access on a struct-valued expression: f(..).field
+            if self.peek() == &Token::Dot && !matches!(lhs, Expr::Col(_) | Expr::QualCol(..) | Expr::Int(_) | Expr::Float(_)) && !matches!(self.peek2(), Token::Star) && matches!(self.peek2(), Token::Ident(_)) {
+                self.pos += 1;
+                let f = self.expect_alias()?;
+                lhs = Expr::FuncCall { name: "__GETFIELD".into(), args: vec![lhs, Expr::Str(f)] };
+                continue;
+            }
             // array subscript: Spark's `arr[i]` is 0-based, ELEMENT_AT is 1-based
             if self.peek() == &Token::LBracket {
                 self.pos += 1;
@@ -1569,6 +1580,9 @@ impl Parser {
                                 // an empty list joins to the empty string, not NULL
                                 return Ok(Expr::FuncCall { name: "COALESCE".into(), args: vec![agg, Expr::Str(String::new())] });
                             }
+                            if matches!(up.as_str(), "INLINE" | "INLINE_OUTER" | "STACK" | "JSON_TUPLE") {
+                                return Ok(Expr::Explode(Box::new(Expr::FuncCall { name: format!("__{up}"), args })));
+                            }
                             if matches!(up.as_str(), "POSEXPLODE" | "EXPLODE_OUTER" | "POSEXPLODE_OUTER") && args.len() == 1 {
                                 return Ok(Expr::Explode(Box::new(Expr::FuncCall { name: format!("__{up}"), args })));
                             }
@@ -1586,13 +1600,26 @@ impl Parser {
                         } else if (up == "DATE" || up == "TIMESTAMP") && matches!(self.peek(), Token::Str(_)) {
                             // DATE '2024-01-31' / TIMESTAMP '2024-01-31 10:00:00'
                             let lit = self.parse_primary()?;
+                            // Spark rejects a malformed typed literal (`date '2024-02-30'`) at parse time; only CAST gives NULL
+                            if let Expr::Str(sv) = &lit {
+                                if crate::datetime::parse(sv).is_none() {
+                                    return Err(KoreError::InvalidArgument(format!("Cannot parse the {} value: {}", up, sv)));
+                                }
+                            }
                             Ok(Expr::FuncCall { name: if up == "DATE" { "TO_DATE".into() } else { "TO_TIMESTAMP".into() }, args: vec![lit] })
                         } else if up == "INTERVAL" && matches!(self.peek(), Token::Str(_) | Token::Int(_) | Token::Float(_) | Token::Minus) {
                             self.parse_interval()
                         } else if self.peek() == &Token::Dot {
                             self.pos += 1;
                             let col = self.expect_alias()?;
-                            Ok(Expr::QualCol(name, col))
+                            let mut e = Expr::QualCol(name, col);
+                            // s.a.b: further fields of a struct value
+                            while self.peek() == &Token::Dot && !matches!(self.peek2(), Token::Star) {
+                                self.pos += 1;
+                                let f = self.expect_alias()?;
+                                e = Expr::FuncCall { name: "__GETFIELD".into(), args: vec![e, Expr::Str(f)] };
+                            }
+                            Ok(e)
                         } else {
                             Ok(Expr::Col(name))
                         }

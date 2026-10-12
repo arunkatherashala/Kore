@@ -85,7 +85,7 @@ pub fn str_to_int(s: &str, bits: u32) -> Option<i64> {
 pub fn cmp_vals(a: &V, b: &V) -> Option<Ordering> {
     match (a, b) {
         (V::Int(x), V::Int(y)) => Some(x.cmp(y)),
-        (V::Str(x), V::Str(y)) => Some(x.cmp(y)),
+        (V::Str(x), V::Str(y)) => Some(cmp_str(x, y)),
         (V::Bool(x), V::Bool(y)) => Some(x.cmp(y)),
         (V::Null, _) | (_, V::Null) => None,
         (V::Str(s), n) | (n, V::Str(s)) if !matches!(n, V::Str(_)) => {
@@ -96,6 +96,19 @@ pub fn cmp_vals(a: &V, b: &V) -> Option<Ordering> {
         }
         _ => num(a)?.partial_cmp(&num(b)?),
     }
+}
+
+/// String comparison with Spark's DATE/TIMESTAMP promotion: values are plain ISO strings here, so when the two
+/// sides have different lengths and both parse as dates/timestamps (`2024-03-15` vs `2024-03-15 00:00:00`) they are
+/// compared as instants (a date is midnight); otherwise plain byte order.
+#[inline]
+pub fn cmp_str(a: &str, b: &str) -> Ordering {
+    if a.len() != b.len() && a.len() >= 8 && b.len() >= 8 && a.as_bytes()[4] == b'-' && b.as_bytes()[4] == b'-' {
+        if let (Some(x), Some(y)) = (dt::parse(a), dt::parse(b)) {
+            return (x.days, x.secs, x.nanos).cmp(&(y.days, y.secs, y.nanos));
+        }
+    }
+    a.cmp(b)
 }
 
 /// SQL equality (None = NULL).
@@ -871,43 +884,16 @@ pub fn call(name: &str, a: &[V]) -> Option<V> {
         }
         "TO_JSON" => {
             nn!(0);
-            fn conv(v: &V) -> serde_json::Value {
-                if let Some(items) = crate::arrays::decode(v) { return serde_json::Value::Array(items.iter().map(conv).collect()); }
-                if let Some(pairs) = crate::maps::decode(v) {
-                    return serde_json::Value::Object(pairs.iter().map(|(k, x)| (to_str(k).unwrap_or_default(), conv(x))).collect());
-                }
-                crate::arrays::to_json(v)
-            }
-            V::Str(conv(arg(0)).to_string())
+            V::Str(crate::structs::value_to_json(arg(0)).to_string())
         }
         "FROM_JSON" => {
             nn!(0, 1);
-            let schema = get!(s(1)).trim().to_ascii_lowercase();
+            let schema = get!(s(1)).trim().to_string();
             let parsed = match serde_json::from_str::<serde_json::Value>(&get!(s(0))) { Ok(j) => j, Err(_) => return Some(V::Null) };
-            fn conv(j: &serde_json::Value, ty: &str) -> V {
-                let ty = ty.trim();
-                if let Some(inner) = ty.strip_prefix("array<").and_then(|t| t.strip_suffix('>')) {
-                    return match j { serde_json::Value::Array(a) => crate::arrays::encode(&a.iter().map(|x| conv(x, inner)).collect::<Vec<_>>()), _ => V::Null };
-                }
-                if let Some(inner) = ty.strip_prefix("map<").and_then(|t| t.strip_suffix('>')) {
-                    let vt = inner.split_once(',').map(|(_, v)| v).unwrap_or("string");
-                    return match j {
-                        serde_json::Value::Object(o) => crate::maps::encode(&o.iter().map(|(k, x)| (V::Str(k.clone()), conv(x, vt))).collect::<Vec<_>>()),
-                        _ => V::Null,
-                    };
-                }
-                match (ty, j) {
-                    (_, serde_json::Value::Null) => V::Null,
-                    ("int" | "integer" | "bigint" | "long" | "smallint" | "tinyint", serde_json::Value::Number(n)) => n.as_i64().map(V::Int).unwrap_or(V::Null),
-                    ("double" | "float" | "decimal", serde_json::Value::Number(n)) => n.as_f64().map(V::Float).unwrap_or(V::Null),
-                    ("boolean", serde_json::Value::Bool(b)) => V::Bool(*b),
-                    ("string", serde_json::Value::String(s)) => V::Str(s.clone()),
-                    ("string", other) => V::Str(other.to_string()),
-                    _ => V::Null,
-                }
-            }
-            if schema.starts_with("array<") || schema.starts_with("map<") { conv(&parsed, &schema) }
-            else { set_error("from_json supports ARRAY<..> and MAP<..> schemas only (STRUCT values are not supported)"); V::Null }
+            let ls = schema.to_ascii_lowercase();
+            if ls.starts_with("array<") || ls.starts_with("map<") || ls.starts_with("struct<") { crate::structs::json_to_value(&parsed, &schema) }
+            else if let Some(_) = crate::structs::parse_schema(&schema).filter(|f| f.len() > 1 || ls.contains(' ') || ls.contains(':')) { crate::structs::json_to_value(&parsed, &format!("struct<{}>", schema)) }
+            else { set_error("from_json: unsupported schema (use ARRAY<..>, MAP<..>, STRUCT<..> or a DDL list like 'a INT, b STRING')"); V::Null }
         }
         "TO_DATE" | "DATE" => {
             nn!(0);
@@ -947,7 +933,7 @@ pub fn call(name: &str, a: &[V]) -> Option<V> {
 
 /// Names that exist as scalar functions, for "unknown function" detection.
 pub fn is_known(name: &str) -> bool {
-    is_lazy(name) || crate::maps::names().contains(&name) || crate::hof::names().contains(&name) || matches!(name,
+    is_lazy(name) || crate::maps::names().contains(&name) || crate::structs::names().contains(&name) || crate::hof::names().contains(&name) || matches!(name,
         "CAST" | "TRY_CAST" | "CONVERT" | "MAP" | "UPPER" | "UCASE" | "LOWER" | "LCASE" | "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "LEN"
         | "OCTET_LENGTH" | "BIT_LENGTH" | "TRIM" | "BTRIM" | "LTRIM" | "RTRIM" | "__TRIM_BOTH" | "__TRIM_LEADING" | "__TRIM_TRAILING"
         | "SUBSTR" | "SUBSTRING" | "MID" | "LEFT" | "RIGHT" | "CONCAT" | "CONCAT_WS" | "REPLACE" | "REPEAT" | "REVERSE" | "LPAD" | "RPAD"

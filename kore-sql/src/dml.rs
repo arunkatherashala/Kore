@@ -167,9 +167,9 @@ fn insert(ctx: &mut KqlContext, rest: &str) -> Result<(String, usize), KoreError
     } else { (None, rest) };
     let existing = ctx.get(&name).cloned();
     let source = if let Some(v) = strip_kw(rest, "VALUES") {
-        ctx.query(&format!("SELECT * FROM (VALUES {v}) AS q"))?
+        ctx.query_raw(&format!("SELECT * FROM (VALUES {v}) AS q"))?
     } else if strip_kw(rest, "SELECT").is_some() || strip_kw(rest, "WITH").is_some() || rest.starts_with('(') {
-        ctx.query(rest)?
+        ctx.query_raw(rest)?
     } else {
         return Err(err(format!("INSERT: expected SELECT or VALUES, got: {}", &rest[..rest.len().min(20)])));
     };
@@ -241,7 +241,7 @@ fn update(ctx: &mut KqlContext, rest: &str) -> Result<(String, usize), KoreError
     for (k, (_, e)) in sets.iter().enumerate() { proj.push(format!("({e}) AS __s{k}")); }
     let mut q = format!("SELECT {} FROM {}", proj.join(", "), stored_name(ctx, &name));
     if let Some(w) = where_str { q.push_str(&format!(" WHERE ({w})")); }
-    let hit = tmp.query(&q)?;
+    let hit = tmp.query_raw(&q)?;
     let rids: Vec<usize> = match &hit.columns[0].data {
         ColumnData::Int64(v) => v.iter().flatten().map(|&x| x as usize).collect(),
         _ => Vec::new(),
@@ -270,7 +270,7 @@ fn delete(ctx: &mut KqlContext, rest: &str) -> Result<(String, usize), KoreError
         None => (0..tbl.num_rows).collect(),
         Some(w) => {
             let tmp = with_rowids(ctx, &name, &tbl);
-            let hit = tmp.query(&format!("SELECT __rid FROM {} WHERE ({w})", stored_name(ctx, &name)))?;
+            let hit = tmp.query_raw(&format!("SELECT __rid FROM {} WHERE ({w})", stored_name(ctx, &name)))?;
             match &hit.columns[0].data { ColumnData::Int64(v) => v.iter().flatten().map(|&x| x as usize).collect(), _ => Vec::new() }
         }
     };
@@ -330,7 +330,7 @@ fn create(ctx: &mut KqlContext, rest: &str) -> Option<Result<(String, usize), Ko
     // optional USING / STORED AS / PARTITIONED BY ... clauses before AS
     let as_pos = match find_top_kw(rest, "AS") { Some(p) => p, None => return Some(Err(err("CREATE: missing AS"))) };
     let select_sql = rest[as_pos + 2..].trim();
-    let mut result = match ctx.query(select_sql) { Ok(b) => b, Err(e) => return Some(Err(e)) };
+    let mut result = match ctx.query_raw(select_sql) { Ok(b) => b, Err(e) => return Some(Err(e)) };
     if is_view {
         let _ = or_replace;
         // a view stores its text; validate it now so a broken definition fails at CREATE time

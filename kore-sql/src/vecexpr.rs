@@ -151,6 +151,12 @@ fn cmp_ok(op: &BinOpKind, a: f64, b: f64) -> bool {
 }
 
 fn cmp_text(op: &BinOpKind, a: &str, b: &str) -> bool {
+    use std::cmp::Ordering::*;
+    if a.len() != b.len() {
+        // DATE vs TIMESTAMP text: compared as instants (see scalar::cmp_str)
+        let o = crate::scalar::cmp_str(a, b);
+        return match op { BinOpKind::Eq => o == Equal, BinOpKind::Ne => o != Equal, BinOpKind::Lt => o == Less, BinOpKind::Le => o != Greater, BinOpKind::Gt => o == Greater, BinOpKind::Ge => o != Less, _ => false };
+    }
     match op {
         BinOpKind::Eq => a == b,
         BinOpKind::Ne => a != b,
@@ -208,12 +214,12 @@ fn compare_const(op: &BinOpKind, l: &Val, r: &Val) -> Option<Vec<u8>> {
             let t: &str = t;
             let run = |f: &dyn Fn(&str) -> bool| -> Vec<u8> { v.iter().map(|x| match x { Some(a) => f(a.as_str()) as u8, None => NULL }).collect() };
             Some(match op {
-                BinOpKind::Lt => v.iter().map(|x| match x { Some(a) => (a.as_str() < t) as u8, None => NULL }).collect(),
-                BinOpKind::Le => v.iter().map(|x| match x { Some(a) => (a.as_str() <= t) as u8, None => NULL }).collect(),
-                BinOpKind::Gt => v.iter().map(|x| match x { Some(a) => (a.as_str() > t) as u8, None => NULL }).collect(),
-                BinOpKind::Ge => v.iter().map(|x| match x { Some(a) => (a.as_str() >= t) as u8, None => NULL }).collect(),
-                BinOpKind::Eq => v.iter().map(|x| match x { Some(a) => (a.as_str() == t) as u8, None => NULL }).collect(),
-                BinOpKind::Ne => run(&|a| a != t),
+                BinOpKind::Lt => v.iter().map(|x| match x { Some(a) => cmp_text(op, a.as_str(), t) as u8, None => NULL }).collect(),
+                BinOpKind::Le => v.iter().map(|x| match x { Some(a) => cmp_text(op, a.as_str(), t) as u8, None => NULL }).collect(),
+                BinOpKind::Gt => v.iter().map(|x| match x { Some(a) => cmp_text(op, a.as_str(), t) as u8, None => NULL }).collect(),
+                BinOpKind::Ge => v.iter().map(|x| match x { Some(a) => cmp_text(op, a.as_str(), t) as u8, None => NULL }).collect(),
+                BinOpKind::Eq => v.iter().map(|x| match x { Some(a) => cmp_text(op, a.as_str(), t) as u8, None => NULL }).collect(),
+                BinOpKind::Ne => run(&|a| cmp_text(op, a, t)),
                 _ => return None,
             })
         }

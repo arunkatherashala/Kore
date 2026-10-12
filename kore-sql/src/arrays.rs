@@ -75,6 +75,7 @@ pub fn render(s: &str) -> String {
             V::Null => "null".into(),
             V::Str(s) if s.starts_with(MARK) => render(s),
             V::Str(s) if s.starts_with(crate::maps::MARK) => crate::maps::render(s),
+            V::Str(s) if s.starts_with(crate::structs::MARK) => crate::structs::render(s),
             V::Float(f) => fmt_f64(*f),
             other => to_str(other).unwrap_or_default(),
         }
@@ -98,6 +99,7 @@ pub fn call(name: &str, a: &[V]) -> Option<V> {
     let arr = |i: usize| decode(arg(i));
     macro_rules! need { ($e:expr) => { match $e { Some(v) => v, None => return Some(V::Null) } } }
     if let Some(r) = crate::maps::call(name, a) { return Some(r); }
+    if let Some(r) = crate::structs::call(name, a) { return Some(r); }
     Some(match name {
         // arr[i]: zero-based, out of range (including negative) is NULL
         "__SUBSCRIPT" => {

@@ -45,6 +45,7 @@ pub fn render(s: &str) -> String {
             V::Null => "null".into(),
             V::Str(s) if s.starts_with(MARK) => render(s),
             V::Str(s) if s.starts_with(arrays::MARK) => arrays::render(s),
+            V::Str(s) if s.starts_with(crate::structs::MARK) => crate::structs::render(s),
             V::Float(f) => fmt_f64(*f),
             other => to_str(other).unwrap_or_default(),
         }

@@ -22,6 +22,7 @@ pub mod aggs;
 pub mod desugar;
 pub mod hashes;
 pub mod arrays;
+pub mod structs;
 pub mod testing;
 pub mod vecexpr;
 pub mod fusedagg;

@@ -199,7 +199,22 @@ impl KqlContext {
 
     /// Parse + execute a KQL query (supports CTEs and UNION ALL).
     /// Also handles DML statements: INSERT INTO, UPDATE, DELETE.
+    /// Result columns that are a top-level `CAST(.. AS DECIMAL(p,s))` are returned as text with exactly `s`
+    /// fractional digits (Spark prints `1.50`); everything inside the engine keeps decimals as doubles.
     pub fn query(&self, sql: &str) -> Result<DataBlock, KoreError> {
+        let mut block = self.query_raw(sql)?;
+        let lower = sql.to_ascii_lowercase();
+        if lower.contains("decimal") || lower.contains("numeric") || lower.contains("dec(") {
+            if let Ok(q) = crate::parser::parse_query(sql.trim()) {
+                apply_decimal_display(&mut block, &q);
+            }
+        }
+        Ok(block)
+    }
+
+    /// `query` without the display layer: used by the engine's own statements (CTAS, INSERT .. SELECT, views) so
+    /// stored columns stay numeric.
+    pub(crate) fn query_raw(&self, sql: &str) -> Result<DataBlock, KoreError> {
         // failures raised inside scalar functions (bad regex, unsupported CAST type, ...) have no return channel:
         // whatever is pending when the statement finishes turns the result into an error
         crate::scalar::take_error();
@@ -398,7 +413,7 @@ impl KqlContext {
             for (k, v) in &self.mut_tables {
                 read_ctx.tables.insert(k.clone(), v.clone());
             }
-            read_ctx.query(rest)?
+            read_ctx.query_raw(rest)?
         } else if rest_upper.starts_with("VALUES") {
             // INSERT INTO t VALUES (v1, v2, ...) — parse inline
             // Use existing table schema for column names if table exists
@@ -462,7 +477,7 @@ impl KqlContext {
         };
         let mut read_ctx = self.clone();
         read_ctx.tables.insert(table_name.to_string(), block.clone());
-        let matching = read_ctx.query(&select_sql)?;
+        let matching = read_ctx.query_raw(&select_sql)?;
         let rows_updated = matching.num_rows;
 
         // Parse assignments: col=val (simple literal values only)
@@ -527,7 +542,7 @@ impl KqlContext {
 
         let mut read_ctx = self.clone();
         read_ctx.tables.insert(table_name.to_string(), block);
-        let kept = read_ctx.query(&keep_sql)?;
+        let kept = read_ctx.query_raw(&keep_sql)?;
         let deleted = rows_before.saturating_sub(kept.num_rows);
         let kept = Arc::new(kept);
         self.mut_tables.insert(table_name.to_string(), kept.clone());
@@ -543,7 +558,7 @@ impl KqlContext {
         let table_pos = after_create.to_uppercase().find(" AS ").unwrap_or(after_create.len());
         let table_name = &after_create[..table_pos];
         let select_sql = &sql[as_pos + 4..].trim();
-        let result = self.query(select_sql)?;
+        let result = self.query_raw(select_sql)?;
         let rows = result.num_rows;
         self.register_mut(table_name, result.clone());
         self.register(table_name, result);
@@ -573,7 +588,7 @@ impl KqlContext {
         if let Some(as_pos) = rest.to_uppercase().find(" AS ") {
             let table_name = rest[..as_pos].trim();
             let select_sql = rest[as_pos + 4..].trim();
-            let result = self.query(select_sql)?;
+            let result = self.query_raw(select_sql)?;
             let rows = result.num_rows;
             self.register(table_name, result);
             Ok(("CREATE TEMP TABLE".into(), rows))
@@ -789,7 +804,7 @@ impl KqlContext {
             let close = after_copy.rfind(')')
                 .ok_or_else(|| KoreError::InvalidArgument("COPY TO: unmatched '('".into()))?;
             let inner_sql = &after_copy[1..close];
-            let block = self.query(inner_sql)?;
+            let block = self.query_raw(inner_sql)?;
             (block, after_copy[close + 1..].trim())
         } else {
             // COPY table_name TO 'path'
@@ -828,7 +843,7 @@ impl KqlContext {
         let as_pos = ctas_part.to_ascii_uppercase().find(" AS ")
             .ok_or_else(|| KoreError::InvalidArgument("CTAS: missing AS".into()))?;
         let select_sql = ctas_part[as_pos + 4..].trim();
-        let result = self.query(select_sql)?;
+        let result = self.query_raw(select_sql)?;
 
         // Extract path after "STORED AS PARQUET 'path'"
         let after_stored = sql[stored_pos + 17..].trim();
@@ -874,7 +889,7 @@ impl KqlContext {
         // Get source rows
         let source = self.get(source_name)
             .cloned()
-            .or_else(|| { let r = self.query(source_name).ok(); r })
+            .or_else(|| { let r = self.query_raw(source_name).ok(); r })
             .ok_or_else(|| KoreError::InvalidArgument(format!("MERGE: source table '{}' not found", source_name)))?;
 
         // Parse WHEN MATCHED / WHEN NOT MATCHED clauses
@@ -985,6 +1000,7 @@ fn render_arrays(block: &mut DataBlock) {
                 if let Some(t) = cell {
                     if t.starts_with(crate::arrays::MARK) { *t = crate::arrays::render(t); }
                     else if t.starts_with(crate::maps::MARK) { *t = crate::maps::render(t); }
+                    else if t.starts_with(crate::structs::MARK) { *t = crate::structs::render(t); }
                 }
             }
         }
@@ -3582,6 +3598,7 @@ fn eval_expr_ctx(expr: &Expr, block: &DataBlock, row: usize, ctx: &KqlContext) -
             if find_col(block, &full).is_some() {
                 return get_cell(block, &full, row);
             }
+            if let Some(x) = struct_field_cell(block, table, col, row) { return x; }
             if let Some(outer_block) = ctx.get(table.as_str()) {
                 if outer_block.num_rows > 0 {
                     return get_cell(outer_block, col.as_str(), 0);
@@ -3903,8 +3920,8 @@ fn eval_batch(expr: &Expr, block: &DataBlock) -> Vec<bool> {
                 if let Some(s) = lit_str!(lit_expr) {
                     if let ColumnData::Str(v) = &col.data {
                         return match op {
-                            BinOpKind::Eq => v.iter().map(|x| x.as_deref() == Some(s)).collect(),
-                            BinOpKind::Ne => v.iter().map(|x| x.as_deref() != Some(s)).collect(),
+                            BinOpKind::Eq => v.iter().map(|x| x.as_deref().map_or(false, |a| if a.len() == s.len() { a == s } else { crate::scalar::cmp_str(a, s).is_eq() })).collect(),
+                            BinOpKind::Ne => v.iter().map(|x| x.as_deref().map_or(false, |a| !(if a.len() == s.len() { a == s } else { crate::scalar::cmp_str(a, s).is_eq() }))).collect(),
                             _ => (0..n).map(|r| eval_bool(expr, block, r)).collect(),
                         };
                     }
@@ -3988,7 +4005,9 @@ pub(crate) fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
                 Expr::Col(n)        => n.clone(),
                 _                   => unreachable!(),
             };
-            get_cell(block, &full, row)
+            let v = get_cell(block, &full, row);
+            if let (ExprVal::Null, Expr::QualCol(t, c)) = (&v, expr) { if let Some(x) = struct_field_cell(block, t, c, row) { return x; } }
+            v
         }
         Expr::BinOp { op, left, right } => {
             if matches!(op, BinOpKind::Add | BinOpKind::Sub) {
@@ -4177,6 +4196,33 @@ fn eval_func(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> ExprVa
             let lit = |i: usize| match args.get(i) { Some(Expr::Int(n)) => Some(*n), _ => None };
             crate::scalar::cast(val, &ty, lit(2), lit(3))
         }
+        // typeof(CAST(x AS DECIMAL(p,s))) reports the declared decimal type (values themselves are doubles)
+        "TYPEOF" if args.len() == 1 && decimal_scale_of(&args[0]).is_some() => {
+            let (p, s) = match &args[0] {
+                Expr::FuncCall { args: ca, .. } => (match ca.get(2) { Some(Expr::Int(p)) => *p, _ => 10 }, match ca.get(3) { Some(Expr::Int(s)) => *s, _ => 0 }),
+                _ => (10, 0),
+            };
+            ExprVal::Str(format!("decimal({},{})", p, s))
+        }
+        "__GETFIELD" => {
+            let base = arg(0);
+            if matches!(base, ExprVal::Null) {
+                if let Some(Expr::QualCol(t, c)) = args.first() {
+                    if find_col(block, &format!("{t}.{c}")).is_none() && find_col(block, t).is_none() {
+                        crate::scalar::set_error(format!("column not found: {t}.{c}"));
+                    }
+                }
+            }
+            crate::structs::call("__GETFIELD", &[base, arg(1)]).unwrap_or(ExprVal::Null)
+        }
+        // struct(a, b): fields take the names of plain column arguments, otherwise col1, col2, ..
+        "STRUCT" => {
+            let fields: Vec<(String, ExprVal)> = args.iter().enumerate().map(|(i, a)| {
+                let n = match a { Expr::Col(c) | Expr::QualCol(_, c) => c.rsplit('.').next().unwrap_or(c).to_string(), _ => format!("col{}", i + 1) };
+                (n, eval_expr(a, block, row))
+            }).collect();
+            crate::structs::encode(&fields)
+        }
         "ISNUMERIC" => ExprVal::Bool(to_f64(&arg(0)).is_some()),
         "STRFTIME" | "FORMAT_DATE" => {
             // STRFTIME('%Y-%m', date)
@@ -4272,6 +4318,14 @@ fn append_row(target: &mut DataBlock, source: &DataBlock, src_row: usize) {
         }
     }
     target.num_rows += 1;
+}
+
+/// `s.field` where `s` is a column holding a struct value (None when there is no such column / field).
+fn struct_field_cell(block: &DataBlock, col: &str, field: &str, row: usize) -> Option<ExprVal> {
+    find_col(block, col)?;
+    let v = get_cell(block, col, row);
+    if !crate::structs::is_struct(&v) { return None; }
+    Some(crate::structs::field(&v, field).unwrap_or_else(|| { crate::scalar::set_error(format!("no such struct field {field}")); ExprVal::Null }))
 }
 
 fn get_cell(block: &DataBlock, col_name: &str, row: usize) -> ExprVal {    // Try exact match, then suffix match (for qualified names)
@@ -4815,9 +4869,18 @@ fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, Ko
                             let cn = col.name.len(); let nm = col_name.len();
                             col.name == col_name ||
                             (cn > nm && col.name.as_bytes()[cn-nm-1] == b'.' && &col.name[cn-nm..] == col_name)
-                        }).or_else(|| ci_find_col(&block, &col_name))
-                        .ok_or_else(|| KoreError::InvalidArgument(format!("column not found: {col_name}")))?;
-                        let mut nc = src.clone();
+                        }).or_else(|| ci_find_col(&block, &col_name));
+                        let mut nc = match src {
+                            Some(s) => s.clone(),
+                            // `s.field` over a struct column `s`
+                            None => match expr {
+                                Expr::QualCol(t, f) if find_col(&block, t).is_some_and(|sc| matches!(&sc.data, ColumnData::Str(_) | ColumnData::StrDict { .. })) => {
+                                    let vals: Vec<ExprVal> = (0..block.num_rows).map(|r| struct_field_cell(&block, t, f, r).unwrap_or(ExprVal::Null)).collect();
+                                    crate::general::vals_to_column(f.clone(), vals, None)
+                                }
+                                _ => return Err(KoreError::InvalidArgument(format!("column not found: {col_name}"))),
+                            },
+                        };
                         if let Some(a) = alias { nc.name = a.clone(); }
                         new_cols.push(nc);
                     }
@@ -4964,7 +5027,7 @@ fn collect_outer_quals(expr: &Expr, set: &mut std::collections::HashSet<String>)
 /// Collect all bare column names referenced anywhere in an expression.
 fn collect_cols_expr(expr: &Expr, set: &mut std::collections::HashSet<String>) {    match expr {
         Expr::Col(c)            => { set.insert(c.clone()); }
-        Expr::QualCol(_, c)     => { set.insert(c.clone()); }
+        Expr::QualCol(t, c)     => { set.insert(c.clone()); set.insert(t.clone()); }
         Expr::Agg { expr: e, .. } => collect_cols_expr(e, set),
         Expr::BinOp { left, right, .. } => {
             collect_cols_expr(left, set);
@@ -7472,3 +7535,35 @@ mod tests {
     }
 }
 
+
+/// Scale of a top-level `CAST(.. AS DECIMAL(p,s))` projection (`DECIMAL` alone is Spark's DECIMAL(10,0)).
+fn decimal_scale_of(e: &Expr) -> Option<i64> {
+    let Expr::FuncCall { name, args } = e else { return None };
+    if name != "CAST" && name != "TRY_CAST" { return None; }
+    match args.get(1) {
+        Some(Expr::Col(t)) if matches!(t.as_str(), "DECIMAL" | "NUMERIC" | "DEC") => {
+            Some(match args.get(3) { Some(Expr::Int(s)) => *s, _ => 0 })
+        }
+        _ => None,
+    }
+}
+
+/// Turn the DOUBLE columns that came from a top-level decimal CAST into text with exactly `s` fractional digits.
+fn apply_decimal_display(block: &mut DataBlock, q: &Query) {
+    let Some(body) = &q.body else { return };
+    if !q.set_ops.is_empty() || !body.set_ops.is_empty() || body.projections.len() != block.columns.len() { return; }
+    for (i, p) in body.projections.iter().enumerate() {
+        let Projection::Expr { expr, .. } = p else { return };
+        let Some(scale) = decimal_scale_of(expr) else { continue };
+        if let ColumnData::Float64(v) = &block.columns[i].data {
+            let out: Vec<Option<String>> = v.iter().map(|x| x.map(|f| {
+                let t = format!("{:.*}", scale.clamp(0, 38) as usize, f);
+                if t.starts_with('-') && t[1..].chars().all(|c| c == '0' || c == '.') { t[1..].to_string() } else { t }
+            })).collect();
+            block.columns[i].data = ColumnData::Str(out);
+        } else if let ColumnData::Int64(v) = &block.columns[i].data {
+            let out: Vec<Option<String>> = v.iter().map(|x| x.map(|n| if scale > 0 { format!("{}.{}", n, "0".repeat(scale as usize)) } else { n.to_string() })).collect();
+            block.columns[i].data = ColumnData::Str(out);
+        }
+    }
+}
