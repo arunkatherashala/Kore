@@ -174,9 +174,8 @@ impl<'a> G<'a> {
         for i in 1..ts.len() {
             let t = ts[i];
             let par = ts[self.r.below(i)];
-            let both_big = |x: usize, y: usize| (x <= 1) && (y <= 1);
             match self.r.below(10) {
-                0 if !both_big(t, par) || self.n < 200 => {} // cross join (only safe when small)
+                0 if self.n < 200 || t == 4 || par == 4 => {} // cross join (only safe when small, or against the tiny table)
                 1 => conds.push(format!("{}.k1 = {}.k1 and {}.k2 = {}.k2", ALIAS[t], ALIAS[par], ALIAS[t], ALIAS[par])),
                 2 => conds.push(format!("{}.s = {}.s and {}.k1 = {}.k1", ALIAS[t], ALIAS[par], ALIAS[t], ALIAS[par])),
                 3 => conds.push(format!("{}.k1 = {}.k2", ALIAS[t], ALIAS[par])),
@@ -258,7 +257,7 @@ impl<'a> G<'a> {
                 let nc = 1 + self.r.below(3);
                 let mut cols: Vec<String> = Vec::new();
                 for _ in 0..nc { let t = *self.r.pick(&ts); let k = *self.r.pick(&["int", "float", "str", "key"]); let c = self.col(t, k); if !cols.contains(&c) { cols.push(c); } }
-                let dirs: Vec<String> = cols.iter().map(|c| format!("{c} {} {}", self.r.pick(&["asc", "desc"]), self.r.pick(&["nulls first", "nulls last"]))).collect();
+                let dirs: Vec<String> = cols.iter().map(|c| format!("{c} {} {}", self.r.pick(&["asc", "desc"]), self.r.pick(&["nulls first", "nulls last", "", ""]))).collect();
                 let lim = if big { let m = if self.r.chance(30) { 70_000 } else { 120 }; 1 + self.r.below(m) } else { 1 + self.r.below(30) };
                 let off = if self.r.chance(40) { format!(" offset {}", self.r.below(20)) } else { String::new() };
                 // full tuple ordering is deterministic as a multiset of rows, even with duplicates
@@ -396,6 +395,17 @@ impl<'a> G<'a> {
                 conds.push(extra);
                 (format!("select count(*), sum({a}.v), count(distinct {a}.s) from {from}{}", Self::where_clause(&conds)), false)
             }
+            28 => {
+                // LIMIT without ORDER BY: which rows is arbitrary, how many is not
+                let nt = 2 + self.r.below(2);
+                let (ts, _from, conds) = self.comma_join(nt);
+                let kind = *self.r.pick(&["join", "left join", "right join", "full join"]);
+                let t0 = ts[0];
+                let (l, rr) = (self.r.pick(&["tc", "td"]).to_string(), self.r.pick(&["tb", "tc", "td"]).to_string());
+                let _ = (t0, conds);
+                let lim = 1 + self.r.below(if self.n >= 200 { 3000 } else { 40 });
+                (format!("select count(*) from (select x.v from {l} x {kind} {rr} y on x.k1 = y.k1 limit {lim}) z"), false)
+            }
             _ => {
                 // expression aggregates incl. HAVING over join with NULL-producing keys
                 let nt = 2 + self.r.below(if big { 2 } else { 3 });
@@ -463,7 +473,9 @@ fn fuzz_joins_and_aggregates() {
             let (sql, ordered) = { let mut g = G { r: &mut qr, n: sz.a, ks: sz.ka }; g.query() };
             total += 1;
             testing::set_force_general(false); testing::set_no_vecexpr(false); testing::set_no_fused(false);
+            let t0 = std::time::Instant::now();
             let fast = answer(&ctx, &sql);
+            if t0.elapsed().as_secs_f64() > 5.0 { println!("SLOW {:.1}s seed {seed} q{qi}: {sql}", t0.elapsed().as_secs_f64()); }
             testing::set_no_fused(true);
             let nofused = answer(&ctx, &sql);
             testing::set_no_fused(false);
