@@ -46,7 +46,7 @@ fn onull<T>(r: &mut Rng, pct: usize, v: T) -> Option<T> { if r.chance(pct) { Non
 
 /// Columns of every table: k1, k2 (join keys), g (small group domain), v (int), f (float), s (text).
 /// `uniq`: k1 is unique (a permutation prefix of 0..n, so key domain is `n` or `ka` whichever is larger).
-fn make_table(r: &mut Rng, n: usize, ka: usize, uniq: bool, with_id: bool, null_pct: usize, dict: bool) -> DataBlock {
+fn make_table(r: &mut Rng, n: usize, ka: usize, uniq: bool, with_id: bool, null_pct: usize, dict: bool, tm: (i64, i64)) -> DataBlock {
     let mut cols = Vec::new();
     if with_id { cols.push(Column::int64("id", (1..=n as i64).map(Some).collect())); }
     let k1: Vec<Option<i64>> = if uniq {
@@ -56,7 +56,7 @@ fn make_table(r: &mut Rng, n: usize, ka: usize, uniq: bool, with_id: bool, null_
     } else {
         (0..n).map(|_| { let v = r.below(ka) as i64; onull(r, null_pct, v) }).collect()
     };
-    cols.push(Column::int64("k1", k1));
+    cols.push(Column::int64("k1", k1.into_iter().map(|x| x.map(|v| v * tm.0 + tm.1)).collect()));
     cols.push(Column::int64("k2", (0..n).map(|_| { let v = r.below(5) as i64; onull(r, null_pct, v) }).collect()));
     cols.push(Column::int64("g", (0..n).map(|_| { let v = r.below(7) as i64; onull(r, null_pct, v) }).collect()));
     cols.push(Column::int64("v", (0..n).map(|_| { let v = r.below(101) as i64 - 50; onull(r, null_pct + 5, v) }).collect()));
@@ -74,7 +74,7 @@ fn make_table(r: &mut Rng, n: usize, ka: usize, uniq: bool, with_id: bool, null_
     }
     // high-cardinality group key (many groups: forces partitioned / hashed group-by)
     let hi = (n / 3).max(2);
-    cols.push(Column::int64("h", (0..n).map(|_| { let v = r.below(hi) as i64; onull(r, null_pct / 2, v) }).collect()));
+    cols.push(Column::int64("h", (0..n).map(|_| { let v = r.below(hi) as i64 * tm.0 + tm.1; onull(r, null_pct / 2, v) }).collect()));
     DataBlock::new(cols).unwrap()
 }
 
@@ -112,6 +112,7 @@ fn answer(c: &KqlContext, sql: &str) -> Result<Vec<String>, String> {
 }
 
 fn norm_num(s: &str) -> String {
+    if let Ok(i) = s.parse::<i64>() { return i.to_string(); }
     match s.parse::<f64>() {
         Ok(x) if !s.is_empty() => if x.fract() == 0.0 && x.abs() < 1e15 { format!("{}", x as i64) } else { format!("{:.6e}", x) },
         _ => s.to_string(),
@@ -125,12 +126,16 @@ fn canon(rows: &[String], ordered: bool) -> Vec<String> {
 
 // ───────────────────────── query generator ─────────────────────────
 
-struct G<'a> { r: &'a mut Rng, n: usize, ks: usize }
+struct G<'a> { r: &'a mut Rng, n: usize, ks: usize, tm: (i64, i64) }
 
 impl<'a> G<'a> {
+    /// A constant from the (transformed) key domain.
+    fn kc(&mut self, bound: usize) -> String { (self.r.below(bound) as i64 * self.tm.0 + self.tm.1).to_string() }
     fn col(&mut self, t: usize, kind: &str) -> String {
         let a = ALIAS[t];
         match kind {
+            // SUM / AVG arguments: keys are excluded (a transformed key near 2^60 would overflow BIGINT)
+            "sumint" => format!("{a}.{}", self.r.pick(&["v", "g", "k2", "v"])),
             "int" => format!("{a}.{}", self.r.pick(&["v", "g", "k2", "k1", "h"])),
             "key" => format!("{a}.{}", self.r.pick(&["k1", "k2", "g"])),
             "grp" => format!("{a}.{}", self.r.pick(&["g", "k2", "s", "k1", "h"])),
@@ -154,7 +159,7 @@ impl<'a> G<'a> {
             9 => format!("{a}.{} is {}null", self.r.pick(&["k1", "v", "s", "f", "g"]), if self.r.chance(50) { "not " } else { "" }),
             10 => format!("substr({a}.s, 1, 2) {} '{}'", self.r.pick(&["=", "<>", ">"]), self.r.pick(&["ab", "b", "hel", "a"])),
             11 => format!("{a}.s in ('ab', 'b', 'hello')"),
-            12 => format!("{a}.k1 {cmp} {}", self.r.below(self.ks.max(1)) ),
+            12 => { let k = self.kc(self.ks.max(1)); format!("{a}.k1 {cmp} {k}") }
             _ => format!("({a}.v + {a}.g) {cmp} {}", self.r.below(30)),
         }
     }
@@ -217,21 +222,21 @@ impl<'a> G<'a> {
         match self.r.below(18) {
             0 => "count(*)".into(),
             1 => format!("count({})", self.col(t, "int")),
-            2 => format!("sum({})", self.col(t, "int")),
+            2 => format!("sum({})", self.col(t, "sumint")),
             3 => format!("sum({})", self.col(t, "float")),
             4 => format!("min({})", self.col(t, "int")),
             5 => format!("max({})", self.col(t, "int")),
-            6 => format!("avg({})", self.col(t, "int")),
+            6 => format!("avg({})", self.col(t, "sumint")),
             7 => format!("avg({})", self.col(t, "float")),
             8 => format!("min({})", self.col(t, "str")),
             9 => format!("max({})", self.col(t, "str")),
             10 => format!("count(distinct {})", self.col(t, "int")),
-            11 => format!("sum({} + {})", self.col(t, "int"), self.col(t2, "int")),
+            11 => format!("sum({} + {})", self.col(t, "sumint"), self.col(t2, "sumint")),
             12 => format!("sum({} * {})", self.col(t, "float"), self.col(t2, "int")),
             13 => format!("sum(case when {} then 1 else 0 end)", self.tab_pred(t)),
             14 => format!("sum(case when {} then {} else 0 end)", self.tab_pred(t), self.col(t2, "float")),
             15 => format!("max({}) - min({})", self.col(t, "float"), self.col(t, "float")),
-            16 => format!("sum(distinct {})", self.col(t, "int")),
+            16 => format!("sum(distinct {})", self.col(t, "sumint")),
             _ => format!("count({})", self.col(t, "str")),
         }
     }
@@ -403,11 +408,11 @@ impl<'a> G<'a> {
                 let t = *self.r.pick(&ts);
                 let a = ALIAS[t];
                 let extra = match self.r.below(5) {
-                    0 => format!("{a}.k1 in ({})", (0..20 + self.r.below(30)).map(|_| self.r.below(self.ks.max(2)).to_string()).collect::<Vec<_>>().join(", ")),
-                    1 => format!("{a}.k1 not in ({})", (0..20 + self.r.below(30)).map(|_| self.r.below(self.ks.max(2)).to_string()).collect::<Vec<_>>().join(", ")),
+                    0 => { let n = 20 + self.r.below(30); format!("{a}.k1 in ({})", (0..n).map(|_| self.kc(self.ks.max(2))).collect::<Vec<_>>().join(", ")) }
+                    1 => { let n = 20 + self.r.below(30); format!("{a}.k1 not in ({})", (0..n).map(|_| self.kc(self.ks.max(2))).collect::<Vec<_>>().join(", ")) }
                     2 => format!("substr({a}.s, 2, 2) = '{}'", self.r.pick(&["b", "bc", "ab", "el", "z", ""])),
                     3 => format!("{a}.s like '%{}%'", self.r.pick(&["a", "b", "ab", "l", "zz"])),
-                    _ => format!("({a}.s like 'a%' or {a}.k1 in ({}, {}))", self.r.below(self.ks.max(2)), self.r.below(self.ks.max(2))),
+                    _ => { let (k1, k2) = (self.kc(self.ks.max(2)), self.kc(self.ks.max(2))); format!("({a}.s like 'a%' or {a}.k1 in ({k1}, {k2}))") }
                 };
                 conds.push(extra);
                 (format!("select count(*), sum({a}.v), count(distinct {a}.s) from {from}{}", Self::where_clause(&conds)), false)
@@ -611,11 +616,15 @@ fn fuzz_joins_and_aggregates() {
         let sz = sizes(&scale, &mut r);
         let np = *r.pick(&[0usize, 5, 20]);
         let dict = seed % 2 == 0;
-        let ta = make_table(&mut r, sz.a, sz.ka, false, true, np, dict);
-        let tb = make_table(&mut r, sz.b, sz.ka, false, false, np, false);
-        let tc = make_table(&mut r, sz.c, sz.ka, true, false, if np == 0 { 0 } else { 8 }, false);
-        let td = make_table(&mut r, sz.d, sz.ka, true, false, 0, dict);
-        let te = make_table(&mut r, sz.e, sz.ka, false, false, 10, false);
+        // key transform: small dense keys (direct-address tables), sparse / negative keys (hashed tables), and keys above
+        // 2^53 that differ by less than a double's resolution (exactness of every key comparison)
+        let tms: [(i64, i64); 5] = [(1, 0), (7, -1_000_000), (100_003, 1_000_000_000_000), (3, 1i64 << 60), (1, -(1i64 << 62))];
+        let tm = match std::env::var("FUZZ_TM").ok().and_then(|v| v.parse::<usize>().ok()) { Some(i) => tms[i % 5], None => tms[(seed as usize / 2) % 5] };
+        let ta = make_table(&mut r, sz.a, sz.ka, false, true, np, dict, tm);
+        let tb = make_table(&mut r, sz.b, sz.ka, false, false, np, false, tm);
+        let tc = make_table(&mut r, sz.c, sz.ka, true, false, if np == 0 { 0 } else { 8 }, false, tm);
+        let td = make_table(&mut r, sz.d, sz.ka, true, false, 0, dict, tm);
+        let te = make_table(&mut r, sz.e, sz.ka, false, false, 10, false, tm);
         let mut ctx = KqlContext::new();
         let blocks = [("ta", ta), ("tb", tb), ("tc", tc), ("td", td), ("te", te)];
         for (n, b) in &blocks { ctx.register(*n, b.clone()); }
@@ -642,7 +651,7 @@ fn fuzz_joins_and_aggregates() {
         }
         let mut qr = Rng(seed * 31 + 7);
         for qi in 0..per {
-            let (sql, ordered) = { let mut g = G { r: &mut qr, n: sz.a, ks: sz.ka }; g.query() };
+            let (sql, ordered) = { let mut g = G { r: &mut qr, n: sz.a, ks: sz.ka, tm }; g.query() };
             total += 1;
             testing::set_force_general(false); testing::set_no_vecexpr(false); testing::set_no_fused(false);
             if std::env::var("FUZZ_TRACE").is_ok() { eprintln!("TRACE seed {seed} q{qi}: {sql}"); }

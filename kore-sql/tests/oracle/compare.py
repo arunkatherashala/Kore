@@ -35,6 +35,11 @@ def cellstr(v):
 def eq_cell(a, b):
     if a == b: return True
     try:
+        # two integers are equal or they are not (a relative tolerance would hide BIGINT key bugs)
+        return int(a) == int(b)
+    except ValueError:
+        pass
+    try:
         x, y = float(a), float(b)
         return math.isclose(x, y, rel_tol=1e-6, abs_tol=1e-6)
     except ValueError:
@@ -50,8 +55,10 @@ def eq_rows(a, b):
 def sortkey(r):
     out = []
     for c in r.split("\t"):
-        try: out.append((0, round(float(c), 4), ""))
-        except ValueError: out.append((1, 0, c))
+        try: out.append((0, int(c), ""))
+        except ValueError:
+            try: out.append((0, round(float(c), 4), ""))
+            except ValueError: out.append((1, 0, c))
     return out
 
 def main():
