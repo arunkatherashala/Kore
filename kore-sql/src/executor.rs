@@ -1582,7 +1582,8 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
         // ON with more than one condition: hash-join on an equality and apply the rest as a residual;
         // only genuinely non-equi joins fall back to the nested loop.
         if let Some(ref on_expr) = join.on.expr {
-            if let Some(done) = hash_join_with_residual(&probe, &right_block, on_expr, &join.join_type, ctx, keep_after_on(stmt, ji, &needed).as_ref())? {
+            let hashed = if crate::testing::no_hash_residual() { None } else { hash_join_with_residual(&probe, &right_block, on_expr, &join.join_type, ctx, keep_after_on(stmt, ji, &needed).as_ref())? };
+            if let Some(done) = hashed {
                 result = done;
                 // columns only the ON condition needed (filters on the joined table) are dead weight now
                 if needed.is_some() {
@@ -1594,7 +1595,12 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
                     result.columns.retain(|c| needs_col(&keep, c.name.rsplit('.').next().unwrap_or(&c.name)) || needs_col(&keep, c.name.as_str()));
                 }
             } else {
-                result = nested_loop_join(&probe, &right_block, on_expr, &join.join_type);
+                // any other ON: composite-key hash join (or a blocked theta join when there is no equality)
+                let general = if crate::testing::no_hash_residual() { None } else { join_general(&probe, &right_block, on_expr, &join.join_type, ctx)? };
+                result = match general {
+                    Some(b) => b,
+                    None => nested_loop_join(&probe, &right_block, on_expr, &join.join_type),
+                };
             }
             continue;
         }
@@ -2427,7 +2433,7 @@ fn lazy_right_hash_join(
     keep: &std::collections::HashSet<String>,
 ) -> Result<Option<DataBlock>, KoreError> {
     use rayon::prelude::*;
-    if !matches!(kind, JoinKind::Inner | JoinKind::Left) { return Ok(None); }
+    if !matches!(kind, JoinKind::Inner | JoinKind::Left) || crate::testing::no_hash_residual() { return Ok(None); }
     let pname = |n: &str| if n.contains('.') { n.to_string() } else { format!("{alias}.{n}") };
     let names = DataBlock {
         num_rows: 0,
@@ -2566,6 +2572,200 @@ fn hash_join_with_residual(
         joined = filter_block_ctx(joined, &p, ctx)?;
     }
     Ok(Some(joined))
+}
+
+/// A join-key cell: numbers (BIGINT kept exact), text, booleans.
+#[derive(Clone, Copy)]
+enum JCell<'a> { I(i64), F(f64), S(&'a str), B(bool) }
+
+#[inline(always)]
+fn jcell(d: &ColumnData, r: usize) -> Option<JCell<'_>> {
+    match d {
+        ColumnData::Int64(v) => v[r].map(JCell::I),
+        ColumnData::Float64(v) => v[r].map(JCell::F),
+        ColumnData::Bool(v) => v[r].map(JCell::B),
+        ColumnData::Str(v) => v[r].as_deref().map(JCell::S),
+        ColumnData::StrDict { codes, dict } => { let c = codes[r]; if c == u8::MAX { None } else { dict.get(c as usize).map(|s| JCell::S(s.as_str())) } }
+    }
+}
+
+/// 0 = number, 1 = text, 2 = bool (only columns of the same class can be hashed together).
+fn jclass(d: &ColumnData) -> u8 {
+    match d { ColumnData::Int64(_) | ColumnData::Float64(_) => 0, ColumnData::Bool(_) => 2, _ => 1 }
+}
+
+#[inline(always)]
+fn jhash(c: JCell<'_>) -> u64 {
+    const BIG: f64 = 9007199254740992.0;
+    match c {
+        JCell::I(i) if i.unsigned_abs() > (1u64 << 53) => (i as u64) ^ 0x4444,
+        JCell::F(f) if f.is_finite() && f.fract() == 0.0 && f.abs() > BIG && f.abs() < 9.2e18 => (f as i64 as u64) ^ 0x4444,
+        JCell::I(i) => (i as f64).to_bits(),
+        JCell::F(f) => (if f == 0.0 { 0.0f64 } else { f }).to_bits(),
+        JCell::B(b) => 0x5555 + b as u64,
+        JCell::S(s) => { let mut h = 0xcbf2_9ce4_8422_2325u64; for b in s.bytes() { h = (h ^ b as u64).wrapping_mul(0x100_0000_01b3); } h ^ (s.len() as u64).rotate_left(40) }
+    }
+}
+
+/// Exact SQL equality of two non-NULL cells (the hash only buckets; this decides).
+#[inline(always)]
+fn jeq(a: JCell<'_>, b: JCell<'_>) -> bool {
+    fn int_float(i: i64, f: f64) -> bool {
+        if i.unsigned_abs() > (1u64 << 53) { f.is_finite() && f.fract() == 0.0 && f.abs() < 9.2e18 && f as i64 == i } else { (i as f64) == f }
+    }
+    match (a, b) {
+        (JCell::I(x), JCell::I(y)) => x == y,
+        (JCell::F(x), JCell::F(y)) => x == y,
+        (JCell::I(i), JCell::F(f)) | (JCell::F(f), JCell::I(i)) => int_float(i, f),
+        (JCell::S(x), JCell::S(y)) => x == y,
+        (JCell::B(x), JCell::B(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// General ON condition: every equality between a left and a right column is a hash key (composite, confirmed
+/// cell by cell); all other conjuncts are evaluated on the hash-candidate pairs only. Outer-join rows are
+/// derived from the pairs that satisfy the WHOLE condition. With no equality at all the candidates are every
+/// pair, produced block by block (a theta join: O(n*m) comparisons, but vectorised and parallel).
+/// None = not applicable (row ids would overflow u32).
+fn join_general(left: &DataBlock, right: &DataBlock, on: &Expr, kind: &JoinKind, ctx: &KqlContext) -> Result<Option<DataBlock>, KoreError> {
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    const NONE: u32 = u32::MAX;
+    const BATCH: usize = 1 << 16;
+    let (ln, rn) = (left.num_rows, right.num_rows);
+    if ln >= NONE as usize || rn >= NONE as usize { return Ok(None); }
+    let mut conjuncts = Vec::new();
+    crate::rewrite::split_conjuncts(on, &mut conjuncts);
+    let mut keys: Vec<(&ColumnData, &ColumnData)> = Vec::new();
+    let mut residual: Vec<Expr> = Vec::new();
+    for c in conjuncts {
+        let mut key = None;
+        if let Expr::BinOp { op: BinOpKind::Eq, left: a, right: b } = &c {
+            if let (Some(x), Some(y)) = (crate::rewrite::col_ref(a), crate::rewrite::col_ref(b)) {
+                let pair = match (find_col_in_block(&x, left), find_col_in_block(&y, right)) {
+                    (Some(l), Some(r)) => Some((l, r)),
+                    _ => match (find_col_in_block(&y, left), find_col_in_block(&x, right)) {
+                        (Some(l), Some(r)) => Some((l, r)),
+                        _ => None,
+                    },
+                };
+                if let Some((l, r)) = pair {
+                    if let (Some(lc), Some(rc)) = (find_col(left, &l), find_col(right, &r)) {
+                        if jclass(&lc.data) == jclass(&rc.data) { key = Some((&lc.data, &rc.data)); }
+                    }
+                }
+            }
+        }
+        match key { Some(k) => keys.push(k), None => residual.push(c) }
+    }
+
+    // which columns the residual reads (all of them when that cannot be told)
+    let pred = crate::rewrite::and_all(residual);
+    let (lsel, rsel): (Vec<usize>, Vec<usize>) = match &pred {
+        None => (vec![], vec![]),
+        Some(p) => {
+            let mut refs = Vec::new();
+            if crate::rewrite::referenced_cols(p, &mut refs) {
+                let hit = |name: &str| refs.iter().any(|n| {
+                    name.eq_ignore_ascii_case(n)
+                        || (name.len() > n.len() && name.as_bytes()[name.len() - n.len() - 1] == b'.' && name[name.len() - n.len()..].eq_ignore_ascii_case(n))
+                });
+                ((0..left.columns.len()).filter(|&i| hit(&left.columns[i].name)).collect(),
+                 (0..right.columns.len()).filter(|&i| hit(&right.columns[i].name)).collect())
+            } else {
+                ((0..left.columns.len()).collect(), (0..right.columns.len()).collect())
+            }
+        }
+    };
+    // residual over candidate pairs -> indices (into the pair list) that satisfy it
+    let eval_pairs = |cl: &[u32], cr: &[u32]| -> Result<Vec<usize>, KoreError> {
+        let Some(p) = &pred else { return Ok((0..cl.len()).collect()) };
+        let mut columns: Vec<Column> = lsel.iter().map(|&i| Column { name: left.columns[i].name.clone(), data: kore_join::gather_rows(&left.columns[i].data, cl) }).collect();
+        columns.extend(rsel.iter().map(|&i| Column { name: right.columns[i].name.clone(), data: kore_join::gather_rows(&right.columns[i].data, cr) }));
+        let mut block = DataBlock { columns, num_rows: cl.len() };
+        if let Some(idx) = crate::vecexpr::filter_idx(p, &block) { return Ok(idx); }
+        block.columns.push(Column { name: "__pi".into(), data: ColumnData::Int64((0..cl.len() as i64).map(Some).collect()) });
+        let f = filter_block_ctx(block, p, ctx)?;
+        match f.columns.last().map(|c| &c.data) {
+            Some(ColumnData::Int64(v)) => Ok(v.iter().map(|x| x.unwrap_or(0) as usize).collect()),
+            _ => Ok(Vec::new()),
+        }
+    };
+
+    // build side: right rows with a complete key, sorted by hash
+    let row_hash = |cols: &[&ColumnData], r: usize| -> Option<u64> {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for d in cols {
+            let c = jcell(d, r)?;
+            h = (h ^ jhash(c)).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29);
+        }
+        Some(h)
+    };
+    let lcols: Vec<&ColumnData> = keys.iter().map(|k| k.0).collect();
+    let rcols: Vec<&ColumnData> = keys.iter().map(|k| k.1).collect();
+    let mut table: Vec<(u64, u32)> = if keys.is_empty() { Vec::new() } else {
+        (0..rn).into_par_iter().filter_map(|r| row_hash(&rcols, r).map(|h| (h, r as u32))).collect()
+    };
+    table.par_sort_unstable();
+    let keys_eq = |li: usize, ri: usize| keys.iter().all(|(l, r)| match (jcell(l, li), jcell(r, ri)) { (Some(a), Some(b)) => jeq(a, b), _ => false });
+
+    let want_left = matches!(kind, JoinKind::Left | JoinKind::Full);
+    let want_right = matches!(kind, JoinKind::Right | JoinKind::Full);
+    let right_seen: Vec<AtomicBool> = if want_right { (0..rn).map(|_| AtomicBool::new(false)).collect() } else { Vec::new() };
+
+    // a chunk of left rows: its candidates are checked in batches, so memory stays bounded
+    let chunk = if keys.is_empty() { (BATCH / rn.max(1)).max(1) } else { 8192 };
+    let starts: Vec<usize> = (0..ln).step_by(chunk).collect();
+    let parts: Vec<Result<(Vec<u32>, Vec<u32>), KoreError>> = starts.into_par_iter().map(|s| {
+        let e = (s + chunk).min(ln);
+        let (mut ol, mut or_): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
+        let mut matched = vec![false; e - s];
+        let (mut cl, mut cr): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
+        let mut flush = |cl: &mut Vec<u32>, cr: &mut Vec<u32>, ol: &mut Vec<u32>, or_: &mut Vec<u32>| -> Result<(), KoreError> {
+            if cl.is_empty() { return Ok(()); }
+            let keep = eval_pairs(cl, cr)?;
+            for i in keep {
+                let (l, r) = (cl[i], cr[i]);
+                matched[l as usize - s] = true;
+                if want_right { right_seen[r as usize].store(true, Ordering::Relaxed); }
+                ol.push(l); or_.push(r);
+            }
+            cl.clear(); cr.clear();
+            Ok(())
+        };
+        for li in s..e {
+            if keys.is_empty() {
+                for ri in 0..rn {
+                    cl.push(li as u32); cr.push(ri as u32);
+                }
+            } else if let Some(h) = row_hash(&lcols, li) {
+                let lo = table.partition_point(|x| x.0 < h);
+                for &(th, ri) in &table[lo..] {
+                    if th != h { break; }
+                    if keys_eq(li, ri as usize) { cl.push(li as u32); cr.push(ri); }
+                }
+            }
+            if cl.len() >= BATCH { flush(&mut cl, &mut cr, &mut ol, &mut or_)?; }
+        }
+        flush(&mut cl, &mut cr, &mut ol, &mut or_)?;
+        if want_left {
+            for (i, m) in matched.iter().enumerate() { if !m { ol.push((s + i) as u32); or_.push(NONE); } }
+        }
+        Ok((ol, or_))
+    }).collect();
+    let mut lidx: Vec<u32> = Vec::new();
+    let mut ridx: Vec<u32> = Vec::new();
+    for p in parts { let (a, b) = p?; lidx.extend(a); ridx.extend(b); }
+    if want_right {
+        for (ri, f) in right_seen.iter().enumerate() {
+            if !f.load(Ordering::Relaxed) { lidx.push(NONE); ridx.push(ri as u32); }
+        }
+    }
+    let mut jobs: Vec<(&Column, &[u32])> = left.columns.iter().map(|c| (c, &lidx[..])).collect();
+    jobs.extend(right.columns.iter().map(|c| (c, &ridx[..])));
+    let columns: Vec<Column> = jobs.into_par_iter().map(|(c, ix)| Column { name: c.name.clone(), data: kore_join::gather_rows(&c.data, ix) }).collect();
+    Ok(Some(DataBlock { columns, num_rows: lidx.len() }))
 }
 
 /// Hash-encode join-key values; false when any value is NULL (NULL never equals anything).

@@ -39,3 +39,11 @@ pub(crate) fn no_date_accel() -> bool {
 
 /// How many times the date accelerator served a column so far (lets tests assert it was really exercised).
 pub fn date_accel_hits() -> usize { crate::dateaccel::hits() }
+
+pub(crate) static NO_HASH_RESIDUAL: AtomicBool = AtomicBool::new(false);
+
+/// Send every explicit join with a complex ON condition through the old row-at-a-time nested loop (A/B oracle).
+pub fn set_no_hash_residual(on: bool) { NO_HASH_RESIDUAL.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_hash_residual() -> bool { NO_HASH_RESIDUAL.load(Ordering::Relaxed) }
