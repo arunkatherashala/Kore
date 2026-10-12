@@ -21,6 +21,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sf", type=float, required=True)
     ap.add_argument("--results", default=os.path.join(HERE, "results"))
+    ap.add_argument("--ref", default="spark", choices=ENGINES,
+                    help="engine whose rows every other engine is checked against (use duckdb when Spark was not run)")
     a = ap.parse_args()
     data, meta = {}, {}
     for e in ENGINES:
@@ -28,7 +30,7 @@ def main():
         if os.path.exists(f):
             data[e] = json.load(open(f, encoding="utf-8"))
             meta[e] = data[e].get("_version", e)
-    ref = data["spark"]
+    ref = data[a.ref]
     names = sorted((q for q in ref if q.startswith("Q")), key=lambda q: int(q[1:]))
     cols = [e for e in ENGINES if e in data]
     head = f"{'query':5}" + "".join(f"{e:>13}" for e in cols)
@@ -45,7 +47,7 @@ def main():
                 cell = "-"
             elif r["status"] != "ok":
                 cell, _ = "unsupported", bad[e].append(q)
-            elif e == "spark":
+            elif e == a.ref:
                 cell, times[e] = f"{r['ms']:.0f}", r["ms"]
                 ok[e] += 1
                 geo[e].append(r["ms"])
@@ -63,14 +65,14 @@ def main():
             best_count[min(times, key=times.get)] += 1
         lines.append(row)
     lines.append("")
-    lines.append("correct (agrees with Spark): " + ", ".join(f"{e} {ok[e]}/{len(names)}" for e in cols))
+    lines.append(f"correct (agrees with {a.ref}): " + ", ".join(f"{e} {ok[e]}/{len(names)}" for e in cols))
     for e in cols:
         if bad[e]:
             lines.append(f"  {e} not comparable on: {', '.join(bad[e])}")
     lines.append("fastest on N queries: " + ", ".join(f"{e} {best_count[e]}" for e in cols))
     # geometric mean over queries every engine answered correctly
     common = [q for q in names if all(q in [n for n in names] and data[e].get(q, {}).get("status") == "ok"
-                                      and (e == "spark" or rows_equal(data[e][q]["rows"], ref[q]["rows"])[0]) for e in cols)]
+                                      and (e == a.ref or rows_equal(data[e][q]["rows"], ref[q]["rows"])[0]) for e in cols)]
     lines.append(f"geometric mean over the {len(common)} queries all engines answered correctly (ms):")
     for e in cols:
         g = math.exp(sum(math.log(data[e][q]["ms"]) for q in common) / len(common)) if common else float("nan")

@@ -73,6 +73,45 @@ Timings: all five engines were re-run back to back on a quiet machine (final run
 Read this with care: one machine (8 cores, 32 GB, Windows), SF 1, in-memory, TPC-H-shaped data (not dbgen), best of 3 after a warm-up, roughly
 +/-20% noise . Engines were installed from conda-forge: DuckDB 1.5.6, DataFusion 54.0.0, Polars 1.44.2, Spark 4.2.0 (local mode).
 
+## Scale check: SF 3 (18M lineitem rows), 2026-10-12
+
+KORE and DuckDB only (Spark does not fit in the memory left on the test machine next to them, so **DuckDB is the correctness reference at this scale**;
+DuckDB agreed with Spark on 22 of 22 queries at SF 1). Same Parquet/CSV data and SQL text, best of 2 after a warm-up, times in milliseconds.
+
+| Query | KORE | DuckDB |
+|---|---|---|
+| Q1 | 220 | 208 |
+| Q2 | 33 | 49 |
+| Q3 | 486 | 129 |
+| Q4 | 215 | 179 |
+| Q5 | 255 | 83 |
+| Q6 | 57 | 72 |
+| Q7 | 306 | 155 |
+| Q8 | 138 | 66 |
+| Q9 | 1018 | 270 |
+| Q10 | 814 | 145 |
+| Q11 | 76 | 17 |
+| Q12 | 203 | 240 |
+| Q13 | 622 | 231 |
+| Q14 | 85 | 97 |
+| Q15 | 206 | 75 |
+| Q16 | 268 | 223 |
+| Q17 | 131 | 45 |
+| Q18 | 766 | 209 |
+| Q19 | 274 | 192 |
+| Q20 | 492 | 133 |
+| Q21 | 498 | 468 |
+| Q22 | 137 | 49 |
+
+Answers agreeing with DuckDB: KORE 22/22. Geometric mean over the 22 queries: KORE 236 ms, DuckDB 119 ms (KORE about 2.0x slower).
+Fastest per query: kore 4, duckdb 18.
+
+What this shows: KORE completes all 22 queries at 3x the SF1 data and returns the same answers as DuckDB; an earlier SF3 attempt had failed with an
+out-of-memory error, before the memory-footprint work. The gap to DuckDB is wider than at SF 1 (best quiet SF 1 runs were about level), mostly on
+join-heavy queries (Q3 486 vs 129 ms, Q5 255 vs 83, Q9 1018 vs 270, Q10 814 vs 145, Q18 766 vs 209), so KORE does not scale as well as DuckDB here.
+Not measured: KORE's peak memory at SF 3 (it ran in the roughly 9.7 GB of RAM that was available, with other programs open), Spark at SF 3, anything larger.
+Same caveats as above: one shared machine with large run-to-run variance, TPC-H-shaped data, warm in-memory runs.
+
 Full tables: `results/`. Read these numbers with care:
 
 * Spark here is a single-JVM local-mode run on a data set that fits in memory; its strengths (scale-out, spilling,
