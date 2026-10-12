@@ -331,7 +331,7 @@ impl<'a> G<'a> {
             13 | 14 | 15 => {
                 // outer joins with residual ON conditions
                 let kind = *self.r.pick(&["left join", "right join", "full join", "left join", "join"]);
-                let res = *self.r.pick(&["", " and b.v > a.v", " and b.g < 4", " and a.g <> b.g", " and (b.v > 0 or a.v > 0)", " and a.s = b.s", " and b.k2 = a.k2"]);
+                let res = *self.r.pick(&["", " and b.v > a.v", " and b.g < 4", " and a.g <> b.g", " and (b.v > 0 or a.v > 0)", " and a.s = b.s", " and b.k2 = a.k2", " and a.v > 2", " and a.s like 'a%'", " and a.k2 is not null and b.v is not null"]);
                 let key = *self.r.pick(&["a.k1 = b.k1", "a.k1 = b.k1 and a.k2 = b.k2", "a.k1 = b.k2"]);
                 let wh = if self.r.chance(40) { format!(" where {}", self.r.pick(&["a.v > 0", "b.v is null", "b.k1 is not null", "a.g in (1, 2, 3)", "a.s like 'a%' or b.s like 'b%'"])) } else { String::new() };
                 let (l, rr) = if big { ("tc", "td") } else { ("ta", "tb") };
