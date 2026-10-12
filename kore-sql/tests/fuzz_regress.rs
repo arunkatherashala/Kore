@@ -197,3 +197,19 @@ fn double_equality_is_exact() {
     assert_eq!(flat(&c, "select id from fx where x = 0"), Vec::<String>::new());
     assert_eq!(flat(&c, "select id from fx where x * 1 = 0.3"), ["1"]);
 }
+
+#[test]
+fn rollup_cube_and_grouping_sets_with_null_keys() {
+    let c = ctx();
+    // k = 1, 2, 3, NULL, 2: the NULL key is a group of its own, the grand total is another NULL row
+    let r = flat(&c, "select k, count(*), sum(v), grouping(k) from l group by rollup(k) order by 4, 1");
+    assert_eq!(r.len(), 5, "{r:?}");
+    assert!(r.contains(&"NULL,1,4,0".to_string()), "{r:?}");
+    assert!(r.contains(&"NULL,5,15,1".to_string()), "{r:?}");
+    assert!(r.contains(&"2,2,7,0".to_string()), "{r:?}");
+    let r = flat(&c, "select k, g, count(*) from l where g < 40 group by cube(k, g) order by 1, 2");
+    // (k,g): 3 groups, (k): 3, (g): 3, total: 1
+    assert_eq!(r.len(), 10, "{r:?}");
+    let r = flat(&c, "select k, count(*) from l group by grouping sets ((k), ())");
+    assert_eq!(r.len(), 5, "{r:?}");
+}

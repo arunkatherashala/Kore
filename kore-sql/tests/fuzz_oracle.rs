@@ -243,7 +243,7 @@ impl<'a> G<'a> {
     /// Returns (sql, ordered). Unordered answers are compared as multisets.
     fn query(&mut self) -> (String, bool) {
         let big = self.n >= 200;
-        let mut pick = self.r.below(48);
+        let mut pick = self.r.below(54);
         // the row-based window evaluator is quadratic in the partition size: keep windows to small / mid tables
         if self.n >= 60_000 && matches!(pick, 18 | 19 | 20) { pick = 0; }
         match pick {
@@ -251,7 +251,7 @@ impl<'a> G<'a> {
                 // aggregate over a comma join, group by 0-3 keys
                 let nt = 1 + self.r.below(if big { 4 } else { 5 });
                 let (ts, from, conds) = self.comma_join(nt);
-                let nk = self.r.below(4);
+                let nk = self.r.below(5);
                 let keys: Vec<String> = (0..nk).map(|_| { let t = *self.r.pick(&ts); self.col(t, "grp") }).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
                 let na = 1 + self.r.below(4);
                 let aggs: Vec<String> = (0..na).map(|i| format!("{} as m{i}", self.agg(&ts))).collect();
@@ -535,6 +535,29 @@ impl<'a> G<'a> {
                 let lim = 1 + self.r.below(20);
                 let t = *self.r.pick(&["tc", "td"]);
                 (format!("select count(*), sum(q.v), sum(a.v) from (select k1, v from {t} order by v, k1, k2 limit {lim}) q, ta a where a.k1 = q.k1"), false)
+            }
+            48 | 49 | 50 => {
+                // correlated IN / NOT IN, nested and multi-table subqueries, subquery in HAVING / select list
+                let it = *self.r.pick(&["tb", "tc", "td"]);
+                let it2 = *self.r.pick(&["tc", "td", "te"]);
+                let cond = match self.r.below(9) {
+                    0 => format!("a.k1 in (select q.k1 from {it} q where q.k2 = a.k2)"),
+                    1 => format!("a.k1 not in (select q.k1 from {it} q where q.k2 = a.k2)"),
+                    2 => format!("a.v not in (select q.v from {it} q where q.k1 = a.k1)"),
+                    3 => format!("exists (select 1 from {it} q where q.k1 = a.k1 and exists (select 1 from {it2} r where r.k1 = q.k2))"),
+                    4 => format!("exists (select 1 from {it} q, {it2} r where q.k1 = a.k1 and r.k1 = q.k1 and r.v > q.v)"),
+                    5 => format!("(select max(q.v) from {it} q where q.k1 = a.k1) is null"),
+                    6 => format!("a.g in (select q.g from {it} q where q.k1 = a.k1 and q.v > 0)"),
+                    7 => format!("not exists (select 1 from {it} q where q.k1 = a.k1 and q.k2 not in (select r.k2 from {it2} r where r.k2 is not null))"),
+                    _ => format!("a.k2 = (select min(q.k2) from {it} q where q.k1 = a.k1)"),
+                };
+                if self.r.chance(70) {
+                    (format!("select count(*), sum(a.v), min(a.id), max(a.h) from ta a where {cond}"), false)
+                } else if self.r.chance(50) {
+                    (format!("select a.g, count(*), sum(a.v) from ta a where {cond} group by a.g having sum(a.v) > (select avg(v) from {it}) or count(*) > 3"), false)
+                } else {
+                    (format!("select count(*), sum(w) from (select a.id, (select count(*) from {it} q where q.k1 = a.k1 and q.v > a.v) + (select coalesce(max(r.v), 0) from {it2} r where r.k1 = a.k2) as w from ta a where {cond}) z"), false)
+                }
             }
             28 => {
                 // LIMIT without ORDER BY: which rows is arbitrary, how many is not
