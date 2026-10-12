@@ -23,6 +23,7 @@ pub mod desugar;
 pub mod hashes;
 pub mod arrays;
 pub mod testing;
+pub(crate) mod dateaccel;
 pub mod vecexpr;
 pub mod fusedagg;
 pub mod window;

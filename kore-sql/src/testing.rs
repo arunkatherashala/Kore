@@ -24,3 +24,14 @@ pub fn set_no_fused(on: bool) { NO_FUSED.store(on, Ordering::Relaxed); }
 
 #[inline]
 pub(crate) fn no_fused() -> bool { NO_FUSED.load(Ordering::Relaxed) }
+
+pub(crate) static NO_DATE_ACCEL: AtomicBool = AtomicBool::new(false);
+
+/// Disable the ISO-date integer accelerator (dateaccel.rs) so it can be compared with the string path.
+pub fn set_no_date_accel(on: bool) { NO_DATE_ACCEL.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_date_accel() -> bool { NO_DATE_ACCEL.load(Ordering::Relaxed) }
+
+/// How many times the date accelerator served a column so far (lets tests assert it was really exercised).
+pub fn date_accel_hits() -> usize { crate::dateaccel::hits() }
