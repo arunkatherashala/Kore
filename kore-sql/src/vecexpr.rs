@@ -112,6 +112,113 @@ fn sub_slice(s: &str, start: usize, len: Option<usize>) -> &str {
     }
 }
 
+
+// ---- ISO-date accelerator (dateaccel.rs): comparisons of well-formed date columns run on i32 ----
+
+/// A date column (or a fixed prefix of it) encoded as integers; `div` 1 = whole date, 100 = `dddd-dd`, 10000 = `dddd`.
+struct DCol { arr: std::sync::Arc<Vec<i32>>, div: i32 }
+
+fn date_col(e: &Expr, block: &DataBlock) -> Option<DCol> {
+    match e {
+        Expr::Col(_) | Expr::QualCol(..) => {
+            let cd = col_of(e, block)?;
+            crate::dateaccel::lookup(block, cd).map(|arr| DCol { arr, div: 1 })
+        }
+        Expr::FuncCall { name, args } if (name.eq_ignore_ascii_case("SUBSTR") || name.eq_ignore_ascii_case("SUBSTRING")) && (args.len() == 2 || args.len() == 3) => {
+            if !matches!(args[1], Expr::Int(1)) || !matches!(args[0], Expr::Col(_) | Expr::QualCol(..)) { return None; }
+            let div = match args.get(2) {
+                None => 1,
+                Some(Expr::Int(4)) => 10000,
+                Some(Expr::Int(7)) => 100,
+                Some(Expr::Int(l)) if *l >= 10 => 1,
+                _ => return None,
+            };
+            let cd = col_of(&args[0], block)?;
+            crate::dateaccel::lookup(block, cd).map(|arr| DCol { arr, div })
+        }
+        _ => None,
+    }
+}
+
+fn date_lit(e: &Expr, div: i32) -> Option<i32> {
+    if let Expr::Str(s) = e { crate::dateaccel::literal(s, div) } else { None }
+}
+
+#[inline(always)]
+fn days_run(a: &[i32], f: impl Fn(i32) -> bool) -> Vec<u8> {
+    use crate::dateaccel::NULL_DAY;
+    a.iter().map(|&x| if x == NULL_DAY { NULL } else { f(x) as u8 }).collect()
+}
+
+fn flip(op: &BinOpKind) -> BinOpKind {
+    match op {
+        BinOpKind::Lt => BinOpKind::Gt, BinOpKind::Le => BinOpKind::Ge,
+        BinOpKind::Gt => BinOpKind::Lt, BinOpKind::Ge => BinOpKind::Le,
+        BinOpKind::Eq => BinOpKind::Eq, _ => BinOpKind::Ne,
+    }
+}
+
+/// `col op literal` on the encoded values. The view `x / div` is compared with literal `c` by turning it into
+/// a range test on x: [c*div, (c+1)*div).
+fn days_vs_const(op: &BinOpKind, a: &[i32], div: i32, c: i32) -> Option<Vec<u8>> {
+    let (l, h) = (c * div, (c + 1) * div);
+    Some(match op {
+        BinOpKind::Lt => days_run(a, |x| x < l),
+        BinOpKind::Le => days_run(a, |x| x < h),
+        BinOpKind::Gt => days_run(a, |x| x >= h),
+        BinOpKind::Ge => days_run(a, |x| x >= l),
+        BinOpKind::Eq => days_run(a, |x| (x.wrapping_sub(l) as u32) < div as u32),
+        BinOpKind::Ne => days_run(a, |x| (x.wrapping_sub(l) as u32) >= div as u32),
+        _ => return None,
+    })
+}
+
+/// Comparison of two date-like operands via the accelerator; None = not applicable (use the string path).
+fn date_cmp(op: &BinOpKind, left: &Expr, right: &Expr, block: &DataBlock, w: Win) -> Option<Vec<u8>> {
+    use crate::dateaccel::NULL_DAY;
+    if !matches!(op, BinOpKind::Eq | BinOpKind::Ne | BinOpKind::Lt | BinOpKind::Le | BinOpKind::Gt | BinOpKind::Ge) { return None; }
+    match (left, right) {
+        (_, Expr::Str(_)) => {
+            let l = date_col(left, block)?;
+            let c = date_lit(right, l.div)?;
+            days_vs_const(op, &l.arr[w.lo..w.hi], l.div, c)
+        }
+        (Expr::Str(_), _) => {
+            let r = date_col(right, block)?;
+            let c = date_lit(left, r.div)?;
+            days_vs_const(&flip(op), &r.arr[w.lo..w.hi], r.div, c)
+        }
+        _ => {
+            let (l, r) = (date_col(left, block)?, date_col(right, block)?);
+            if l.div != r.div { return None; }
+            let (a, b) = (&l.arr[w.lo..w.hi], &r.arr[w.lo..w.hi]);
+            let d = l.div;
+            Some(a.iter().zip(b).map(|(&x, &y)| {
+                if x == NULL_DAY || y == NULL_DAY { return NULL; }
+                let (x, y) = (x / d, y / d);
+                (match op {
+                    BinOpKind::Eq => x == y, BinOpKind::Ne => x != y, BinOpKind::Lt => x < y,
+                    BinOpKind::Le => x <= y, BinOpKind::Gt => x > y, _ => x >= y,
+                }) as u8
+            }).collect())
+        }
+    }
+}
+
+/// `col IN ('date', ...)` on the encoded values (every list element must be a well-formed literal).
+fn date_in(expr: &Expr, values: &[Expr], block: &DataBlock, w: Win) -> Option<Vec<u8>> {
+    let l = date_col(expr, block)?;
+    let set: Vec<i32> = values.iter().map(|v| date_lit(v, l.div)).collect::<Option<_>>()?;
+    let a = &l.arr[w.lo..w.hi];
+    let d = l.div;
+    Some(if set.len() <= 8 {
+        days_run(a, |x| { let q = x / d; set.iter().any(|&s| s == q) })
+    } else {
+        let hs: std::collections::HashSet<i32> = set.into_iter().collect();
+        days_run(a, |x| hs.contains(&(x / d)))
+    })
+}
+
 fn operand<'a>(e: &'a Expr, block: &'a DataBlock, w: Win, c: &Cache) -> Option<Val<'a>> {
     match e {
         Expr::Int(i) => Some(Val::NumI(*i)),
@@ -320,10 +427,15 @@ fn tri<'a>(e: &'a Expr, block: &'a DataBlock, w: Win, c: &Cache) -> Option<Vec<u
             Some(l.iter().zip(&r).map(|(&a, &b)| if a == TRUE || b == TRUE { TRUE } else if a == FALSE && b == FALSE { FALSE } else { NULL }).collect())
         }
         Expr::BinOp { op: op @ (BinOpKind::Eq | BinOpKind::Ne | BinOpKind::Lt | BinOpKind::Le | BinOpKind::Gt | BinOpKind::Ge), left, right } => {
+            if let Some(v) = date_cmp(op, left, right, block, w) { return Some(v); }
             let (l, r) = (operand(left, block, w, c)?, operand(right, block, w, c)?);
             compare(op, &l, &r, n)
         }
         Expr::Between { expr, low, high, negated } => {
+            if let (Some(ge), Some(le)) = (date_cmp(&BinOpKind::Ge, expr, low, block, w), date_cmp(&BinOpKind::Le, expr, high, block, w)) {
+                let both = and3(&ge, &le);
+                return Some(if *negated { not(both) } else { both });
+            }
             let (v, lo, hi) = (operand(expr, block, w, c)?, operand(low, block, w, c)?, operand(high, block, w, c)?);
             let ge = compare(&BinOpKind::Ge, &v, &lo, n)?;
             let le = compare(&BinOpKind::Le, &v, &hi, n)?;
@@ -331,6 +443,7 @@ fn tri<'a>(e: &'a Expr, block: &'a DataBlock, w: Win, c: &Cache) -> Option<Vec<u
             Some(if *negated { not(both) } else { both })
         }
         Expr::In { expr, values, negated } => {
+            if let Some(out) = date_in(expr, values, block, w) { return Some(if *negated { not(out) } else { out }); }
             let v = operand(expr, block, w, c)?;
             let key_id = values.as_ptr() as usize;
             let int_set: Option<std::sync::Arc<FxSet<i64>>> = if v.is_int() {

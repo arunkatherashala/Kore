@@ -72,7 +72,7 @@ impl KqlContext {
     pub fn register(&mut self, name: impl Into<String>, block: DataBlock) {
         let n = name.into();
         let row_count = block.num_rows;
-        self.tables.insert(n.clone(), Arc::new(block));
+        self.tables.insert(n.clone(), crate::dateaccel::arc(block));
         self.stats.insert(n, row_count);
     }
 
@@ -80,7 +80,7 @@ impl KqlContext {
     pub fn register_mut(&mut self, name: impl Into<String>, block: DataBlock) {
         let n = name.into();
         self.stats.insert(n.clone(), block.num_rows);
-        self.mut_tables.insert(n, Arc::new(block));
+        self.mut_tables.insert(n, crate::dateaccel::arc(block));
     }
 
     /// Register a view (SQL text executed on demand).
@@ -122,8 +122,8 @@ impl KqlContext {
     pub fn load_from_kore(&mut self, name: impl Into<String>, path: impl AsRef<Path>) -> Result<(), KoreError> {
         let block = kore_store::KoreReader::read_file(path.as_ref())?;
         let n = name.into();
-        self.tables.insert(n.clone(), Arc::new(block.clone()));
-        self.mut_tables.insert(n, Arc::new(block));
+        self.tables.insert(n.clone(), crate::dateaccel::arc(block.clone()));
+        self.mut_tables.insert(n, crate::dateaccel::arc(block));
         Ok(())
     }
 
@@ -150,7 +150,7 @@ impl KqlContext {
         )
             .map_err(|e| e.into_kore())?;
         let snapshot = dt.read().map_err(|e| e.into_kore())?;
-        self.tables.insert(name.to_string(), Arc::new(snapshot));
+        self.tables.insert(name.to_string(), crate::dateaccel::arc(snapshot));
         Ok(())
     }
 
@@ -159,7 +159,7 @@ impl KqlContext {
         let dt = kore_delta::DeltaTable::open(path.as_ref())
             .map_err(|e| e.into_kore())?;
         let snapshot = dt.read().map_err(|e| e.into_kore())?;
-        self.tables.insert(name.to_string(), Arc::new(snapshot));
+        self.tables.insert(name.to_string(), crate::dateaccel::arc(snapshot));
         Ok(())
     }
 
@@ -428,7 +428,7 @@ impl KqlContext {
             // Subsequent INSERT: append rows (schema must match)
             DataBlock::concat(vec![(**entry).clone(), new_rows])?
         };
-        *entry = Arc::new(combined);
+        *entry = crate::dateaccel::arc(combined);
         // Also update read-only view
         self.tables.insert(table_name.to_string(), entry.clone());
         Ok(("INSERT".into(), rows_added))
@@ -491,7 +491,7 @@ impl KqlContext {
             }
         }
 
-        let updated = Arc::new(updated);
+        let updated = crate::dateaccel::arc(updated);
         self.mut_tables.insert(table_name.to_string(), updated.clone());
         self.tables.insert(table_name.to_string(), updated);
         Ok(("UPDATE".into(), rows_updated))
@@ -529,7 +529,7 @@ impl KqlContext {
         read_ctx.tables.insert(table_name.to_string(), block);
         let kept = read_ctx.query(&keep_sql)?;
         let deleted = rows_before.saturating_sub(kept.num_rows);
-        let kept = Arc::new(kept);
+        let kept = crate::dateaccel::arc(kept);
         self.mut_tables.insert(table_name.to_string(), kept.clone());
         self.tables.insert(table_name.to_string(), kept);
         Ok(("DELETE".into(), deleted))
@@ -943,7 +943,7 @@ impl KqlContext {
                                     set_col_val(&mut new_target, col_idx, ti, new_val);
                                 }
                             }
-                            let new_target = Arc::new(new_target);
+                            let new_target = crate::dateaccel::arc(new_target);
                             self.mut_tables.insert(target_name.to_string(), new_target.clone());
                             self.tables.insert(target_name.to_string(), new_target);
                         }
@@ -965,7 +965,7 @@ impl KqlContext {
                         let mut new_target = self.mut_tables.get(target_name).map(|a| (**a).clone()).unwrap_or(target.clone());
                         append_row(&mut new_target, &source, si);
                         inserted += 1;
-                        let new_target = Arc::new(new_target);
+                        let new_target = crate::dateaccel::arc(new_target);
                         self.mut_tables.insert(target_name.to_string(), new_target.clone());
                         self.tables.insert(target_name.to_string(), new_target);
                     }
