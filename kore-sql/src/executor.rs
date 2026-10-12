@@ -1492,12 +1492,10 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
     for (ji, join) in stmt.joins.iter().enumerate().skip(n_implicit) {
         // Pre-cap the probe side when LIMIT is set with no ORDER BY/WHERE.
         let probe = if let Some(lim) = stmt.limit {
-            let has_win = stmt.projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Window { .. }, .. }));
-            if stmt.where_clause.is_none()
-                && stmt.order_by.is_empty()
-                && stmt.group_by.is_empty()
-                && stmt.having.is_none()
-                && !has_win
+            // only valid when every join keeps (at least) every probe row: an INNER / RIGHT / FULL join can drop
+            // them, and capping first would then return fewer than LIMIT rows
+            let row_preserving = stmt.joins.iter().skip(n_implicit).all(|j| matches!(j.join_type, JoinKind::Left | JoinKind::Cross));
+            if early_limit_ok(stmt) && row_preserving
             {
                 let cap = (lim as usize).saturating_add(stmt.offset.unwrap_or(0) as usize);
                 limit_block(std::mem::replace(&mut result, DataBlock::empty()), cap.max(1))
@@ -1606,12 +1604,7 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
     // Avoids materialising huge cross-products (e.g. 9K×9K self-join) before LIMIT 5.
     if !stmt.joins.is_empty() {
         if let Some(lim) = stmt.limit {
-            let has_win = stmt.projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Window { .. }, .. }));
-            if stmt.where_clause.is_none()
-                && stmt.order_by.is_empty()
-                && stmt.group_by.is_empty()
-                && stmt.having.is_none()
-                && !has_win
+            if early_limit_ok(stmt)
             {
                 let cap = (lim as usize).saturating_add(stmt.offset.unwrap_or(0) as usize);
                 result = limit_block(result, cap);
@@ -1833,6 +1826,19 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
 // ─── Implicit-join helpers ────────────────────────────────────────────────────
 
 /// The block behind `(VALUES (..), (..)) alias(c1, c2)`.
+/// May the join output be cut to LIMIT(+OFFSET) rows before the rest of the query runs? Not when anything
+/// downstream looks at every row: WHERE, aggregates (COUNT(*) ... LIMIT 5 is one row over ALL the join rows),
+/// GROUP BY, HAVING, ORDER BY, windows, DISTINCT, QUALIFY.
+fn early_limit_ok(stmt: &SelectStmt) -> bool {
+    stmt.where_clause.is_none() && stmt.order_by.is_empty() && stmt.group_by.is_empty() && stmt.having.is_none()
+        && stmt.qualify.is_none() && !stmt.distinct && stmt.group_exprs.is_empty() && stmt.pivot.is_none() && stmt.unpivot.is_none()
+        && stmt.lateral_views.is_empty()
+        && !stmt.projections.iter().any(|p| match p {
+            Projection::Expr { expr, .. } => crate::ast_walk::any_node(expr, &|x| matches!(x, Expr::Agg { .. } | Expr::AggX { .. } | Expr::Window { .. } | Expr::Explode(_))),
+            _ => false,
+        })
+}
+
 fn values_table_block(t: &TableExpr) -> Result<DataBlock, KoreError> {
     let rows = t.values.as_deref().unwrap_or(&[]);
     if rows.is_empty() { return Ok(DataBlock::empty()); }
