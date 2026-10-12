@@ -9,9 +9,10 @@
 KORE's SQL engine is real: a Rust parser and executor whose answers were checked against live Apache Spark on
 all 22 TPC-H-shaped queries, with 0 mismatches. On one machine, with data that fits in memory (SF1, about 6M
 lineitem rows), it was faster than Spark local mode on every query. It is a strong prototype. It is not
-production-ready, it does not replace Spark for large data, clusters or fault tolerance, and **DuckDB is still
-faster than KORE**: in the final same-day comparison (below) DuckDB was about 1.8x faster than KORE in geometric
-mean, while KORE was faster than DataFusion and Polars overall and about 13x faster than Spark local mode.
+production-ready, it does not replace Spark for large data, clusters or fault tolerance, and **KORE is now about
+level with DuckDB at SF1** in the final quiet-machine comparison (below): geometric mean 48-50 ms vs 47 ms, each engine
+fastest on about half the queries, KORE faster than DataFusion and Polars and about 29x faster than Spark local mode.
+This is a warm, in-memory, single-machine, SF1 result and must not be generalised.
 
 ## What was wrong before and was corrected
 
@@ -60,18 +61,22 @@ Same machine, same Parquet data, same SQL text, answers compared with Spark. Tim
 
 | Engine | Answers agreeing with Spark | Geometric mean over the 18 queries all engines answered correctly |
 |---|---|---|
-| DuckDB 1.5.6 | 22 of 22 | 60 ms |
-| **KORE** | 22 of 22 | 106 ms |
-| Polars 1.44.2 | 19 of 22 (SQL layer rejects Q2, Q13, Q17) | 164 ms |
-| DataFusion 54.0.0 | 21 of 22 (Q15 returns no rows: float-equality artifact of the query) | 166 ms |
+| DuckDB 1.5.6 | 22 of 22 | 47 ms |
+| **KORE** | 22 of 22 | **50 ms** (second run 49.6 ms) |
+| Polars 1.44.2 | 19 of 22 (SQL layer rejects Q2, Q13, Q17) | 117 ms |
+| DataFusion 54.0.0 | 21 of 22 (Q15 returns no rows: float-equality artifact of the query) | 138 ms |
 | Spark 4.2.0 local | 22 of 22 (reference) | 1425 ms |
 
-DuckDB was fastest on 16 of 22 queries, Polars on 5, KORE on 1 (Q1: 74 ms vs DuckDB 113 ms). Per-query table:
-`benchmarks/tpch_honest/README.md`. KORE's geometric mean improved from 238 ms to 106 ms during the day, after the aggregation,
-join and subquery work below (fused filter+aggregate, late-materialised joins, sideways information passing, per-key
-correlated aggregates). Its weakest queries relative to DuckDB are Q13 (850 vs 87 ms), Q17 (82 vs 24), Q10 (309 vs 76) and
-Q3/Q4/Q12. Caveats: one machine, SF 1, in-memory, TPC-H-shaped data, about +/-20% noise. Engines were re-run back to back on a
-quiet machine (Spark's times are from its earlier cached run on the same machine).
+Fastest per query: KORE 8-9, DuckDB 9-10, Polars 4. Per-query table: `benchmarks/tpch_honest/README.md`. KORE's geometric mean fell
+from 238 ms to 106 ms and then to about 49 ms across the day's rounds (fused filter+aggregate, late-materialised joins, sideways
+information passing, per-key correlated aggregates, a cached integer encoding of ISO-date string columns, a faster left-join path
+for Q13, and a fuzzing round that fixed 14 wrong-answer bugs). Where KORE is still behind DuckDB: Q17 (104 vs 18 ms), Q3 (94 vs 41),
+Q9 (256 vs 95), Q10 (150 vs 64), Q18 (165 vs 72), Q13 (149 vs 66).
+
+How to read this: one machine, SF 1, TPC-H-shaped data (not dbgen), in memory, about +/-20% noise (two back-to-back KORE runs gave 48.3 and
+49.6 ms). KORE caches an integer encoding of date columns after the first query on a table (the warm-up run absorbs the one-time cost); every
+engine's time includes building Python result objects, which dominates the shortest queries (5-30 ms). The comparison says nothing about
+larger data, cold start, concurrency or other query shapes. Spark's times are from its earlier cached run on the same machine.
 
 ## What was added in this round
 
@@ -89,7 +94,7 @@ quiet machine (Spark's times are from its earlier cached run on the same machine
 
 ## Test evidence
 
-- 223 tests pass across `kore-sql`, `kore-join` and `kore-ffi`, including about 960 hand-derived regression
+- 251 tests pass across `kore-sql`, `kore-join` and `kore-ffi`, including about 960 hand-derived regression
   cases, a differential test across execution paths, and a SQLite oracle over 60k generated queries.
 - A mutation fuzzer ran about 1.6M mutants with no panics (reported by the SQL-coverage work, not re-run here).
 - Not run: the whole workspace, because a Python-binding crate does not build against Python 3.14 here.
@@ -101,7 +106,7 @@ quiet machine (Spark's times are from its earlier cached run on the same machine
 | Scale | Everything is in memory as row vectors of `Option<T>`. Spilling bounds operator working state only, not input tables or results. A skewed key can still exceed the budget. |
 | SF3 (18M lineitem rows) | Earlier run needed 8-10 GB per query process and one run failed with an out-of-memory error while other programs were running. Not re-run on the final commit. |
 | Strings | `Option<String>` columns that cannot be dictionary-encoded (dictionary holds at most 254 values) dominate memory and are slow to sort and group. |
-| Other engines | DuckDB is about 1.8x faster than KORE (geometric mean at SF1) and won 16 of 22 queries. KORE is faster than DataFusion and Polars overall. |
+| Other engines | At SF1 (warm, in-memory) KORE and DuckDB are about equal overall. DuckDB is the better-engineered baseline and was only exercised on these 22 queries. Untested: larger data, cold start, concurrency. |
 | Distributed | No cluster execution, no fault tolerance, no connectors (S3, Hive, JDBC, Kafka), no streaming or ML. |
 | SQL | No STRUCT, TABLESAMPLE or native DECIMAL (DECIMAL is a double). A DATE compared with a TIMESTAMP is a string comparison. `EXPLAIN`/`DESCRIBE` output differs from Spark. |
 | Data | TPC-H-shaped data from `gen_data.py`, not the official dbgen. This is not an official TPC-H result. |
@@ -115,14 +120,14 @@ quiet machine (Spark's times are from its earlier cached run on the same machine
 | Is it a real SQL engine? | Yes. |
 | Are the results correct? | On the 22 TPC-H-shaped queries, yes, checked against live Spark. In general, no guarantee: bugs are still being found at a rate of several per round. |
 | Faster than Spark on one machine, in-memory? | Yes at SF1, by 2x to 25x in these runs. |
-| Faster than DuckDB? | Not overall: DuckDB is about 1.8x faster in geometric mean and won 16 of 22 queries. KORE was faster on Q1 only. |
+| Faster than DuckDB? | About equal at SF1 in this setup (48-50 ms vs 47 ms geometric mean); each is faster on about half the queries. Not shown for other workloads or scales. |
 | Replacement for Spark? | No. |
 | Production ready? | No. |
 | Best description | Strong research-grade prototype. |
 
 ## What would be needed next, in order
 
-1. Close the remaining gap to DuckDB (about 1.8x): Q13 (left join + count), Q17, Q10, Q3/Q4/Q12 and the date-string filters. A compact date/integer column representation would help most.
+1. Fix two performance cliffs found by fuzzing: (a) LEFT/RIGHT/FULL joins whose ON has more than a right-only filter fall back to a nested loop (one case took 528 s); (b) window functions are quadratic in partition size (67 s on 150k rows).
 2. Run SF3 and SF10 on a machine with enough RAM; reduce string memory (compact string type or per-column loading).
 3. Parallelise the remaining single-threaded paths (Q20 inner aggregation, string-key group-by, string sort).
 4. Keep widening the differential and oracle tests: every round so far found new silent wrong answers.
