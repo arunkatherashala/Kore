@@ -183,3 +183,17 @@ fn spilled_join_and_group_by_over_dictionary_text_columns() {
         assert_eq!(flat(&spill, sql), flat(&plain, sql), "{sql}");
     }
 }
+
+#[test]
+fn double_equality_is_exact() {
+    let mut c = KqlContext::new();
+    c.register("fx", DataBlock::new(vec![
+        Column::int64("id", vec![Some(1), Some(2), Some(3)]),
+        Column::float64("x", vec![Some(0.3), Some(0.1 + 0.2), Some(1e-12)]),
+    ]).unwrap());
+    assert_eq!(flat(&c, "select id from fx where x = 0.3"), ["1"]);
+    assert_eq!(flat(&c, "select id from fx where x <> 0.3 order by id"), ["2", "3"]);
+    assert_eq!(flat(&c, "select id from fx where x in (0.3, 7.5)"), ["1"]);
+    assert_eq!(flat(&c, "select id from fx where x = 0"), Vec::<String>::new());
+    assert_eq!(flat(&c, "select id from fx where x * 1 = 0.3"), ["1"]);
+}

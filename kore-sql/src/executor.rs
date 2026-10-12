@@ -4073,7 +4073,7 @@ pub(crate) fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
                             (ExprVal::Str(a),   ExprVal::Str(b))   => a == b,
                             (ExprVal::Bool(a),  ExprVal::Bool(b))  => a == b,
                             _ => match (num_only(&lhs), num_only(&rhs)) {
-                                (Some(a), Some(b)) => (a - b).abs() < 1e-10,
+                                (Some(a), Some(b)) => a == b,
                                 _ => false,
                             },
                         };
@@ -4741,8 +4741,8 @@ fn merge_single_row(left: &DataBlock, li: usize, right: &DataBlock, ri: usize) -
 }
 
 /// Remove duplicate rows (for SELECT DISTINCT), keeping the first occurrence.
-/// Rows are identified by a 128-bit hash built column by column (no per-row String); floats compare at
-/// 1e-10 resolution and NULL is its own value, as before.
+/// Rows are identified by a 128-bit hash built column by column (no per-row String), equal hashes confirmed cell
+/// by cell; floats compare exactly and NULL is its own value.
 /// Bits identifying a DOUBLE value for grouping / DISTINCT: -0.0 equals 0.0, every NaN equals every NaN.
 #[inline(always)]
 pub(crate) fn float_key(f: f64) -> u64 {

@@ -140,8 +140,8 @@ fn operand<'a>(e: &'a Expr, block: &'a DataBlock, w: Win, c: &Cache) -> Option<V
 
 fn cmp_ok(op: &BinOpKind, a: f64, b: f64) -> bool {
     match op {
-        BinOpKind::Eq => (a - b).abs() < 1e-10,
-        BinOpKind::Ne => (a - b).abs() >= 1e-10,
+        BinOpKind::Eq => a == b,
+        BinOpKind::Ne => a != b,
         BinOpKind::Lt => a < b,
         BinOpKind::Le => a <= b,
         BinOpKind::Gt => a > b,
@@ -190,7 +190,7 @@ fn compare_const(op: &BinOpKind, l: &Val, r: &Val) -> Option<Vec<u8>> {
         (Val::F(_) | Val::Owned(_), Val::Num(_) | Val::NumI(_)) => {
             let v: &[Option<f64>] = match l { Val::F(v) => v, Val::Owned(v) => v, _ => unreachable!() };
             let c = match r { Val::Num(c) => *c, Val::NumI(c) => *c as f64, _ => unreachable!() };
-            cmp_loop(op, v, |a| a < c, |a| a <= c, |a| a > c, |a| a >= c, |a| (a - c).abs() < 1e-10, |a| (a - c).abs() >= 1e-10)
+            cmp_loop(op, v, |a| a < c, |a| a <= c, |a| a > c, |a| a >= c, |a| a == c, |a| a != c)
         }
         (Val::I(v), Val::NumI(c)) => {
             let c = *c;
@@ -376,7 +376,7 @@ fn tri<'a>(e: &'a Expr, block: &'a DataBlock, w: Win, c: &Cache) -> Option<Vec<u
                 } else {
                     (0..n).map(|i| match v.num(i) {
                         None => NULL,
-                        Some(a) => if set.iter().any(|b| (a - b).abs() < 1e-10) { TRUE } else { FALSE },
+                        Some(a) => if set.iter().any(|b| a == *b) { TRUE } else { FALSE },
                     }).collect()
                 }
             } else if v.is_text() {
