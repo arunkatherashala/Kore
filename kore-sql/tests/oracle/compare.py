@@ -5,7 +5,7 @@ NULLTOK = chr(92) + "N"
 EMPTYTOK = chr(92) + "E"
 
 def load(db, d, name):
-    with open(os.path.join(d, name + ".csv"), newline="") as f:
+    with open(os.path.join(d, name + ".csv"), newline="", encoding="utf-8") as f:
         rd = csv.reader(f)
         hdr = next(rd)
         types = {"id": "INTEGER", "f": "REAL", "s": "TEXT"}

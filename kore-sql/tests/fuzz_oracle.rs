@@ -40,7 +40,7 @@ fn sizes0(scale: &str, r: &mut Rng) -> Sizes {
     }
 }
 
-const STRS: [&str; 12] = ["ab", "abc", "b", "", "Ab", "ba", "xyz", "abab", "zz", "a", "bb", "hello"];
+const STRS: [&str; 15] = ["ab", "abc", "b", "", "Ab", "ba", "xyz", "abab", "zz", "a", "bb", "hello", "\u{e9}", "\u{e9}a", "\u{65e5}\u{672c}"];
 
 fn onull<T>(r: &mut Rng, pct: usize, v: T) -> Option<T> { if r.chance(pct) { None } else { Some(v) } }
 
@@ -243,7 +243,7 @@ impl<'a> G<'a> {
     /// Returns (sql, ordered). Unordered answers are compared as multisets.
     fn query(&mut self) -> (String, bool) {
         let big = self.n >= 200;
-        let mut pick = self.r.below(42);
+        let mut pick = self.r.below(48);
         // the row-based window evaluator is quadratic in the partition size: keep windows to small / mid tables
         if self.n >= 60_000 && matches!(pick, 18 | 19 | 20) { pick = 0; }
         match pick {
@@ -350,7 +350,7 @@ impl<'a> G<'a> {
             16 | 17 => {
                 let op = *self.r.pick(&["union", "union all", "intersect", "except"]);
                 let (t1, t2) = (*self.r.pick(&[0usize, 1, 2, 3, 4]), *self.r.pick(&[0usize, 1, 2, 3, 4]));
-                let (c1, c2) = (*self.r.pick(&["k1", "g", "k2", "v"]), *self.r.pick(&["k1", "g", "k2", "v"]));
+                let (c1, c2) = (*self.r.pick(&["k1", "g", "k2", "v", "f"]), *self.r.pick(&["k1", "g", "k2", "v", "f"]));
                 let w1 = if self.r.chance(50) { format!(" where {}", self.tab_pred_alias("x")) } else { String::new() };
                 let w2 = if self.r.chance(50) { format!(" where {}", self.tab_pred_alias("y")) } else { String::new() };
                 let outer = if self.r.chance(50) { format!("select count(*), sum(u) from (select x.{c1} as u from {} x{w1} {op} select y.{c2} from {} y{w2}) z", TABS[t1], TABS[t2]) } else { format!("select x.{c1} from {} x{w1} {op} select y.{c2} from {} y{w2}", TABS[t1], TABS[t2]) };
@@ -456,7 +456,7 @@ impl<'a> G<'a> {
                 let a = ALIAS[t];
                 let tn = TABS[t];
                 let key = match self.r.below(6) {
-                    0 => format!("{a}.k2 + 1"), 1 => format!("upper({a}.s)"), 2 => format!("substr({a}.s, 1, 1)"),
+                    0 => format!("{a}.k2 + 1"), 1 => format!("length({a}.s)"), 2 => format!("substr({a}.s, 1, 1)"),
                     3 => format!("case when {a}.v > 0 then 'p' when {a}.v < 0 then 'n' else 'z' end"),
                     4 => format!("coalesce({a}.g, -1)"), _ => format!("{a}.g % 3"),
                 };
@@ -480,6 +480,61 @@ impl<'a> G<'a> {
                 };
                 conds.push(p);
                 (format!("select count(*), count(distinct {a}.s), min({a}.s) from {from}{}", Self::where_clause(&conds)), false)
+            }
+            42 | 43 | 44 => {
+                // explicit JOIN chains (a different executor path from comma joins), ON-clause filters, WHERE on the nullable side
+                let nt = 2 + self.r.below(3);
+                let mut ts: Vec<usize> = (0..5).collect();
+                for i in (1..5).rev() { let j = self.r.below(i + 1); ts.swap(i, j); }
+                ts.truncate(nt);
+                if big && ts.iter().filter(|&&t| t <= 1).count() > 1 { ts.retain(|&t| t != 1); if ts.len() < 2 { ts.push(2); } }
+                let mut from = format!("{} {}", TABS[ts[0]], ALIAS[ts[0]]);
+                for i in 1..ts.len() {
+                    let (t, par) = (ts[i], ts[self.r.below(i)]);
+                    let kind = *self.r.pick(&["join", "left join", "join", "left join", "inner join"]);
+                    let key = match self.r.below(4) {
+                        0 => format!("{}.k1 = {}.k1 and {}.k2 = {}.k2", ALIAS[t], ALIAS[par], ALIAS[t], ALIAS[par]),
+                        1 => format!("{}.k1 = {}.k1 and {}.s = {}.s", ALIAS[t], ALIAS[par], ALIAS[t], ALIAS[par]),
+                        _ => format!("{}.k1 = {}.k1", ALIAS[par], ALIAS[t]),
+                    };
+                    let extra = if self.r.chance(35) { format!(" and {}", self.tab_pred(t)) } else { String::new() };
+                    from.push_str(&format!(" {kind} {} {} on {key}{extra}", TABS[t], ALIAS[t]));
+                }
+                let t = *self.r.pick(&ts);
+                let wt = *self.r.pick(&ts);
+                let wh = if self.r.chance(50) { format!(" where {}", self.tab_pred(wt)) } else { String::new() };
+                let ag = self.agg(&ts);
+                if self.r.chance(50) {
+                    let k = self.col(t, "grp");
+                    (format!("select {k}, count(*), {ag} from {from}{wh} group by {k}"), false)
+                } else {
+                    (format!("select count(*), {ag} from {from}{wh}"), false)
+                }
+            }
+            45 => {
+                // SELECT * / alias.* over joins (column order and naming)
+                let (l, r2) = (*self.r.pick(&["tc", "td", "te"]), *self.r.pick(&["tc", "td", "tb"]));
+                if big && r2 == "tb" { return ("select count(*) from tc a, td b where a.k1 = b.k1".to_string(), false); }
+                let sel = *self.r.pick(&["*", "a.*", "b.*", "a.*, b.k1"]);
+                let wh = if self.r.chance(60) { format!(" and {}", self.tab_pred_alias("a")) } else { String::new() };
+                if self.r.chance(50) {
+                    (format!("select {sel} from {l} a, {r2} b where a.k1 = b.k1{wh}"), false)
+                } else {
+                    (format!("select {sel} from {l} a join {r2} b on a.k1 = b.k1 and a.k2 = b.k2"), false)
+                }
+            }
+            46 => {
+                // USING / NATURAL joins; counts so that column merging does not matter
+                let how = *self.r.pick(&["using (k1)", "using (k1, k2)", "using (s)"]);
+                let kind = *self.r.pick(&["join", "left join"]);
+                let (l, r2) = if big { ("tc", "td") } else { ("ta", "tb") };
+                (format!("select count(*), count(x.v), sum(y.v) from {l} x {kind} {r2} y {how}"), false)
+            }
+            47 => {
+                // derived table with LIMIT / ORDER inside, joined
+                let lim = 1 + self.r.below(20);
+                let t = *self.r.pick(&["tc", "td"]);
+                (format!("select count(*), sum(q.v), sum(a.v) from (select k1, v from {t} order by v, k1, k2 limit {lim}) q, ta a where a.k1 = q.k1"), false)
             }
             28 => {
                 // LIMIT without ORDER BY: which rows is arbitrary, how many is not
