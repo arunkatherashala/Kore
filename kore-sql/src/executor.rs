@@ -1506,6 +1506,18 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
         let right_name  = &join.table.name;
         let right_alias = join.table.alias.as_deref().unwrap_or(right_name.as_str());
 
+        // explicit INNER/LEFT JOIN of a catalog table with ON key = key [AND filters on that table]
+        if needed.is_some() && join.table.values.is_none() && join.table.subquery.is_none() {
+            if let (Some(on_expr), Some(src)) = (&join.on.expr, ctx.get(right_name)) {
+                if let Some(keep) = keep_after_on(stmt, ji, &needed) {
+                    if let Some(done) = lazy_right_hash_join(&probe, src, right_alias, on_expr, &join.join_type, ctx, &keep)? {
+                        result = done;
+                        continue;
+                    }
+                }
+            }
+        }
+
         // Resolve right side: subquery, view, or regular table
         let right_block = if join.table.values.is_some() {
             values_table_block(&join.table)?
@@ -1543,7 +1555,7 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
         // ON with more than one condition: hash-join on an equality and apply the rest as a residual;
         // only genuinely non-equi joins fall back to the nested loop.
         if let Some(ref on_expr) = join.on.expr {
-            if let Some(done) = hash_join_with_residual(&probe, &right_block, on_expr, &join.join_type, ctx)? {
+            if let Some(done) = hash_join_with_residual(&probe, &right_block, on_expr, &join.join_type, ctx, keep_after_on(stmt, ji, &needed).as_ref())? {
                 result = done;
                 // columns only the ON condition needed (filters on the joined table) are dead weight now
                 if needed.is_some() {
@@ -2371,11 +2383,83 @@ fn find_link(conjuncts: &[Expr], left: &DataBlock, right: &DataBlock) -> Option<
     None
 }
 
+/// INNER/LEFT `JOIN t ON k1 = k2 AND <filters on t>` where `t` is a catalog table: the filters run on the
+/// catalog table itself, the join works on integer row ids, and only the columns the rest of the statement
+/// reads are gathered. Nothing of `t` is copied up front (a 1.5M-row string column used only by the ON
+/// filter costs nothing). None = shape not covered; the caller takes the general path.
+fn lazy_right_hash_join(
+    left: &DataBlock, src: &DataBlock, alias: &str, on: &Expr, kind: &JoinKind, ctx: &KqlContext,
+    keep: &std::collections::HashSet<String>,
+) -> Result<Option<DataBlock>, KoreError> {
+    use rayon::prelude::*;
+    if !matches!(kind, JoinKind::Inner | JoinKind::Left) { return Ok(None); }
+    let pname = |n: &str| if n.contains('.') { n.to_string() } else { format!("{alias}.{n}") };
+    let names = DataBlock {
+        num_rows: 0,
+        columns: src.columns.iter().map(|c| Column { name: pname(&c.name), data: ColumnData::Int64(Vec::new()) }).collect(),
+    };
+    let mut conjuncts = Vec::new();
+    crate::rewrite::split_conjuncts(on, &mut conjuncts);
+    let Some((ci, lk, rk)) = find_link(&conjuncts, left, &names) else { return Ok(None) };
+    conjuncts.remove(ci);
+    let mut right_only = Vec::new();
+    for c in conjuncts {
+        let mut cols = Vec::new();
+        let ok = crate::rewrite::referenced_cols(&c, &mut cols) && !cols.is_empty();
+        if ok && cols.iter().all(|n| find_col_in_block(n, &names).is_some()) { right_only.push(crate::rewrite::unqualify(&c, alias)) } else { return Ok(None) }
+    }
+    let Some(ri) = names.columns.iter().position(|c| c.name == rk) else { return Ok(None) };
+    let (Some(Column { data: ColumnData::Int64(lv), .. }), ColumnData::Int64(rv_all)) = (find_col(left, &lk), &src.columns[ri].data) else { return Ok(None) };
+    if left.num_rows >= u32::MAX as usize || src.num_rows >= u32::MAX as usize { return Ok(None); }
+    let __tj = std::time::Instant::now();
+    let fidx: Option<Vec<usize>> = match crate::rewrite::and_all(right_only) {
+        Some(p) => match crate::vecexpr::filter_idx(&p, src) { Some(i) => Some(i), None => return Ok(None) },
+        None => None,
+    };
+    prof!(__tj, "    lazy join: right filtered rows={}", fidx.as_ref().map(|v| v.len()).unwrap_or(src.num_rows));
+    let jt = if *kind == JoinKind::Left { JoinType::Left } else { JoinType::Inner };
+    let (lidx, mut ridx) = match &fidx {
+        Some(f) => {
+            let rv: Vec<Option<i64>> = f.iter().map(|&i| rv_all[i]).collect();
+            HashJoin::join_row_ids(lv, &rv, jt)
+        }
+        None => HashJoin::join_row_ids(lv, rv_all, jt),
+    };
+    if let Some(f) = &fidx {
+        // row ids into the filtered key list -> row ids into the catalog table
+        ridx.par_iter_mut().for_each(|r| if *r != u32::MAX { *r = f[*r as usize] as u32 });
+    }
+    prof!(__tj, "    lazy join: row ids n={}", lidx.len());
+    let keep_col = |name: &str, key: &str| name == key || needs_col(keep, name.rsplit('.').next().unwrap_or(name)) || needs_col(keep, name);
+    let lnames: std::collections::HashSet<&str> = left.columns.iter().map(|c| c.name.as_str()).collect();
+    let mut jobs: Vec<(String, &ColumnData, &[u32])> = Vec::new();
+    for c in left.columns.iter().filter(|c| keep_col(&c.name, &lk)) { jobs.push((c.name.clone(), &c.data, &lidx)); }
+    for (c, n) in src.columns.iter().zip(names.columns.iter()).filter(|(_, n)| keep_col(&n.name, &rk)) {
+        let name = if lnames.contains(n.name.as_str()) { format!("{}_r", n.name) } else { n.name.clone() };
+        jobs.push((name, &c.data, &ridx));
+    }
+    let columns: Vec<Column> = jobs.into_par_iter()
+        .map(|(name, data, ix)| Column { name, data: kore_join::gather_rows(data, ix) }).collect();
+    prof!(__tj, "    lazy join: gathered");
+    Ok(Some(DataBlock { columns, num_rows: lidx.len() }))
+}
+
 /// `JOIN ... ON a = b AND <more>`: hash join on the equality, then the remaining conditions.
 /// For a LEFT join the extra conditions must only touch the right side (they then filter the right
 /// input, which is equivalent); anything else returns None so the caller uses the nested loop.
+/// Columns still needed once the ON conditions of joins `0..=ji` have been applied (None = all).
+fn keep_after_on(stmt: &SelectStmt, ji: usize, needed: &Option<std::collections::HashSet<String>>) -> Option<std::collections::HashSet<String>> {
+    if needed.is_none() { return None; }
+    let mut rest = stmt.clone();
+    for j in rest.joins.iter_mut().take(ji + 1) {
+        j.on = JoinOn { left_col: String::new(), right_col: String::new(), expr: None };
+    }
+    Some(used_columns(&rest))
+}
+
 fn hash_join_with_residual(
     left: &DataBlock, right: &DataBlock, on: &Expr, kind: &JoinKind, ctx: &KqlContext,
+    keep: Option<&std::collections::HashSet<String>>,
 ) -> Result<Option<DataBlock>, KoreError> {
     if !matches!(kind, JoinKind::Inner | JoinKind::Left) { return Ok(None); }
     let mut conjuncts = Vec::new();
@@ -2392,19 +2476,54 @@ fn hash_join_with_residual(
     }
     if *kind == JoinKind::Left && !other.is_empty() { return Ok(None); }
 
+    // Only the key and the columns the rest of the statement reads survive the join (pure ON-filter columns
+    // such as o_comment are never gathered). Needs integer keys and no residual over the joined rows.
+    let keep_col = |name: &str, key: &str| -> bool {
+        name == key || keep.map_or(true, |k| needs_col(k, name.rsplit('.').next().unwrap_or(name)) || needs_col(k, name))
+    };
+    let int_keys = other.is_empty() && keep.is_some() && match (find_col(left, &lk), find_col(right, &rk)) {
+        (Some(l), Some(r)) => matches!((&l.data, &r.data), (ColumnData::Int64(_), ColumnData::Int64(_)))
+            && left.num_rows < u32::MAX as usize && right.num_rows < u32::MAX as usize,
+        _ => false,
+    };
     // Filter the build side where it lives (no copy of rows that are about to be thrown away).
-    let filtered: Option<DataBlock> = match crate::rewrite::and_all(right_only) {
-        Some(p) => Some(match crate::vecexpr::filter_idx(&p, right) {
+    let __tj = std::time::Instant::now();
+    let rpred = crate::rewrite::and_all(right_only);
+    let filtered: Option<DataBlock> = match &rpred {
+        Some(p) => Some(match crate::vecexpr::filter_idx(p, right) {
             Some(idx) => {
                 use rayon::prelude::*;
                 let columns: Vec<Column> = right.columns.par_iter()
+                    .filter(|c| !int_keys || keep_col(&c.name, &rk))
                     .map(|c| Column { name: c.name.clone(), data: c.data.take_rows(&idx) }).collect();
                 DataBlock { columns, num_rows: idx.len() }
             }
-            None => filter_block_ctx(right.clone(), &p, ctx)?,
+            None => filter_block_ctx(right.clone(), p, ctx)?,
         }),
         None => None,
     };
+    prof!(__tj, "    join: right filtered rows={}", filtered.as_ref().map(|b| b.num_rows).unwrap_or(right.num_rows));
+    if int_keys {
+        use rayon::prelude::*;
+        let rb: &DataBlock = filtered.as_ref().unwrap_or(right);
+        if let (Some(ColumnData::Int64(lv)), Some(ColumnData::Int64(rv))) =
+            (find_col(left, &lk).map(|c| &c.data), find_col(rb, &rk).map(|c| &c.data))
+        {
+            let jt = if *kind == JoinKind::Left { JoinType::Left } else { JoinType::Inner };
+            let (lidx, ridx) = HashJoin::join_row_ids(lv, rv, jt);
+            prof!(__tj, "    join: row ids n={}", lidx.len());
+            let lnames: std::collections::HashSet<&str> = left.columns.iter().map(|c| c.name.as_str()).collect();
+            let mut jobs: Vec<(String, &ColumnData, &[u32])> = Vec::new();
+            for c in left.columns.iter().filter(|c| keep_col(&c.name, &lk)) { jobs.push((c.name.clone(), &c.data, &lidx)); }
+            for c in rb.columns.iter().filter(|c| keep_col(&c.name, &rk)) {
+                let name = if lnames.contains(c.name.as_str()) { format!("{}_r", c.name) } else { c.name.clone() };
+                jobs.push((name, &c.data, &ridx));
+            }
+            let columns: Vec<Column> = jobs.into_par_iter()
+                .map(|(name, data, ix)| Column { name, data: kore_join::gather_rows(data, ix) }).collect();
+            return Ok(Some(DataBlock { columns, num_rows: lidx.len() }));
+        }
+    }
     let right: &DataBlock = filtered.as_ref().unwrap_or(right);
     let jt = if *kind == JoinKind::Left { JoinType::Left } else { JoinType::Inner };
     let mut joined = HashJoin::join(left, right, &JoinConfig { left_key: lk, right_key: rk, join_type: jt })?;
