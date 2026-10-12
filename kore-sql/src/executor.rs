@@ -1271,7 +1271,7 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
     // borrowed from the catalog and copy only the surviving rows of the columns still needed afterwards.
     // Cloning a whole 6M-row string column just to throw most of it away used to dominate the runtime.
     let planned = needed.is_some() && stmt.joins.iter().all(|j| j.join_type == JoinKind::Implicit);
-    let needed_wo_where = needed.as_ref().map(|_| used_columns_without_where(stmt));
+    let mut needed_wo_where = needed.as_ref().map(|_| used_columns_without_where(stmt));
     let mut conjuncts: Vec<Expr> = Vec::new();
     if planned || n_implicit > 0 {
         if let Some(w) = &where_pred { crate::rewrite::split_conjuncts(w, &mut conjuncts); }
@@ -1324,6 +1324,10 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
             }
         }
         conjuncts = keep;
+        // the deferred predicates run on the joined result: the columns they read must survive the table loads
+        if let Some(set) = needed_wo_where.as_mut() {
+            for d in &deferred { collect_cols_expr(d, set); }
+        }
     }
 
     // Single-table filter + aggregate: aggregate straight off the borrowed table (fusedagg.rs).
@@ -1513,12 +1517,10 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
     for (ji, join) in stmt.joins.iter().enumerate().skip(n_implicit) {
         // Pre-cap the probe side when LIMIT is set with no ORDER BY/WHERE.
         let probe = if let Some(lim) = stmt.limit {
-            let has_win = stmt.projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Window { .. }, .. }));
-            if stmt.where_clause.is_none()
-                && stmt.order_by.is_empty()
-                && stmt.group_by.is_empty()
-                && stmt.having.is_none()
-                && !has_win
+            // only valid when every join keeps (at least) every probe row: an INNER / RIGHT / FULL join can drop
+            // them, and capping first would then return fewer than LIMIT rows
+            let row_preserving = stmt.joins.iter().skip(n_implicit).all(|j| matches!(j.join_type, JoinKind::Left | JoinKind::Cross));
+            if early_limit_ok(stmt) && row_preserving
             {
                 let cap = (lim as usize).saturating_add(stmt.offset.unwrap_or(0) as usize);
                 limit_block(std::mem::replace(&mut result, DataBlock::empty()), cap.max(1))
@@ -1639,12 +1641,7 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
     // Avoids materialising huge cross-products (e.g. 9K×9K self-join) before LIMIT 5.
     if !stmt.joins.is_empty() {
         if let Some(lim) = stmt.limit {
-            let has_win = stmt.projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Window { .. }, .. }));
-            if stmt.where_clause.is_none()
-                && stmt.order_by.is_empty()
-                && stmt.group_by.is_empty()
-                && stmt.having.is_none()
-                && !has_win
+            if early_limit_ok(stmt)
             {
                 let cap = (lim as usize).saturating_add(stmt.offset.unwrap_or(0) as usize);
                 result = limit_block(result, cap);
@@ -1866,6 +1863,19 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
 // ─── Implicit-join helpers ────────────────────────────────────────────────────
 
 /// The block behind `(VALUES (..), (..)) alias(c1, c2)`.
+/// May the join output be cut to LIMIT(+OFFSET) rows before the rest of the query runs? Not when anything
+/// downstream looks at every row: WHERE, aggregates (COUNT(*) ... LIMIT 5 is one row over ALL the join rows),
+/// GROUP BY, HAVING, ORDER BY, windows, DISTINCT, QUALIFY.
+fn early_limit_ok(stmt: &SelectStmt) -> bool {
+    stmt.where_clause.is_none() && stmt.order_by.is_empty() && stmt.group_by.is_empty() && stmt.having.is_none()
+        && stmt.qualify.is_none() && !stmt.distinct && stmt.group_exprs.is_empty() && stmt.pivot.is_none() && stmt.unpivot.is_none()
+        && stmt.lateral_views.is_empty()
+        && !stmt.projections.iter().any(|p| match p {
+            Projection::Expr { expr, .. } => crate::ast_walk::any_node(expr, &|x| matches!(x, Expr::Agg { .. } | Expr::AggX { .. } | Expr::Window { .. } | Expr::Explode(_))),
+            _ => false,
+        })
+}
+
 fn values_table_block(t: &TableExpr) -> Result<DataBlock, KoreError> {
     let rows = t.values.as_deref().unwrap_or(&[]);
     if rows.is_empty() { return Ok(DataBlock::empty()); }
@@ -2370,7 +2380,7 @@ fn add_composite_key(block: &mut DataBlock, cols: &[String], name: &str) {
         let mix = |acc: &mut u64, v: u64| { *acc = (*acc ^ v).wrapping_mul(K).rotate_left(29); };
         match &col.data {
             ColumnData::Int64(v)   => for (acc, x) in h.iter_mut().zip(v) { mix(acc, x.map_or(u64::MAX, |i| (i as f64).to_bits())); },
-            ColumnData::Float64(v) => for (acc, x) in h.iter_mut().zip(v) { mix(acc, x.map_or(u64::MAX, |f| f.to_bits())); },
+            ColumnData::Float64(v) => for (acc, x) in h.iter_mut().zip(v) { mix(acc, x.map_or(u64::MAX, |f| float_key(f))); },
             ColumnData::Bool(v)    => for (acc, x) in h.iter_mut().zip(v) { mix(acc, x.map_or(2, |b| b as u64)); },
             ColumnData::Str(v)     => for (acc, x) in h.iter_mut().zip(v) {
                 let mut s = 0xcbf2_9ce4_8422_2325u64;
@@ -2562,6 +2572,10 @@ fn hash_join_with_residual(
 fn key_bytes(vals: &[ExprVal], out: &mut Vec<u8>) -> bool {
     for v in vals {
         match v {
+            // BIGINT keys above 2^53 are not exactly representable as f64: two different ids would collapse into one
+            // key. Those (and the integral floats equal to them) are encoded as exact integers.
+            ExprVal::Int(i) if i.unsigned_abs() > (1u64 << 53) => { out.push(4); out.extend_from_slice(&i.to_le_bytes()); }
+            ExprVal::Float(f) if f.is_finite() && f.fract() == 0.0 && f.abs() > 9007199254740992.0 && f.abs() < 9.2e18 => { out.push(4); out.extend_from_slice(&(*f as i64).to_le_bytes()); }
             ExprVal::Int(i)   => { out.push(1); out.extend_from_slice(&(*i as f64).to_bits().to_le_bytes()); }
             ExprVal::Float(f) => { out.push(1); out.extend_from_slice(&(if *f == 0.0 { 0.0f64 } else { *f }).to_bits().to_le_bytes()); }
             ExprVal::Str(s)   => { out.push(2); out.extend_from_slice(&(s.len() as u32).to_le_bytes()); out.extend_from_slice(s.as_bytes()); }
@@ -2582,6 +2596,13 @@ impl KeyCol<'_> {
         let f = match self { KeyCol::I(v) => v[r].map(|x| x as f64), KeyCol::F(v) => v[r], KeyCol::O(v) => v[r] }?;
         Some(if f == 0.0 { 0.0f64.to_bits() } else { f.to_bits() })
     }
+    /// `exact`: both sides of the comparison are BIGINT columns, so the raw integer is the key (an f64 would merge
+    /// distinct values above 2^53).
+    #[inline(always)]
+    fn bits_x(&self, r: usize, exact: bool) -> Option<u64> {
+        match (exact, self) { (true, KeyCol::I(v)) => v[r].map(|x| x as u64), _ => self.bits(r) }
+    }
+    fn is_int(&self) -> bool { matches!(self, KeyCol::I(_)) }
 }
 
 fn key_col<'a>(e: &Expr, block: &'a DataBlock) -> Option<KeyCol<'a>> {
@@ -2714,9 +2735,12 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
                 use rayon::prelude::*;
                 let ne_inner = ne_i.flatten();
                 let ne_outer = ne_o.flatten();
+                // per key: raw integers when both sides are BIGINT columns
+                let exact: Vec<bool> = ik.iter().zip(ok.iter()).map(|(a, b)| a.is_int() && b.is_int()).collect();
+                let ne_exact = matches!((&ne_inner, &ne_outer), (Some(a), Some(b)) if a.is_int() && b.is_int());
                 let key = |cols: &Vec<KeyCol>, r: usize| -> Option<(u64, u64)> {
-                    let a = cols[0].bits(r)?;
-                    let b = if cols.len() > 1 { cols[1].bits(r)? } else { 0 };
+                    let a = cols[0].bits_x(r, exact[0])?;
+                    let b = if cols.len() > 1 { cols[1].bits_x(r, exact[1])? } else { 0 };
                     Some((a, b))
                 };
                 const NO: u32 = u32::MAX;
@@ -2770,7 +2794,7 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
                         };
                         let g = &mut st[s as usize];
                         g.present = true;
-                        if let Some(v) = ne_inner.as_ref().and_then(|c| c.bits(r)) {
+                        if let Some(v) = ne_inner.as_ref().and_then(|c| c.bits_x(r, ne_exact)) {
                             if g.flags & 1 == 0 { g.first = v; g.flags |= 1; }
                             else if g.first != v { g.flags |= 2; }
                         }
@@ -2794,7 +2818,7 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
                         if !g.present { false } else {
                             match &ne_outer {
                                 None => true,
-                                Some(c) => match c.bits(r) {
+                                Some(c) => match c.bits_x(r, ne_exact) {
                                     None => false,
                                     Some(v) => g.flags & 2 != 0 || (g.flags & 1 != 0 && g.first != v),
                                 },
@@ -3327,9 +3351,11 @@ fn correlated_scalar_values(outer: &DataBlock, sq: &SelectStmt, ctx: &KqlContext
         let av: Option<Vec<KeyCol>> = (0..funcs.len()).map(|j| key_col(&Expr::Col(format!("__a{j}")), &rows)).collect();
         if let (Some(ik), Some(ok), Some(av)) = (ik, ok, av) {
             use rayon::prelude::*;
+            // per key: raw integers when both sides are BIGINT columns (f64 bits would merge ids above 2^53)
+            let exact: Vec<bool> = ik.iter().zip(ok.iter()).map(|(a, b)| a.is_int() && b.is_int()).collect();
             let key = |cols: &Vec<KeyCol>, r: usize| -> Option<(u64, u64)> {
-                let a = cols[0].bits(r)?;
-                let b = if cols.len() > 1 { cols[1].bits(r)? } else { 0 };
+                let a = cols[0].bits_x(r, exact[0])?;
+                let b = if cols.len() > 1 { cols[1].bits_x(r, exact[1])? } else { 0 };
                 Some((a, b))
             };
             const NO: u32 = u32::MAX;
@@ -3692,7 +3718,7 @@ fn eval_expr_ctx(expr: &Expr, block: &DataBlock, row: usize, ctx: &KqlContext) -
             match execute_select(stmt, &row_ctx) {
                 Ok(result) if result.num_rows > 0 && !result.columns.is_empty() => {
                     match result.columns[0].data.get_value(0) {
-                        Value::Int(i)   => ExprVal::Float(i as f64),
+                        Value::Int(i)   => ExprVal::Int(i),
                         Value::Float(f) => ExprVal::Float(f),
                         Value::Str(s)   => ExprVal::Str(s),
                         Value::Bool(b)  => ExprVal::Bool(b),
@@ -3844,7 +3870,8 @@ fn rewrite_exists(expr: &Expr, ctx: &KqlContext) -> Expr {
                         let inner_col = &corr_inner[0];
                         let outer_expr = corr_outer[0].clone();
 
-                        let mut filtered = inner_block.clone();
+                        // qualified references (q.g) in the filters resolve against the alias-prefixed columns
+                        let mut filtered = prefix_columns(inner_block.clone(), inner_alias);
                         for fc in &filters {
                             if let Ok(f) = filter_block(filtered.clone(), fc) {
                                 filtered = f;
@@ -3877,10 +3904,13 @@ fn rewrite_exists(expr: &Expr, ctx: &KqlContext) -> Expr {
                                 })
                                 .collect();
 
-                            return Expr::In {
-                                expr: Box::new(outer_expr),
-                                values,
-                                negated: *negated,
+                            // EXISTS is never UNKNOWN: a NULL outer key simply has no match, so NOT EXISTS is TRUE
+                            // for it (a bare `x NOT IN (...)` would be UNKNOWN there and, under OR / NOT, wrong)
+                            let is_in = Expr::In { expr: Box::new(outer_expr.clone()), values, negated: *negated };
+                            return if *negated {
+                                Expr::BinOp { op: BinOpKind::Or, left: Box::new(Expr::IsNull(Box::new(outer_expr))), right: Box::new(is_in) }
+                            } else {
+                                Expr::BinOp { op: BinOpKind::And, left: Box::new(Expr::IsNotNull(Box::new(outer_expr))), right: Box::new(is_in) }
                             };
                         }
                     }
@@ -3979,7 +4009,8 @@ fn resolve_subqueries(expr: &Expr, ctx: &KqlContext) -> Expr {
                     if result.num_rows > 0 && !result.columns.is_empty() {
                         let v = result.columns[0].data.get_value(0);
                         match v {
-                            Value::Int(i)   => Expr::Float(i as f64),
+                            // an integer stays an integer: through f64 a BIGINT above 2^53 would change value
+                            Value::Int(i)   => Expr::Int(i),
                             Value::Float(f) => Expr::Float(f),
                             Value::Str(s)   => Expr::Str(s),
                             Value::Bool(b)  => Expr::Bool(b),
@@ -4238,7 +4269,7 @@ pub(crate) fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
                             (ExprVal::Str(a),   ExprVal::Str(b))   => a == b,
                             (ExprVal::Bool(a),  ExprVal::Bool(b))  => a == b,
                             _ => match (num_only(&lhs), num_only(&rhs)) {
-                                (Some(a), Some(b)) => (a - b).abs() < 1e-10,
+                                (Some(a), Some(b)) => a == b,
                                 _ => false,
                             },
                         };
@@ -4271,7 +4302,8 @@ pub(crate) fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
         // ── IN (three-valued: a NULL in the list makes a miss UNKNOWN) ─────
         Expr::In { expr: e, values, negated } => {
             let lv = eval_expr(e, block, row);
-            if matches!(lv, ExprVal::Null) { return ExprVal::Null; }
+            // x IN () is FALSE even for a NULL x (an empty subquery result), so x NOT IN () is TRUE
+            if matches!(lv, ExprVal::Null) { return if values.is_empty() { ExprVal::Bool(*negated) } else { ExprVal::Null }; }
             let mut saw_null = false;
             for v in values {
                 let rv = eval_expr(v, block, row);
@@ -4823,7 +4855,10 @@ fn cross_join(left: &DataBlock, right: &DataBlock) -> DataBlock {
     let rn = right.num_rows;
     let total = ln * rn;
     if total == 0 {
-        return DataBlock::empty();
+        // an empty product still has the schema of both sides (later stages look columns up by name)
+        let mut columns = left.select_rows(&[]).columns;
+        columns.extend(right.select_rows(&[]).columns);
+        return DataBlock { columns, num_rows: 0 };
     }
 
     let mut columns = Vec::new();
@@ -4953,8 +4988,14 @@ fn merge_single_row(left: &DataBlock, li: usize, right: &DataBlock, ri: usize) -
 }
 
 /// Remove duplicate rows (for SELECT DISTINCT), keeping the first occurrence.
-/// Rows are identified by a 128-bit hash built column by column (no per-row String); floats compare at
-/// 1e-10 resolution and NULL is its own value, as before.
+/// Rows are identified by a 128-bit hash built column by column (no per-row String), equal hashes confirmed cell
+/// by cell; floats compare exactly and NULL is its own value.
+/// Bits identifying a DOUBLE value for grouping / DISTINCT: -0.0 equals 0.0, every NaN equals every NaN.
+#[inline(always)]
+pub(crate) fn float_key(f: f64) -> u64 {
+    if f == 0.0 { 0 } else if f.is_nan() { 0x7ff8_0000_0000_0000 } else { f.to_bits() }
+}
+
 fn deduplicate(block: DataBlock) -> DataBlock {
     use rayon::prelude::*;
     use std::collections::HashMap;
@@ -4969,9 +5010,9 @@ fn deduplicate(block: DataBlock) -> DataBlock {
         };
         match &col.data {
             ColumnData::Int64(v) => hashes.par_iter_mut().zip(v.par_iter()).for_each(|(h, x)| match x { Some(x) => mix(h, *x as u64, 1), None => mix(h, 0, 0) }),
+            // exact value identity (0.1+0.2 and 0.3 are different values; -0.0 and 0.0 are the same one)
             ColumnData::Float64(v) => hashes.par_iter_mut().zip(v.par_iter()).for_each(|(h, x)| match x {
-                Some(f) if f.is_finite() && f.abs() < 9.0e8 => mix(h, ((f * 1e10).round() as i64 + 0) as u64, 2),
-                Some(f) => mix(h, f.to_bits(), 3),
+                Some(f) => mix(h, float_key(*f), 2),
                 None => mix(h, 0, 0),
             }),
             ColumnData::Bool(v) => hashes.par_iter_mut().zip(v.par_iter()).for_each(|(h, x)| match x { Some(b) => mix(h, *b as u64, 4), None => mix(h, 0, 0) }),
@@ -4989,9 +5030,7 @@ fn deduplicate(block: DataBlock) -> DataBlock {
             ColumnData::Bool(v) => v[i] == v[j],
             ColumnData::Float64(v) => match (v[i], v[j]) {
                 (None, None) => true,
-                (Some(a), Some(b)) => if a.is_finite() && b.is_finite() && a.abs() < 9.0e8 && b.abs() < 9.0e8 {
-                    (a * 1e10).round() as i64 == (b * 1e10).round() as i64
-                } else { a.to_bits() == b.to_bits() },
+                (Some(a), Some(b)) => float_key(a) == float_key(b),
                 _ => false,
             },
             ColumnData::Str(v) => v[i] == v[j],
@@ -5461,7 +5500,7 @@ fn global_agg(block: DataBlock, projections: &[Projection]) -> Result<DataBlock,
                 AggFunc::CountDistinct => {
                     use std::collections::HashSet;
                     let seen: HashSet<u64> = agg_col.map(|col| match &col.data {
-                        ColumnData::Float64(v) => v.iter().filter_map(|x| *x).map(|f| f.to_bits()).collect(),
+                        ColumnData::Float64(v) => v.iter().filter_map(|x| *x).map(float_key).collect(),
                         ColumnData::Int64(v)   => v.iter().filter_map(|x| *x).map(|i| i as u64).collect(),
                         ColumnData::Str(v)     => v.iter().filter_map(|x| x.as_deref()).map(|s| {
                             let mut h = 14695981039346656037u64;
@@ -5599,6 +5638,13 @@ fn fnv64(bytes: &[u8]) -> u64 {
 /// u128 grouping key of one row (no String allocation). This DEFINES group equality
 /// for the general GROUP BY path; the spilling grace-hash GROUP BY partitions on it so
 /// both agree on which rows form a group.
+///
+/// Group equality is hash equality (no row-by-row confirmation, unlike `deduplicate`). Integer, float and
+/// boolean key columns enter the 128-bit state exactly, and for a single such column the map value -> key is a
+/// bijection (odd multiplier, rotation), so those never collide. Text is first reduced to a 64-bit hash:
+/// two DISTINCT strings in the same key position share a group with probability about n^2 / 2^65 for n distinct
+/// strings (~3e-8 for 1M, ~3e-6 for 10M distinct values); several key columns combine without adding noticeable
+/// collision probability beyond that. Accepted for speed; NULL has its own bit so it never merges with 0 / ''.
 #[inline(always)]
 fn grp_row_key(block: &DataBlock, group_cols: &[String], gcols: &[&Column], fallback: bool, row: usize) -> u128 {
     let mut k: u128 = 0xcbf29ce484222325_cbf29ce484222325u128;
@@ -5612,7 +5658,7 @@ fn grp_row_key(block: &DataBlock, group_cols: &[String], gcols: &[&Column], fall
         for (i, gc) in group_cols.iter().enumerate() {
             let (v, null) = match get_cell(block, gc, row) {
                 ExprVal::Int(x)   => (x as u64, false),
-                ExprVal::Float(x) => (x.to_bits(), false),
+                ExprVal::Float(x) => (float_key(x), false),
                 ExprVal::Str(ref s) => (fnv64(s.as_bytes()), false),
                 ExprVal::Bool(x)  => (x as u64, false),
                 ExprVal::Null     => (0, true),
@@ -5623,7 +5669,7 @@ fn grp_row_key(block: &DataBlock, group_cols: &[String], gcols: &[&Column], fall
         for (i, col) in gcols.iter().enumerate() {
             let (v, null): (u64, bool) = match &col.data {
                 ColumnData::Int64(v)   => match v.get(row).and_then(|x| *x) { Some(x) => (x as u64, false), None => (0, true) },
-                ColumnData::Float64(v) => match v.get(row).and_then(|x| *x) { Some(f) => (f.to_bits(), false), None => (0, true) },
+                ColumnData::Float64(v) => match v.get(row).and_then(|x| *x) { Some(f) => (float_key(f), false), None => (0, true) },
                 ColumnData::Bool(v)    => match v.get(row).and_then(|x| *x) { Some(b) => (b as u64, false), None => (0, true) },
                 ColumnData::Str(v)     => match v.get(row).and_then(|x| x.as_deref()) { Some(t) => (fnv64(t.as_bytes()), false), None => (0, true) },
                 ColumnData::StrDict { codes, dict } => {
@@ -5770,12 +5816,12 @@ pub(crate) fn group_by_agg_ex(
                                     use std::collections::HashSet;
                                     let seen: HashSet<u64> = if is_direct {
                                         agg_col.map(|col| match &col.data {
-                                            ColumnData::Float64(v) => idxs.iter().filter_map(|&r| v.get(r).and_then(|x| *x)).map(|f| f.to_bits()).collect(),
+                                            ColumnData::Float64(v) => idxs.iter().filter_map(|&r| v.get(r).and_then(|x| *x)).map(float_key).collect(),
                                             ColumnData::Int64(v)   => idxs.iter().filter_map(|&r| v.get(r).and_then(|x| *x)).map(|i| i as u64).collect(),
                                             _ => HashSet::new(),
                                         }).unwrap_or_default()
                                     } else {
-                                        vals.iter().map(|&f| f.to_bits()).collect()
+                                        vals.iter().map(|&f| float_key(f)).collect()
                                     };
                                     Some(seen.len() as f64)
                                 }
@@ -5854,7 +5900,10 @@ pub(crate) fn group_by_agg_ex(
                         };
 
                         if let Some(cn) = col_name {
-                            if let Some(src) = find_col(&agg_block, &cn) {
+                            // a qualified reference must find ITS table's column: after a join the bare name
+                            // `g` may exist once per table, and the first one is not necessarily the right one
+                            let qualified = match other { Expr::QualCol(t, c) => find_col(&agg_block, &format!("{t}.{c}")), _ => None };
+                            if let Some(src) = qualified.or_else(|| find_col(&agg_block, &cn)) {
                                 let mut nc = src.clone();
                                 if let Some(a) = alias { nc.name = a.clone(); }
                                 new_cols.push(nc);
