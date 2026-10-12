@@ -2343,7 +2343,7 @@ fn add_composite_key(block: &mut DataBlock, cols: &[String], name: &str) {
         let mix = |acc: &mut u64, v: u64| { *acc = (*acc ^ v).wrapping_mul(K).rotate_left(29); };
         match &col.data {
             ColumnData::Int64(v)   => for (acc, x) in h.iter_mut().zip(v) { mix(acc, x.map_or(u64::MAX, |i| (i as f64).to_bits())); },
-            ColumnData::Float64(v) => for (acc, x) in h.iter_mut().zip(v) { mix(acc, x.map_or(u64::MAX, |f| f.to_bits())); },
+            ColumnData::Float64(v) => for (acc, x) in h.iter_mut().zip(v) { mix(acc, x.map_or(u64::MAX, |f| float_key(f))); },
             ColumnData::Bool(v)    => for (acc, x) in h.iter_mut().zip(v) { mix(acc, x.map_or(2, |b| b as u64)); },
             ColumnData::Str(v)     => for (acc, x) in h.iter_mut().zip(v) {
                 let mut s = 0xcbf2_9ce4_8422_2325u64;
@@ -4742,6 +4742,12 @@ fn merge_single_row(left: &DataBlock, li: usize, right: &DataBlock, ri: usize) -
 /// Remove duplicate rows (for SELECT DISTINCT), keeping the first occurrence.
 /// Rows are identified by a 128-bit hash built column by column (no per-row String); floats compare at
 /// 1e-10 resolution and NULL is its own value, as before.
+/// Bits identifying a DOUBLE value for grouping / DISTINCT: -0.0 equals 0.0, every NaN equals every NaN.
+#[inline(always)]
+pub(crate) fn float_key(f: f64) -> u64 {
+    if f == 0.0 { 0 } else if f.is_nan() { 0x7ff8_0000_0000_0000 } else { f.to_bits() }
+}
+
 fn deduplicate(block: DataBlock) -> DataBlock {
     use rayon::prelude::*;
     use std::collections::HashMap;
@@ -4756,9 +4762,9 @@ fn deduplicate(block: DataBlock) -> DataBlock {
         };
         match &col.data {
             ColumnData::Int64(v) => hashes.par_iter_mut().zip(v.par_iter()).for_each(|(h, x)| match x { Some(x) => mix(h, *x as u64, 1), None => mix(h, 0, 0) }),
+            // exact value identity (0.1+0.2 and 0.3 are different values; -0.0 and 0.0 are the same one)
             ColumnData::Float64(v) => hashes.par_iter_mut().zip(v.par_iter()).for_each(|(h, x)| match x {
-                Some(f) if f.is_finite() && f.abs() < 9.0e8 => mix(h, ((f * 1e10).round() as i64 + 0) as u64, 2),
-                Some(f) => mix(h, f.to_bits(), 3),
+                Some(f) => mix(h, float_key(*f), 2),
                 None => mix(h, 0, 0),
             }),
             ColumnData::Bool(v) => hashes.par_iter_mut().zip(v.par_iter()).for_each(|(h, x)| match x { Some(b) => mix(h, *b as u64, 4), None => mix(h, 0, 0) }),
@@ -4776,9 +4782,7 @@ fn deduplicate(block: DataBlock) -> DataBlock {
             ColumnData::Bool(v) => v[i] == v[j],
             ColumnData::Float64(v) => match (v[i], v[j]) {
                 (None, None) => true,
-                (Some(a), Some(b)) => if a.is_finite() && b.is_finite() && a.abs() < 9.0e8 && b.abs() < 9.0e8 {
-                    (a * 1e10).round() as i64 == (b * 1e10).round() as i64
-                } else { a.to_bits() == b.to_bits() },
+                (Some(a), Some(b)) => float_key(a) == float_key(b),
                 _ => false,
             },
             ColumnData::Str(v) => v[i] == v[j],
@@ -5239,7 +5243,7 @@ fn global_agg(block: DataBlock, projections: &[Projection]) -> Result<DataBlock,
                 AggFunc::CountDistinct => {
                     use std::collections::HashSet;
                     let seen: HashSet<u64> = agg_col.map(|col| match &col.data {
-                        ColumnData::Float64(v) => v.iter().filter_map(|x| *x).map(|f| f.to_bits()).collect(),
+                        ColumnData::Float64(v) => v.iter().filter_map(|x| *x).map(float_key).collect(),
                         ColumnData::Int64(v)   => v.iter().filter_map(|x| *x).map(|i| i as u64).collect(),
                         ColumnData::Str(v)     => v.iter().filter_map(|x| x.as_deref()).map(|s| {
                             let mut h = 14695981039346656037u64;
@@ -5390,7 +5394,7 @@ fn grp_row_key(block: &DataBlock, group_cols: &[String], gcols: &[&Column], fall
         for (i, gc) in group_cols.iter().enumerate() {
             let (v, null) = match get_cell(block, gc, row) {
                 ExprVal::Int(x)   => (x as u64, false),
-                ExprVal::Float(x) => (x.to_bits(), false),
+                ExprVal::Float(x) => (float_key(x), false),
                 ExprVal::Str(ref s) => (fnv64(s.as_bytes()), false),
                 ExprVal::Bool(x)  => (x as u64, false),
                 ExprVal::Null     => (0, true),
@@ -5401,7 +5405,7 @@ fn grp_row_key(block: &DataBlock, group_cols: &[String], gcols: &[&Column], fall
         for (i, col) in gcols.iter().enumerate() {
             let (v, null): (u64, bool) = match &col.data {
                 ColumnData::Int64(v)   => match v.get(row).and_then(|x| *x) { Some(x) => (x as u64, false), None => (0, true) },
-                ColumnData::Float64(v) => match v.get(row).and_then(|x| *x) { Some(f) => (f.to_bits(), false), None => (0, true) },
+                ColumnData::Float64(v) => match v.get(row).and_then(|x| *x) { Some(f) => (float_key(f), false), None => (0, true) },
                 ColumnData::Bool(v)    => match v.get(row).and_then(|x| *x) { Some(b) => (b as u64, false), None => (0, true) },
                 ColumnData::Str(v)     => match v.get(row).and_then(|x| x.as_deref()) { Some(t) => (fnv64(t.as_bytes()), false), None => (0, true) },
                 ColumnData::StrDict { codes, dict } => {
@@ -5548,12 +5552,12 @@ pub(crate) fn group_by_agg_ex(
                                     use std::collections::HashSet;
                                     let seen: HashSet<u64> = if is_direct {
                                         agg_col.map(|col| match &col.data {
-                                            ColumnData::Float64(v) => idxs.iter().filter_map(|&r| v.get(r).and_then(|x| *x)).map(|f| f.to_bits()).collect(),
+                                            ColumnData::Float64(v) => idxs.iter().filter_map(|&r| v.get(r).and_then(|x| *x)).map(float_key).collect(),
                                             ColumnData::Int64(v)   => idxs.iter().filter_map(|&r| v.get(r).and_then(|x| *x)).map(|i| i as u64).collect(),
                                             _ => HashSet::new(),
                                         }).unwrap_or_default()
                                     } else {
-                                        vals.iter().map(|&f| f.to_bits()).collect()
+                                        vals.iter().map(|&f| float_key(f)).collect()
                                     };
                                     Some(seen.len() as f64)
                                 }

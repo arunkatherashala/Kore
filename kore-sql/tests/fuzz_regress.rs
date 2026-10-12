@@ -101,3 +101,16 @@ fn bigint_keys_above_2_pow_53_are_not_merged_by_semi_join_or_correlated_aggregat
     assert_eq!(flat(&c, "select k, (select count(*) from br where br.k = bl.k) as n from bl order by k"), ["5,1", "9007199254740993,0", "9007199254740995,0"]);
     assert_eq!(flat(&c, "select bl.k from bl, br where bl.k = br.k"), ["5"]);
 }
+
+#[test]
+fn distinct_and_group_by_compare_doubles_exactly() {
+    let mut c = KqlContext::new();
+    c.register("fl", DataBlock::new(vec![
+        Column::float64("x", vec![Some(1e-12), Some(2e-12), Some(0.3), Some(0.1 + 0.2), Some(0.0), Some(-0.0), None]),
+        Column::int64("i", vec![Some(1); 7]),
+    ]).unwrap());
+    // 1e-12, 2e-12, 0.3, 0.30000000000000004, 0.0 (== -0.0), NULL
+    assert_eq!(rows(&c, "select distinct x from fl").len(), 6);
+    assert_eq!(rows(&c, "select x, count(*) from fl group by x").len(), 6);
+    assert_eq!(flat(&c, "select count(distinct x) from fl"), ["5"]);
+}

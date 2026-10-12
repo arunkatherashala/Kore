@@ -322,13 +322,19 @@ impl<'a> G<'a> {
                 let key = *self.r.pick(&["a.k1 = b.k1", "a.k1 = b.k1 and a.k2 = b.k2", "a.k1 = b.k2"]);
                 let wh = if self.r.chance(40) { format!(" where {}", self.r.pick(&["a.v > 0", "b.v is null", "b.k1 is not null", "a.g in (1, 2, 3)", "a.s like 'a%' or b.s like 'b%'"])) } else { String::new() };
                 let (l, rr) = if big { ("tc", "td") } else { ("ta", "tb") };
-                let key = if big { key.replace("b.k1 and", "b.k1 and").to_string() } else { key.to_string() };
+                let key = key.to_string();
                 if self.r.chance(55) {
                     (format!("select a.g, count(*), count(b.k1), sum(b.v), sum(a.v), max(b.s) from {l} a {kind} {rr} b on {key}{res}{wh} group by a.g"), false)
                 } else if big && self.r.chance(60) {
+                    // a multi-condition ON that is not an INNER / LEFT hash join runs as a nested loop (|a| x |b| row
+                    // evaluations): keep that to the mid-size tables
+                    let res = if self.n >= 60_000 && !res.is_empty() { "" } else { res };
+                    let kind = if self.n >= 60_000 && res.is_empty() { kind } else { kind };
                     (format!("select count(*), count(a.v), count(b.v), sum(a.v), sum(b.f) from ta a {kind} tc b on a.k1 = b.k1{res}{wh}"), false)
                 } else if !big {
                     (format!("select a.id, b.v, a.v from ta a {kind} tb b on {key}{res}{wh}"), false)
+                } else if self.n >= 60_000 {
+                    (format!("select a.g, count(*), count(b.k1), sum(b.v) from tc a {kind} tb b on a.k1 = b.k1 group by a.g"), false)
                 } else {
                     (format!("select a.g, count(*), count(b.k1), sum(b.v) from tc a {kind} tb b on {key}{res}{wh} group by a.g"), false)
                 }
