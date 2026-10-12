@@ -276,19 +276,28 @@ impl KqlContext {
         }
 
         if upper.starts_with("EXPLAIN") {
-            let rest = sql_trim[7..].trim();
-            let plan = match crate::parser::parse_query(rest) {
-                Ok(q) => format!("KORE Query Plan\n  FROM: {}\n  GROUP BY: {}\n  JOINS: {}\n  HAS AGG: {}\n  ORDER BY: {}\n  LIMIT: {}",
-                    q.body.as_ref().map(|s| s.from.name.as_str()).unwrap_or("?"),
-                    q.body.as_ref().map(|s| s.group_by.join(", ")).unwrap_or_default(),
-                    q.body.as_ref().map(|s| s.joins.len()).unwrap_or(0),
-                    q.body.as_ref().map(|s| s.projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Agg {..}, ..}))).unwrap_or(false),
-                    q.body.as_ref().map(|s| s.order_by.iter().map(|o| format!("{} {}", o.col, if o.desc { "DESC" } else { "ASC" })).collect::<Vec<_>>().join(", ")).unwrap_or_default(),
-                    q.body.as_ref().and_then(|s| s.limit).map(|n| n.to_string()).unwrap_or_else(|| "none".to_string()),
-                ),
-                Err(e) => format!("Parse error: {e}"),
-            };
+            let mut rest = sql_trim[7..].trim();
+            let mut mode = String::new();
+            for kw in ["EXTENDED", "FORMATTED", "COST", "CODEGEN", "LOGICAL"] {
+                if rest.len() > kw.len() && rest[..kw.len()].eq_ignore_ascii_case(kw) && rest.as_bytes()[kw.len()].is_ascii_whitespace() {
+                    mode = kw.to_string();
+                    rest = rest[kw.len()..].trim();
+                    break;
+                }
+            }
+            let q = crate::parser::parse_query(rest)?;
+            let plan = crate::explain::explain(&mode, &q).ok_or_else(|| KoreError::InvalidArgument("EXPLAIN needs a SELECT query".into()))?;
             return DataBlock::new(vec![Column { name: "plan".into(), data: ColumnData::Str(vec![Some(plan)]) }]);
+        }
+        // USE db / SET key=value: accepted without effect (a single catalog, no session configuration)
+        if upper.starts_with("USE ") {
+            return DataBlock::new(vec![Column { name: "result".into(), data: ColumnData::Str(vec![]) }]);
+        }
+        if upper == "SET" || upper.starts_with("SET ") {
+            let body = sql_trim[3..].trim().trim_end_matches(';');
+            let (k, v) = match body.split_once('=') { Some((k, v)) => (k.trim().to_string(), v.trim().to_string()), None => (body.to_string(), "<undefined>".to_string()) };
+            if k.is_empty() { return DataBlock::new(vec![Column { name: "key".into(), data: ColumnData::Str(vec![]) }, Column { name: "value".into(), data: ColumnData::Str(vec![]) }]); }
+            return DataBlock::new(vec![Column { name: "key".into(), data: ColumnData::Str(vec![Some(k)]) }, Column { name: "value".into(), data: ColumnData::Str(vec![Some(v)]) }]);
         }
         if upper.starts_with("ANALYZE TABLE") {
             let rest = sql_trim["ANALYZE TABLE".len()..].trim();
@@ -4223,6 +4232,22 @@ fn eval_func(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> ExprVa
             }).collect();
             crate::structs::encode(&fields)
         }
+        // hash(..) / xxhash64(..): Spark hashes INT and BIGINT differently; integer literals in INT range and CAST(.. AS INT)
+        // count as INT, every other integer value is hashed as BIGINT
+        "HASH" | "XXHASH64" => {
+            let vals: Vec<crate::hashes::HashVal> = args.iter().map(|a| to_hash_val(Some(a), &eval_expr(a, block, row))).collect();
+            if name == "HASH" { ExprVal::Int(crate::hashes::spark_hash(&vals) as i64) } else { ExprVal::Int(crate::hashes::spark_xxhash64(&vals)) }
+        }
+        // TABLESAMPLE filter: keep the row when its seeded hash falls in [lo, hi)
+        "__SAMPLE" => {
+            let (lo, hi, seed) = (to_f64(&arg(0)).unwrap_or(0.0), to_f64(&arg(1)).unwrap_or(0.0), match arg(2) { ExprVal::Int(i) => i as u64, _ => 0 });
+            let mut x = seed ^ (row as u64).wrapping_add(1).wrapping_mul(0x9E3779B97F4A7C15);
+            x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            x = (x ^ (x >> 27)).wrapping_mul(0x94D049BB133111EB);
+            x ^= x >> 31;
+            let u = (x >> 11) as f64 / (1u64 << 53) as f64;
+            ExprVal::Bool(u >= lo && (u < hi || hi >= 1.0))
+        }
         "ISNUMERIC" => ExprVal::Bool(to_f64(&arg(0)).is_some()),
         "STRFTIME" | "FORMAT_DATE" => {
             // STRFTIME('%Y-%m', date)
@@ -7564,6 +7589,38 @@ fn apply_decimal_display(block: &mut DataBlock, q: &Query) {
         } else if let ColumnData::Int64(v) = &block.columns[i].data {
             let out: Vec<Option<String>> = v.iter().map(|x| x.map(|n| if scale > 0 { format!("{}.{}", n, "0".repeat(scale as usize)) } else { n.to_string() })).collect();
             block.columns[i].data = ColumnData::Str(out);
+        }
+    }
+}
+
+fn to_hash_val(e: Option<&Expr>, v: &ExprVal) -> crate::hashes::HashVal {
+    use crate::hashes::HashVal as H;
+    let is_int32 = |e: Option<&Expr>, i: i64| -> bool {
+        match e {
+            Some(Expr::Int(_)) => i32::try_from(i).is_ok(),
+            Some(Expr::FuncCall { name, args }) if matches!(name.as_str(), "CAST" | "TRY_CAST") => {
+                matches!(args.get(1), Some(Expr::Col(t)) if matches!(t.as_str(), "INT" | "INTEGER" | "SMALLINT" | "SHORT" | "TINYINT" | "BYTE"))
+            }
+            None => i32::try_from(i).is_ok(),
+            _ => false,
+        }
+    };
+    match v {
+        ExprVal::Null => H::Null,
+        ExprVal::Int(i) => if is_int32(e, *i) { H::Int32(*i as i32) } else { H::Int64(*i) },
+        // a decimal literal such as 2.5 is DECIMAL in Spark and hashed from its unscaled value (25); double columns hash as doubles
+        ExprVal::Float(f) if matches!(e, Some(Expr::Float(_))) && f.is_finite() => {
+            let s = format!("{}", f);
+            let scale = s.split_once('.').map_or(0, |(_, d)| d.len());
+            match s.replace('.', "").parse::<i64>() { Ok(u) if scale <= 18 => H::Int64(u), _ => H::Double(*f) }
+        }
+        ExprVal::Float(f) => H::Double(*f),
+        ExprVal::Bool(b) => H::Bool(*b),
+        ExprVal::Str(s) => {
+            if let Some(items) = crate::arrays::decode(v) { H::Seq(items.iter().map(|x| to_hash_val(None, x)).collect()) }
+            else if crate::maps::is_map(v) { crate::scalar::set_error("hash(): map arguments are not supported (Spark rejects them as well)"); H::Null }
+            else if let Some(fields) = crate::structs::decode(v) { H::Seq(fields.iter().map(|(_, x)| to_hash_val(None, x)).collect()) }
+            else { H::Bytes(s.as_bytes().to_vec()) }
         }
     }
 }

@@ -687,7 +687,7 @@ fn analytic_query_shapes() {
         (r#"select id from range(1, 8, 3)"#, r#"1|4|7"#),
         (r#"select sum(id) from range(5)"#, r#"10"#),
         (r#"select try_divide(1, 0), try_divide(6, 3) from t where id = 1"#, r#"NULL,2"#),
-        (r#"select * from t tablesample (10 percent)"#, r#"ERR"#),
+        (r#"select * from t tablesample (foo)"#, r#"ERR"#),
         (r#"select cast(v as array<int>) from t"#, r#"ERR"#),
         (r#"select v::int from t"#, r#"ERR"#),
         (r#"select struct(1,2) from t"#, r#"{1, 2}|{1, 2}|{1, 2}|{1, 2}|{1, 2}|{1, 2}"#),
@@ -848,7 +848,7 @@ fn pivot_lateral_using_hashes_and_dates() {
         (r#"select count(*) from t left anti join u on t.id = u.id where t.v is not null"#, r#"3"#),
         (r#"select count(*) from t semi join (select id from u where w = 'q') s on t.id = s.id"#, r#"1"#),
         (r#"select md5('a'), sha1('a'), sha2('a', 256), crc32('a') from t where id = 1"#, r#"0cc175b9c0f1b6a831c399e269772661,86f7e437faa5a7fce15d1ddcb9eaeaea377667b8,ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb,3904355907"#),
-        (r#"select hash('a') from t where id = 1"#, r#"ERR"#),
+        (r#"select hash('a') from t where id = 1"#, r#"1485273170"#),
         (r#"select md5(cast(id as string)) from t where id = 1"#, r#"c4ca4238a0b923820dcc509a6f75849b"#),
         (r#"select length(uuid()) from t where id = 1"#, r#"36"#),
         (r#"select typeof(1.5), typeof('a'), typeof(true) from t where id = 1"#, r#"double,string,boolean"#),
@@ -1003,8 +1003,8 @@ fn lateral_aliases_and_unsupported_features() {
         (r#"select spark_partition_id() from t where id = 1"#, r#"ERR"#),
         (r#"select reflect('java.lang.Math', 'abs', -1) from t where id = 1"#, r#"ERR"#),
         (r#"select assert_true(1 = 1) from t where id = 1"#, r#"true"#),
-        (r#"select hash('a') from t where id = 1"#, r#"ERR"#),
-        (r#"select xxhash64('a') from t where id = 1"#, r#"ERR"#),
+        (r#"select hash('a') from t where id = 1"#, r#"1485273170"#),
+        (r#"select xxhash64('a') from t where id = 1"#, r#"-8582455328737087284"#),
         (r#"select sentences('a b') from t where id = 1"#, r#"ERR"#),
     ]);
 }
@@ -1161,12 +1161,12 @@ fn array_functions() {
 fn unsupported_syntax_is_rejected_and_edge_arithmetic() {
     check(&[
         (r#"with recursive r as (select 1 as n union all select n + 1 from r where n < 3) select * from r"#, r#"1|2|3"#),
-        (r#"select id from t tablesample (50 percent)"#, r#"ERR"#),
+        (r#"select count(*) from t tablesample (0 percent)"#, r#"0"#),
         (r#"select interval 1 day 2 hours from t where id = 1"#, r#"ERR"#),
         (r#"select from_utc_timestamp('2024-01-01 00:00:00', 'PST') from t where id = 1"#, r#"ERR"#),
         (r#"select id from t window w as (order by id)"#, r#"1|2|3|4|5|6"#),
-        (r#"select sum(v) over (order by id groups between 1 preceding and current row) from t"#, r#"ERR"#),
-        (r#"select * from t cluster by id"#, r#"ERR"#),
+        (r#"select sum(v) over (order by id groups between 1 preceding and current row) from t"#, r#"10|30|50|30|50|110"#),
+        (r#"select * from t cluster by id"#, r#"1,x,10,Hello,1.5,2024-01-15|2,x,20,  pad ,2.5,2024-02-29|3,y,30,abc,-3.5,2023-12-31|4,y,NULL,NULL,NULL,NULL|5,z,50,a,b,c,4,2024-03-01|6,NULL,60,World,0,2024-01-01"#),
         (r#"select cast(v as binary) from t"#, r#"ERR"#),
         (r#"select map_from_arrays(array(1), array(2)) from t where id = 1"#, r#"{1 -> 2}"#),
         (r#"select id::int from t"#, r#"ERR"#),
@@ -1233,7 +1233,7 @@ fn whitespace_sensitive_results() {
 #[test]
 fn unknown_functions_are_errors_not_nulls() {
     let c = ctx();
-    for sql in ["select nosuchfn(id) from t", "select id from t where frobnicate(g) = 1", "select soundex('a') from t"] {
+    for sql in ["select nosuchfn(id) from t", "select id from t where frobnicate(g) = 1", "select soundexx('a') from t"] {
         let e = c.query(sql).unwrap_err().to_string();
         assert!(e.contains("unknown function"), "{sql}: {e}");
     }

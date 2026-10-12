@@ -112,6 +112,7 @@ impl Parser {
             Token::On        => Ok("on".to_string()),
             Token::By        => Ok("by".to_string()),
             Token::Array     => Ok("array".to_string()),
+            Token::End       => Ok("end".to_string()),
             Token::Map       => Ok("map".to_string()),
             Token::Explode   => Ok("explode".to_string()),
             Token::Pivot     => Ok("pivot".to_string()),
@@ -226,19 +227,31 @@ impl Parser {
             }
         }
 
-        // ORDER BY
-        let order_by = if self.peek() == &Token::Order && self.peek2() == &Token::By {
-            self.pos += 2;
-            self.parse_order_by_list()?
-        } else {
-            Vec::new()
-        };
+        // ORDER BY; Spark's CLUSTER BY x (= DISTRIBUTE BY x SORT BY x) and SORT BY x are a sort too here: a single partition
+        // makes the per-partition sort global. DISTRIBUTE BY only repartitions, so it is parsed and ignored.
+        let mut order_by = Vec::new();
+        loop {
+            let word = self.peek_ident_upper();
+            if self.peek() == &Token::Order && self.peek2() == &Token::By {
+                self.pos += 2;
+                order_by = self.parse_order_by_list()?;
+            } else if matches!(word.as_str(), "CLUSTER" | "SORT") && self.peek2() == &Token::By {
+                self.pos += 2;
+                order_by = self.parse_order_by_list()?;
+            } else if word == "DISTRIBUTE" && self.peek2() == &Token::By {
+                self.pos += 2;
+                self.parse_expr(0)?;
+                while self.consume_if(&Token::Comma) { self.parse_expr(0)?; }
+            } else { break; }
+        }
 
         let (limit, offset) = self.parse_limit_offset()?;
 
-        Ok(SelectStmt { distinct, projections, from, joins, where_clause,
+        let mut stmt = SelectStmt { distinct, projections, from, joins, where_clause,
                          group_by, grouping, group_exprs, group_sets, windows, having, qualify, order_by, limit, offset, scan_limit: None,
-                         lateral_views, pivot, unpivot, hints, parenthesized: false, set_ops: Vec::new() })
+                         lateral_views, pivot, unpivot, hints, parenthesized: false, set_ops: Vec::new() };
+        rewrite_window_refs(&mut stmt);
+        Ok(stmt)
     }
 
     /// `arm [UNION|INTERSECT|EXCEPT|MINUS [ALL|DISTINCT] arm]* [ORDER BY ..] [LIMIT ..]`. With set operations
@@ -651,8 +664,9 @@ impl Parser {
             self.expect(&Token::By)?;
             spec.order_by = self.parse_order_by_list()?;
         }
-        if matches!(self.peek(), Token::Rows | Token::Range) {
-            let mode = if self.peek() == &Token::Rows { FrameMode::Rows } else { FrameMode::Range };
+        let is_groups = matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case("GROUPS"));
+        if matches!(self.peek(), Token::Rows | Token::Range) || is_groups {
+            let mode = if is_groups { FrameMode::Groups } else if self.peek() == &Token::Rows { FrameMode::Rows } else { FrameMode::Range };
             self.pos += 1;
             // BETWEEN a AND b, or a single bound (the end then defaults to CURRENT ROW)
             let between = match self.peek() {
@@ -988,6 +1002,7 @@ impl Parser {
             let t = self.expect_ident()?;
             format!("{name}.{t}")
         } else { name };
+        let sample = self.parse_tablesample()?;
         let alias = if self.consume_if(&Token::As) {
             Some(self.expect_alias()?)
         } else if matches!(self.peek(), Token::Ident(s) if !is_clause_word(s))
@@ -999,7 +1014,60 @@ impl Parser {
         } else {
             None
         };
+        let alias = if alias.is_none() && matches!(self.peek_ident_upper().as_str(), "TABLESAMPLE") { None } else { alias };
+        let sample = match sample { Some(s) => Some(s), None => self.parse_tablesample()? };
+        if let Some((where_clause, limit)) = sample {
+            // TABLESAMPLE: a derived table over the base table
+            let outer = alias.clone().unwrap_or_else(|| name.rsplit('.').next().unwrap_or(&name).to_string());
+            let mut inner = SelectStmt::star_from(TableExpr { name, alias: None, subquery: None, values: None, push_filter: None, col_aliases: vec![] });
+            inner.where_clause = where_clause;
+            inner.limit = limit;
+            return Ok(TableExpr { name: outer.clone(), alias: Some(outer), subquery: Some(Box::new(inner)), values: None, push_filter: None, col_aliases: vec![] });
+        }
         Ok(TableExpr { name, alias, subquery: None, values: None, push_filter: None, col_aliases: vec![] })
+    }
+
+    /// `TABLESAMPLE (n ROWS | p PERCENT | BUCKET x OUT OF y) [REPEATABLE (seed)]`: (filter, limit) of the equivalent derived table.
+    fn parse_tablesample(&mut self) -> Result<Option<(Option<Expr>, Option<u64>)>, KoreError> {
+        if self.peek_ident_upper() != "TABLESAMPLE" { return Ok(None); }
+        self.pos += 1;
+        self.expect(&Token::LParen)?;
+        let mut limit = None;
+        let mut range: Option<(f64, f64)> = None;
+        if self.peek_ident_upper() == "BUCKET" {
+            self.pos += 1;
+            let x = match self.advance() { Token::Int(n) => n, o => return Err(KoreError::InvalidArgument(format!("TABLESAMPLE BUCKET needs integers, got {:?}", o))) };
+            if self.peek_ident_upper() != "OUT" { return Err(KoreError::InvalidArgument("expected OUT OF in TABLESAMPLE BUCKET".into())); }
+            self.pos += 1;
+            if self.peek_ident_upper() != "OF" { return Err(KoreError::InvalidArgument("expected OUT OF in TABLESAMPLE BUCKET".into())); }
+            self.pos += 1;
+            let y = match self.advance() { Token::Int(n) => n, o => return Err(KoreError::InvalidArgument(format!("TABLESAMPLE BUCKET needs integers, got {:?}", o))) };
+            if x < 1 || y < 1 || x > y { return Err(KoreError::InvalidArgument("TABLESAMPLE BUCKET x OUT OF y needs 1 <= x <= y".into())); }
+            range = Some(((x - 1) as f64 / y as f64, x as f64 / y as f64));
+        } else {
+            let neg = self.consume_if(&Token::Minus);
+            let v = match self.advance() { Token::Int(n) => n as f64, Token::Float(f) => f, o => return Err(KoreError::InvalidArgument(format!("TABLESAMPLE needs a number, got {:?}", o))) };
+            let v = if neg { -v } else { v };
+            match self.peek_ident_upper().as_str() {
+                "ROWS" => { self.pos += 1; if v < 0.0 || v.fract() != 0.0 { return Err(KoreError::InvalidArgument("TABLESAMPLE (n ROWS) needs a non-negative integer".into())); } limit = Some(v as u64); }
+                "PERCENT" => { self.pos += 1; if !(0.0..=100.0).contains(&v) { return Err(KoreError::InvalidArgument("TABLESAMPLE percentage must be between 0 and 100".into())); } range = Some((0.0, v / 100.0)); }
+                _ => {
+                    if self.peek() == &Token::Rows { self.pos += 1; if v < 0.0 || v.fract() != 0.0 { return Err(KoreError::InvalidArgument("TABLESAMPLE (n ROWS) needs a non-negative integer".into())); } limit = Some(v as u64); }
+                    else { return Err(KoreError::InvalidArgument("TABLESAMPLE needs ROWS, PERCENT or BUCKET".into())); }
+                }
+            }
+        }
+        self.expect(&Token::RParen)?;
+        let mut seed: Option<i64> = None;
+        if self.peek_ident_upper() == "REPEATABLE" {
+            self.pos += 1;
+            self.expect(&Token::LParen)?;
+            seed = match self.advance() { Token::Int(n) => Some(n), o => return Err(KoreError::InvalidArgument(format!("REPEATABLE needs an integer seed, got {:?}", o))) };
+            self.expect(&Token::RParen)?;
+        }
+        let seed = seed.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i64).unwrap_or(7));
+        let filter = range.map(|(lo, hi)| Expr::FuncCall { name: "__SAMPLE".into(), args: vec![Expr::Float(lo), Expr::Float(hi), Expr::Int(seed)] });
+        Ok(Some((filter, limit)))
     }
 
     // ─── JOIN clause ───────────────────────────────────────────────────────
@@ -1108,7 +1176,7 @@ impl Parser {
         let mut lhs = self.parse_unary()?;
         loop {
             // postfix field access on a struct-valued expression: f(..).field
-            if self.peek() == &Token::Dot && !matches!(lhs, Expr::Col(_) | Expr::QualCol(..) | Expr::Int(_) | Expr::Float(_)) && !matches!(self.peek2(), Token::Star) && matches!(self.peek2(), Token::Ident(_)) {
+            if self.peek() == &Token::Dot && !matches!(lhs, Expr::Col(_) | Expr::QualCol(..) | Expr::Int(_) | Expr::Float(_)) && !matches!(self.peek2(), Token::Star) && matches!(self.peek2(), Token::Ident(_) | Token::End) {
                 self.pos += 1;
                 let f = self.expect_alias()?;
                 lhs = Expr::FuncCall { name: "__GETFIELD".into(), args: vec![lhs, Expr::Str(f)] };
@@ -1815,14 +1883,15 @@ fn is_agg_name(up: &str) -> bool {
         | "STRING_AGG" | "LISTAGG" | "GROUP_CONCAT" | "COLLECT_LIST" | "COLLECT_SET" | "ARRAY_AGG"
         | "FIRST" | "LAST" | "ANY_VALUE" | "MODE" | "COUNT_IF" | "BOOL_AND" | "BOOL_OR" | "EVERY" | "SOME" | "ANY"
         | "MAX_BY" | "MIN_BY" | "APPROX_COUNT_DISTINCT" | "CORR" | "COVAR_POP" | "COVAR_SAMP"
-        | "SKEWNESS" | "KURTOSIS" | "SUM_DISTINCT")
+        | "SKEWNESS" | "KURTOSIS" | "SUM_DISTINCT" | "BIT_AND" | "BIT_OR" | "BIT_XOR" | "HISTOGRAM_NUMERIC"
+        | "REGR_COUNT" | "REGR_AVGX" | "REGR_AVGY" | "REGR_R2" | "REGR_SLOPE" | "REGR_INTERCEPT" | "REGR_SXX" | "REGR_SYY" | "REGR_SXY")
 }
 
 /// Words that end a table reference and so cannot be an implicit table alias.
 fn is_clause_word(s: &str) -> bool {
     matches!(s.to_ascii_uppercase().as_str(),
         "WHERE" | "ORDER" | "GROUP" | "LIMIT" | "HAVING" | "QUALIFY" | "UNION" | "INTERSECT" | "EXCEPT" | "MINUS" | "FETCH"
-        | "OFFSET" | "ON" | "SET" | "INTO" | "USING" | "NATURAL" | "WINDOW" | "SEMI" | "ANTI" | "TABLESAMPLE")
+        | "OFFSET" | "ON" | "SET" | "INTO" | "USING" | "NATURAL" | "WINDOW" | "SEMI" | "ANTI" | "TABLESAMPLE" | "CLUSTER" | "DISTRIBUTE" | "SORT")
 }
 
 fn infix_precedence(tok: &Token) -> u8 {
@@ -2085,3 +2154,27 @@ mod tests {
     }
 }
 
+
+/// `SELECT window.start, window.end ... GROUP BY window(ts, '10 minutes')`: Spark names the grouping expression
+/// `window`; here the references are expanded to the grouping expression itself.
+fn rewrite_window_refs(s: &mut SelectStmt) {
+    let Some(w) = s.group_exprs.iter().find(|g| matches!(g, Expr::FuncCall { name, .. } if name == "WINDOW")).cloned() else { return };
+    let mut f = |e: &Expr| -> Option<Expr> {
+        match e {
+            Expr::QualCol(t, field) if t.eq_ignore_ascii_case("window") && matches!(field.to_ascii_lowercase().as_str(), "start" | "end") =>
+                Some(Expr::FuncCall { name: "__GETFIELD".into(), args: vec![w.clone(), Expr::Str(field.to_ascii_lowercase())] }),
+            Expr::Col(c) if c.eq_ignore_ascii_case("window") => Some(w.clone()),
+            _ => None,
+        }
+    };
+    for p in s.projections.iter_mut() {
+        if let Projection::Expr { expr, alias } = p {
+            if alias.is_none() {
+                if let Expr::QualCol(t, field) = expr { if t.eq_ignore_ascii_case("window") { *alias = Some(field.to_ascii_lowercase()); } }
+                if matches!(expr, Expr::Col(c) if c.eq_ignore_ascii_case("window")) { *alias = Some("window".into()); }
+            }
+            *expr = crate::ast_walk::map_expr(expr, &mut f);
+        }
+    }
+    if let Some(h) = &s.having { s.having = Some(crate::ast_walk::map_expr(h, &mut f)); }
+}

@@ -764,6 +764,7 @@ pub fn call(name: &str, a: &[V]) -> Option<V> {
         "SHA1" | "SHA" => { nn!(0); V::Str(crate::hashes::sha1(get!(s(0)).as_bytes())) }
         "SHA2" => { nn!(0, 1); match crate::hashes::sha2(get!(s(0)).as_bytes(), get!(k(1))) { Some(h) => V::Str(h), None => V::Null } }
         "CRC32" => { nn!(0); V::Int(crate::hashes::crc32(get!(s(0)).as_bytes()) as i64) }
+        "SOUNDEX" => { nn!(0); V::Str(crate::hashes::soundex(&get!(s(0)))) }
         "BITAND" => { nn!(0, 1); V::Int(get!(k(0)) & get!(k(1))) }
         "BITOR" => { nn!(0, 1); V::Int(get!(k(0)) | get!(k(1))) }
         "BITXOR" => { nn!(0, 1); V::Int(get!(k(0)) ^ get!(k(1))) }
@@ -866,6 +867,17 @@ pub fn call(name: &str, a: &[V]) -> Option<V> {
             t.nanos = ((sec - whole) * 1e9).round() as i64;
             ts_v(t)
         }
+        "FROM_UTC_TIMESTAMP" | "TO_UTC_TIMESTAMP" => {
+            nn!(0, 1);
+            let d = get!(to_dt(arg(0)));
+            let tz = get!(s(1));
+            let secs = d.epoch_secs();
+            let r = if name == "FROM_UTC_TIMESTAMP" { crate::tz::offset_at_utc(&tz, secs).map(|o| secs + o) } else { crate::tz::local_to_utc(&tz, secs) };
+            match r {
+                Ok(e) => { let mut t = Dt::from_epoch_secs(e); t.nanos = d.nanos; ts_v(t) }
+                Err(m) => { set_error(m); V::Null }
+            }
+        }
         "UNIX_SECONDS" => { nn!(0); V::Int(get!(to_dt(arg(0))).epoch_secs()) }
         "UNIX_MILLIS" => { nn!(0); let d = get!(to_dt(arg(0))); V::Int(d.epoch_secs() * 1000 + d.nanos / 1_000_000) }
         "UNIX_MICROS" => { nn!(0); let d = get!(to_dt(arg(0))); V::Int(d.epoch_secs() * 1_000_000 + d.nanos / 1000) }
@@ -943,7 +955,7 @@ pub fn is_known(name: &str) -> bool {
         | "RLIKE" | "REGEXP" | "REGEXP_COUNT" | "REGEXP_INSTR" | "ABS" | "SIGN" | "SIGNUM" | "ROUND" | "BROUND" | "FLOOR" | "CEIL" | "CEILING"
         | "TRUNC" | "TRUNCATE" | "SQRT" | "CBRT" | "EXP" | "EXPM1" | "LN" | "LOG" | "LOG10" | "LOG2" | "LOG1P" | "POWER" | "POW" | "SIN" | "COS"
         | "TAN" | "ASIN" | "ACOS" | "ATAN" | "SINH" | "COSH" | "TANH" | "COT" | "DEGREES" | "RADIANS" | "ATAN2" | "HYPOT" | "PI" | "E" | "FACTORIAL"
-        | "DECODE" | "ELT" | "FIELD" | "FIND_IN_SET" | "GET_JSON_OBJECT" | "REGEXP_SUBSTR" | "CONV" | "BIN" | "UNBASE64" | "NEGATIVE" | "POSITIVE" | "RINT" | "TIMESTAMP_SECONDS" | "TIMESTAMP_MILLIS" | "UNIX_DATE" | "DATE_FROM_UNIX_DATE" | "CURRENT_DATABASE" | "CURRENT_SCHEMA" | "VERSION" | "SEQUENCE" | "MD5" | "SHA1" | "SHA" | "SHA2" | "CRC32" | "TRY_DIVIDE" | "TRY_ADD" | "TRY_SUBTRACT" | "TRY_MULTIPLY" | "MOD" | "PMOD" | "REMAINDER" | "DIV" | "BITAND" | "BITOR" | "BITXOR" | "BITNOT" | "SHIFTLEFT" | "SHIFTRIGHT" | "BIT_COUNT" | "WIDTH_BUCKET" | "RAND" | "RANDOM" | "UUID" | "GREATEST" | "LEAST" | "NULLIF" | "ISNULL"
+        | "DECODE" | "ELT" | "FIELD" | "FIND_IN_SET" | "GET_JSON_OBJECT" | "REGEXP_SUBSTR" | "CONV" | "BIN" | "UNBASE64" | "NEGATIVE" | "POSITIVE" | "RINT" | "TIMESTAMP_SECONDS" | "TIMESTAMP_MILLIS" | "UNIX_DATE" | "DATE_FROM_UNIX_DATE" | "CURRENT_DATABASE" | "CURRENT_SCHEMA" | "VERSION" | "SEQUENCE" | "MD5" | "SHA1" | "SHA" | "SHA2" | "CRC32" | "SOUNDEX" | "HASH" | "XXHASH64" | "TRY_DIVIDE" | "TRY_ADD" | "TRY_SUBTRACT" | "TRY_MULTIPLY" | "MOD" | "PMOD" | "REMAINDER" | "DIV" | "BITAND" | "BITOR" | "BITXOR" | "BITNOT" | "SHIFTLEFT" | "SHIFTRIGHT" | "BIT_COUNT" | "WIDTH_BUCKET" | "RAND" | "RANDOM" | "UUID" | "GREATEST" | "LEAST" | "NULLIF" | "ISNULL"
         | "ISNOTNULL" | "ISNAN" | "NANVL" | "TYPEOF" | "ASSERT_TRUE" | "YEAR" | "MONTH" | "DAY" | "DAYOFMONTH" | "DAYOFWEEK" | "DAYOFYEAR"
         | "QUARTER" | "WEEKOFYEAR" | "HOUR" | "MINUTE" | "SECOND" | "WEEK" | "WEEKDAY" | "EXTRACT" | "DATE_PART" | "DATEPART" | "LAST_DAY"
         | "ADD_MONTHS" | "DATE_ADD" | "DATEADD" | "TIMESTAMPADD" | "DAYS_ADD" | "ADDDATE" | "DATE_SUB" | "SUBDATE" | "DATEDIFF" | "TIMESTAMPDIFF"
@@ -953,7 +965,7 @@ pub fn is_known(name: &str) -> bool {
         | "DOUBLE" | "FLOAT" | "BOOLEAN" | "SPLIT" | "SIZE" | "CARDINALITY" | "ARRAY_SIZE" | "ELEMENT_AT" | "ARRAY_CONTAINS" | "ARRAY_POSITION" | "ARRAY_JOIN"
         | "SORT_ARRAY" | "ARRAY_SORT" | "ARRAY_DISTINCT" | "ARRAY_UNION" | "ARRAY_INTERSECT" | "ARRAY_EXCEPT" | "ARRAYS_OVERLAP" | "ARRAY_MAX" | "ARRAY_MIN"
         | "ARRAY_REMOVE" | "ARRAY_COMPACT" | "ARRAY_APPEND" | "ARRAY_PREPEND" | "ARRAY_REPEAT" | "SLICE" | "FLATTEN" | "STRFTIME" | "FORMAT_DATE" | "EXTRACT_YEAR" | "EXTRACT_MONTH" | "EXTRACT_DAY" | "CHARINDEX_"
-        | "ISNUMERIC" | "PROPERCASE" | "POSITION_OF" | "ARRAY" | "EXPLODE" | "MAKE_TIMESTAMP" | "UNIX_SECONDS" | "UNIX_MILLIS" | "UNIX_MICROS"
+        | "ISNUMERIC" | "PROPERCASE" | "POSITION_OF" | "ARRAY" | "EXPLODE" | "MAKE_TIMESTAMP" | "UNIX_SECONDS" | "UNIX_MILLIS" | "UNIX_MICROS" | "FROM_UTC_TIMESTAMP" | "TO_UTC_TIMESTAMP"
         | "CURRENT_TIMEZONE" | "REGEXP_EXTRACT_ALL" | "JSON_ARRAY_LENGTH" | "TO_JSON" | "FROM_JSON")
 }
 

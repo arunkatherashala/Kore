@@ -252,6 +252,61 @@ pub fn aggregate(inp: &AggInput, rows: &[usize]) -> Result<V, KoreError> {
                 V::Float(m4 / (m2 * m2) - 3.0)
             }
         }
+        "BIT_AND" | "BIT_OR" | "BIT_XOR" => {
+            let mut acc: Option<i64> = None;
+            for &r in &live {
+                let x = match arg(0, r) { V::Int(i) => *i, V::Float(f) if f.fract() == 0.0 => *f as i64, V::Bool(b) => *b as i64, _ => return Err(KoreError::InvalidArgument(format!("{name} needs an integer argument"))) };
+                acc = Some(match (acc, name) { (None, _) => x, (Some(a), "BIT_AND") => a & x, (Some(a), "BIT_OR") => a | x, (Some(a), _) => a ^ x });
+            }
+            acc.map(V::Int).unwrap_or(V::Null)
+        }
+        "REGR_COUNT" | "REGR_AVGX" | "REGR_AVGY" | "REGR_R2" | "REGR_SLOPE" | "REGR_INTERCEPT" | "REGR_SXX" | "REGR_SYY" | "REGR_SXY" => {
+            if nargs < 2 { return Err(KoreError::InvalidArgument(format!("{name} needs two arguments (y, x)"))); }
+            // Spark: arguments are (y, x); only rows where both are non-NULL count
+            let pairs: Vec<(f64, f64)> = rows.iter().filter_map(|&r| Some((num(arg(0, r))?, num(arg(1, r))?))).collect();
+            let n = pairs.len() as f64;
+            if name == "REGR_COUNT" { return Ok(V::Int(pairs.len() as i64)); }
+            if pairs.is_empty() { return Ok(V::Null); }
+            let (my, mx) = (pairs.iter().map(|p| p.0).sum::<f64>() / n, pairs.iter().map(|p| p.1).sum::<f64>() / n);
+            let sxx = pairs.iter().map(|p| (p.1 - mx).powi(2)).sum::<f64>();
+            let syy = pairs.iter().map(|p| (p.0 - my).powi(2)).sum::<f64>();
+            let sxy = pairs.iter().map(|p| (p.1 - mx) * (p.0 - my)).sum::<f64>();
+            match name {
+                "REGR_AVGX" => V::Float(mx),
+                "REGR_AVGY" => V::Float(my),
+                "REGR_SXX" => V::Float(sxx),
+                "REGR_SYY" => V::Float(syy),
+                "REGR_SXY" => V::Float(sxy),
+                "REGR_SLOPE" => if sxx == 0.0 { V::Null } else { V::Float(sxy / sxx) },
+                "REGR_INTERCEPT" => if sxx == 0.0 { V::Null } else { V::Float(my - sxy / sxx * mx) },
+                _ => if sxx == 0.0 { V::Null } else if syy == 0.0 { V::Float(1.0) } else { V::Float(sxy * sxy / (sxx * syy)) },
+            }
+        }
+        "HISTOGRAM_NUMERIC" => {
+            let nb = match inp.args.get(1).and_then(|a| a.first()) { Some(V::Int(n)) if *n >= 1 => *n as usize, _ => return Err(KoreError::InvalidArgument("histogram_numeric needs a positive number of bins".into())) };
+            // Ben-Haim / Tom-Tov online histogram, as in Hive's NumericHistogram (which Spark uses)
+            let mut bins: Vec<(f64, f64)> = Vec::new();
+            for &r in &live {
+                let Some(v) = num(arg(0, r)) else { continue };
+                match bins.binary_search_by(|b| b.0.partial_cmp(&v).unwrap_or(Ordering::Equal)) {
+                    Ok(i) => bins[i].1 += 1.0,
+                    Err(i) => {
+                        bins.insert(i, (v, 1.0));
+                        while bins.len() > nb {
+                            let mut best = 0;
+                            let mut diff = bins[1].0 - bins[0].0;
+                            for j in 1..bins.len() - 1 { let d = bins[j + 1].0 - bins[j].0; if d < diff { diff = d; best = j; } }
+                            let (a, b) = (bins[best], bins[best + 1]);
+                            let tot = a.1 + b.1;
+                            bins[best] = (a.0 * (a.1 / tot) + b.0 / tot * b.1, tot);
+                            bins.remove(best + 1);
+                        }
+                    }
+                }
+            }
+            if bins.is_empty() { return Ok(V::Null); }
+            crate::arrays::encode(&bins.iter().map(|(x, y)| crate::structs::encode(&[("x".to_string(), V::Float(*x)), ("y".to_string(), V::Float(*y))])).collect::<Vec<_>>())
+        }
         other => return Err(KoreError::InvalidArgument(format!("unsupported aggregate function: {other}"))),
     })
 }

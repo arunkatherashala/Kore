@@ -104,7 +104,7 @@ pub struct WindowFrame {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum FrameMode { Rows, Range }
+pub enum FrameMode { Rows, Range, Groups }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FrameBound {

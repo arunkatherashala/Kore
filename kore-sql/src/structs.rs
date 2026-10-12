@@ -154,6 +154,23 @@ pub fn call(name: &str, a: &[V]) -> Option<V> {
             }
             Some(encode(&fields))
         }
+        // window(ts, '10 minutes' [, slide [, start offset]]): the tumbling time window of ts as struct<start, end>
+        "WINDOW" => {
+            let ts = a.first()?;
+            if matches!(ts, V::Null) { return Some(V::Null); }
+            let (Some(dur), slide, off) = (interval_secs(a.get(1)), a.get(2).map(|x| interval_secs(Some(x))), a.get(3).map(|x| interval_secs(Some(x)))) else {
+                crate::scalar::set_error("window(): the duration must be a fixed-length interval string such as '10 minutes'");
+                return Some(V::Null);
+            };
+            if dur <= 0 { crate::scalar::set_error("window(): the duration must be positive"); return Some(V::Null); }
+            if let Some(sl) = slide { if sl != Some(dur) { crate::scalar::set_error("window(): sliding windows (slide different from the duration) are not supported"); return Some(V::Null); } }
+            let off = match off { None => 0, Some(Some(o)) => o, Some(None) => { crate::scalar::set_error("window(): bad start offset"); return Some(V::Null); } };
+            let Some(d) = crate::scalar::to_dt(ts) else { return Some(V::Null) };
+            let secs = d.epoch_secs();
+            let start = secs - (secs - off).rem_euclid(dur);
+            let f = |e: i64| { let t = crate::datetime::Dt::from_epoch_secs(e); V::Str(crate::datetime::fmt_ts(t.days, t.secs, 0)) };
+            Some(encode(&[("start".to_string(), f(start)), ("end".to_string(), f(start + dur))]))
+        }
         "__GETFIELD" => {
             let (s, f) = (a.first()?, a.get(1)?);
             if matches!(s, V::Null) { return Some(V::Null); }
@@ -167,4 +184,20 @@ pub fn call(name: &str, a: &[V]) -> Option<V> {
     }
 }
 
-pub fn names() -> &'static [&'static str] { &["STRUCT", "NAMED_STRUCT", "__GETFIELD"] }
+/// Seconds of a fixed-length interval string (`10 minutes`, `1 hour 30 minutes`, `interval 2 days`); None for months / years.
+fn interval_secs(v: Option<&V>) -> Option<i64> {
+    let V::Str(s) = v? else { return None };
+    let t = s.trim().to_ascii_lowercase();
+    let t = t.strip_prefix("interval").unwrap_or(&t).trim().to_string();
+    let words: Vec<&str> = t.split_whitespace().collect();
+    if words.is_empty() || words.len() % 2 != 0 { return None; }
+    let mut total = 0i64;
+    for p in words.chunks(2) {
+        let n: i64 = p[0].parse().ok()?;
+        let unit = crate::datetime::norm_unit(p[1])?;
+        total += n * match unit { "second" => 1, "minute" => 60, "hour" => 3600, "day" => 86400, "week" => 604800, _ => return None };
+    }
+    Some(total)
+}
+
+pub fn names() -> &'static [&'static str] { &["STRUCT", "NAMED_STRUCT", "__GETFIELD", "WINDOW"] }
