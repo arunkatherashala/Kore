@@ -598,6 +598,14 @@ fn fuzz_joins_and_aggregates() {
         for (n, b) in &blocks { ctx.register(*n, b.clone()); }
         let mut out_q = String::new();
         let mut out_a = String::new();
+        // the same tables under a tiny memory budget: external sort, grace-hash GROUP BY and JOIN
+        let spill_limit: Option<usize> = std::env::var("FUZZ_SPILL").ok().and_then(|v| v.parse().ok());
+        let ctx_spill = spill_limit.map(|lim| {
+            let mut c = KqlContext::new();
+            for (n, b) in &blocks { c.register(*n, b.clone()); }
+            c.set_memory_limit(lim);
+            c
+        });
         let sdir = dir.as_ref().map(|d| format!("{d}/{scale}_{seed}"));
         if let Some(sd) = &sdir {
             std::fs::create_dir_all(sd).unwrap();
@@ -632,9 +640,11 @@ fn fuzz_joins_and_aggregates() {
                 _ => false,
             };
             if fast.is_ok() { ok += 1; }
-            let bad = !agree(&fast, &nofused) || !agree(&fast, &rowonly) || general.as_ref().map_or(false, |g| !agree(&fast, g));
+            let spilled = ctx_spill.as_ref().map(|c| answer(c, &sql));
+            let bad = !agree(&fast, &nofused) || !agree(&fast, &rowonly) || general.as_ref().map_or(false, |g| !agree(&fast, g))
+                || spilled.as_ref().map_or(false, |g| !agree(&fast, g));
             if bad {
-                mismatches.push(format!("DIFF seed {seed} {scale}: {sql}\n   fast    {}\n   nofused {}\n   rowonly {}\n   general {}", show(&fast), show(&nofused), show(&rowonly), general.as_ref().map(show).unwrap_or_default()));
+                mismatches.push(format!("DIFF seed {seed} {scale}: {sql}\n   fast    {}\n   nofused {}\n   rowonly {}\n   general {}\n   spilled {}", show(&fast), show(&nofused), show(&rowonly), general.as_ref().map(show).unwrap_or_default(), spilled.as_ref().map(show).unwrap_or_default()));
             }
             if sdir.is_some() {
                 let _ = writeln!(out_q, "{}\t{}", if ordered { "O" } else { "U" }, sql);

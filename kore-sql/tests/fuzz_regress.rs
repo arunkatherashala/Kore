@@ -135,3 +135,51 @@ fn scalar_subquery_keeps_bigint_precision() {
     assert_eq!(flat(&c, "select k from bt where k = (select max(k) from bt)"), ["9007199254740993"]);
     assert_eq!(flat(&c, "select k from bt where k > (select min(k) from bt where k > 100) order by k"), ["9007199254740993"]);
 }
+
+fn dict_text(c: &Column, i: usize) -> Option<String> { c.data.get_str(i).map(|s| s.to_string()) }
+
+#[test]
+fn concat_mixes_dictionary_and_plain_text_columns_and_survives_more_than_255_values() {
+    // a dictionary column meeting plain text (a join output gathers dictionary columns as text)
+    let d = DataBlock::new(vec![Column::int64("n", vec![Some(1), Some(2)]), Column::str_dict("a", vec![0, u8::MAX], vec!["x".into()]), Column::str_col("b", vec![Some("p".into()), None])]).unwrap();
+    let t = DataBlock::new(vec![Column::int64("n", vec![Some(3)]), Column::str_col("a", vec![Some("y".into())]), Column::str_dict("b", vec![0], vec!["q".into()])]).unwrap();
+    let r = DataBlock::concat(vec![d, t]).unwrap();
+    assert_eq!((0..3).map(|i| dict_text(&r.columns[1], i)).collect::<Vec<_>>(), [Some("x".into()), None, Some("y".into())]);
+    assert_eq!((0..3).map(|i| dict_text(&r.columns[2], i)).collect::<Vec<_>>(), [Some("p".into()), None, Some("q".into())]);
+    // two dictionaries that together hold more than 255 distinct values (u8 codes, 255 = NULL)
+    let strs = |lo: usize, hi: usize| -> Vec<String> { (lo..hi).map(|i| format!("v{i}")).collect() };
+    let a = DataBlock::new(vec![Column::str_dict("s", (0..200u8).collect(), strs(0, 200))]).unwrap();
+    let b = DataBlock::new(vec![Column::str_dict("s", (0..200u8).collect(), strs(100, 300))]).unwrap();
+    let r = DataBlock::concat(vec![a, b]).unwrap();
+    assert_eq!(r.num_rows, 400);
+    for i in 0..200 { assert_eq!(dict_text(&r.columns[0], i), Some(format!("v{i}"))); assert_eq!(dict_text(&r.columns[0], 200 + i), Some(format!("v{}", 100 + i))); }
+    // appending a 256th distinct value
+    let mut col = Column::str_dict("s", (0..255u8.min(254)).collect(), strs(0, 254));
+    for k in 0..3 { col.data.append_value(&kore_core::Value::Str(format!("new{k}"))).unwrap(); }
+    assert_eq!(dict_text(&col, 253), Some("v253".into()));
+    assert_eq!(dict_text(&col, 254), Some("new0".into()));
+    assert_eq!(dict_text(&col, 256), Some("new2".into()));
+}
+
+#[test]
+fn spilled_join_and_group_by_over_dictionary_text_columns() {
+    let n = 400usize;
+    let dict: Vec<String> = ["aa", "bb", "cc", "dd"].iter().map(|s| s.to_string()).collect();
+    let mk = || DataBlock::new(vec![
+        Column::int64("k", (0..n as i64).map(|i| Some(i % 40)).collect()),
+        Column::str_dict("s", (0..n).map(|i| if i % 11 == 0 { u8::MAX } else { (i % 4) as u8 }).collect(), dict.clone()),
+        Column::int64("v", (0..n as i64).map(Some).collect()),
+    ]).unwrap();
+    let mut plain = KqlContext::new();
+    plain.register("t", mk());
+    let mut spill = KqlContext::new();
+    spill.register("t", mk());
+    spill.set_memory_limit(2000);
+    for sql in [
+        "select a.s, count(*), sum(b.v) from t a join t b on a.k = b.k group by a.s order by 1",
+        "select a.s, b.s, count(*) from t a, t b where a.k = b.k and a.v < 60 group by a.s, b.s order by 1, 2",
+        "select s, v from t order by s desc, v limit 25",
+    ] {
+        assert_eq!(flat(&spill, sql), flat(&plain, sql), "{sql}");
+    }
+}
