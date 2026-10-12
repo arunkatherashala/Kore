@@ -235,7 +235,7 @@ impl<'a> G<'a> {
     /// Returns (sql, ordered). Unordered answers are compared as multisets.
     fn query(&mut self) -> (String, bool) {
         let big = self.n >= 200;
-        let mut pick = self.r.below(30);
+        let mut pick = self.r.below(42);
         // the row-based window evaluator is quadratic in the partition size: keep windows to small / mid tables
         if self.n >= 60_000 && matches!(pick, 18 | 19 | 20) { pick = 0; }
         match pick {
@@ -403,6 +403,75 @@ impl<'a> G<'a> {
                 };
                 conds.push(extra);
                 (format!("select count(*), sum({a}.v), count(distinct {a}.s) from {from}{}", Self::where_clause(&conds)), false)
+            }
+            30 | 31 => {
+                // self join on a (unique-id) table
+                let (t, big_ok) = if big { ("tb", true) } else { ("ta", true) };
+                let _ = big_ok;
+                let cmp = *self.r.pick(&["<", "<>", ">", "<="]);
+                let key = *self.r.pick(&["k1", "k2", "g"]);
+                let key = if big && key != "k1" { "k1" } else { key };
+                let extra = if big { format!(" and x.k2 = y.k2") } else { String::new() };
+                (format!("select count(*), sum(x.v), max(y.v) from {t} x, {t} y where x.{key} = y.{key}{extra} and x.v {cmp} y.v"), false)
+            }
+            32 | 33 => {
+                // EXISTS with a correlated <> and several correlations; scalar subquery with two keys
+                let it = *self.r.pick(&["tb", "tc", "td"]);
+                let sub = match self.r.below(6) {
+                    0 => format!("exists (select 1 from {it} q where q.k1 = a.k1 and q.v <> a.v)"),
+                    1 => format!("not exists (select 1 from {it} q where q.k1 = a.k1 and q.k2 = a.k2 and q.g <> a.g)"),
+                    2 => format!("a.f > (select 0.5 * avg(q.f) from {it} q where q.k1 = a.k1 and q.k2 = a.k2)"),
+                    3 => format!("a.v <= (select max(q.v) + 2 from {it} q where q.k1 = a.k1)"),
+                    4 => format!("exists (select 1 from {it} q where q.k1 = a.k1 and q.s = a.s and q.v > 0)"),
+                    _ => format!("(select count(*) from {it} q where q.k1 = a.k1 and q.v > a.v) = 0"),
+                };
+                let w = if self.r.chance(50) { format!(" and {}", self.tab_pred(0)) } else { String::new() };
+                (format!("select count(*), sum(a.v), min(a.id), max(a.h) from ta a where {sub}{w}"), false)
+            }
+            34 | 35 => {
+                // derived tables / CTEs joined to base tables
+                let it = *self.r.pick(&["tb", "ta"]);
+                let key = *self.r.pick(&["k1", "k2", "g"]);
+                let agg = *self.r.pick(&["sum(v)", "count(*)", "max(f)", "min(v)", "avg(v)"]);
+                let cmp = *self.r.pick(&["<", ">", "="]);
+                let body = format!("select {key} as kk, {agg} as m from {it} where {} group by {key}", self.tab_pred_alias(it));
+                let body = body.replace(&format!("{it}.", it = it), "");
+                if self.r.chance(50) {
+                    (format!("select count(*), sum(c.m), sum(a.v) from ({body}) c, ta a where a.{key} = c.kk and a.v {cmp} c.m"), false)
+                } else {
+                    (format!("with c as ({body}) select count(*), sum(c.m), max(c.kk) from tc a join c on a.{key} = c.kk where a.v {cmp} c.m or a.g > 3"), false)
+                }
+            }
+            36 | 37 => {
+                // expression group keys, ORDER BY aggregate, HAVING expression
+                let t = *self.r.pick(&[0usize, 1, 2]);
+                let a = ALIAS[t];
+                let tn = TABS[t];
+                let key = match self.r.below(6) {
+                    0 => format!("{a}.k2 + 1"), 1 => format!("upper({a}.s)"), 2 => format!("substr({a}.s, 1, 1)"),
+                    3 => format!("case when {a}.v > 0 then 'p' when {a}.v < 0 then 'n' else 'z' end"),
+                    4 => format!("coalesce({a}.g, -1)"), _ => format!("{a}.g % 3"),
+                };
+                let ag = self.agg(&[t]);
+                if self.r.chance(50) {
+                    (format!("select {key} as gk, {ag} as m from {tn} {a} group by {key} order by m desc, gk limit {}", 3 + self.r.below(5)), true)
+                } else {
+                    (format!("select {key} as gk, count(*) as n, {ag} as m from {tn} {a} group by {key} having count(*) > {} and {ag} is not null", self.r.below(3)), false)
+                }
+            }
+            38 => {
+                // LIKE / IN with NULLs and wildcards over joins
+                let nt = 1 + self.r.below(2);
+                let (ts, from, mut conds) = self.comma_join(nt);
+                let ai = *self.r.pick(&ts);
+                let a = ALIAS[ai];
+                let p = match self.r.below(7) {
+                    0 => format!("{a}.s like '_b%'"), 1 => format!("{a}.s like 'a_c'"), 2 => format!("{a}.s not like '%a%'"),
+                    3 => format!("{a}.s in ('ab', null)"), 4 => format!("{a}.s not in ('ab', 'b')"),
+                    5 => format!("{a}.s between 'a' and 'b'"), _ => format!("{a}.s like '%'"),
+                };
+                conds.push(p);
+                (format!("select count(*), count(distinct {a}.s), min({a}.s) from {from}{}", Self::where_clause(&conds)), false)
             }
             28 => {
                 // LIMIT without ORDER BY: which rows is arbitrary, how many is not
