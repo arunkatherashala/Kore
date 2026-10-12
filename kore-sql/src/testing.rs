@@ -47,3 +47,10 @@ pub fn set_no_hash_residual(on: bool) { NO_HASH_RESIDUAL.store(on, Ordering::Rel
 
 #[inline]
 pub(crate) fn no_hash_residual() -> bool { NO_HASH_RESIDUAL.load(Ordering::Relaxed) }
+pub(crate) static SLOW_WINDOW: AtomicBool = AtomicBool::new(false);
+
+/// Run window functions through the original (quadratic) reference implementation, for A/B tests.
+pub fn set_slow_window(on: bool) { SLOW_WINDOW.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn slow_window() -> bool { SLOW_WINDOW.load(Ordering::Relaxed) }
