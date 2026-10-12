@@ -73,6 +73,8 @@ information passing, per-key correlated aggregates, a cached integer encoding of
 for Q13, and a fuzzing round that fixed 14 wrong-answer bugs). Where KORE is still behind DuckDB: Q17 (104 vs 18 ms), Q3 (94 vs 41),
 Q9 (256 vs 95), Q10 (150 vs 64), Q18 (165 vs 72), Q13 (149 vs 66).
 
+**Run-to-run variance (read this before quoting any ratio).** The 48-50 ms vs 47 ms result above came from the quietest runs. Later repeated runs of the same code on the same shared machine gave KORE geometric means of 53, 86, 112, 137 and 141 ms (over the 22 queries the figures were 53-141 ms) and DuckDB 47-67 ms, mainly because other programs on the machine (Teams, Edge WebView, and three runaway helper processes that were found and stopped) took CPU in the middle of runs; in one run Q1-Q10 were unchanged and Q11-Q22 were 4-25x slower. An interleaved A/B of the previous and the current build (two rounds each) gave 56 / 84 ms and 66 / 70 ms: no consistent difference. So "about level with DuckDB" is a best case on a quiet machine. A fair summary is: between roughly level with and about 2x slower than DuckDB at SF1, much faster than Spark local mode, and the ordering with DuckDB is not stable across runs.
+
 How to read this: one machine, SF 1, TPC-H-shaped data (not dbgen), in memory, about +/-20% noise (two back-to-back KORE runs gave 48.3 and
 49.6 ms). KORE caches an integer encoding of date columns after the first query on a table (the warm-up run absorbs the one-time cost); every
 engine's time includes building Python result objects, which dominates the shortest queries (5-30 ms). The comparison says nothing about
@@ -94,7 +96,7 @@ larger data, cold start, concurrency or other query shapes. Spark's times are fr
 
 ## Test evidence
 
-- 251 tests pass across `kore-sql`, `kore-join` and `kore-ffi`, including about 960 hand-derived regression
+- 260 tests pass across `kore-sql`, `kore-join` and `kore-ffi`, including about 960 hand-derived regression
   cases, a differential test across execution paths, and a SQLite oracle over 60k generated queries.
 - A mutation fuzzer ran about 1.6M mutants with no panics (reported by the SQL-coverage work, not re-run here).
 - Not run: the whole workspace, because a Python-binding crate does not build against Python 3.14 here.

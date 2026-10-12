@@ -63,6 +63,8 @@ Geometric mean over the 18 queries every engine answered correctly: Spark 1425 m
 Fastest engine per query: KORE 8-9 of 22, DuckDB 9-10, Polars 4 (two back-to-back KORE runs gave 9/9/4 and 8/10/4). KORE and DuckDB are
 about equal overall in this setup (KORE 48-50 ms vs DuckDB 47 ms geometric mean); KORE is about 29x faster than Spark local mode.
 
+**Run-to-run variance (read this before quoting any ratio).** The 48-50 ms vs 47 ms result above came from the quietest runs. Later repeated runs of the same code on the same shared machine gave KORE geometric means of 53, 86, 112, 137 and 141 ms (over the 22 queries the figures were 53-141 ms) and DuckDB 47-67 ms, mainly because other programs on the machine (Teams, Edge WebView, and three runaway helper processes that were found and stopped) took CPU in the middle of runs; in one run Q1-Q10 were unchanged and Q11-Q22 were 4-25x slower. An interleaved A/B of the previous and the current build (two rounds each) gave 56 / 84 ms and 66 / 70 ms: no consistent difference. So "about level with DuckDB" is a best case on a quiet machine. A fair summary is: between roughly level with and about 2x slower than DuckDB at SF1, much faster than Spark local mode, and the ordering with DuckDB is not stable across runs.
+
 \* DataFusion returned no rows for Q15: the query compares a sum with `max()` of the same sum using float equality, and a different summation
 order gives a slightly different float. This is a property of the query, not necessarily a DataFusion bug. Polars' SQL layer rejects Q2, Q13 and Q17
 (correlated subquery / `NOT LIKE` in a join condition).
