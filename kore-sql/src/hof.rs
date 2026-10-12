@@ -149,5 +149,5 @@ pub fn call(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> V {
 }
 
 pub fn names() -> &'static [&'static str] {
-    &["__LAMBDA", "__POSEXPLODE", "__EXPLODE_OUTER", "__POSEXPLODE_OUTER", "TRANSFORM", "FILTER", "EXISTS", "FORALL", "AGGREGATE", "REDUCE", "ZIP_WITH", "MAP_FILTER", "TRANSFORM_KEYS", "TRANSFORM_VALUES", "MAP_ZIP_WITH"]
+    &["__LAMBDA", "__POSEXPLODE", "__EXPLODE_OUTER", "__POSEXPLODE_OUTER", "__SAMPLE", "__INLINE", "__INLINE_OUTER", "__STACK", "__JSON_TUPLE", "TRANSFORM", "FILTER", "EXISTS", "FORALL", "AGGREGATE", "REDUCE", "ZIP_WITH", "MAP_FILTER", "TRANSFORM_KEYS", "TRANSFORM_VALUES", "MAP_ZIP_WITH"]
 }

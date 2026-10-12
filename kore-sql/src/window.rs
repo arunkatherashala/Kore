@@ -181,6 +181,35 @@ pub fn evaluate(func: &WindowFn, spec: &WindowSpec, n: usize, ev: &mut dyn FnMut
                     };
                     (lo, hi)
                 }
+                FrameMode::Groups => {
+                    // frame measured in peer groups (rows with equal ORDER BY keys): walk group by group from the current one
+                    let mi = m as usize;
+                    let back = |start: usize, k: i64| -> Option<usize> {
+                        let mut x = start;
+                        for _ in 0..k { if x == 0 { return None; } x = part.peer_lo[x - 1]; }
+                        Some(x)
+                    };
+                    let fwd = |end: usize, k: i64| -> Option<usize> {
+                        let mut x = end;
+                        for _ in 0..k { if x + 1 >= mi { return None; } x = part.peer_hi[x + 1]; }
+                        Some(x)
+                    };
+                    let lo = match &f.start {
+                        FrameBound::UnboundedPreceding => 0,
+                        FrameBound::CurrentRow => part.peer_lo[p] as i64,
+                        FrameBound::Preceding(_) => back(part.peer_lo[p], rows_off(start_off)).map_or(0, |x| x as i64),
+                        FrameBound::Following(_) => fwd(part.peer_hi[p], rows_off(start_off)).map_or(m, |x| part.peer_lo[x] as i64),
+                        FrameBound::UnboundedFollowing => m,
+                    };
+                    let hi = match &f.end {
+                        FrameBound::UnboundedPreceding => -1,
+                        FrameBound::CurrentRow => part.peer_hi[p] as i64,
+                        FrameBound::Preceding(_) => back(part.peer_lo[p], rows_off(end_off)).map_or(-1, |x| part.peer_hi[x] as i64),
+                        FrameBound::Following(_) => fwd(part.peer_hi[p], rows_off(end_off)).map_or(m - 1, |x| x as i64),
+                        FrameBound::UnboundedFollowing => m - 1,
+                    };
+                    (lo, hi)
+                }
                 FrameMode::Range => match &range_keys {
                     None => {
                         let lo = match &f.start { FrameBound::UnboundedPreceding => 0, FrameBound::CurrentRow => part.peer_lo[p] as i64, _ => 0 };

@@ -182,3 +182,137 @@ mod tests {
         assert_eq!(md5(&[b'a'; 1000]), "cabe45dcc9ae5b66ba86600cca6b8ba8");
     }
 }
+
+// ─── Spark's hash() (Murmur3 x86_32, seed 42) and xxhash64() ────────────────────
+
+/// A value as `hash()` / `xxhash64()` see it: Spark hashes INT and BIGINT differently.
+#[derive(Debug, Clone)]
+pub enum HashVal { Null, Int32(i32), Int64(i64), Double(f64), Bool(bool), Bytes(Vec<u8>), Seq(Vec<HashVal>) }
+// A DECIMAL literal (`2.5`) is hashed by Spark from its unscaled value: `Int64` of 25 is what the caller passes for it.
+
+fn mix_k1(k1: i32) -> i32 { (k1.wrapping_mul(0xcc9e2d51u32 as i32)).rotate_left(15).wrapping_mul(0x1b873593) }
+fn mix_h1(h1: i32, k1: i32) -> i32 { (h1 ^ k1).rotate_left(13).wrapping_mul(5).wrapping_add(0xe6546b64u32 as i32) }
+fn fmix32(mut h1: i32, len: i32) -> i32 {
+    h1 ^= len;
+    h1 ^= ((h1 as u32) >> 16) as i32;
+    h1 = h1.wrapping_mul(0x85ebca6bu32 as i32);
+    h1 ^= ((h1 as u32) >> 13) as i32;
+    h1 = h1.wrapping_mul(0xc2b2ae35u32 as i32);
+    h1 ^= ((h1 as u32) >> 16) as i32;
+    h1
+}
+fn m3_int(i: i32, seed: i32) -> i32 { fmix32(mix_h1(seed, mix_k1(i)), 4) }
+fn m3_long(l: i64, seed: i32) -> i32 {
+    let h1 = mix_h1(seed, mix_k1(l as i32));
+    let h1 = mix_h1(h1, mix_k1((l >> 32) as i32));
+    fmix32(h1, 8)
+}
+fn m3_bytes(b: &[u8], seed: i32) -> i32 {
+    let aligned = b.len() - b.len() % 4;
+    let mut h1 = seed;
+    for c in b[..aligned].chunks(4) { h1 = mix_h1(h1, mix_k1(i32::from_le_bytes([c[0], c[1], c[2], c[3]]))); }
+    // Spark mixes the remaining bytes one at a time (sign-extended), unlike reference Murmur3
+    for &x in &b[aligned..] { h1 = mix_h1(h1, mix_k1(x as i8 as i32)); }
+    fmix32(h1, b.len() as i32)
+}
+
+const P1: u64 = 11400714785074694791;
+const P2: u64 = 14029467366897019727;
+const P3: u64 = 1609587929392839161;
+const P4: u64 = 9650029242287828579;
+const P5: u64 = 2870177450012600261;
+fn xx_fmix(mut h: u64) -> u64 { h ^= h >> 33; h = h.wrapping_mul(P2); h ^= h >> 29; h = h.wrapping_mul(P3); h ^= h >> 32; h }
+fn xx_int(i: i32, seed: i64) -> i64 {
+    let mut h = (seed as u64).wrapping_add(P5).wrapping_add(4);
+    h ^= (i as u32 as u64).wrapping_mul(P1);
+    h = h.rotate_left(23).wrapping_mul(P2).wrapping_add(P3);
+    xx_fmix(h) as i64
+}
+fn xx_long(l: i64, seed: i64) -> i64 {
+    let mut h = (seed as u64).wrapping_add(P5).wrapping_add(8);
+    h ^= (l as u64).wrapping_mul(P2).rotate_left(31).wrapping_mul(P1);
+    h = h.rotate_left(27).wrapping_mul(P1).wrapping_add(P4);
+    xx_fmix(h) as i64
+}
+fn xx_bytes(b: &[u8], seed: i64) -> i64 {
+    let seed = seed as u64;
+    let len = b.len();
+    let rd64 = |i: usize| u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+    let rd32 = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().unwrap()) as u64;
+    let round = |acc: u64, w: u64| acc.wrapping_add(w.wrapping_mul(P2)).rotate_left(31).wrapping_mul(P1);
+    let mut off = 0;
+    let mut h: u64;
+    if len >= 32 {
+        let (mut v1, mut v2, mut v3, mut v4) = (seed.wrapping_add(P1).wrapping_add(P2), seed.wrapping_add(P2), seed, seed.wrapping_sub(P1));
+        while off + 32 <= len {
+            v1 = round(v1, rd64(off)); v2 = round(v2, rd64(off + 8)); v3 = round(v3, rd64(off + 16)); v4 = round(v4, rd64(off + 24));
+            off += 32;
+        }
+        h = v1.rotate_left(1).wrapping_add(v2.rotate_left(7)).wrapping_add(v3.rotate_left(12)).wrapping_add(v4.rotate_left(18));
+        for v in [v1, v2, v3, v4] { h ^= round(0, v); h = h.wrapping_mul(P1).wrapping_add(P4); }
+    } else {
+        h = seed.wrapping_add(P5);
+    }
+    h = h.wrapping_add(len as u64);
+    while off + 8 <= len { h ^= round(0, rd64(off)); h = h.rotate_left(27).wrapping_mul(P1).wrapping_add(P4); off += 8; }
+    if off + 4 <= len { h ^= rd32(off).wrapping_mul(P1); h = h.rotate_left(23).wrapping_mul(P2).wrapping_add(P3); off += 4; }
+    while off < len { h ^= (b[off] as u64).wrapping_mul(P5); h = h.rotate_left(11).wrapping_mul(P1); off += 1; }
+    xx_fmix(h) as i64
+}
+
+fn double_bits(d: f64) -> i64 { (if d == 0.0 { 0.0f64 } else { d }).to_bits() as i64 }
+
+/// `hash(a, b, ..)`: Murmur3 chained over the arguments starting from seed 42; NULLs leave the running hash alone.
+pub fn spark_hash(vals: &[HashVal]) -> i32 {
+    fn step(v: &HashVal, seed: i32) -> i32 {
+        match v {
+            HashVal::Null => seed,
+            HashVal::Int32(i) => m3_int(*i, seed),
+            HashVal::Int64(l) => m3_long(*l, seed),
+            HashVal::Double(d) => m3_long(double_bits(*d), seed),
+            HashVal::Bool(b) => m3_int(*b as i32, seed),
+            HashVal::Bytes(b) => m3_bytes(b, seed),
+            HashVal::Seq(items) => items.iter().fold(seed, |s, x| step(x, s)),
+        }
+    }
+    vals.iter().fold(42, |s, v| step(v, s))
+}
+
+/// `xxhash64(a, b, ..)`: XXH64 chained over the arguments starting from seed 42.
+pub fn spark_xxhash64(vals: &[HashVal]) -> i64 {
+    fn step(v: &HashVal, seed: i64) -> i64 {
+        match v {
+            HashVal::Null => seed,
+            HashVal::Int32(i) => xx_int(*i, seed),
+            HashVal::Int64(l) => xx_long(*l, seed),
+            HashVal::Double(d) => xx_long(double_bits(*d), seed),
+            HashVal::Bool(b) => xx_int(*b as i32, seed),
+            HashVal::Bytes(b) => xx_bytes(b, seed),
+            HashVal::Seq(items) => items.iter().fold(seed, |s, x| step(x, s)),
+        }
+    }
+    vals.iter().fold(42, |s, v| step(v, s))
+}
+
+/// Spark's `soundex`: a non-letter first character returns the input unchanged.
+pub fn soundex(s: &str) -> String {
+    const MAP: &[u8; 26] = b"01230127022455012623017202";
+    let b = s.as_bytes();
+    if b.is_empty() { return String::new(); }
+    let up = |c: u8| if c.is_ascii_lowercase() { c - 32 } else { c };
+    let first = up(b[0]);
+    if !first.is_ascii_uppercase() { return s.to_string(); }
+    let mut sx = [b'0'; 4];
+    sx[0] = first;
+    let mut n = 1;
+    let mut last = MAP[(first - b'A') as usize];
+    for &c in &b[1..] {
+        let c = up(c);
+        if !c.is_ascii_uppercase() { last = b'0'; continue; }
+        let code = MAP[(c - b'A') as usize];
+        if code == b'7' { continue; }
+        if code != b'0' && code != last { sx[n] = code; n += 1; if n > 3 { break; } }
+        last = code;
+    }
+    String::from_utf8_lossy(&sx).to_string()
+}

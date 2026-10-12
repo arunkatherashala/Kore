@@ -150,6 +150,8 @@ pub fn execute(ctx: &mut KqlContext, sql: &str) -> Option<Result<(String, usize)
     if let Some(rest) = strip_kw(s, "TRUNCATE") { return Some(truncate(ctx, rest)); }
     if let Some(rest) = strip_kw(s, "CREATE") { return create(ctx, rest); }
     if let Some(rest) = strip_kw(s, "DROP") { return Some(drop_stmt(ctx, rest)); }
+    if let Some(rest) = strip_kw(s, "ALTER") { return Some(alter(ctx, rest)); }
+    if let Some(r) = session_noop(s) { return Some(Ok(r)); }
     None
 }
 
@@ -167,9 +169,9 @@ fn insert(ctx: &mut KqlContext, rest: &str) -> Result<(String, usize), KoreError
     } else { (None, rest) };
     let existing = ctx.get(&name).cloned();
     let source = if let Some(v) = strip_kw(rest, "VALUES") {
-        ctx.query(&format!("SELECT * FROM (VALUES {v}) AS q"))?
+        ctx.query_raw(&format!("SELECT * FROM (VALUES {v}) AS q"))?
     } else if strip_kw(rest, "SELECT").is_some() || strip_kw(rest, "WITH").is_some() || rest.starts_with('(') {
-        ctx.query(rest)?
+        ctx.query_raw(rest)?
     } else {
         return Err(err(format!("INSERT: expected SELECT or VALUES, got: {}", &rest[..rest.len().min(20)])));
     };
@@ -241,7 +243,7 @@ fn update(ctx: &mut KqlContext, rest: &str) -> Result<(String, usize), KoreError
     for (k, (_, e)) in sets.iter().enumerate() { proj.push(format!("({e}) AS __s{k}")); }
     let mut q = format!("SELECT {} FROM {}", proj.join(", "), stored_name(ctx, &name));
     if let Some(w) = where_str { q.push_str(&format!(" WHERE ({w})")); }
-    let hit = tmp.query(&q)?;
+    let hit = tmp.query_raw(&q)?;
     let rids: Vec<usize> = match &hit.columns[0].data {
         ColumnData::Int64(v) => v.iter().flatten().map(|&x| x as usize).collect(),
         _ => Vec::new(),
@@ -270,7 +272,7 @@ fn delete(ctx: &mut KqlContext, rest: &str) -> Result<(String, usize), KoreError
         None => (0..tbl.num_rows).collect(),
         Some(w) => {
             let tmp = with_rowids(ctx, &name, &tbl);
-            let hit = tmp.query(&format!("SELECT __rid FROM {} WHERE ({w})", stored_name(ctx, &name)))?;
+            let hit = tmp.query_raw(&format!("SELECT __rid FROM {} WHERE ({w})", stored_name(ctx, &name)))?;
             match &hit.columns[0].data { ColumnData::Int64(v) => v.iter().flatten().map(|&x| x as usize).collect(), _ => Vec::new() }
         }
     };
@@ -330,7 +332,7 @@ fn create(ctx: &mut KqlContext, rest: &str) -> Option<Result<(String, usize), Ko
     // optional USING / STORED AS / PARTITIONED BY ... clauses before AS
     let as_pos = match find_top_kw(rest, "AS") { Some(p) => p, None => return Some(Err(err("CREATE: missing AS"))) };
     let select_sql = rest[as_pos + 2..].trim();
-    let mut result = match ctx.query(select_sql) { Ok(b) => b, Err(e) => return Some(Err(e)) };
+    let mut result = match ctx.query_raw(select_sql) { Ok(b) => b, Err(e) => return Some(Err(e)) };
     if is_view {
         let _ = or_replace;
         // a view stores its text; validate it now so a broken definition fails at CREATE time
@@ -356,3 +358,80 @@ fn drop_stmt(ctx: &mut KqlContext, rest: &str) -> Result<(String, usize), KoreEr
 
 #[allow(dead_code)]
 fn _unused(_: Arc<DataBlock>) {}
+
+/// `USE db` / `SET key=value`: accepted, no state is kept (there is a single catalog and no session conf).
+fn session_noop(sql: &str) -> Option<(String, usize)> {
+    if let Some(rest) = strip_kw(sql, "USE") { if !rest.is_empty() { return Some(("USE".into(), 0)); } }
+    if let Some(rest) = strip_kw(sql, "SET") {
+        // SET TIME ZONE / SET key = value / SET (all accepted); SET <table-style UPDATE> never reaches here
+        let _ = rest;
+        return Some(("SET".into(), 0));
+    }
+    None
+}
+
+fn null_column(name: String, ty: &str, n: usize) -> Result<Column, KoreError> {
+    let data = match sql_type(ty)? {
+        ColumnData::Int64(_) => ColumnData::Int64(vec![None; n]),
+        ColumnData::Float64(_) => ColumnData::Float64(vec![None; n]),
+        ColumnData::Bool(_) => ColumnData::Bool(vec![None; n]),
+        _ => ColumnData::Str(vec![None; n]),
+    };
+    Ok(Column { name, data })
+}
+
+/// `ALTER TABLE t ADD COLUMN[S] (c type, ..) | RENAME TO t2 | RENAME COLUMN a TO b | DROP COLUMN[S] c, ..`
+fn alter(ctx: &mut KqlContext, rest: &str) -> Result<(String, usize), KoreError> {
+    let rest = strip_kw(rest, "TABLE").ok_or_else(|| err("ALTER: only ALTER TABLE is supported"))?;
+    let (name, rest) = take_ident(rest);
+    let tname = stored_name(ctx, &name);
+    let mut block = table_block(ctx, &tname)?;
+    if let Some(r) = strip_kw(rest, "ADD") {
+        let r = strip_kw(r, "COLUMNS").or_else(|| strip_kw(r, "COLUMN")).ok_or_else(|| err("ALTER TABLE ADD: expected COLUMN or COLUMNS"))?;
+        let r = r.trim();
+        let defs = if r.starts_with('(') && r.ends_with(')') { &r[1..r.len() - 1] } else { r };
+        for d in split_top(defs, ',') {
+            let mut it = d.trim().splitn(2, char::is_whitespace);
+            let (cn, ct) = (ident(it.next().unwrap_or("")), it.next().unwrap_or("").trim());
+            let ct = ct.split_whitespace().next().unwrap_or("");
+            if cn.is_empty() { return Err(err("ALTER TABLE ADD COLUMN: missing column name")); }
+            if block.columns.iter().any(|c| crate::general::bare_name(&c.name).eq_ignore_ascii_case(&cn)) { return Err(err(format!("column {cn} already exists"))); }
+            block.columns.push(null_column(cn, ct, block.num_rows)?);
+        }
+        set_table(ctx, &tname, block);
+        return Ok(("ALTER TABLE".into(), 0));
+    }
+    if let Some(r) = strip_kw(rest, "RENAME") {
+        if let Some(r) = strip_kw(r, "COLUMN") {
+            let (old, r) = take_ident(r);
+            let r = strip_kw(r, "TO").ok_or_else(|| err("ALTER TABLE RENAME COLUMN: expected TO"))?;
+            let (new, _) = take_ident(r);
+            let c = block.columns.iter_mut().find(|c| crate::general::bare_name(&c.name).eq_ignore_ascii_case(&old))
+                .ok_or_else(|| err(format!("column not found: {old}")))?;
+            c.name = new;
+            set_table(ctx, &tname, block);
+            return Ok(("ALTER TABLE".into(), 0));
+        }
+        let r = strip_kw(r, "TO").ok_or_else(|| err("ALTER TABLE RENAME: expected TO or COLUMN"))?;
+        let (new, _) = take_ident(r);
+        if ctx.get(&new).is_some() { return Err(err(format!("Table already exists: {new}"))); }
+        ctx.drop_table(&tname);
+        set_table(ctx, &new, block);
+        return Ok(("ALTER TABLE".into(), 0));
+    }
+    if let Some(r) = strip_kw(rest, "DROP") {
+        let r = strip_kw(r, "COLUMNS").or_else(|| strip_kw(r, "COLUMN")).ok_or_else(|| err("ALTER TABLE DROP: expected COLUMN or COLUMNS"))?;
+        let r = r.trim();
+        let list = if r.starts_with('(') && r.ends_with(')') { &r[1..r.len() - 1] } else { r };
+        for cn in split_top(list, ',') {
+            let cn = ident(cn);
+            let pos = block.columns.iter().position(|c| crate::general::bare_name(&c.name).eq_ignore_ascii_case(&cn))
+                .ok_or_else(|| err(format!("column not found: {cn}")))?;
+            block.columns.remove(pos);
+        }
+        if block.columns.is_empty() { return Err(err("ALTER TABLE DROP COLUMN: cannot drop every column")); }
+        set_table(ctx, &tname, block);
+        return Ok(("ALTER TABLE".into(), 0));
+    }
+    Err(err("unsupported ALTER TABLE action (ADD COLUMN, RENAME TO, RENAME COLUMN and DROP COLUMN are supported)"))
+}

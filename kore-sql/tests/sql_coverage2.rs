@@ -102,7 +102,7 @@ fn map_values() {
         ("select map(null, 1)", "ERR"),
         ("select to_json(array(1, 2)), to_json(map('a', 1))", "[1,2],{\"a\":1}"),
         ("select from_json('[1,2,3]', 'array<int>'), from_json('{\"a\":1}', 'map<string,int>')", "[1, 2, 3],{a -> 1}"),
-        ("select from_json('{\"a\":1}', 'a int')", "ERR"),
+        ("select from_json('{\"a\":1}', 'a int')", "{1}"),
     ]);
 }
 

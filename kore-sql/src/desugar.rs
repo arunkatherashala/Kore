@@ -367,6 +367,87 @@ fn rewrite_lateral(mut s: SelectStmt, ctx: &KqlContext) -> Result<(SelectStmt, K
     let mut generated: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     for v in &views {
         let Expr::Explode(gen) = &v.expr else { return Err(err("LATERAL VIEW needs EXPLODE(..)")) };
+        // INLINE(array<struct>) / STACK(n, e1, ..) / JSON_TUPLE(json, k1, ..): generators with several output columns
+        if let Expr::FuncCall { name: gname, args: gargs } = gen.as_ref() {
+            if matches!(gname.as_str(), "__INLINE" | "__INLINE_OUTER" | "__STACK" | "__JSON_TUPLE") {
+                let outer = gname == "__INLINE_OUTER";
+                let mut rows: Vec<usize> = Vec::new();
+                let mut cols: Vec<Vec<V>> = Vec::new();
+                let mut def_names: Vec<String> = Vec::new();
+                let push_row = |cols: &mut Vec<Vec<V>>, vals: Vec<V>| {
+                    while cols.len() < vals.len() { cols.push(Vec::new()); }
+                    let n = cols.len();
+                    for (i, c) in cols.iter_mut().enumerate() { c.push(vals.get(i).cloned().unwrap_or(V::Null)); }
+                    let _ = n;
+                };
+                match gname.as_str() {
+                    "__STACK" => {
+                        let n = match gargs.first() { Some(Expr::Int(n)) if *n >= 1 => *n as usize, _ => return Err(err("stack() needs a constant positive row count as its first argument")) };
+                        let k = gargs.len() - 1;
+                        let ncols = (k + n - 1) / n;
+                        def_names = (0..ncols).map(|i| format!("col{i}")).collect();
+                        cols = vec![Vec::new(); ncols];
+                        for r in 0..block.num_rows {
+                            let vals: Vec<V> = gargs[1..].iter().map(|a| crate::executor::eval_expr(a, &block, r)).collect();
+                            for i in 0..n {
+                                rows.push(r);
+                                for c in 0..ncols { cols[c].push(vals.get(i * ncols + c).cloned().unwrap_or(V::Null)); }
+                            }
+                        }
+                    }
+                    "__JSON_TUPLE" => {
+                        if gargs.len() < 2 { return Err(err("json_tuple() needs a JSON string and at least one key")); }
+                        let nk = gargs.len() - 1;
+                        def_names = (0..nk).map(|i| format!("c{i}")).collect();
+                        cols = vec![Vec::new(); nk];
+                        for r in 0..block.num_rows {
+                            let vals: Vec<V> = gargs.iter().map(|a| crate::executor::eval_expr(a, &block, r)).collect();
+                            let parsed = match &vals[0] { V::Str(s) => serde_json::from_str::<serde_json::Value>(s).ok(), _ => None };
+                            rows.push(r);
+                            for (i, kv) in vals[1..].iter().enumerate() {
+                                let out = match (&parsed, kv) {
+                                    (Some(serde_json::Value::Object(o)), V::Str(k)) => match o.get(k) {
+                                        None | Some(serde_json::Value::Null) => V::Null,
+                                        Some(serde_json::Value::String(s)) => V::Str(s.clone()),
+                                        Some(other) => V::Str(other.to_string()),
+                                    },
+                                    _ => V::Null,
+                                };
+                                cols[i].push(out);
+                            }
+                        }
+                    }
+                    _ => {
+                        if gargs.len() != 1 { return Err(err("inline() takes one argument")); }
+                        for r in 0..block.num_rows {
+                            let v0 = crate::executor::eval_expr(&gargs[0], &block, r);
+                            let items = if matches!(v0, V::Null) { Vec::new() } else { crate::arrays::decode(&v0).ok_or_else(|| err("inline() needs an array of structs"))? };
+                            if items.is_empty() && outer { rows.push(r); for c in cols.iter_mut() { c.push(V::Null); } if cols.is_empty() { cols.push(vec![V::Null]); } continue; }
+                            for it in items {
+                                let fields = crate::structs::decode(&it).ok_or_else(|| err("inline() needs an array of structs"))?;
+                                if def_names.is_empty() { def_names = fields.iter().map(|(n, _)| n.clone()).collect(); }
+                                rows.push(r);
+                                push_row(&mut cols, fields.into_iter().map(|(_, x)| x).collect());
+                            }
+                        }
+                        if def_names.is_empty() { def_names = (0..cols.len().max(1)).map(|i| format!("col{}", i + 1)).collect(); }
+                        // earlier NULL rows of an OUTER inline may have been pushed before the width was known
+                        let n = rows.len();
+                        for c in cols.iter_mut() { while c.len() < n { c.push(V::Null); } }
+                        while cols.len() < def_names.len() { cols.push(vec![V::Null; n]); }
+                    }
+                }
+                let given: Vec<String> = v.col_alias.split(',').filter(|x| !x.is_empty()).map(|x| x.to_string()).collect();
+                let names: Vec<String> = (0..cols.len()).map(|i| given.get(i).cloned().unwrap_or_else(|| def_names.get(i).cloned().unwrap_or_else(|| format!("col{i}")))).collect();
+                let mut next = block.select_rows(&rows);
+                for (name, vals) in names.iter().zip(cols) {
+                    next.columns.push(crate::general::vals_to_column(format!("{}.{}", v.table_alias, name), vals, None));
+                }
+                generated.insert(v.table_alias.clone(), names);
+                block = next;
+                continue;
+            }
+        }
         let (pos, outer, arr) = generator_kind(gen);
         let mut is_map = false;
         // row -> items -> columns of the item
