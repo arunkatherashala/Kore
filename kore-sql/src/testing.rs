@@ -39,3 +39,11 @@ pub(crate) fn no_date_accel() -> bool {
 
 /// How many times the date accelerator served a column so far (lets tests assert it was really exercised).
 pub fn date_accel_hits() -> usize { crate::dateaccel::hits() }
+
+pub(crate) static SLOW_WINDOW: AtomicBool = AtomicBool::new(false);
+
+/// Run window functions through the original (quadratic) reference implementation, for A/B tests.
+pub fn set_slow_window(on: bool) { SLOW_WINDOW.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn slow_window() -> bool { SLOW_WINDOW.load(Ordering::Relaxed) }
