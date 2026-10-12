@@ -2428,6 +2428,10 @@ fn hash_join_with_residual(
 fn key_bytes(vals: &[ExprVal], out: &mut Vec<u8>) -> bool {
     for v in vals {
         match v {
+            // BIGINT keys above 2^53 are not exactly representable as f64: two different ids would collapse into one
+            // key. Those (and the integral floats equal to them) are encoded as exact integers.
+            ExprVal::Int(i) if i.unsigned_abs() > (1u64 << 53) => { out.push(4); out.extend_from_slice(&i.to_le_bytes()); }
+            ExprVal::Float(f) if f.is_finite() && f.fract() == 0.0 && f.abs() > 9007199254740992.0 && f.abs() < 9.2e18 => { out.push(4); out.extend_from_slice(&(*f as i64).to_le_bytes()); }
             ExprVal::Int(i)   => { out.push(1); out.extend_from_slice(&(*i as f64).to_bits().to_le_bytes()); }
             ExprVal::Float(f) => { out.push(1); out.extend_from_slice(&(if *f == 0.0 { 0.0f64 } else { *f }).to_bits().to_le_bytes()); }
             ExprVal::Str(s)   => { out.push(2); out.extend_from_slice(&(s.len() as u32).to_le_bytes()); out.extend_from_slice(s.as_bytes()); }
@@ -2448,6 +2452,13 @@ impl KeyCol<'_> {
         let f = match self { KeyCol::I(v) => v[r].map(|x| x as f64), KeyCol::F(v) => v[r], KeyCol::O(v) => v[r] }?;
         Some(if f == 0.0 { 0.0f64.to_bits() } else { f.to_bits() })
     }
+    /// `exact`: both sides of the comparison are BIGINT columns, so the raw integer is the key (an f64 would merge
+    /// distinct values above 2^53).
+    #[inline(always)]
+    fn bits_x(&self, r: usize, exact: bool) -> Option<u64> {
+        match (exact, self) { (true, KeyCol::I(v)) => v[r].map(|x| x as u64), _ => self.bits(r) }
+    }
+    fn is_int(&self) -> bool { matches!(self, KeyCol::I(_)) }
 }
 
 fn key_col<'a>(e: &Expr, block: &'a DataBlock) -> Option<KeyCol<'a>> {
@@ -2572,9 +2583,12 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
                 use rayon::prelude::*;
                 let ne_inner = ne_i.flatten();
                 let ne_outer = ne_o.flatten();
+                // per key: raw integers when both sides are BIGINT columns
+                let exact: Vec<bool> = ik.iter().zip(ok.iter()).map(|(a, b)| a.is_int() && b.is_int()).collect();
+                let ne_exact = matches!((&ne_inner, &ne_outer), (Some(a), Some(b)) if a.is_int() && b.is_int());
                 let key = |cols: &Vec<KeyCol>, r: usize| -> Option<(u64, u64)> {
-                    let a = cols[0].bits(r)?;
-                    let b = if cols.len() > 1 { cols[1].bits(r)? } else { 0 };
+                    let a = cols[0].bits_x(r, exact[0])?;
+                    let b = if cols.len() > 1 { cols[1].bits_x(r, exact[1])? } else { 0 };
                     Some((a, b))
                 };
                 const NO: u32 = u32::MAX;
@@ -2599,7 +2613,7 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
                         let Some(&s) = slots.get(&k) else { continue };
                         let g = &mut st[s as usize];
                         g.present = true;
-                        if let Some(v) = ne_inner.as_ref().and_then(|c| c.bits(r)) {
+                        if let Some(v) = ne_inner.as_ref().and_then(|c| c.bits_x(r, ne_exact)) {
                             if g.flags & 1 == 0 { g.first = v; g.flags |= 1; }
                             else if g.first != v { g.flags |= 2; }
                         }
@@ -2623,7 +2637,7 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
                         if !g.present { false } else {
                             match &ne_outer {
                                 None => true,
-                                Some(c) => match c.bits(r) {
+                                Some(c) => match c.bits_x(r, ne_exact) {
                                     None => false,
                                     Some(v) => g.flags & 2 != 0 || (g.flags & 1 != 0 && g.first != v),
                                 },
@@ -3144,9 +3158,11 @@ fn correlated_scalar_values(outer: &DataBlock, sq: &SelectStmt, ctx: &KqlContext
         let av: Option<Vec<KeyCol>> = (0..funcs.len()).map(|j| key_col(&Expr::Col(format!("__a{j}")), &rows)).collect();
         if let (Some(ik), Some(ok), Some(av)) = (ik, ok, av) {
             use rayon::prelude::*;
+            // per key: raw integers when both sides are BIGINT columns (f64 bits would merge ids above 2^53)
+            let exact: Vec<bool> = ik.iter().zip(ok.iter()).map(|(a, b)| a.is_int() && b.is_int()).collect();
             let key = |cols: &Vec<KeyCol>, r: usize| -> Option<(u64, u64)> {
-                let a = cols[0].bits(r)?;
-                let b = if cols.len() > 1 { cols[1].bits(r)? } else { 0 };
+                let a = cols[0].bits_x(r, exact[0])?;
+                let b = if cols.len() > 1 { cols[1].bits_x(r, exact[1])? } else { 0 };
                 Some((a, b))
             };
             const NO: u32 = u32::MAX;

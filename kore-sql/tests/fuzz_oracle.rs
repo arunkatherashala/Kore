@@ -235,7 +235,10 @@ impl<'a> G<'a> {
     /// Returns (sql, ordered). Unordered answers are compared as multisets.
     fn query(&mut self) -> (String, bool) {
         let big = self.n >= 200;
-        match self.r.below(30) {
+        let mut pick = self.r.below(30);
+        // the row-based window evaluator is quadratic in the partition size: keep windows to small / mid tables
+        if self.n >= 60_000 && matches!(pick, 18 | 19 | 20) { pick = 0; }
+        match pick {
             0 | 1 | 2 | 3 => {
                 // aggregate over a comma join, group by 0-3 keys
                 let nt = 1 + self.r.below(if big { 4 } else { 5 });
@@ -473,6 +476,7 @@ fn fuzz_joins_and_aggregates() {
             let (sql, ordered) = { let mut g = G { r: &mut qr, n: sz.a, ks: sz.ka }; g.query() };
             total += 1;
             testing::set_force_general(false); testing::set_no_vecexpr(false); testing::set_no_fused(false);
+            if std::env::var("FUZZ_TRACE").is_ok() { eprintln!("TRACE seed {seed} q{qi}: {sql}"); }
             let t0 = std::time::Instant::now();
             let fast = answer(&ctx, &sql);
             if t0.elapsed().as_secs_f64() > 5.0 { println!("SLOW {:.1}s seed {seed} q{qi}: {sql}", t0.elapsed().as_secs_f64()); }

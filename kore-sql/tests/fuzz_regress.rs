@@ -90,3 +90,14 @@ fn limit_is_not_pushed_below_an_inner_join_or_an_aggregate() {
     assert_eq!(flat(&c, "select count(*) from (select l.v from l join r on l.k = r.k limit 4) q"), ["4"]);
     assert_eq!(rows(&c, "select l.v from l join r on l.k = r.k join r r2 on r2.k = l.k limit 5").len(), 5);
 }
+
+#[test]
+fn bigint_keys_above_2_pow_53_are_not_merged_by_semi_join_or_correlated_aggregate() {
+    let mut c = KqlContext::new();
+    c.register("bl", DataBlock::new(vec![Column::int64("k", vec![Some(9007199254740993), Some(9007199254740995), Some(5)])]).unwrap());
+    c.register("br", DataBlock::new(vec![Column::int64("k", vec![Some(9007199254740992), Some(9007199254740994), Some(5)]), Column::int64("v", vec![Some(1), Some(2), Some(3)])]).unwrap());
+    assert_eq!(flat(&c, "select k from bl where exists (select 1 from br where br.k = bl.k)"), ["5"]);
+    assert_eq!(flat(&c, "select k from bl where not exists (select 1 from br where br.k = bl.k) order by k"), ["9007199254740993", "9007199254740995"]);
+    assert_eq!(flat(&c, "select k, (select count(*) from br where br.k = bl.k) as n from bl order by k"), ["5,1", "9007199254740993,0", "9007199254740995,0"]);
+    assert_eq!(flat(&c, "select bl.k from bl, br where bl.k = br.k"), ["5"]);
+}
