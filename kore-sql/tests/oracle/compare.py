@@ -7,14 +7,20 @@ EMPTYTOK = chr(92) + "E"
 def load(db, d, name):
     with open(os.path.join(d, name + ".csv"), newline="", encoding="utf-8") as f:
         rd = csv.reader(f)
-        hdr = next(rd)
-        types = {"id": "INTEGER", "f": "REAL", "s": "TEXT"}
-        db.execute("create table %s (%s)" % (name, ", ".join(c + " " + types.get(c, "INTEGER") for c in hdr)))
+        raw = next(rd)
+        # header cells are `name` (fuzz_oracle: f = REAL, s = TEXT, else INTEGER) or `name:i|f|s` (typed)
+        hdr = [h.split(":")[0] for h in raw]
+        kinds = {}
+        for h in raw:
+            if ":" in h: n, k = h.split(":"); kinds[n] = {"i": "INTEGER", "f": "REAL", "s": "TEXT"}[k]
+        default = {"id": "INTEGER", "f": "REAL", "s": "TEXT"}
+        types = {c: kinds.get(c) or default.get(c, "INTEGER") for c in hdr}
+        db.execute("create table %s (%s)" % (name, ", ".join(c + " " + types[c] for c in hdr)))
         def conv(c, v):
             if v == NULLTOK: return None
             if v == EMPTYTOK: return ""
-            if c == "f": return float(v)
-            if c == "s": return v
+            if types[c] == "REAL": return float(v)
+            if types[c] == "TEXT": return v
             return int(v)
         db.executemany("insert into %s values (%s)" % (name, ",".join("?" * len(hdr))),
                        ([conv(c, v) for c, v in zip(hdr, row)] for row in rd))
@@ -55,7 +61,8 @@ def main():
         d = os.path.join(root, sub)
         if not os.path.exists(os.path.join(d, "kore.txt")): continue
         db = sqlite3.connect(":memory:"); db.execute("pragma case_sensitive_like=on")
-        for t in ["ta", "tb", "tc", "td", "te"]: load(db, d, t)
+        for fn in sorted(os.listdir(d)):
+            if fn.endswith(".csv"): load(db, d, fn[:-4])
         qs = [l.rstrip("\n").split("\t", 1) for l in open(os.path.join(d, "queries.txt"), encoding="utf-8")]
         ans = {}; cur = None
         for l in open(os.path.join(d, "kore.txt"), encoding="utf-8"):
@@ -68,6 +75,9 @@ def main():
                 ans[cur][1].append(l)
         for i, (o, sql) in enumerate(qs):
             total += 1
+            # known SQLite / Spark differences: integer division (Spark's / is a DOUBLE division) and concat() with a NULL
+            # argument (NULL in Spark, treated as '' by SQLite)
+            if "--spark" in sys.argv and (" / " in sql or "concat(" in sql): skipped += 1; continue
             a = ans.get(i)
             try:
                 rows = db.execute(sql).fetchall()

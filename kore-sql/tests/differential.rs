@@ -405,6 +405,48 @@ fn answer(c: &KqlContext, sql: &str) -> Result<Vec<String>, String> {
     Ok(rows)
 }
 
+/// DIFF_DUMP=dir: also write each seed's tables, queries and the answers of the optimised path, for
+/// `tests/oracle/compare.py` (replays them in SQLite).
+fn dump_tables(c: &KqlContext, dir: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    for name in ["t1", "t2", "t3"] {
+        let b = c.get(name).unwrap();
+        let hdr: Vec<String> = b.columns.iter().map(|col| format!("{}:{}", col.name, match &col.data {
+            ColumnData::Int64(_) => "i", ColumnData::Float64(_) => "f", _ => "s" })).collect();
+        let mut out = hdr.join(",");
+        out.push('\n');
+        for r in 0..b.num_rows {
+            let cells: Vec<String> = b.columns.iter().map(|col| {
+                let is_null = match &col.data {
+                    ColumnData::Int64(v) => v[r].is_none(), ColumnData::Float64(v) => v[r].is_none(), ColumnData::Bool(v) => v[r].is_none(),
+                    ColumnData::Str(v) => v[r].is_none(), ColumnData::StrDict { codes, .. } => codes[r] == u8::MAX,
+                };
+                if is_null { return NULL_TOKEN.to_string(); }
+                let t = match &col.data { ColumnData::Float64(v) => format!("{}", v[r].unwrap()), _ => cell(col, r) };
+                if t.is_empty() { EMPTY_TOKEN.to_string() } else { t }
+            }).collect();
+            out.push_str(&cells.join(","));
+            out.push('\n');
+        }
+        std::fs::write(format!("{dir}/{name}.csv"), out).unwrap();
+    }
+}
+
+const NULL_TOKEN: &str = r"\N";
+const EMPTY_TOKEN: &str = r"\E";
+
+fn tab_rows(c: &KqlContext, sql: &str) -> Result<Vec<String>, String> {
+    let b = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.query(sql))) {
+        Ok(Ok(b)) => b,
+        Ok(Err(e)) => return Err(format!("error: {e}")),
+        Err(_) => return Err("panic".into()),
+    };
+    Ok((0..b.num_rows).map(|r| b.columns.iter().map(|c| match &c.data {
+        ColumnData::Float64(v) => v[r].map(|x| format!("{}", x)).unwrap_or("NULL".into()),
+        _ => cell(c, r),
+    }).collect::<Vec<_>>().join("\t")).collect())
+}
+
 #[test]
 fn random_queries_agree_across_execution_paths() {
     let mut mismatches: Vec<String> = Vec::new();
@@ -416,6 +458,10 @@ fn random_queries_agree_across_execution_paths() {
         let mut r = Rng(seed * 7919);
         let ctx = tables(&mut r);
         let twin = dict_twin(&ctx);
+        let dump_dir = std::env::var("DIFF_DUMP").ok().map(|d| format!("{d}/diff_{seed}"));
+        if let Some(d) = &dump_dir { dump_tables(&ctx, d); }
+        let (mut dq, mut da) = (String::new(), String::new());
+        let mut qi = 0usize;
         for _ in 0..per {
             let mut sql = query(&mut r);
             // large-table mode: skip the quadratic shapes (self joins, per-row subqueries over t1)
@@ -436,6 +482,15 @@ fn random_queries_agree_across_execution_paths() {
             testing::set_force_general(false);
             testing::set_no_vecexpr(false);
             let fast = answer(&ctx, &sql);
+            if dump_dir.is_some() {
+                use std::fmt::Write as _;
+                let _ = writeln!(dq, "{}\t{}", if sql.contains(" order by ") { "O" } else { "U" }, sql);
+                match tab_rows(&ctx, &sql) {
+                    Ok(rows) => { let _ = writeln!(da, "Q {qi} {}", rows.len()); for rw in rows { let _ = writeln!(da, "{rw}"); } }
+                    Err(e) => { let _ = writeln!(da, "E {qi} {}", e.replace('\n', " ")); }
+                }
+                qi += 1;
+            }
             testing::set_force_general(true);
             let general = answer(&ctx, &sql);
             testing::set_force_general(false);
@@ -453,6 +508,10 @@ fn random_queries_agree_across_execution_paths() {
                 mismatches.push(format!("seed {seed}: {sql}\n   fast    {}\n   general {}\n   rowonly {}",
                     show(&fast), show(&general), show(&rows_only)));
             }
+        }
+        if let Some(d) = &dump_dir {
+            std::fs::write(format!("{d}/queries.txt"), &dq).unwrap();
+            std::fs::write(format!("{d}/kore.txt"), &da).unwrap();
         }
     }
     testing::set_force_general(false);
