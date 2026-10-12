@@ -2657,7 +2657,14 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
     let __ts = std::time::Instant::now();
     // Without inner filters the catalog table itself is the inner side: no copy of its key columns.
     let inner_owned: DataBlock;
-    let inner: &DataBlock = if inner_filters.is_empty() {
+    // Inner filters that vectorise: keep the surviving row ids and scan the catalog table through them
+    // (no copy of the surviving rows' key columns).
+    let mut sel: Option<Vec<usize>> = None;
+    if !inner_filters.is_empty() {
+        let p = crate::rewrite::and_all(inner_filters.iter().map(|f| crate::rewrite::unqualify(f, &alias)).collect());
+        if let Some(p) = p { sel = crate::vecexpr::filter_idx(&p, src.get()); }
+    }
+    let inner: &DataBlock = if inner_filters.is_empty() || sel.is_some() {
         for p in eqs.iter_mut().chain(nes.iter_mut()) { p.0 = crate::rewrite::unqualify(&p.0, &alias); }
         src.get()
     } else {
@@ -2665,7 +2672,8 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
         if !inner_filters.is_empty() { return Ok(None); }
         &inner_owned
     };
-    prof!(__ts, "semi load_table rows={}", inner.num_rows);
+    let inner_rows = sel.as_ref().map_or(inner.num_rows, |s| s.len());
+    prof!(__ts, "semi load_table rows={}", inner_rows);
 
     // Fast path: one or two numeric keys (the usual surrogate-key joins), no per-row allocation.
     // The (small) outer side defines the set of keys that matter; the inner side is then scanned once, in
@@ -2693,19 +2701,48 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
                     Some(k) => { let next = slots.len() as u32; *slots.entry(k).or_insert(next) }
                 }).collect();
                 let ns = slots.len();
+                // One integral key whose values span a modest range: a flat slot table instead of hashing every inner row.
+                let direct: Option<(f64, Vec<u32>)> = if eqs.len() == 1 && ns > 0 {
+                    let (mut lo, mut hi, mut ok_int) = (f64::MAX, f64::MIN, true);
+                    for (k, _) in slots.iter() {
+                        let f = f64::from_bits(k.0);
+                        if f.fract() != 0.0 || f.abs() > 1e15 { ok_int = false; break; }
+                        if f < lo { lo = f; } if f > hi { hi = f; }
+                    }
+                    if ok_int && hi - lo < (1u64 << 26) as f64 {
+                        let mut tbl = vec![NO; (hi - lo) as usize + 1];
+                        for (k, &sl) in slots.iter() { tbl[(f64::from_bits(k.0) - lo) as usize] = sl; }
+                        Some((lo, tbl))
+                    } else { None }
+                } else { None };
                 // state per slot: bit 0 = has a first <> value, bit 1 = two distinct values seen
                 #[derive(Clone, Copy)]
                 struct St { first: u64, flags: u8, present: bool }
                 let empty = St { first: 0, flags: 0, present: false };
                 let nthreads = rayon::current_num_threads().max(1);
-                let chunk = inner.num_rows.div_ceil(nthreads).max(1);
+                let chunk = inner_rows.div_ceil(nthreads).max(1);
+                let sel_ref = sel.as_deref();
                 let parts: Vec<Vec<St>> = (0..nthreads).into_par_iter().map(|t| {
                     let mut st = vec![empty; ns];
-                    let lo = (t * chunk).min(inner.num_rows);
-                    let hi = ((t + 1) * chunk).min(inner.num_rows);
+                    let lo = (t * chunk).min(inner_rows);
+                    let hi = ((t + 1) * chunk).min(inner_rows);
                     for r in lo..hi {
-                        let Some(k) = key(ik, r) else { continue };
-                        let Some(&s) = slots.get(&k) else { continue };
+                        let r = match sel_ref { Some(s) => s[r], None => r };
+                        let s = match &direct {
+                            Some((mn, tbl)) => {
+                                let Some(b) = ik[0].bits(r) else { continue };
+                                let d = f64::from_bits(b) - *mn;
+                                if !(d >= 0.0 && d < tbl.len() as f64) { continue; }
+                                let s = tbl[d as usize];
+                                if s == NO { continue; }
+                                s
+                            }
+                            None => {
+                                let Some(k) = key(ik, r) else { continue };
+                                let Some(&s) = slots.get(&k) else { continue };
+                                s
+                            }
+                        };
                         let g = &mut st[s as usize];
                         g.present = true;
                         if let Some(v) = ne_inner.as_ref().and_then(|c| c.bits(r)) {
@@ -2746,6 +2783,18 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
         }
     }
 
+    // generic path: needs the surviving rows as a block of their own
+    let sel_block: DataBlock;
+    let inner: &DataBlock = match &sel {
+        Some(s) => {
+            sel_block = DataBlock {
+                columns: inner.columns.iter().map(|c| Column { name: c.name.clone(), data: c.data.take_rows(s) }).collect(),
+                num_rows: s.len(),
+            };
+            &sel_block
+        }
+        None => inner,
+    };
     struct Group { first: Option<Vec<u8>>, multi: bool }
     let mut map: HashMap<Vec<u8>, Group> = HashMap::with_capacity(inner.num_rows.min(1 << 20));
     let mut kb = Vec::new();
