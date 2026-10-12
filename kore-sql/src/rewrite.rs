@@ -262,8 +262,12 @@ pub fn lift_aggregates(stmt: &SelectStmt) -> Option<SelectStmt> {
             let name = alias.clone()
                 .or_else(|| col_ref(expr).map(|c| c.rsplit('.').next().unwrap_or(&c).to_string()))
                 .unwrap_or_else(|| format!("__k{i}"));
-            inner_projs.push(Projection::Expr { expr: expr.clone(), alias: Some(name.clone()) });
-            outer_projs.push(Projection::Expr { expr: Expr::Col(name.clone()), alias: Some(name) });
+            // two items with the same bare name (a.h, d.h) need distinct hidden names, or the outer query
+            // would read the first one for both
+            let taken = inner_projs.iter().any(|q| matches!(q, Projection::Expr { alias: Some(a), .. } if a.eq_ignore_ascii_case(&name)));
+            let inner_name = if taken { format!("__k{i}") } else { name.clone() };
+            inner_projs.push(Projection::Expr { expr: expr.clone(), alias: Some(inner_name.clone()) });
+            outer_projs.push(Projection::Expr { expr: Expr::Col(inner_name), alias: Some(name) });
         }
     }
 

@@ -332,6 +332,8 @@ fn tri<'a>(e: &'a Expr, block: &'a DataBlock, w: Win, c: &Cache) -> Option<Vec<u
         }
         Expr::In { expr, values, negated } => {
             let v = operand(expr, block, w, c)?;
+            // x IN () is FALSE even for a NULL x, so x NOT IN () is TRUE
+            if values.is_empty() { return Some(vec![if *negated { TRUE } else { FALSE }; n]); }
             let key_id = values.as_ptr() as usize;
             let int_set: Option<std::sync::Arc<FxSet<i64>>> = if v.is_int() {
                 let cached = c.ints.lock().unwrap().get(&key_id).cloned();

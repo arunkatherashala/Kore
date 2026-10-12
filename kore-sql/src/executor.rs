@@ -1246,7 +1246,7 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
     // borrowed from the catalog and copy only the surviving rows of the columns still needed afterwards.
     // Cloning a whole 6M-row string column just to throw most of it away used to dominate the runtime.
     let planned = needed.is_some() && stmt.joins.iter().all(|j| j.join_type == JoinKind::Implicit);
-    let needed_wo_where = needed.as_ref().map(|_| used_columns_without_where(stmt));
+    let mut needed_wo_where = needed.as_ref().map(|_| used_columns_without_where(stmt));
     let mut conjuncts: Vec<Expr> = Vec::new();
     if planned || n_implicit > 0 {
         if let Some(w) = &where_pred { crate::rewrite::split_conjuncts(w, &mut conjuncts); }
@@ -1299,6 +1299,10 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
             }
         }
         conjuncts = keep;
+        // the deferred predicates run on the joined result: the columns they read must survive the table loads
+        if let Some(set) = needed_wo_where.as_mut() {
+            for d in &deferred { collect_cols_expr(d, set); }
+        }
     }
 
     // Single-table filter + aggregate: aggregate straight off the borrowed table (fusedagg.rs).
@@ -3650,7 +3654,8 @@ fn rewrite_exists(expr: &Expr, ctx: &KqlContext) -> Expr {
                         let inner_col = &corr_inner[0];
                         let outer_expr = corr_outer[0].clone();
 
-                        let mut filtered = inner_block.clone();
+                        // qualified references (q.g) in the filters resolve against the alias-prefixed columns
+                        let mut filtered = prefix_columns(inner_block.clone(), inner_alias);
                         for fc in &filters {
                             if let Ok(f) = filter_block(filtered.clone(), fc) {
                                 filtered = f;
@@ -3683,10 +3688,13 @@ fn rewrite_exists(expr: &Expr, ctx: &KqlContext) -> Expr {
                                 })
                                 .collect();
 
-                            return Expr::In {
-                                expr: Box::new(outer_expr),
-                                values,
-                                negated: *negated,
+                            // EXISTS is never UNKNOWN: a NULL outer key simply has no match, so NOT EXISTS is TRUE
+                            // for it (a bare `x NOT IN (...)` would be UNKNOWN there and, under OR / NOT, wrong)
+                            let is_in = Expr::In { expr: Box::new(outer_expr.clone()), values, negated: *negated };
+                            return if *negated {
+                                Expr::BinOp { op: BinOpKind::Or, left: Box::new(Expr::IsNull(Box::new(outer_expr))), right: Box::new(is_in) }
+                            } else {
+                                Expr::BinOp { op: BinOpKind::And, left: Box::new(Expr::IsNotNull(Box::new(outer_expr))), right: Box::new(is_in) }
                             };
                         }
                     }
@@ -4075,7 +4083,8 @@ pub(crate) fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
         // ── IN (three-valued: a NULL in the list makes a miss UNKNOWN) ─────
         Expr::In { expr: e, values, negated } => {
             let lv = eval_expr(e, block, row);
-            if matches!(lv, ExprVal::Null) { return ExprVal::Null; }
+            // x IN () is FALSE even for a NULL x (an empty subquery result), so x NOT IN () is TRUE
+            if matches!(lv, ExprVal::Null) { return if values.is_empty() { ExprVal::Bool(*negated) } else { ExprVal::Null }; }
             let mut saw_null = false;
             for v in values {
                 let rv = eval_expr(v, block, row);
