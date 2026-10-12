@@ -4576,7 +4576,10 @@ fn cross_join(left: &DataBlock, right: &DataBlock) -> DataBlock {
     let rn = right.num_rows;
     let total = ln * rn;
     if total == 0 {
-        return DataBlock::empty();
+        // an empty product still has the schema of both sides (later stages look columns up by name)
+        let mut columns = left.select_rows(&[]).columns;
+        columns.extend(right.select_rows(&[]).columns);
+        return DataBlock { columns, num_rows: 0 };
     }
 
     let mut columns = Vec::new();
@@ -5598,7 +5601,10 @@ pub(crate) fn group_by_agg_ex(
                         };
 
                         if let Some(cn) = col_name {
-                            if let Some(src) = find_col(&agg_block, &cn) {
+                            // a qualified reference must find ITS table's column: after a join the bare name
+                            // `g` may exist once per table, and the first one is not necessarily the right one
+                            let qualified = match other { Expr::QualCol(t, c) => find_col(&agg_block, &format!("{t}.{c}")), _ => None };
+                            if let Some(src) = qualified.or_else(|| find_col(&agg_block, &cn)) {
                                 let mut nc = src.clone();
                                 if let Some(a) = alias { nc.name = a.clone(); }
                                 new_cols.push(nc);
