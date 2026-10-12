@@ -227,6 +227,7 @@ fn timed(ctx: &KqlContext, name: &str, sql: &str, slow: bool) -> f64 {
 #[ignore]
 fn bench_window() {
     let rows: usize = std::env::var("CLIFF_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(1_000_000);
+    let groups: usize = std::env::var("CLIFF_GROUPS").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
     let old_rows: usize = std::env::var("CLIFF_OLD_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(150_000);
     let queries = [
         ("min(v) over (partition by g)", "select min(v) over (partition by g) x from t"),
@@ -241,7 +242,7 @@ fn bench_window() {
         let ctx = {
             let mut c = KqlContext::new();
             c.register("t", DataBlock::new(vec![
-                Column::int64("g", (0..n).map(|_| Some(r.below(100) as i64)).collect()),
+                Column::int64("g", (0..n).map(|_| Some(r.below(groups) as i64)).collect()),
                 Column::int64("t", (0..n).map(|_| Some(r.below(1_000_000) as i64)).collect()),
                 Column::int64("v", (0..n).map(|_| Some(r.below(10_000) as i64)).collect()),
             ]).unwrap());
