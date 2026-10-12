@@ -3525,7 +3525,7 @@ fn eval_expr_ctx(expr: &Expr, block: &DataBlock, row: usize, ctx: &KqlContext) -
             match execute_select(stmt, &row_ctx) {
                 Ok(result) if result.num_rows > 0 && !result.columns.is_empty() => {
                     match result.columns[0].data.get_value(0) {
-                        Value::Int(i)   => ExprVal::Float(i as f64),
+                        Value::Int(i)   => ExprVal::Int(i),
                         Value::Float(f) => ExprVal::Float(f),
                         Value::Str(s)   => ExprVal::Str(s),
                         Value::Bool(b)  => ExprVal::Bool(b),
@@ -3815,7 +3815,8 @@ fn resolve_subqueries(expr: &Expr, ctx: &KqlContext) -> Expr {
                     if result.num_rows > 0 && !result.columns.is_empty() {
                         let v = result.columns[0].data.get_value(0);
                         match v {
-                            Value::Int(i)   => Expr::Float(i as f64),
+                            // an integer stays an integer: through f64 a BIGINT above 2^53 would change value
+                            Value::Int(i)   => Expr::Int(i),
                             Value::Float(f) => Expr::Float(f),
                             Value::Str(s)   => Expr::Str(s),
                             Value::Bool(b)  => Expr::Bool(b),

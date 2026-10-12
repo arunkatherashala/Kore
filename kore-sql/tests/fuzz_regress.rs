@@ -127,3 +127,11 @@ fn all_quantifier_is_unknown_when_the_set_contains_null() {
     // ANY ignores NULLs when some comparison is TRUE
     assert_eq!(flat(&c, "select l.v from l where l.v > any (select q.k from r q where q.g < 11) order by 1"), ["3", "4", "5"]);
 }
+
+#[test]
+fn scalar_subquery_keeps_bigint_precision() {
+    let mut c = KqlContext::new();
+    c.register("bt", DataBlock::new(vec![Column::int64("k", vec![Some(9007199254740993), Some(9007199254740992), Some(7)])]).unwrap());
+    assert_eq!(flat(&c, "select k from bt where k = (select max(k) from bt)"), ["9007199254740993"]);
+    assert_eq!(flat(&c, "select k from bt where k > (select min(k) from bt where k > 100) order by k"), ["9007199254740993"]);
+}
