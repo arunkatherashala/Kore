@@ -792,7 +792,10 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
         let mut v = Vec::new();
         for (i, e) in order_exprs.iter().enumerate() {
             let direct = matches!(stmt.order_by[i].expr, Expr::Int(_))
-                || matches!(&stmt.order_by[i].expr, Expr::Col(c) | Expr::QualCol(_, c) if items.iter().any(|it| bare_name(&it.name).eq_ignore_ascii_case(c)))
+                // a qualified name (c.g) names ONE column: only an output column of that exact name (not a bare-name
+                // twin from another table, a.g) can stand in for it
+                || matches!(&stmt.order_by[i].expr, Expr::QualCol(..)) && matches!(e, Expr::Col(full) if items.iter().any(|it| it.name.eq_ignore_ascii_case(full)))
+                || matches!(&stmt.order_by[i].expr, Expr::Col(c) if items.iter().any(|it| bare_name(&it.name).eq_ignore_ascii_case(c)))
                 || matches!(&stmt.order_by[i].expr, Expr::Col(c) if proj_alias.iter().any(|(a, _)| a.eq_ignore_ascii_case(c)));
             v.push(if direct { None } else { Some(alias_expr(e)) });
         }
@@ -880,7 +883,11 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
                 if *p < 1 || *p as usize > out_cols.len() { return Err(err(format!("ORDER BY position {p} is not in the select list"))); }
                 col_vals(*p as usize - 1)
             }
-            (Expr::Col(c) | Expr::QualCol(_, c), None) => {
+            (Expr::QualCol(..), None) => {
+                let full = match &order_exprs[i] { Expr::Col(f) => f.clone(), _ => String::new() };
+                col_vals(items.iter().position(|it| it.name.eq_ignore_ascii_case(&full)).unwrap_or(0))
+            }
+            (Expr::Col(c), None) => {
                 // output alias or output column name
                 let by_alias = proj_alias.iter().find(|(a, _)| a.eq_ignore_ascii_case(c)).map(|(_, idx)| *idx);
                 let by_name = items.iter().position(|it| bare_name(&it.name).eq_ignore_ascii_case(c));
