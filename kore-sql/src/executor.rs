@@ -5381,6 +5381,13 @@ fn fnv64(bytes: &[u8]) -> u64 {
 /// u128 grouping key of one row (no String allocation). This DEFINES group equality
 /// for the general GROUP BY path; the spilling grace-hash GROUP BY partitions on it so
 /// both agree on which rows form a group.
+///
+/// Group equality is hash equality (no row-by-row confirmation, unlike `deduplicate`). Integer, float and
+/// boolean key columns enter the 128-bit state exactly, and for a single such column the map value -> key is a
+/// bijection (odd multiplier, rotation), so those never collide. Text is first reduced to a 64-bit hash:
+/// two DISTINCT strings in the same key position share a group with probability about n^2 / 2^65 for n distinct
+/// strings (~3e-8 for 1M, ~3e-6 for 10M distinct values); several key columns combine without adding noticeable
+/// collision probability beyond that. Accepted for speed; NULL has its own bit so it never merges with 0 / ''.
 #[inline(always)]
 fn grp_row_key(block: &DataBlock, group_cols: &[String], gcols: &[&Column], fallback: bool, row: usize) -> u128 {
     let mut k: u128 = 0xcbf29ce484222325_cbf29ce484222325u128;

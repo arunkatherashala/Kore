@@ -25,6 +25,14 @@ impl Rng {
 struct Sizes { a: usize, b: usize, c: usize, d: usize, e: usize, ka: usize }
 
 fn sizes(scale: &str, r: &mut Rng) -> Sizes {
+    let mut sz = sizes0(scale, r);
+    // FUZZ_A pins the row count of the big table (threshold probing: 4096, 8192, 65536, 100000 +/- 1 ...)
+    if let Some(a) = std::env::var("FUZZ_A").ok().and_then(|v| v.parse().ok()) { sz.a = a; }
+    if let Some(b) = std::env::var("FUZZ_B").ok().and_then(|v| v.parse().ok()) { sz.b = b; }
+    sz
+}
+
+fn sizes0(scale: &str, r: &mut Rng) -> Sizes {
     match scale {
         "large" => Sizes { a: 120_000 + r.below(60_000), b: 20_000 + r.below(20_000), c: 2000, d: 700, e: 6 + r.below(20), ka: 2500 },
         "mid" => Sizes { a: 9_000 + r.below(20_000), b: 3000 + r.below(3000), c: 300, d: 120, e: 5 + r.below(10), ka: 400 },

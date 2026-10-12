@@ -114,3 +114,16 @@ fn distinct_and_group_by_compare_doubles_exactly() {
     assert_eq!(rows(&c, "select x, count(*) from fl group by x").len(), 6);
     assert_eq!(flat(&c, "select count(distinct x) from fl"), ["5"]);
 }
+
+#[test]
+fn all_quantifier_is_unknown_when_the_set_contains_null() {
+    let c = ctx();
+    // set {2, 2}: v >= ALL -> v >= 2
+    assert_eq!(flat(&c, "select l.v from l where l.v >= all (select q.k from r q where q.g < 9) order by 1"), ["2", "3", "4", "5"]);
+    // set {2, 2, 3, NULL}: v >= NULL is UNKNOWN, so no row qualifies
+    assert_eq!(flat(&c, "select l.v from l where l.v >= all (select q.k from r q where q.g < 11) order by 1"), Vec::<String>::new());
+    // empty set: ALL is TRUE
+    assert_eq!(flat(&c, "select l.v from l where l.v > all (select q.k from r q where q.g < 0) order by 1"), ["1", "2", "3", "4", "5"]);
+    // ANY ignores NULLs when some comparison is TRUE
+    assert_eq!(flat(&c, "select l.v from l where l.v > any (select q.k from r q where q.g < 11) order by 1"), ["3", "4", "5"]);
+}

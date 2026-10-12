@@ -121,6 +121,17 @@ fn quant_to_plain(lhs: &Expr, op: &BinOpKind, all: bool, sub: &SelectStmt) -> Re
         }];
         Expr::ScalarSubquery(Box::new(s))
     };
+    // ALL is only TRUE when no compared value is NULL (that comparison would be UNKNOWN); MIN / MAX skip NULLs,
+    // so a NULL in the set has to be excluded explicitly
+    let no_null_in_set = || {
+        let mut s = SelectStmt::star_from(TableExpr {
+            name: "__qn".into(), alias: Some("__qn".into()), subquery: Some(Box::new(inner.clone())),
+            values: None, push_filter: None, col_aliases: Vec::new(),
+        });
+        s.projections = vec![Projection::Expr { expr: Expr::Int(1), alias: None }];
+        s.where_clause = Some(Expr::IsNull(Box::new(Expr::Col("__q0".into()))));
+        Expr::Exists { subquery: Box::new(s), negated: true }
+    };
     let use_max = match (op, all) {
         (Gt | Ge, true) | (Lt | Le, false) => true,
         (Gt | Ge, false) | (Lt | Le, true) => false,
@@ -129,6 +140,7 @@ fn quant_to_plain(lhs: &Expr, op: &BinOpKind, all: bool, sub: &SelectStmt) -> Re
             let eq_min = Expr::BinOp { op: Eq, left: Box::new(lhs.clone()), right: Box::new(scalar("MIN")) };
             let eq_max = Expr::BinOp { op: Eq, left: Box::new(lhs.clone()), right: Box::new(scalar("MAX")) };
             let both = Expr::BinOp { op: And, left: Box::new(eq_min), right: Box::new(eq_max) };
+            let both = Expr::BinOp { op: And, left: Box::new(both), right: Box::new(no_null_in_set()) };
             return Ok(Expr::BinOp { op: Or, left: Box::new(Expr::Exists { subquery: Box::new(sub.clone()), negated: true }), right: Box::new(both) });
         }
         _ => return Err(err("unsupported quantified comparison")),
@@ -136,6 +148,7 @@ fn quant_to_plain(lhs: &Expr, op: &BinOpKind, all: bool, sub: &SelectStmt) -> Re
     let cmp = Expr::BinOp { op: op.clone(), left: Box::new(lhs.clone()), right: Box::new(scalar(if use_max { "MAX" } else { "MIN" })) };
     if all {
         // ALL over an empty set is true
+        let cmp = Expr::BinOp { op: And, left: Box::new(cmp), right: Box::new(no_null_in_set()) };
         Ok(Expr::BinOp { op: Or, left: Box::new(Expr::Exists { subquery: Box::new(sub.clone()), negated: true }), right: Box::new(cmp) })
     } else {
         Ok(cmp)
