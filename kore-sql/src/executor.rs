@@ -2171,7 +2171,6 @@ fn fill_keys(mut block: DataBlock, lz: &LazyCols<'_>) -> DataBlock {
 /// Inner join of `left` with a lazy table on single Int64 keys, without copying the right side's key column
 /// (borrowed from the source when unfiltered) and gathering its other columns once, for the matching rows only.
 fn lazy_inner_join(left: DataBlock, lk: &str, lz: &LazyCols<'_>, rk: &str, defer: bool) -> Result<DataBlock, DataBlock> {
-    use rayon::prelude::*;
     let lpos = match left.columns.iter().position(|c| c.name == lk) { Some(p) => p, None => return Err(left) };
     let Some(&(rci, _)) = lz.keys.iter().find(|(_, n)| n == rk) else { return Err(left) };
     let (ColumnData::Int64(lv), ColumnData::Int64(rsrc)) = (&left.columns[lpos].data, &lz.src.columns[rci].data) else { return Err(left) };
