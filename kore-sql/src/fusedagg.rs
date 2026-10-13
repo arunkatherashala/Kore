@@ -29,7 +29,9 @@ pub(crate) const MIN_ROWS: usize = 4096;
 type Key = (i64, i64, i64, u8);
 type KeyMap = HashMap<Key, u32, BuildHasherDefault<FxHasher>>;
 
-enum KeyPart<'a> { I(&'a [Option<i64>]), D(&'a [u8]), O(Vec<Option<i64>>) }
+/// One group column read as (value, is_null) pairs. `U` holds interned ids (strings, or several columns folded into
+/// one), `F` float bits with the same equality as the ordinary GROUP BY (0.0 == -0.0, one NaN).
+enum KeyPart<'a> { I(&'a [Option<i64>]), D(&'a [u8]), O(Vec<Option<i64>>), U(Vec<u32>), F(&'a [Option<f64>]) }
 
 impl KeyPart<'_> {
     /// (value, is_null)
@@ -39,8 +41,86 @@ impl KeyPart<'_> {
             KeyPart::I(v) => match v[r] { Some(x) => (x, false), None => (0, true) },
             KeyPart::D(c) => if c[r] == u8::MAX { (0, true) } else { (c[r] as i64, false) },
             KeyPart::O(v) => match v[r] { Some(x) => (x, false), None => (0, true) },
+            KeyPart::U(v) => if v[r] == u32::MAX { (0, true) } else { (v[r] as i64, false) },
+            KeyPart::F(v) => match v[r] { Some(x) => (crate::executor::float_key(x) as i64, false), None => (0, true) },
         }
     }
+}
+
+/// Hasher for string interning: eight bytes per step (the integer hasher hashes strings byte by byte).
+#[derive(Default, Clone, Copy)]
+struct WHasher(u64);
+
+impl std::hash::Hasher for WHasher {
+    fn finish(&self) -> u64 { let h = self.0; (h ^ (h >> 32)).wrapping_mul(0xff51_afd7_ed55_8ccd).rotate_left(26) }
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            let w = u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+            self.write_u64(w);
+        }
+        let rem = chunks.remainder();
+        if !rem.is_empty() {
+            let mut w = 0u64;
+            for (i, &b) in rem.iter().enumerate() { w |= (b as u64) << (8 * i); }
+            self.write_u64(w ^ ((rem.len() as u64) << 58));
+        }
+    }
+    fn write_u8(&mut self, i: u8) { self.write_u64(i as u64); }
+    fn write_u32(&mut self, i: u32) { self.write_u64(i as u64); }
+    fn write_i64(&mut self, i: i64) { self.write_u64(i as u64); }
+    fn write_usize(&mut self, i: usize) { self.write_u64(i as u64); }
+    fn write_u64(&mut self, i: u64) { self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x517c_c1b7_2722_0a95); }
+}
+
+/// Dense ids (u32::MAX for `None`) for the values `key(0..n)`: equal keys get equal ids, distinct keys distinct ids.
+/// Chunks intern into private maps in parallel, a short serial merge unifies the (few) distinct keys, and the
+/// rows are re-labelled in parallel.
+fn intern_par<K: Copy + Eq + std::hash::Hash + Send + Sync>(n: usize, key: impl Fn(usize) -> Option<K> + Sync) -> Vec<u32> {
+    let nch = if n >= 100_000 { rayon::current_num_threads().max(1) * 2 } else { 1 };
+    let span = n.div_ceil(nch).max(1);
+    let mut chunks: Vec<(Vec<u32>, Vec<K>)> = (0..nch).into_par_iter().map(|c| {
+        let (lo, hi) = ((c * span).min(n), ((c + 1) * span).min(n));
+        let mut map: HashMap<K, u32, BuildHasherDefault<WHasher>> = HashMap::default();
+        let mut keys: Vec<K> = Vec::new();
+        let mut ids: Vec<u32> = Vec::with_capacity(hi - lo);
+        for r in lo..hi {
+            match key(r) {
+                None => ids.push(u32::MAX),
+                Some(k) => {
+                    let next = keys.len() as u32;
+                    let id = *map.entry(k).or_insert(next);
+                    if id == next { keys.push(k); }
+                    ids.push(id);
+                }
+            }
+        }
+        (ids, keys)
+    }).collect();
+    if nch == 1 { return chunks.pop().map(|c| c.0).unwrap_or_default(); }
+    let mut global: HashMap<K, u32, BuildHasherDefault<WHasher>> = HashMap::default();
+    let remaps: Vec<Vec<u32>> = chunks.iter().map(|(_, keys)| keys.iter().map(|k| {
+        let next = global.len() as u32;
+        *global.entry(*k).or_insert(next)
+    }).collect()).collect();
+    let mut out = vec![0u32; n];
+    out.par_chunks_mut(span).zip(chunks.par_iter()).zip(remaps.par_iter()).for_each(|((o, (ids, _)), remap)| {
+        for (d, &i) in o.iter_mut().zip(ids) { *d = if i == u32::MAX { u32::MAX } else { remap[i as usize] }; }
+    });
+    out
+}
+
+/// Whole column non-decreasing with no NULL (so equal keys are adjacent and every group is one run).
+fn sorted_non_null(v: &[Option<i64>]) -> bool {
+    const CH: usize = 1 << 16;
+    fn ok(s: &[Option<i64>]) -> bool {
+        let mut prev = match s.first() { Some(Some(x)) => *x, Some(None) => return false, None => return true };
+        for x in &s[1..] { match x { Some(x) if *x >= prev => prev = *x, _ => return false } }
+        true
+    }
+    if !ok(&v[..v.len().min(CH)]) { return false; }
+    // each chunk plus the first element of the next one (the boundary)
+    (0..v.len().div_ceil(CH)).into_par_iter().all(|c| ok(&v[c * CH..(c * CH + CH + 1).min(v.len())]))
 }
 
 #[inline(always)]
@@ -208,6 +288,9 @@ struct Local {
     index: KeyMap,
     /// dictionary-coded keys (at most two): direct table instead of hashing
     direct: Option<Vec<u32>>,
+    /// sorted-run mode: key of the first and of the most recent group (`keys` stays empty)
+    first_key: i64,
+    last_key: i64,
 }
 
 impl Local {
@@ -215,7 +298,18 @@ impl Local {
         Local {
             keys: Vec::new(), first: Vec::new(), acc: vec![Vec::new(); nspecs], cnt: vec![Vec::new(); nspecs],
             index: HashMap::default(), direct: if direct { Some(vec![u32::MAX; 1 << 16]) } else { None },
+            first_key: 0, last_key: 0,
         }
+    }
+    /// A new group in sorted-run mode: no key is stored, the run is identified by its key value.
+    #[inline(always)]
+    fn new_run(&mut self, key: i64, row: usize, specs: &[Spec]) -> u32 {
+        let id = self.first.len() as u32;
+        if id == 0 { self.first_key = key; }
+        self.last_key = key;
+        self.first.push(row);
+        for (si, s) in specs.iter().enumerate() { self.acc[si].push(init(s.func)); self.cnt[si].push(0); }
+        id
     }
     #[inline(always)]
     fn new_group(&mut self, key: Key, row: usize, specs: &[Spec]) -> u32 {
@@ -236,6 +330,8 @@ struct Job<'a> {
     nodes: Vec<PN<'a>>,
     /// all key parts are dictionary codes and there are at most two: index = code0 | code1 << 8
     dict_keys: bool,
+    /// one integer key column, non-decreasing and NULL-free: groups are runs of equal keys
+    sorted: bool,
 }
 
 impl<'a> Job<'a> {
@@ -260,6 +356,14 @@ impl<'a> Job<'a> {
         if self.parts.is_empty() {
             if l.keys.is_empty() { l.new_group((0, 0, 0, 0), lo + sel[0] as usize, &self.specs); }
             gid.resize(sel.len(), 0);
+        } else if self.sorted {
+            let KeyPart::I(kv) = &self.parts[0] else { return None };
+            for &i in sel.iter() {
+                let r = lo + i as usize;
+                let k = kv[r]?;
+                if l.first.is_empty() || k != l.last_key { l.new_run(k, r, &self.specs); }
+                gid.push((l.first.len() - 1) as u32);
+            }
         } else if self.dict_keys {
             // Hoist the match on the number of key columns out of the row loop.
             for &i in sel.iter() {
@@ -309,6 +413,45 @@ impl<'a> Job<'a> {
 /// Final per-group state, groups ordered by first appearance.
 struct Groups { first: Vec<usize>, acc: Vec<Vec<f64>>, cnt: Vec<Vec<u64>> }
 
+/// Fold group `lg` of `l` into group `gi` of `g`.
+fn fold_group(job: &Job, g: &mut Groups, gi: usize, l: &Local, lg: usize) {
+    for (si, s) in job.specs.iter().enumerate() {
+        let (a, c) = (l.acc[si][lg], l.cnt[si][lg]);
+        g.cnt[si][gi] += c;
+        match s.func {
+            AggFunc::Min => if a < g.acc[si][gi] { g.acc[si][gi] = a },
+            AggFunc::Max => if a > g.acc[si][gi] { g.acc[si][gi] = a },
+            AggFunc::Count => {}
+            _ => g.acc[si][gi] += a,
+        }
+    }
+}
+
+/// Sorted-run mode: the chunks are consecutive row ranges, so the result is their concatenation, except that a
+/// run can continue across a chunk boundary.
+fn merge_sorted(job: &Job, locals: Vec<Local>) -> Groups {
+    let nspecs = job.specs.len();
+    let total: usize = locals.iter().map(|l| l.first.len()).sum();
+    let mut g = Groups { first: Vec::with_capacity(total), acc: vec![Vec::with_capacity(total); nspecs], cnt: vec![Vec::with_capacity(total); nspecs] };
+    let mut prev_last: Option<i64> = None;
+    for l in &locals {
+        if l.first.is_empty() { continue; }
+        let mut start = 0;
+        if prev_last == Some(l.first_key) {
+            let gi = g.first.len() - 1;
+            fold_group(job, &mut g, gi, l, 0);
+            start = 1;
+        }
+        g.first.extend_from_slice(&l.first[start..]);
+        for si in 0..nspecs {
+            g.acc[si].extend_from_slice(&l.acc[si][start..]);
+            g.cnt[si].extend_from_slice(&l.cnt[si][start..]);
+        }
+        prev_last = Some(l.last_key);
+    }
+    g
+}
+
 fn merge_locals(job: &Job, locals: Vec<Local>) -> Groups {
     let nspecs = job.specs.len();
     let mut global: KeyMap = HashMap::default();
@@ -321,16 +464,7 @@ fn merge_locals(job: &Job, locals: Vec<Local>) -> Groups {
                 for (si, s) in job.specs.iter().enumerate() { g.acc[si].push(init(s.func)); g.cnt[si].push(0); }
                 next
             }) as usize;
-            for (si, s) in job.specs.iter().enumerate() {
-                let (a, c) = (l.acc[si][lg], l.cnt[si][lg]);
-                g.cnt[si][gi] += c;
-                match s.func {
-                    AggFunc::Min => if a < g.acc[si][gi] { g.acc[si][gi] = a },
-                    AggFunc::Max => if a > g.acc[si][gi] { g.acc[si][gi] = a },
-                    AggFunc::Count => {}
-                    _ => g.acc[si][gi] += a,
-                }
-            }
+            fold_group(job, &mut g, gi, l, lg);
         }
     }
     g
@@ -355,7 +489,7 @@ fn run_local(job: &Job) -> Option<Groups> {
         Some(l)
     }).collect();
     let locals: Vec<Local> = locals.into_iter().collect::<Option<Vec<_>>>()?;
-    Some(merge_locals(job, locals))
+    Some(if job.sorted { merge_sorted(job, locals) } else { merge_locals(job, locals) })
 }
 
 /// Selected rows of one window grouped by key partition, plus the values of the computed aggregate inputs.
@@ -541,7 +675,8 @@ pub(crate) struct Request<'a> {
 pub(crate) fn run(req: Request) -> Option<DataBlock> {
     let block = req.block;
     let n = block.num_rows;
-    if n == 0 || n >= u32::MAX as usize || req.group_cols.len() > 3 { return None; }
+    let wide = !crate::testing::no_wide_agg();
+    if n == 0 || n >= u32::MAX as usize || (req.group_cols.len() > 3 && !wide) { return None; }
 
     // key columns, read in place (strings are interned to ids once)
     let mut key_cols: Vec<&Column> = Vec::new();
@@ -552,6 +687,8 @@ pub(crate) fn run(req: Request) -> Option<DataBlock> {
         parts.push(match &col.data {
             ColumnData::Int64(v) => KeyPart::I(v),
             ColumnData::StrDict { codes, .. } => KeyPart::D(codes),
+            ColumnData::Float64(v) if wide => KeyPart::F(v),
+            ColumnData::Str(v) if wide => KeyPart::U(intern_par(n, |r| v[r].as_deref())),
             ColumnData::Str(v) => {
                 let mut ids: HashMap<&str, i64, BuildHasherDefault<FxHasher>> = HashMap::default();
                 KeyPart::O(v.iter().map(|s| s.as_deref().map(|t| { let next = ids.len() as i64; *ids.entry(t).or_insert(next) })).collect())
@@ -559,7 +696,15 @@ pub(crate) fn run(req: Request) -> Option<DataBlock> {
             _ => return None,
         });
     }
+    // more than three key columns: fold the first three into one interned id until three are left
+    while parts.len() > 3 {
+        let head: Vec<KeyPart> = parts.drain(..3).collect();
+        let ids = intern_par(n, |r| Some(key_of(&head, r)));
+        parts.push(KeyPart::U(ids));
+    }
     let dict_keys = !parts.is_empty() && parts.len() <= 2 && parts.iter().all(|p| matches!(p, KeyPart::D(_)));
+    let sorted = wide && !crate::testing::no_sorted_agg() && n >= 50_000
+        && matches!(parts.as_slice(), [KeyPart::I(v)] if sorted_non_null(v));
 
     let mut plan = Plan { nodes: Vec::new(), memo: HashMap::new() };
     let mut outs: Vec<Out> = Vec::new();
@@ -613,8 +758,12 @@ pub(crate) fn run(req: Request) -> Option<DataBlock> {
     if specs.is_empty() { return None; }
     if req.group_cols.is_empty() && outs.iter().any(|o| matches!(o, Out::Key(..))) { return None; }
 
-    let job = Job { block, pred: req.pred, parts, specs, nodes: plan.nodes, dict_keys };
-    let hc = looks_high_cardinality(&job);
+    if sorted { crate::testing::SORTED_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+    if wide && (req.group_cols.len() > 3 || key_cols.iter().any(|c| matches!(c.data, ColumnData::Float64(_)))) {
+        crate::testing::WIDE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    let job = Job { block, pred: req.pred, parts, specs, nodes: plan.nodes, dict_keys, sorted };
+    let hc = !sorted && looks_high_cardinality(&job);
     let groups = if hc { run_partitioned(&job)? } else { run_local(&job)? };
     let ng = groups.first.len();
     if ng == 0 { return None; }

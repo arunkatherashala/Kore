@@ -54,3 +54,36 @@ pub fn set_slow_window(on: bool) { SLOW_WINDOW.store(on, Ordering::Relaxed); }
 
 #[inline]
 pub(crate) fn slow_window() -> bool { SLOW_WINDOW.load(Ordering::Relaxed) }
+
+/// How often each new aggregation path served a query (tests assert they were really exercised).
+pub(crate) static WIDE_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static SORTED_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static SUBSTR_DICT_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// (queries with more than three key columns or float keys, sorted-run aggregations, SUBSTR dictionary columns)
+pub fn agg_hits() -> (usize, usize, usize) {
+    (WIDE_HITS.load(Ordering::Relaxed), SORTED_HITS.load(Ordering::Relaxed), SUBSTR_DICT_HITS.load(Ordering::Relaxed))
+}
+
+pub(crate) static NO_WIDE_AGG: AtomicBool = AtomicBool::new(false);
+
+/// Limit the fused GROUP BY to the old shapes (at most three integer / text columns, serial string interning).
+pub fn set_no_wide_agg(on: bool) { NO_WIDE_AGG.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_wide_agg() -> bool { NO_WIDE_AGG.load(Ordering::Relaxed) }
+
+pub(crate) static NO_SORTED_AGG: AtomicBool = AtomicBool::new(false);
+
+/// Do not detect sorted key columns in the fused GROUP BY (always hash).
+pub fn set_no_sorted_agg(on: bool) { NO_SORTED_AGG.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_sorted_agg() -> bool { NO_SORTED_AGG.load(Ordering::Relaxed) }
+
+pub(crate) static NO_SUBSTR_DICT: AtomicBool = AtomicBool::new(false);
+
+/// SUBSTR projections always produce one String per row (no dictionary column for few distinct values).
+pub fn set_no_substr_dict(on: bool) { NO_SUBSTR_DICT.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_substr_dict() -> bool { NO_SUBSTR_DICT.load(Ordering::Relaxed) }

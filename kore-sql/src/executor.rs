@@ -5255,14 +5255,59 @@ fn deduplicate(block: DataBlock) -> DataBlock {
     block.select_rows(&keep)
 }
 
-fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, KoreError> {
+/// Index of the block column a plain column projection reads (alias pre-computed by GROUP BY first, then by name).
+fn proj_col_index(block: &DataBlock, expr: &Expr, alias: &Option<String>) -> Option<usize> {
+    let (Expr::Col(_) | Expr::QualCol(..)) = expr else { return None };
+    let full = match expr { Expr::QualCol(t, c) => format!("{t}.{c}"), Expr::Col(c) => c.clone(), _ => return None };
+    let by_name = |name: &str| block.columns.iter().position(|col| {
+        let cn = col.name.len(); let nm = name.len();
+        col.name == name || (cn > nm && col.name.as_bytes()[cn-nm-1] == b'.' && &col.name[cn-nm..] == name)
+    });
+    if let Some(a) = alias {
+        if let Some(i) = block.columns.iter().position(|c| c.name == a.as_str()) {
+            if by_name(&full).is_none() { return Some(i); }
+        }
+    }
+    by_name(&full).or_else(|| ci_find_col(block, &full).and_then(|c| block.columns.iter().position(|x| std::ptr::eq(x, c))))
+}
+
+/// Index of the block column holding the aggregate a projection names.
+fn proj_agg_index(block: &DataBlock, func: &AggFunc, inner: &Expr, alias: &Option<String>) -> Option<usize> {
+    let col_name = alias.clone().unwrap_or_else(|| {
+        let inner_name = match inner {
+            Expr::Col(c) => c.clone(),
+            Expr::QualCol(t, c) => format!("{t}.{c}"),
+            Expr::Star => "*".to_string(),
+            _ => String::new(),
+        };
+        format!("{:?}({})", func, inner_name)
+    });
+    block.columns.iter().position(|c| c.name == col_name || alias.as_ref().map(|a| c.name == *a).unwrap_or(false))
+}
+
+fn project(mut block: DataBlock, projections: &[Projection]) -> Result<DataBlock, KoreError> {
     // Star = keep all
     if projections.iter().any(|p| matches!(p, Projection::Star)) {
         return Ok(block);
     }
 
+    // When every projection only copies a column, the last projection reading a column may take it instead of
+    // cloning it (a 4.5M-row grouped result is otherwise copied once more just to be renamed).
+    let mut last_use: Vec<usize> = vec![usize::MAX; block.columns.len()];
+    if !crate::testing::no_wide_agg() && projections.iter().all(|p| matches!(p, Projection::Expr { expr: Expr::Col(_) | Expr::QualCol(..) | Expr::Agg { .. }, .. })) {
+        for (pi, p) in projections.iter().enumerate() {
+            if let Projection::Expr { expr, alias } = p {
+                let idx = match expr {
+                    Expr::Agg { func, expr: inner } => proj_agg_index(&block, func, inner, alias),
+                    _ => proj_col_index(&block, expr, alias),
+                };
+                if let Some(i) = idx { last_use[i] = pi; }
+            }
+        }
+    }
+    let nrows_in = block.num_rows;
     let mut new_cols: Vec<Column> = Vec::new();
-    for proj in projections {
+    for (pi, proj) in projections.iter().enumerate() {
         match proj {
             Projection::Star => { new_cols.extend(block.columns.iter().cloned()); }
             Projection::Expr { expr, alias } => {
@@ -5272,7 +5317,7 @@ fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, Ko
                 // materialize_groupby_aliases), use it directly — avoids re-evaluation
                 // with stale/missing columns after GROUP BY projection.
                 if let Some(a) = alias {
-                    if let Some(src) = block.columns.iter().find(|c| c.name == a.as_str()) {
+                    if let Some(src_i) = block.columns.iter().position(|c| c.name == a.as_str()) {
                         // Only use pre-computed alias for complex exprs or when source col is gone
                         let source_col_missing = match expr {
                             Expr::Col(c) | Expr::QualCol(_, c) => {
@@ -5285,7 +5330,7 @@ fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, Ko
                             _ => true, // complex exprs always prefer pre-computed
                         };
                         if source_col_missing {
-                            new_cols.push(src.clone());
+                            new_cols.push(grab_col(&mut block, src_i, last_use[src_i] == pi));
                             continue;
                         }
                     }
@@ -5297,13 +5342,9 @@ fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, Ko
                             Expr::QualCol(t, c2) => format!("{}.{}", t, c2),
                             _                    => c.clone(),
                         };
-                        let src = block.columns.iter().find(|col| {
-                            let cn = col.name.len(); let nm = col_name.len();
-                            col.name == col_name ||
-                            (cn > nm && col.name.as_bytes()[cn-nm-1] == b'.' && &col.name[cn-nm..] == col_name)
-                        }).or_else(|| ci_find_col(&block, &col_name));
+                        let src = proj_col_index(&block, expr, alias);
                         let mut nc = match src {
-                            Some(s) => s.clone(),
+                            Some(i) => grab_col(&mut block, i, last_use[i] == pi),
                             // `s.field` over a struct column `s`
                             None => match expr {
                                 Expr::QualCol(t, f) if find_col(&block, t).is_some_and(|sc| matches!(&sc.data, ColumnData::Str(_) | ColumnData::StrDict { .. })) => {
@@ -5336,13 +5377,13 @@ fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, Ko
                             };
                             format!("{:?}({})", func, inner_name)
                         });
-                        if let Some(src) = block.columns.iter().find(|c| {
+                        if let Some(src_i) = block.columns.iter().position(|c| {
                             c.name == col_name || {
                                 // Also try alias match for group_by results
                                 alias.as_ref().map(|a| c.name == *a).unwrap_or(false)
                             }
                         }) {
-                            let mut nc = src.clone();
+                            let mut nc = grab_col(&mut block, src_i, last_use[src_i] == pi);
                             if let Some(a) = alias { nc.name = a.clone(); }
                             new_cols.push(nc);
                         } else {
@@ -5374,9 +5415,19 @@ fn project(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, Ko
             }
         }
     }
-    let num_rows = block.num_rows;
+    let num_rows = nrows_in;
     if let Some(m) = crate::scalar::take_error() { return Err(KoreError::InvalidArgument(m)); }
     Ok(DataBlock { columns: new_cols, num_rows })
+}
+
+/// Column `i` of `block`: moved out (leaving an empty placeholder of the same name) when `take`, cloned otherwise.
+fn grab_col(block: &mut DataBlock, i: usize, take: bool) -> Column {
+    if take {
+        let name = block.columns[i].name.clone();
+        std::mem::replace(&mut block.columns[i], Column { name, data: ColumnData::Int64(Vec::new()) })
+    } else {
+        block.columns[i].clone()
+    }
 }
 
 /// Projected expressions the vectorized evaluator can produce directly: arithmetic over numeric columns
@@ -5419,6 +5470,10 @@ fn fast_project_expr(expr: &Expr, block: &DataBlock, name: String) -> Option<Col
                 Some(Expr::Int(l)) => Some((*l).max(0) as usize),
                 _ => return None,
             };
+            // few distinct results (the year of a date): a code per row instead of a String per row
+            if !crate::testing::no_substr_dict() {
+                if let Some(c) = substr_dict(v, start, len) { return Some(Column { name, data: c }); }
+            }
             let out: Vec<Option<String>> = v.par_iter().map(|s| s.as_ref().map(|s| match len {
                 Some(l) => s.chars().skip(start).take(l).collect(),
                 None => s.chars().skip(start).collect(),
@@ -5427,6 +5482,80 @@ fn fast_project_expr(expr: &Expr, block: &DataBlock, name: String) -> Option<Col
         }
         _ => None,
     }
+}
+
+/// `s` without its first `start` characters, cut to `len` characters (same result as chars().skip().take()).
+fn substr_slice(s: &str, start: usize, len: Option<usize>) -> &str {
+    if s.is_ascii() {
+        let b = start.min(s.len());
+        let e = match len { Some(l) => b.saturating_add(l).min(s.len()), None => s.len() };
+        return &s[b..e];
+    }
+    let mut it = s.char_indices().map(|(i, _)| i).chain(std::iter::once(s.len()));
+    let b = it.by_ref().nth(start).unwrap_or(s.len());
+    let e = match len {
+        Some(0) => b,
+        Some(l) => { let mut it2 = s[b..].char_indices().map(|(i, _)| b + i).chain(std::iter::once(s.len())); it2.nth(l).unwrap_or(s.len()) }
+        None => s.len(),
+    };
+    &s[b..e]
+}
+
+/// SUBSTR of a text column as a dictionary column, when it has at most 254 distinct values.
+fn substr_dict(v: &[Option<String>], start: usize, len: Option<usize>) -> Option<ColumnData> {
+    use rayon::prelude::*;
+    use std::collections::HashMap;
+    use std::hash::BuildHasherDefault;
+    const CH: usize = 1 << 15;
+    if v.len() < 1024 { return None; }
+    let chunks: Option<Vec<(Vec<u8>, Vec<&str>)>> = v.par_chunks(CH).map(|c| {
+        let mut ids: HashMap<&str, u8, BuildHasherDefault<FxHasher>> = HashMap::default();
+        let mut dict: Vec<&str> = Vec::new();
+        let mut codes: Vec<u8> = Vec::with_capacity(c.len());
+        for s in c {
+            match s {
+                None => codes.push(u8::MAX),
+                Some(s) => {
+                    let t = substr_slice(s, start, len);
+                    let code = match ids.get(t) {
+                        Some(&k) => k,
+                        None => {
+                            if dict.len() >= u8::MAX as usize - 1 { return None; }
+                            let k = dict.len() as u8;
+                            ids.insert(t, k);
+                            dict.push(t);
+                            k
+                        }
+                    };
+                    codes.push(code);
+                }
+            }
+        }
+        Some((codes, dict))
+    }).collect();
+    let chunks = chunks?;
+    let mut global: HashMap<&str, u8, BuildHasherDefault<FxHasher>> = HashMap::default();
+    let mut dict: Vec<String> = Vec::new();
+    let mut codes: Vec<u8> = Vec::with_capacity(v.len());
+    for (cc, cd) in &chunks {
+        let mut remap: Vec<u8> = Vec::with_capacity(cd.len());
+        for t in cd {
+            let k = match global.get(t) {
+                Some(&k) => k,
+                None => {
+                    if dict.len() >= u8::MAX as usize - 1 { return None; }
+                    let k = dict.len() as u8;
+                    global.insert(t, k);
+                    dict.push((*t).to_string());
+                    k
+                }
+            };
+            remap.push(k);
+        }
+        codes.extend(cc.iter().map(|&c| if c == u8::MAX { u8::MAX } else { remap[c as usize] }));
+    }
+    crate::testing::SUBSTR_DICT_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Some(ColumnData::StrDict { codes, dict })
 }
 
 /// Convert a Vec<ExprVal> into a typed Column. The type comes from *all* the values (an expression such as
