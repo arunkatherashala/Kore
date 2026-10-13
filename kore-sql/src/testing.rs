@@ -87,3 +87,11 @@ pub(crate) fn no_plan_lazy_base() -> bool {
     static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     NO_PLAN_LAZY_BASE.load(Ordering::Relaxed) || env_flag("KORE_NO_PLAN_LAZY_BASE", &E)
 }
+
+pub(crate) static PLAN_SIP_SETS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static PLAN_DERIVED_EQS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many SIP key sets were applied to a table load so far (lets tests assert the planner path was exercised).
+pub fn plan_sip_sets() -> usize { PLAN_SIP_SETS.load(Ordering::Relaxed) }
+/// How many transitive equalities the planner derived so far.
+pub fn plan_derived_equalities() -> usize { PLAN_DERIVED_EQS.load(Ordering::Relaxed) }

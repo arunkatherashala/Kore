@@ -1415,7 +1415,9 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
                         None => tabs.push((a, &pending[i])),
                     }
                 }
-                derive_equalities(&conjuncts, &tabs)
+                let d = derive_equalities(&conjuncts, &tabs);
+                crate::testing::PLAN_DERIVED_EQS.fetch_add(d.len(), std::sync::atomic::Ordering::Relaxed);
+                d
             } else { Vec::new() };
             {
                 let mut blocks: Vec<&mut DataBlock> = std::iter::once(&mut result).chain(pending.iter_mut()).collect();
@@ -2186,6 +2188,7 @@ fn load_table_sets<'a>(
     for (col, set) in sets {
         if let Some(Column { data: ColumnData::Int64(v), .. }) = src.columns.iter().find(|c| c.name == *col) {
             idx = Some(set.filter(v, idx.as_deref()));
+            crate::testing::PLAN_SIP_SETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             prof!(__tl, "load_table {} sip set on {} n={}", alias, col, idx.as_ref().map_or(0, |v| v.len()));
         }
     }
