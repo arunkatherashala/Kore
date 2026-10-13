@@ -54,3 +54,36 @@ pub fn set_slow_window(on: bool) { SLOW_WINDOW.store(on, Ordering::Relaxed); }
 
 #[inline]
 pub(crate) fn slow_window() -> bool { SLOW_WINDOW.load(Ordering::Relaxed) }
+
+pub(crate) static NO_PLAN_SIP: AtomicBool = AtomicBool::new(false);
+pub(crate) static NO_PLAN_ORDER: AtomicBool = AtomicBool::new(false);
+pub(crate) static NO_PLAN_LAZY_BASE: AtomicBool = AtomicBool::new(false);
+
+/// Disable the bitmap/hash-set SIP side channel and derived equalities (back to capped `IN (...)` lists), for A/B tests.
+pub fn set_no_plan_sip(on: bool) { NO_PLAN_SIP.store(on, Ordering::Relaxed); }
+/// Disable the statistics-driven comma-join order (back to lookup-first, then FROM order), for A/B tests.
+pub fn set_no_plan_order(on: bool) { NO_PLAN_ORDER.store(on, Ordering::Relaxed); }
+/// Load the base table of a comma join eagerly (the old behaviour), for A/B tests.
+pub fn set_no_plan_lazy_base(on: bool) { NO_PLAN_LAZY_BASE.store(on, Ordering::Relaxed); }
+/// Turn every join-planner optimisation off (or on) at once.
+pub fn set_no_plan(on: bool) { set_no_plan_sip(on); set_no_plan_order(on); set_no_plan_lazy_base(on); }
+
+fn env_flag(name: &str, cell: &'static std::sync::OnceLock<bool>) -> bool {
+    *cell.get_or_init(|| std::env::var_os(name).is_some())
+}
+
+#[inline]
+pub(crate) fn no_plan_sip() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_PLAN_SIP.load(Ordering::Relaxed) || env_flag("KORE_NO_PLAN_SIP", &E)
+}
+#[inline]
+pub(crate) fn no_plan_order() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_PLAN_ORDER.load(Ordering::Relaxed) || env_flag("KORE_NO_PLAN_ORDER", &E)
+}
+#[inline]
+pub(crate) fn no_plan_lazy_base() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_PLAN_LAZY_BASE.load(Ordering::Relaxed) || env_flag("KORE_NO_PLAN_LAZY_BASE", &E)
+}
