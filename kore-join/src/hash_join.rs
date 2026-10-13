@@ -27,8 +27,9 @@ pub fn set_serial_join(on: bool) { SERIAL.store(on, Ordering::Relaxed); }
 
 #[inline]
 pub fn serial_join() -> bool {
-    static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    SERIAL.load(Ordering::Relaxed) || *ENV.get_or_init(|| std::env::var_os("KORE_SERIAL_JOIN").is_some())
+    // KORE_SERIAL_JOIN is read on every call (cheap: a handful of calls per join) so a host process can flip it
+    // between queries for in-process A/B timing
+    SERIAL.load(Ordering::Relaxed) || std::env::var_os("KORE_SERIAL_JOIN").is_some()
 }
 
 /// Build sides at least this long are built in parallel.
