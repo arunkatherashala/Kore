@@ -579,8 +579,28 @@ pub fn filter_mask(pred: &Expr, block: &DataBlock) -> Option<Vec<bool>> {
 
 /// Indices of the rows for which the predicate is TRUE, ascending; None when not covered.
 pub fn filter_idx(pred: &Expr, block: &DataBlock) -> Option<Vec<usize>> {
+    filter_idx_with(pred, block, None)
+}
+
+/// `filter_idx` that also requires, for every `(keys, set)`, `keys[row]` to be a non-NULL member of `set` (sideways
+/// information passing key sets), tested in the same pass so no long intermediate row list is built.
+pub fn filter_idx_sets(pred: &Expr, block: &DataBlock, sets: &[(&[Option<i64>], &crate::sipset::IntSet)]) -> Option<Vec<usize>> {
+    filter_idx_with(pred, block, Some(sets))
+}
+
+fn filter_idx_with(pred: &Expr, block: &DataBlock, sets: Option<&[(&[Option<i64>], &crate::sipset::IntSet)]>) -> Option<Vec<usize>> {
     let wins = windows(block.num_rows);
     let pick = |w: Win, v: Vec<u8>| -> Vec<usize> {
+        if let Some(sets) = sets {
+            let mut out = Vec::new();
+            for (i, &x) in v.iter().enumerate() {
+                if x == TRUE {
+                    let r = w.lo + i;
+                    if sets.iter().all(|(col, set)| matches!(col[r], Some(k) if set.contains(k))) { out.push(r); }
+                }
+            }
+            return out;
+        }
         // exact capacity: no doubling reallocations (large allocations are expensive page-fault wise)
         let cnt = v.iter().filter(|&&x| x == TRUE).count();
         let mut out = Vec::with_capacity(cnt);

@@ -106,3 +106,81 @@ pub fn set_no_par_join(on: bool) { kore_join::set_serial_join(on); }
 
 #[inline]
 pub(crate) fn no_par_join() -> bool { kore_join::serial_join() }
+pub(crate) static NO_PLAN_SIP: AtomicBool = AtomicBool::new(false);
+pub(crate) static NO_PLAN_ORDER: AtomicBool = AtomicBool::new(false);
+pub(crate) static NO_PLAN_LAZY_BASE: AtomicBool = AtomicBool::new(false);
+pub(crate) static NO_PLAN_DEFER: AtomicBool = AtomicBool::new(false);
+pub(crate) static NO_PLAN_SETS_FIRST: AtomicBool = AtomicBool::new(false);
+pub(crate) static PLAN_SETS_FIRST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static NO_PLAN_PACK: AtomicBool = AtomicBool::new(false);
+pub(crate) static PLAN_PACKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Disable the bitmap/hash-set SIP side channel and derived equalities (back to capped `IN (...)` lists), for A/B tests.
+pub fn set_no_plan_sip(on: bool) { NO_PLAN_SIP.store(on, Ordering::Relaxed); }
+/// Disable the statistics-driven comma-join order (back to lookup-first, then FROM order), for A/B tests.
+pub fn set_no_plan_order(on: bool) { NO_PLAN_ORDER.store(on, Ordering::Relaxed); }
+/// Load the base table of a comma join eagerly (the old behaviour), for A/B tests.
+pub fn set_no_plan_lazy_base(on: bool) { NO_PLAN_LAZY_BASE.store(on, Ordering::Relaxed); }
+/// Gather payload columns after every join (the old behaviour) instead of once for the final rows, for A/B tests.
+pub fn set_no_plan_defer(on: bool) { NO_PLAN_DEFER.store(on, Ordering::Relaxed); }
+/// Hash multi-column join keys instead of packing Int64 key tuples exactly (the old behaviour), for A/B tests.
+pub fn set_no_plan_pack(on: bool) { NO_PLAN_PACK.store(on, Ordering::Relaxed); }
+/// How many multi-key joins used the exact packed key so far.
+pub fn plan_packed_joins() -> usize { PLAN_PACKED.load(Ordering::Relaxed) }
+/// Evaluate a table's own predicate before its SIP key sets (the old order), for A/B tests.
+pub fn set_no_plan_sets_first(on: bool) { NO_PLAN_SETS_FIRST.store(on, Ordering::Relaxed); }
+/// How many table loads ran their key sets before the predicate so far.
+pub fn plan_sets_first_loads() -> usize { PLAN_SETS_FIRST.load(Ordering::Relaxed) }
+/// Turn every join-planner optimisation off (or on) at once.
+pub fn set_no_plan(on: bool) { set_no_plan_sets_first(on); set_no_plan_sip(on); set_no_plan_order(on); set_no_plan_lazy_base(on); set_no_plan_defer(on); set_no_plan_pack(on); }
+
+fn env_flag(name: &str, cell: &'static std::sync::OnceLock<bool>) -> bool {
+    *cell.get_or_init(|| std::env::var_os(name).is_some())
+}
+
+#[inline]
+pub(crate) fn no_plan_sip() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_PLAN_SIP.load(Ordering::Relaxed) || env_flag("KORE_NO_PLAN_SIP", &E)
+}
+#[inline]
+pub(crate) fn no_plan_order() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_PLAN_ORDER.load(Ordering::Relaxed) || env_flag("KORE_NO_PLAN_ORDER", &E)
+}
+#[inline]
+pub(crate) fn no_plan_defer() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_PLAN_DEFER.load(Ordering::Relaxed) || env_flag("KORE_NO_PLAN_DEFER", &E)
+}
+#[inline]
+pub(crate) fn no_plan_pack() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_PLAN_PACK.load(Ordering::Relaxed) || env_flag("KORE_NO_PLAN_PACK", &E)
+}
+#[inline]
+pub(crate) fn no_plan_sets_first() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_PLAN_SETS_FIRST.load(Ordering::Relaxed) || env_flag("KORE_NO_PLAN_SETS_FIRST", &E)
+}
+#[inline]
+pub(crate) fn no_plan_lazy_base() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_PLAN_LAZY_BASE.load(Ordering::Relaxed) || env_flag("KORE_NO_PLAN_LAZY_BASE", &E)
+}
+
+pub(crate) static PLAN_SIP_SETS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static PLAN_DERIVED_EQS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many SIP key sets were applied to a table load so far (lets tests assert the planner path was exercised).
+pub fn plan_sip_sets() -> usize { PLAN_SIP_SETS.load(Ordering::Relaxed) }
+/// How many transitive equalities the planner derived so far.
+pub fn plan_derived_equalities() -> usize { PLAN_DERIVED_EQS.load(Ordering::Relaxed) }
+
+pub(crate) static PLAN_DEFERRED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// How many tables had their payload columns gathered after the last join (late materialisation) so far.
+pub fn plan_deferred_tables() -> usize { PLAN_DEFERRED.load(Ordering::Relaxed) }
+
+pub(crate) static PLAN_ESTIMATED_PICKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// How many join steps picked their next table from distinct-key estimates so far.
+pub fn plan_estimated_picks() -> usize { PLAN_ESTIMATED_PICKS.load(Ordering::Relaxed) }

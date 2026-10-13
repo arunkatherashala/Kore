@@ -1339,12 +1339,22 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
     // already-reduced tables contain (sideways information passing), instead of being copied whole.
     let sip_on = planned && n_implicit > 0;
     let base_deferred = sip_on && base_ref.num_rows >= SIP_MIN_ROWS;
+    // payload columns of tables whose gather is postponed to after the last join (see `lazy_inner_join`)
+    let mut deferred_lz: Vec<LazyCols<'_>> = Vec::new();
+    let plan_defer = planned && n_implicit > 0 && ctx.memory_limit.is_none() && !crate::testing::no_plan_defer();
+    let plan_lazy_base = plan_defer && !crate::testing::no_plan_lazy_base();
     let mut result = if let Some(done) = fused {
         conjuncts.clear();
         done
     } else if planned {
         if base_deferred { DataBlock::empty() }
-        else { load_table(base_ref, base_alias, &mut conjuncts, &needed, &needed_wo_where, ctx, false)?.0 }
+        else {
+            let (b, lz) = load_table(base_ref, base_alias, &mut conjuncts, &needed, &needed_wo_where, ctx, plan_lazy_base)?;
+            match lz {
+                Some(lz) => { let b = fill_keys(b, &lz); { crate::testing::PLAN_DEFERRED.fetch_add(1, std::sync::atomic::Ordering::Relaxed); deferred_lz.push(lz) }; b }
+                None => b,
+            }
+        }
     } else {
         let base_block: DataBlock = match &needed {
             Some(needed) => DataBlock {
@@ -1404,43 +1414,97 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
             }
             let mut loaded: Vec<bool> = vec![!base_deferred];
             loaded.extend((0..pending.len()).map(|i| !deferred_pending.iter().any(|(d, _)| *d == i)));
+            let plan_sip = !crate::testing::no_plan_sip();
+            // equalities implied by transitivity (a = x AND b = x), usable as extra key sets
+            let derived: Vec<Expr> = if plan_sip {
+                let mut tabs: Vec<(&str, &DataBlock)> = vec![(base_alias, base_ref)];
+                for (i, join) in stmt.joins[..n_implicit].iter().enumerate() {
+                    let a = join.table.alias.as_deref().unwrap_or(join.table.name.as_str());
+                    match deferred_pending.iter().find(|(d, _)| *d == i) {
+                        Some((_, s)) => tabs.push((a, s.get())),
+                        None => tabs.push((a, &pending[i])),
+                    }
+                }
+                let d = derive_equalities(&conjuncts, &tabs);
+                crate::testing::PLAN_DERIVED_EQS.fetch_add(d.len(), std::sync::atomic::Ordering::Relaxed);
+                d
+            } else { Vec::new() };
             {
                 let mut blocks: Vec<&mut DataBlock> = std::iter::once(&mut result).chain(pending.iter_mut()).collect();
-                sip_reduce(&mut blocks, &src_rows, &loaded, &conjuncts);
+                if plan_sip { sip_reduce_v2(&mut blocks, &src_rows, &loaded, &conjuncts, &derived); }
+                else { sip_reduce(&mut blocks, &src_rows, &loaded, &conjuncts); }
             }
-            // smaller tables first: once filtered they restrict the bigger ones
-            let mut order: Vec<usize> = Vec::new();
-            if base_deferred { order.push(0); }
-            order.extend(deferred_pending.iter().map(|(d, _)| d + 1));
-            order.sort_by_key(|&slot| src_rows[slot]);
-            for slot in order {
-                let (alias, src_block): (String, &DataBlock) = if slot == 0 {
-                    (base_alias.to_string(), base_ref)
-                } else {
-                    let (_, src) = deferred_pending.iter().find(|(d, _)| *d + 1 == slot).unwrap();
-                    let j = &stmt.joins[slot - 1];
-                    (j.table.alias.as_deref().unwrap_or(j.table.name.as_str()).to_string(), src.get())
+            // smaller tables first: once filtered they restrict the bigger ones. With the planner on, "smaller" is the
+            // estimated row count after the table's own filter and the key sets of the tables loaded so far (a strided
+            // sample of the source), re-evaluated after every load, instead of the source row count.
+            let mut remaining: Vec<usize> = Vec::new();
+            if base_deferred { remaining.push(0); }
+            remaining.extend(deferred_pending.iter().map(|(d, _)| d + 1));
+            remaining.sort_by_key(|&slot| src_rows[slot]);
+            let plan_order = plan_sip && !crate::testing::no_plan_order();
+            let n_order = remaining.len();
+            let mut oi = 0usize;
+            while !remaining.is_empty() {
+                let slot_info = |slot: usize| -> (String, &DataBlock) {
+                    if slot == 0 { (base_alias.to_string(), base_ref) } else {
+                        let (_, src) = deferred_pending.iter().find(|(d, _)| *d + 1 == slot).unwrap();
+                        let j = &stmt.joins[slot - 1];
+                        (j.table.alias.as_deref().unwrap_or(j.table.name.as_str()).to_string(), src.get())
+                    }
                 };
-                let extra = {
+                let (extra, sets, slot) = {
                     let blocks: Vec<&DataBlock> = std::iter::once(&result).chain(pending.iter()).collect();
-                    sip_in_conjuncts(&conjuncts, &alias, src_block, &blocks, &src_rows, &loaded)
+                    if plan_sip {
+                        let mut best: Option<(usize, usize, SipFilters)> = None; // (position in remaining, estimate, sets)
+                        let cands = if plan_order { remaining.len() } else { 1 };
+                        for (pos, &slot) in remaining.iter().enumerate().take(cands) {
+                            let (alias, src_block) = slot_info(slot);
+                            let sets = sip_filters(&conjuncts, &derived, &alias, src_block, &blocks, &src_rows, &loaded);
+                            let est = if plan_order { est_filtered_rows(src_block, &alias, &conjuncts, &sets) } else { 0 };
+                            prof!(__tf, "  load order candidate {} est={} src={} sets={}", alias, est, src_block.num_rows, sets.len());
+                            if best.as_ref().map_or(true, |b| est < b.1) { best = Some((pos, est, sets)); }
+                        }
+                        let (pos, _, sets) = best.unwrap();
+                        (Vec::new(), sets, remaining.remove(pos))
+                    } else {
+                        let slot = remaining.remove(0);
+                        let (alias, src_block) = slot_info(slot);
+                        (sip_in_conjuncts(&conjuncts, &alias, src_block, &blocks, &src_rows, &loaded), Vec::new(), slot)
+                    }
                 };
+                let (alias, src_block) = slot_info(slot);
                 conjuncts.extend(extra);
                 if slot == 0 {
-                    result = load_table(src_block, &alias, &mut conjuncts, &needed, &needed_wo_where, ctx, false)?.0;
+                    let (b, lz) = load_table_sets(src_block, &alias, &mut conjuncts, &needed, &needed_wo_where, ctx, plan_lazy_base, &sets)?;
+                    result = match lz {
+                        Some(lz) => { let b = fill_keys(b, &lz); { crate::testing::PLAN_DEFERRED.fetch_add(1, std::sync::atomic::Ordering::Relaxed); deferred_lz.push(lz) }; b }
+                        None => b,
+                    };
                     loaded[slot] = true;
                 } else {
                     // deferred tables go through the lazy path, with the IN restriction already in their row ids;
                     // a lazy block has placeholder key columns, so it is not used as a key source for later tables
                     let borrowed = deferred_pending.iter().find(|(d, _)| *d + 1 == slot).and_then(|(_, s)| s.borrowed()).is_some();
-                    let (block, lz) = load_table(src_block, &alias, &mut conjuncts, &needed, &needed_wo_where, ctx, borrowed)?;
+                    let (block, lz) = load_table_sets(src_block, &alias, &mut conjuncts, &needed, &needed_wo_where, ctx, borrowed, &sets)?;
                     loaded[slot] = lz.is_none();
                     pending[slot - 1] = block;
                     lazies[slot - 1] = lz;
+                    if plan_sip && oi + 1 < n_order {
+                        // a later table can still be restricted by this one's keys: fill the placeholder key columns
+                        // (the join below re-fills them with the same data)
+                        if let Some(lz) = &lazies[slot - 1] {
+                            for (ci, name) in &lz.keys {
+                                if let Some(c) = pending[slot - 1].columns.iter_mut().find(|c| c.name == *name) { c.data = lz.key_data(*ci); }
+                            }
+                            loaded[slot] = true;
+                        }
+                    }
                 }
+                oi += 1;
             }
         }
         result = push_down_conjuncts(&mut conjuncts, result, ctx)?;
+        prof!(__tf, "  pre-join phase done rows={} pending={}", result.num_rows, pending.len());
         while !pending.is_empty() {
             // Tables that join on a unique key can only shrink or keep the result (a lookup), so those
             // go first, smallest first: selective dimension tables then cut the fact tables down before
@@ -1449,16 +1513,46 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
                 let links = find_links(&conjuncts, &result, pb);
                 if links.is_empty() { None } else { Some((pi, links)) }
             }).collect();
-            let lookup = linked.iter()
-                .filter(|(pi, links)| links.len() == 1 && pending[*pi].num_rows <= 2_000_000
-                    && *unique_cache.entry(links[0].2.clone()).or_insert_with(|| match &lazies[*pi] {
-                        Some(lz) => lz.keys.iter().find(|(_, n)| *n == links[0].2).map_or(false, |(ci, n)| is_unique_key(
-                            &DataBlock { num_rows: pending[*pi].num_rows, columns: vec![Column { name: n.clone(), data: lz.key_data(*ci) }] }, n)),
-                        None => is_unique_key(&pending[*pi], &links[0].2),
-                    }))
-                .min_by_key(|(pi, _)| pending[*pi].num_rows).map(|(pi, _)| *pi);
+            // With the planner on, a table is also a lookup when any one of several linking equalities hits a unique
+            // key (the others only filter), and the size cap is higher: a unique key never blows the result up.
+            let plan_order = planned && !crate::testing::no_plan_order();
+            let cap = if plan_order { 16_000_000 } else { 2_000_000 };
+            let lookup = {
+                let mut uniq = |pi: usize, name: &String| -> bool {
+                    *unique_cache.entry(name.clone()).or_insert_with(|| match &lazies[pi] {
+                        Some(lz) => lz.keys.iter().find(|(_, n)| n == name).map_or(false, |(ci, n)| is_unique_key(
+                            &DataBlock { num_rows: pending[pi].num_rows, columns: vec![Column { name: n.clone(), data: lz.key_data(*ci) }] }, n)),
+                        None => is_unique_key(&pending[pi], name),
+                    })
+                };
+                let mut best: Option<(usize, usize)> = None;
+                for (pi, links) in &linked {
+                    if !(plan_order || links.len() == 1) || pending[*pi].num_rows > cap { continue; }
+                    let n_check = if plan_order { links.len() } else { 1 };
+                    if links.iter().take(n_check).any(|l| uniq(*pi, &l.2)) && best.map_or(true, |b| pending[*pi].num_rows < b.1) {
+                        best = Some((*pi, pending[*pi].num_rows));
+                    }
+                }
+                best.map(|b| b.0)
+            };
             let link = match lookup {
                 Some(pi) => linked.into_iter().find(|(i, _)| *i == pi),
+                None if plan_order && linked.len() > 1 => {
+                    // no lookup: join the candidate with the smallest estimated output (rows * rows / distinct keys)
+                    // from the actual row and distinct-key counts; unusable estimates or an estimate that grows the
+                    // result a lot keep the FROM order
+                    let ests: Vec<Option<f64>> = linked.iter().map(|(pi, links)| {
+                        let (_, lk, rk) = &links[0];
+                        est_join_rows(&result, lk, &pending[*pi], lazies[*pi].as_ref(), rk)
+                    }).collect();
+                    let mut pick = 0usize;
+                    if ests.iter().all(|e| e.is_some()) {
+                        let (bi, be) = ests.iter().enumerate().map(|(i, e)| (i, e.unwrap())).fold((0usize, f64::INFINITY), |a, b| if b.1 < a.1 { b } else { a });
+                        let (pi, _) = &linked[bi];
+                        if be <= 4.0 * (result.num_rows.max(pending[*pi].num_rows) as f64) { pick = bi; crate::testing::PLAN_ESTIMATED_PICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+                    }
+                    linked.into_iter().nth(pick)
+                }
                 None => linked.into_iter().next(),
             };
             match link {
@@ -1470,8 +1564,8 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
                     let cfg = JoinConfig { left_key: lk, right_key: rk, join_type: JoinType::Inner };
                     let left = std::mem::replace(&mut result, DataBlock::empty());
                     result = match lz {
-                        Some(lz) if ctx.memory_limit.is_none() => match lazy_inner_join(left, &cfg.left_key, &lz, &cfg.right_key) {
-                            Ok(b) => b,
+                        Some(lz) if ctx.memory_limit.is_none() => match lazy_inner_join(left, &cfg.left_key, &lz, &cfg.right_key, plan_defer) {
+                            Ok(b) => { if plan_defer && !lz.cols.is_empty() { { crate::testing::PLAN_DEFERRED.fetch_add(1, std::sync::atomic::Ordering::Relaxed); deferred_lz.push(lz) }; } b }
                             Err(left) => {
                                 let j = join_blocks(ctx, left, fill_keys(pb, &lz), &cfg)?;
                                 finish_lazy(j, lz)
@@ -1483,19 +1577,61 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
                 }
                 Some((pi, links)) => {
                     // Several equalities connect the two sides (e.g. ps_partkey = l_partkey AND
-                    // ps_suppkey = l_suppkey): hash on all of them at once. A hash collision only adds
-                    // a candidate row; the equalities stay in `conjuncts` and are applied exactly below.
+                    // ps_suppkey = l_suppkey). Int64 keys whose combined range fits are packed into one exact key
+                    // (the equalities are then fully applied by the join); otherwise hash on all of them at once:
+                    // a hash collision only adds a candidate row, the equalities stay in `conjuncts` and are
+                    // applied exactly below.
                     let mut pb = pending.remove(pi);
                     let lz = lazies.remove(pi);
-                    if let Some(lz) = &lz { pb = fill_keys(pb, lz); }
                     let lcols: Vec<String> = links.iter().map(|l| l.1.clone()).collect();
                     let rcols: Vec<String> = links.iter().map(|l| l.2.clone()).collect();
-                    add_composite_key(&mut result, &lcols, "__jkL");
-                    add_composite_key(&mut pb, &rcols, "__jkR");
-                    let cfg = JoinConfig { left_key: "__jkL".into(), right_key: "__jkR".into(), join_type: JoinType::Inner };
-                    result = join_blocks(ctx, std::mem::replace(&mut result, DataBlock::empty()), pb, &cfg)?;
-                    result.columns.retain(|c| c.name != "__jkL" && c.name != "__jkR");
-                    if let Some(lz) = lz { result = finish_lazy(result, lz); }
+                    let mut packed: Option<(Vec<Option<i64>>, Vec<Option<i64>>)> = None;
+                    if plan_defer && !crate::testing::no_plan_pack() {
+                        // right-hand key columns of the filtered rows: from the lazy source or the loaded block
+                        let rdata: Option<Vec<ColumnData>> = rcols.iter().map(|n| match &lz {
+                            Some(lz) => lz.keys.iter().find(|(_, kn)| kn == n).map(|(ci, _)| lz.key_data(*ci)),
+                            None => pb.columns.iter().find(|c| c.name == *n).map(|c| c.data.clone()),
+                        }).collect();
+                        let lref: Option<Vec<&[Option<i64>]>> = lcols.iter().map(|n| match result.columns.iter().find(|c| c.name == *n).map(|c| &c.data) {
+                            Some(ColumnData::Int64(v)) => Some(v.as_slice()), _ => None }).collect();
+                        if let (Some(rd), Some(lr)) = (&rdata, &lref) {
+                            let rref: Option<Vec<&[Option<i64>]>> = rd.iter().map(|d| match d { ColumnData::Int64(v) => Some(v.as_slice()), _ => None }).collect();
+                            if let Some(rr) = rref {
+                                if result.num_rows < u32::MAX as usize && pb.num_rows < u32::MAX as usize { packed = pack_int_keys(lr, &rr); }
+                            }
+                        }
+                    }
+                    if let Some((lk, rk)) = packed {
+                        crate::testing::PLAN_PACKED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        // the packed equality replaces the link conjuncts
+                        let mut drop_idx: Vec<usize> = links.iter().map(|l| l.0).collect();
+                        drop_idx.sort_unstable_by(|a, b| b.cmp(a));
+                        for ci in drop_idx { conjuncts.remove(ci); }
+                        let left = std::mem::replace(&mut result, DataBlock::empty());
+                        match lz {
+                            Some(lz) => {
+                                let (lidx, ridx) = kore_join::HashJoin::inner_join_row_ids(&lk, &rk);
+                                result = lazy_gather(left, lidx, ridx, &lz, plan_defer);
+                                if !lz.cols.is_empty() { crate::testing::PLAN_DEFERRED.fetch_add(1, std::sync::atomic::Ordering::Relaxed); deferred_lz.push(lz); }
+                            }
+                            None => {
+                                let mut left = left;
+                                left.columns.push(Column { name: "__jkL".into(), data: ColumnData::Int64(lk) });
+                                pb.columns.push(Column { name: "__jkR".into(), data: ColumnData::Int64(rk) });
+                                let cfg = JoinConfig { left_key: "__jkL".into(), right_key: "__jkR".into(), join_type: JoinType::Inner };
+                                result = join_blocks(ctx, left, pb, &cfg)?;
+                                result.columns.retain(|c| c.name != "__jkL" && c.name != "__jkR");
+                            }
+                        }
+                    } else {
+                        if let Some(lz) = &lz { pb = fill_keys(pb, lz); }
+                        add_composite_key(&mut result, &lcols, "__jkL");
+                        add_composite_key(&mut pb, &rcols, "__jkR");
+                        let cfg = JoinConfig { left_key: "__jkL".into(), right_key: "__jkR".into(), join_type: JoinType::Inner };
+                        result = join_blocks(ctx, std::mem::replace(&mut result, DataBlock::empty()), pb, &cfg)?;
+                        result.columns.retain(|c| c.name != "__jkL" && c.name != "__jkR");
+                        if let Some(lz) = lz { result = finish_lazy(result, lz); }
+                    }
                 }
                 None => {
                     // no equality connects the remaining tables: fall back to a cross product (smallest first)
@@ -1506,7 +1642,9 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
                 }
             }
             result = push_down_conjuncts(&mut conjuncts, result, ctx)?;
+            prof!(__tf, "  join step done rows={} cols={} pending={}", result.num_rows, result.columns.len(), pending.len());
         }
+        for lz in deferred_lz.drain(..) { result = finish_lazy(result, lz); }
         conjuncts.append(&mut deferred);
         where_pred = crate::rewrite::and_all(std::mem::take(&mut conjuncts));
     } else if planned {
@@ -2039,9 +2177,9 @@ fn fill_keys(mut block: DataBlock, lz: &LazyCols<'_>) -> DataBlock {
 
 /// Inner join of `left` with a lazy table on single Int64 keys, without copying the right side's key column
 /// (borrowed from the source when unfiltered) and gathering its other columns once, for the matching rows only.
-fn lazy_inner_join(left: DataBlock, lk: &str, lz: &LazyCols<'_>, rk: &str) -> Result<DataBlock, DataBlock> {
+fn lazy_inner_join(left: DataBlock, lk: &str, lz: &LazyCols<'_>, rk: &str, defer: bool) -> Result<DataBlock, DataBlock> {
     use rayon::prelude::*;
-    let lpos = match left.columns.iter().position(|c| c.name == lk) { Some(p) => p, None => return Err(left) };
+    let lpos =match left.columns.iter().position(|c| c.name == lk) { Some(p) => p, None => return Err(left) };
     let Some(&(rci, _)) = lz.keys.iter().find(|(_, n)| n == rk) else { return Err(left) };
     let (ColumnData::Int64(lv), ColumnData::Int64(rsrc)) = (&left.columns[lpos].data, &lz.src.columns[rci].data) else { return Err(left) };
     if lv.len() >= u32::MAX as usize || rsrc.len() >= u32::MAX as usize { return Err(left); }
@@ -2054,6 +2192,17 @@ fn lazy_inner_join(left: DataBlock, lk: &str, lz: &LazyCols<'_>, rk: &str) -> Re
         }
     };
     let (lidx, ridx) = kore_join::HashJoin::inner_join_row_ids(lv, rv);
+    Ok(lazy_gather(left, lidx, ridx, lz, defer))
+}
+
+/// The gather half of `lazy_inner_join`: `lidx` / `ridx` are the matching row numbers of `left` and of the filtered
+/// rows of `lz`.
+fn lazy_gather(left: DataBlock, lidx: Vec<u32>, ridx: Vec<u32>, lz: &LazyCols<'_>, defer: bool) -> DataBlock {
+    use rayon::prelude::*;
+    // `defer`: the payload columns are not gathered here but later, once, for the rows that survive every join
+    // (the caller keeps `lz` and calls `finish_lazy`); a `__rid` column with the filtered-row numbers carries them
+    let defer = defer && !lz.cols.is_empty();
+    let rid_col: Option<Column> = defer.then(|| Column { name: lz.rid.clone(), data: ColumnData::Int64(ridx.iter().map(|&r| Some(r as i64)).collect()) });
     // row ids of the source table
     let src_rows: Vec<u32> = match &lz.idx {
         None => ridx,
@@ -2064,14 +2213,58 @@ fn lazy_inner_join(left: DataBlock, lk: &str, lz: &LazyCols<'_>, rk: &str) -> Re
     enum Job<'x> { L(String, ColumnData, &'x [u32]), R(usize, String) }
     let mut jobs: Vec<Job> = Vec::new();
     for c in left.columns { jobs.push(Job::L(c.name, c.data, &lidx)); }
-    let mut right: Vec<(usize, String)> = lz.keys.iter().chain(lz.cols.iter()).cloned().collect();
+    let mut right: Vec<(usize, String)> = if defer { lz.keys.clone() } else { lz.keys.iter().chain(lz.cols.iter()).cloned().collect() };
     right.sort_by_key(|(ci, _)| *ci);
     for (ci, name) in right { jobs.push(Job::R(ci, name)); }
     let columns: Vec<Column> = jobs.into_par_iter().map(|j| match j {
         Job::L(name, data, ix) => { let g = kore_join::gather_rows(&data, ix); drop(data); Column { name, data: g } }
         Job::R(ci, name) => Column { name, data: kore_join::gather_rows(&lz.src.columns[ci].data, &src_rows) },
     }).collect();
-    Ok(DataBlock { columns, num_rows: n })
+    let mut columns = columns;
+    columns.extend(rid_col);
+    DataBlock { columns, num_rows: n }
+}
+
+/// Exact single-key packing of several Int64 key columns per side: each component is offset by the minimum over both
+/// sides and the components are combined mixed-radix, so equal tuples give equal keys and different tuples different
+/// ones. A tuple with a NULL component becomes NULL (never matches). None when the combined range does not fit.
+fn pack_int_keys(left: &[&[Option<i64>]], right: &[&[Option<i64>]]) -> Option<(Vec<Option<i64>>, Vec<Option<i64>>)> {
+    use rayon::prelude::*;
+    const CH: usize = 1 << 16;
+    if left.is_empty() || left.len() != right.len() { return None; }
+    let mut los = Vec::new();
+    let mut mults: Vec<u128> = Vec::new();
+    let mut total: u128 = 1;
+    for (l, r) in left.iter().zip(right) {
+        let mm = |v: &[Option<i64>]| v.par_chunks(CH).map(|ch| {
+            let (mut lo, mut hi) = (i64::MAX, i64::MIN);
+            for x in ch { if let Some(k) = x { if *k < lo { lo = *k; } if *k > hi { hi = *k; } } }
+            (lo, hi)
+        }).reduce(|| (i64::MAX, i64::MIN), |a, b| (a.0.min(b.0), a.1.max(b.1)));
+        let (a, b) = (mm(l), mm(r));
+        let (lo, hi) = (a.0.min(b.0), a.1.max(b.1));
+        // a side without any non-NULL key: nothing can match, any packing will do
+        let span: u128 = if lo > hi { 1 } else { (hi as i128 - lo as i128) as u128 + 1 };
+        los.push(if lo > hi { 0 } else { lo });
+        mults.push(total);
+        total = total.checked_mul(span)?;
+        if total > (1u128 << 62) { return None; }
+    }
+    let pack = |cols: &[&[Option<i64>]]| -> Vec<Option<i64>> {
+        let n = cols[0].len();
+        (0..n.div_ceil(CH)).into_par_iter().flat_map_iter(|c| {
+            let (lo, hi) = (c * CH, ((c + 1) * CH).min(n));
+            (lo..hi).map(|i| {
+                let mut key: i64 = 0;
+                for (j, col) in cols.iter().enumerate() {
+                    let x = col[i]?;
+                    key += ((x as i128 - los[j] as i128) as i64) * (mults[j] as i64);
+                }
+                Some(key)
+            }).collect::<Vec<_>>()
+        }).collect()
+    };
+    Some((pack(left), pack(right)))
 }
 
 /// Append the lazy columns of `lz` to `block`, which carries a `__rid` column (row numbers of the filtered table).
@@ -2098,6 +2291,21 @@ fn load_table<'a>(
     needed: &Option<std::collections::HashSet<String>>,
     needed_wo_where: &Option<std::collections::HashSet<String>>,
     ctx: &KqlContext, lazy: bool,
+) -> Result<(DataBlock, Option<LazyCols<'a>>), KoreError> {
+    load_table_sets(src, alias, conjuncts, needed, needed_wo_where, ctx, lazy, &[])
+}
+
+/// Key sets from sideways information passing: (bare Int64 column of the source, keys that may survive).
+type SipFilters = Vec<(String, std::sync::Arc<crate::sipset::IntSet>)>;
+
+/// `load_table` plus extra semi-join restrictions `sets` (never required for correctness: the join equality
+/// stays in the plan, so a set that cannot be applied is simply skipped).
+#[allow(clippy::too_many_arguments)]
+fn load_table_sets<'a>(
+    src: &'a DataBlock, alias: &str, conjuncts: &mut Vec<Expr>,
+    needed: &Option<std::collections::HashSet<String>>,
+    needed_wo_where: &Option<std::collections::HashSet<String>>,
+    ctx: &KqlContext, lazy: bool, sets: &[(String, std::sync::Arc<crate::sipset::IntSet>)],
 ) -> Result<(DataBlock, Option<LazyCols<'a>>), KoreError> {
     let (Some(needed), Some(after_where)) = (needed, needed_wo_where) else {
         return Ok((prefix_columns(src.clone(), alias), None));
@@ -2140,10 +2348,28 @@ fn load_table<'a>(
 
     let pred = crate::rewrite::and_all(mine.iter().map(|c| crate::rewrite::unqualify(c, alias)).collect());
     let __tl = std::time::Instant::now();
-    let idx: Option<Vec<usize>> = match &pred {
-        Some(p) => crate::vecexpr::filter_idx(p, src),
-        None => None,
-    };
+    // selective key sets first: the (more expensive) predicate then only runs on the rows that pass them
+    let mut sets_done = false;
+    let mut idx: Option<Vec<usize>> = None;
+    if let Some(p) = &pred {
+        if !sets.is_empty() && src.num_rows >= 200_000 && !crate::testing::no_plan_sets_first() {
+            if let Some(i) = filter_sets_first(p, src, sets) { idx = Some(i); sets_done = true; }
+        }
+    }
+    if !sets_done {
+        idx = match &pred {
+            Some(p) if !sets.is_empty() => {
+                // predicate and key sets in one pass over the table
+                let cols: Vec<(&[Option<i64>], &crate::sipset::IntSet)> = sets.iter().filter_map(|(c, set)| {
+                    match src.columns.iter().find(|x| x.name == *c) { Some(Column { data: ColumnData::Int64(v), .. }) => Some((v.as_slice(), &**set)), _ => None }
+                }).collect();
+                if cols.len() == sets.len() { sets_done = true; crate::vecexpr::filter_idx_sets(p, src, &cols) } else { crate::vecexpr::filter_idx(p, src) }
+            }
+            Some(p) => crate::vecexpr::filter_idx(p, src),
+            None => None,
+        };
+        if sets_done && idx.is_some() { crate::testing::PLAN_SIP_SETS.fetch_add(sets.len(), std::sync::atomic::Ordering::Relaxed); }
+    }
     prof!(__tl, "load_table {} filter_idx n={:?} src={}", alias, idx.as_ref().map(|v| v.len()), src.num_rows);
     if pred.is_some() && idx.is_none() {
         // not covered by the fast evaluator: copy what the whole statement needs, filter the copy
@@ -2151,6 +2377,13 @@ fn load_table<'a>(
         *conjuncts = rest;
         conjuncts.extend(mine);
         return push_down_conjuncts(conjuncts, block, ctx).map(|b| (b, None));
+    }
+    for (col, set) in sets.iter().filter(|_| !sets_done) {
+        if let Some(Column { data: ColumnData::Int64(v), .. }) = src.columns.iter().find(|c| c.name == *col) {
+            idx = Some(set.filter(v, idx.as_deref()));
+            crate::testing::PLAN_SIP_SETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            prof!(__tl, "load_table {} sip set on {} n={}", alias, col, idx.as_ref().map_or(0, |v| v.len()));
+        }
     }
 
     let after = keep_cols(&rest);
@@ -2308,6 +2541,255 @@ fn sip_in_conjuncts(conjuncts: &[Expr], alias: &str, src: &DataBlock, blocks: &[
             let mut vals: Vec<i64> = keys.into_iter().collect();
             vals.sort_unstable();
             out.push(Expr::In { expr: Box::new(Expr::Col(bare)), values: vals.into_iter().map(Expr::Int).collect(), negated: false });
+            break;
+        }
+    }
+    out
+}
+
+/// Rows of `src` that pass every key set and `pred`, when the sets are selective enough (a strided sample passes at
+/// most a quarter of the rows) to evaluate `pred` on the survivors only. None = not applicable, use the ordinary order.
+fn filter_sets_first(pred: &Expr, src: &DataBlock, sets: &[(String, std::sync::Arc<crate::sipset::IntSet>)]) -> Option<Vec<usize>> {
+    let n = src.num_rows;
+    let cols: Vec<(&[Option<i64>], &crate::sipset::IntSet)> = sets.iter().filter_map(|(c, set)| {
+        match src.columns.iter().find(|x| x.name == *c) { Some(Column { data: ColumnData::Int64(v), .. }) => Some((v.as_slice(), &**set)), _ => None }
+    }).collect();
+    if cols.is_empty() { return None; }
+    let stride = ((n / 4096) | 1).max(1);
+    let (mut seen, mut pass) = (0usize, 0usize);
+    let mut i = 0;
+    while i < n {
+        seen += 1;
+        if cols.iter().all(|(v, set)| matches!(v[i], Some(k) if set.contains(k))) { pass += 1; }
+        i += stride;
+    }
+    if pass * 4 > seen { return None; }
+    let mut cand: Option<Vec<usize>> = None;
+    for (v, set) in &cols { cand = Some(set.filter(v, cand.as_deref())); }
+    let cand = cand?;
+    let mut names: Vec<String> = Vec::new();
+    let mut refs = Vec::new();
+    if !crate::rewrite::referenced_cols(pred, &mut refs) { return None; }
+    for c in refs { names.push(c.rsplit('.').next().unwrap_or(&c).to_string()); }
+    // String columns are cloned by the gather (the ISO-date accelerator only serves registered tables): only worth it
+    // when few rows survive the sets
+    if cand.len() * 16 > n && names.iter().any(|nm| src.columns.iter().any(|c| c.name == *nm && matches!(c.data, ColumnData::Str(_)))) { return None; }
+    let mut sub_cols = Vec::new();
+    for nm in &names {
+        if sub_cols.iter().any(|c: &Column| c.name == *nm) { continue; }
+        let c = src.columns.iter().find(|c| c.name == *nm)?;
+        sub_cols.push(Column { name: c.name.clone(), data: c.data.take_rows(&cand) });
+    }
+    let sub = DataBlock { num_rows: cand.len(), columns: sub_cols };
+    let keep = crate::vecexpr::filter_idx(pred, &sub)?;
+    crate::testing::PLAN_SETS_FIRST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Some(keep.into_iter().map(|k| cand[k]).collect())
+}
+
+/// Estimated output rows of an inner join of `result` (key `lk`) with a pending table (key `rk`) as
+/// rows * rows / max(distinct left keys, distinct right keys), from the actual data. None when a key is not Int64.
+fn est_join_rows(result: &DataBlock, lk: &str, pb: &DataBlock, lz: Option<&LazyCols<'_>>, rk: &str) -> Option<f64> {
+    let ColumnData::Int64(lv) = &result.columns.iter().find(|c| c.name == lk)?.data else { return None };
+    let owned;
+    let rv: &[Option<i64>] = match lz {
+        Some(lz) => {
+            let (ci, _) = lz.keys.iter().find(|(_, n)| n == rk)?;
+            owned = lz.key_data(*ci);
+            match &owned { ColumnData::Int64(v) => v, _ => return None }
+        }
+        None => match &pb.columns.iter().find(|c| c.name == rk)?.data { ColumnData::Int64(v) => v, _ => return None },
+    };
+    let dl = crate::sipset::IntSet::build(lv, 4_000_000)?.count.max(1);
+    let dr = crate::sipset::IntSet::build(rv, 4_000_000)?.count.max(1);
+    Some(lv.len() as f64 * rv.len() as f64 / dl.max(dr) as f64)
+}
+
+/// Estimated rows of `src` (alias `alias`) after the conjuncts that only need its columns and the SIP key sets
+/// `sets`, from a strided sample of at most ~32k rows (exact for small tables). Estimation only: never used to
+/// decide what rows survive.
+fn est_filtered_rows(src: &DataBlock, alias: &str, conjuncts: &[Expr], sets: &SipFilters) -> usize {
+    const SAMPLE: usize = 32_768;
+    let n = src.num_rows;
+    if n == 0 { return 0; }
+    let prefix = format!("{alias}.");
+    let mut mine: Vec<Expr> = Vec::new();
+    for c in conjuncts {
+        let mut cols = Vec::new();
+        let movable = !matches!(c, Expr::InSubquery { .. }) && crate::rewrite::referenced_cols(c, &mut cols) && !cols.is_empty()
+            && cols.iter().all(|n| match n.strip_prefix(&prefix) { Some(bare) => has_bare_col(src, bare), None => !n.contains('.') && has_bare_col(src, n) });
+        if movable { mine.push(crate::rewrite::unqualify(c, alias)); }
+    }
+    let pred = crate::rewrite::and_all(mine);
+    if pred.is_none() && sets.is_empty() { return n; }
+    let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(p) = &pred {
+        let mut cols = Vec::new();
+        crate::rewrite::referenced_cols(p, &mut cols);
+        for c in cols { names.insert(c.rsplit('.').next().unwrap_or(&c).to_string()); }
+    }
+    for (c, _) in sets { names.insert(c.clone()); }
+    let stride = if n <= 2 * SAMPLE { 1 } else { (n / SAMPLE) | 1 };
+    let pos: Vec<usize> = (0..n).step_by(stride).collect();
+    let sample = DataBlock {
+        num_rows: pos.len(),
+        columns: src.columns.iter().filter(|c| names.contains(&c.name)).map(|c| Column {
+            name: c.name.clone(),
+            data: if stride == 1 { c.data.clone() } else { c.data.take_rows(&pos) },
+        }).collect(),
+    };
+    let mut alive: Vec<usize> = match &pred {
+        Some(p) => crate::vecexpr::filter_idx(p, &sample).unwrap_or_else(|| (0..sample.num_rows).collect()),
+        None => (0..sample.num_rows).collect(),
+    };
+    for (col, set) in sets {
+        if let Some(Column { data: ColumnData::Int64(v), .. }) = sample.columns.iter().find(|c| c.name == *col) {
+            alive.retain(|&i| matches!(v[i], Some(k) if set.contains(k)));
+        }
+    }
+    if alive.is_empty() { return (n / sample.num_rows.max(1) / 2).max(1); }
+    ((alive.len() as f64) * (n as f64) / (sample.num_rows as f64)).ceil() as usize
+}
+
+/// Equality pairs for SIP: the explicit column = column conjuncts plus `derived` ones.
+fn sip_pairs2<'a>(conjuncts: &'a [Expr], derived: &'a [Expr]) -> Vec<(&'a Expr, &'a Expr)> {
+    let mut v = sip_pairs(conjuncts);
+    v.extend(sip_pairs(derived));
+    v
+}
+
+/// Name of a column reference as written, for grouping equal columns.
+fn eq_member_name(e: &Expr) -> Option<String> {
+    match e { Expr::Col(c) => Some(c.clone()), Expr::QualCol(t, c) => Some(format!("{t}.{c}")), _ => None }
+}
+
+/// `e` is a column of exactly one of `tables` (alias, block with bare or alias-prefixed names), stored as Int64.
+fn member_is_int(e: &Expr, tables: &[(&str, &DataBlock)]) -> bool {
+    let int_in = |alias: &str, b: &DataBlock, bare: &str| b.columns.iter().find(|c| {
+        c.name == bare || (c.name.len() == alias.len() + 1 + bare.len() && c.name.starts_with(alias)
+            && c.name.as_bytes()[alias.len()] == b'.' && c.name.ends_with(bare))
+    }).map(|c| matches!(c.data, ColumnData::Int64(_)));
+    match e {
+        Expr::QualCol(t, c) => {
+            let mut hits = tables.iter().filter(|(a, _)| a == t);
+            match (hits.next(), hits.next()) { (Some((a, b)), None) => int_in(a, b, c) == Some(true), _ => false }
+        }
+        Expr::Col(c) => {
+            let found: Vec<bool> = tables.iter().filter_map(|(a, b)| int_in(a, b, c)).collect();
+            found.len() == 1 && found[0]
+        }
+        _ => false,
+    }
+}
+
+fn uf_find(p: &mut [usize], mut x: usize) -> usize {
+    while p[x] != x { p[x] = p[p[x]]; x = p[x]; }
+    x
+}
+
+/// Equalities implied by transitivity (`a = x AND b = x` also means `a = b`) between Int64 columns, so key sets can
+/// travel between tables that no WHERE conjunct joins directly. Only classes whose members are all Int64 columns are
+/// expanded (exact integer equality is transitive; mixed int/float/string comparisons are not).
+fn derive_equalities(conjuncts: &[Expr], tables: &[(&str, &DataBlock)]) -> Vec<Expr> {
+    use std::collections::HashMap;
+    let mut ids: HashMap<String, usize> = HashMap::new();
+    let mut exprs: Vec<&Expr> = Vec::new();
+    let mut parent: Vec<usize> = Vec::new();
+    let mut direct: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    for c in conjuncts {
+        let Expr::BinOp { op: BinOpKind::Eq, left, right } = c else { continue };
+        let (Some(a), Some(b)) = (eq_member_name(left), eq_member_name(right)) else { continue };
+        let mut ends = [0usize; 2];
+        for (k, (name, e)) in [(a, left.as_ref()), (b, right.as_ref())].into_iter().enumerate() {
+            ends[k] = match ids.get(&name) {
+                Some(&i) => i,
+                None => { let i = parent.len(); parent.push(i); exprs.push(e); ids.insert(name, i); i }
+            };
+        }
+        direct.insert((ends[0].min(ends[1]), ends[0].max(ends[1])));
+        let (ra, rb) = (uf_find(&mut parent, ends[0]), uf_find(&mut parent, ends[1]));
+        if ra != rb { parent[ra] = rb; }
+    }
+    let n = parent.len();
+    let mut classes: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..n { let r = uf_find(&mut parent, i); classes.entry(r).or_default().push(i); }
+    let mut roots: Vec<usize> = classes.keys().copied().collect();
+    roots.sort_unstable();
+    let mut out = Vec::new();
+    for r in roots {
+        let m = &classes[&r];
+        if m.len() < 3 || !m.iter().all(|&i| member_is_int(exprs[i], tables)) { continue; }
+        for (x, &i) in m.iter().enumerate() {
+            for &j in &m[x + 1..] {
+                if direct.contains(&(i.min(j), i.max(j))) { continue; }
+                out.push(Expr::BinOp { op: BinOpKind::Eq, left: Box::new(exprs[i].clone()), right: Box::new(exprs[j].clone()) });
+            }
+        }
+    }
+    out
+}
+
+/// `sip_reduce` with parallel key-set building / filtering, bitmap key sets without a key-count limit and
+/// derived equalities.
+fn sip_reduce_v2(blocks: &mut [&mut DataBlock], src_rows: &[usize], loaded: &[bool], conjuncts: &[Expr], derived: &[Expr]) {
+    let pairs = sip_pairs2(conjuncts, derived);
+    if pairs.is_empty() { return; }
+    let n = blocks.len();
+    let mut reduced: Vec<bool> = (0..n).map(|i| loaded[i] && blocks[i].num_rows * 3 <= src_rows[i]).collect();
+    for _pass in 0..3 {
+        let mut changed = false;
+        for (l, r) in &pairs {
+            for (a, b) in [(*l, *r), (*r, *l)] {
+                let (ui, ucol, vi, vcol) = {
+                    let views: Vec<&DataBlock> = blocks.iter().map(|b| &**b).collect();
+                    let (Some((ui, ucol)), Some((vi, vcol))) = (sip_resolve(a, &views, loaded), sip_resolve(b, &views, loaded)) else { continue };
+                    (ui, ucol, vi, vcol)
+                };
+                if ui == vi || !reduced[vi] || blocks[ui].num_rows == 0 { continue; }
+                let ColumnData::Int64(vkeys) = &blocks[vi].columns[vcol].data else { continue };
+                let Some(set) = crate::sipset::IntSet::build(vkeys, SIP_MAX_KEYS) else { continue };
+                let keep: Vec<usize> = match &blocks[ui].columns[ucol].data {
+                    ColumnData::Int64(v) => set.filter(v, None),
+                    _ => continue,
+                };
+                if prof_on() { eprintln!("[prof] sip_reduce_v2 {}.{} <- {}.{} keys={} span={} keep={}/{}", ui, blocks[ui].columns[ucol].name, vi, blocks[vi].columns[vcol].name, set.count, set.span, keep.len(), blocks[ui].num_rows); }
+                if keep.len() * 10 > blocks[ui].num_rows * 9 { continue; }
+                let taken = std::mem::replace(&mut *blocks[ui], DataBlock::empty());
+                *blocks[ui] = select_rows_owned(taken, &keep);
+                changed = true;
+                reduced[ui] = blocks[ui].num_rows * 3 <= src_rows[ui];
+            }
+        }
+        if !changed { break; }
+    }
+}
+
+/// Key sets (instead of `IN` lists) restricting a table that has not been loaded yet: one per equality that links
+/// one of its Int64 columns to an already loaded, reduced table.
+fn sip_filters(conjuncts: &[Expr], derived: &[Expr], alias: &str, src: &DataBlock, blocks: &[&DataBlock], src_rows: &[usize], loaded: &[bool]) -> SipFilters {
+    let mut out: SipFilters = Vec::new();
+    let mut cache: std::collections::HashMap<(usize, usize), Option<std::sync::Arc<crate::sipset::IntSet>>> = std::collections::HashMap::new();
+    for (l, r) in sip_pairs2(conjuncts, derived) {
+        for (a, b) in [(l, r), (r, l)] {
+            let bare = match a {
+                Expr::QualCol(t, c) if t == alias => c.clone(),
+                Expr::Col(c) if !c.contains('.') && !blocks.iter().enumerate().any(|(i, bl)| loaded[i] && find_col_in_block(c, bl).is_some()) => c.clone(),
+                _ => continue,
+            };
+            if !src.columns.iter().any(|c| c.name == bare && matches!(c.data, ColumnData::Int64(_))) { continue; }
+            let Some((vi, vcol)) = sip_resolve(b, blocks, loaded) else { continue };
+            if blocks[vi].num_rows * 3 > src_rows[vi] { continue; }
+            let set = cache.entry((vi, vcol)).or_insert_with(|| match &blocks[vi].columns[vcol].data {
+                ColumnData::Int64(v) => crate::sipset::IntSet::build(v, SIP_MAX_KEYS).map(std::sync::Arc::new),
+                _ => None,
+            }).clone();
+            let Some(set) = set else { continue };
+            if prof_on() { eprintln!("[prof] sip_filters {} <- {}.{} keys={} span={}", bare, vi, blocks[vi].columns[vcol].name, set.count, set.span); }
+            if set.count >= 4096 && set.density() > 0.6 { continue; }
+            // several sources for one column (direct and derived equalities): the smallest set is enough
+            match out.iter_mut().find(|(c, _)| *c == bare) {
+                Some(slot) => { if set.count < slot.1.count { slot.1 = set; } }
+                None => out.push((bare, set)),
+            }
             break;
         }
     }
