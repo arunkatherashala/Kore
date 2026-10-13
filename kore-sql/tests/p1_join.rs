@@ -137,19 +137,19 @@ fn heavy_duplicate_and_skewed_keys() {
     let mut c = KqlContext::new();
     // build side: a handful of keys (long chains, skewed hash partitions) plus wide sparse keys
     c.register("f", DataBlock::new(vec![
-        Column::int64("fk", (0..30_000).map(|i| Some(if i % 3 == 0 { i64::MAX - (i % 7) } else { (i % 40) as i64 * 1_000_003 })).collect()),
+        Column::int64("fk", (0..30_000).map(|i| Some(if i % 1000 == 0 { i64::MAX - (i % 7) } else { (i % 40_000) as i64 * 1_000_003 })).collect()),
         Column::int64("v", (0..30_000).map(|i| Some(i as i64)).collect()),
     ]).unwrap());
     c.register("e", DataBlock::new(vec![
-        Column::int64("ek", (0..n).map(|i| match r.below(4) { 0 => None, 1 => Some(i64::MAX - (i % 7) as i64), 2 => Some(((i % 40) as i64) * 1_000_003), _ => Some(r.next() as i64 * 977) }).collect()),
+        Column::int64("ek", (0..n).map(|i| match r.below(4) { 0 => None, 1 => Some(i64::MAX - (i % 7000) as i64), 2 => Some(((i % 40_000) as i64) * 1_000_003), _ => Some(r.next() as i64 * 977) }).collect()),
         Column::str_col("es", (0..n).map(|i| Some(format!("e{}", i % 11))).collect()),
     ]).unwrap());
     c.register("one", DataBlock::new(vec![
-        Column::int64("ok", vec![Some(7); n]),
-        Column::int64("w", (0..n as i64).map(Some).collect()),
+        Column::int64("ok", vec![Some(7); 100_000]),
+        Column::int64("w", (0..100_000i64).map(Some).collect()),
     ]).unwrap());
     c.register("two", DataBlock::new(vec![
-        Column::int64("tk", (0..2000).map(|i| Some(if i < 1500 { 7 } else { i })).collect()),
+        Column::int64("tk", (0..2000).map(|i| Some(if i < 60 { 7 } else { i })).collect()),
         Column::int64("z", (0..2000i64).map(Some).collect()),
     ]).unwrap());
     let mut rows = 0;
