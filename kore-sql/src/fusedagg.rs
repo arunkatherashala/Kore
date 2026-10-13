@@ -645,6 +645,54 @@ fn run_partitioned(job: &Job) -> Option<Groups> {
     Some(Groups { first, acc, cnt })
 }
 
+/// One run of the aggregation over `job` (groups in order of first appearance).
+fn aggregate(job: &Job) -> Option<Groups> {
+    let hc = !job.sorted && looks_high_cardinality(job);
+    if hc { run_partitioned(job) } else { run_local(job) }
+}
+
+/// Key parts of the group columns. With `skip_str` the text columns are left out and returned separately (they are
+/// verified instead of hashed). More than three parts are folded, three at a time, into one interned id.
+fn make_parts<'a>(cols: &[&'a Column], n: usize, wide: bool, skip_str: bool) -> Option<(Vec<KeyPart<'a>>, Vec<&'a [Option<String>]>)> {
+    let mut parts: Vec<KeyPart<'a>> = Vec::new();
+    let mut strs: Vec<&'a [Option<String>]> = Vec::new();
+    for col in cols {
+        parts.push(match &col.data {
+            ColumnData::Int64(v) => KeyPart::I(v),
+            ColumnData::StrDict { codes, .. } => KeyPart::D(codes),
+            ColumnData::Float64(v) if wide => KeyPart::F(v),
+            ColumnData::Str(v) if skip_str => { strs.push(v); continue }
+            ColumnData::Str(v) if wide => KeyPart::U(intern_par(n, |r| v[r].as_deref())),
+            ColumnData::Str(v) => {
+                let mut ids: HashMap<&str, i64, BuildHasherDefault<FxHasher>> = HashMap::default();
+                KeyPart::O(v.iter().map(|s| s.as_deref().map(|t| { let next = ids.len() as i64; *ids.entry(t).or_insert(next) })).collect())
+            }
+            _ => return None,
+        });
+    }
+    while parts.len() > 3 {
+        let head: Vec<KeyPart> = parts.drain(..3).collect();
+        let ids = intern_par(n, |r| Some(key_of(&head, r)));
+        parts.push(KeyPart::U(ids));
+    }
+    Some((parts, strs))
+}
+
+/// Every row carries the same text values as the first row of its group (groups identified by the numeric key).
+fn verify_fd(parts: &[KeyPart], first: &[usize], strs: &[&[Option<String>]], n: usize) -> bool {
+    const CH: usize = 1 << 14;
+    let mut index: KeyMap = HashMap::with_capacity_and_hasher(first.len(), Default::default());
+    for (g, &f) in first.iter().enumerate() { index.insert(key_of(parts, f), g as u32); }
+    (0..n.div_ceil(CH)).into_par_iter().all(|c| {
+        for r in c * CH..((c + 1) * CH).min(n) {
+            let Some(&g) = index.get(&key_of(parts, r)) else { return false };
+            let rep = first[g as usize];
+            if rep != r && strs.iter().any(|s| s[r] != s[rep]) { return false; }
+        }
+        true
+    })
+}
+
 /// True when a sample of the input has so many distinct keys that per-thread tables plus a merge would be slow.
 fn looks_high_cardinality(job: &Job) -> bool {
     let n = job.block.num_rows;
@@ -672,7 +720,12 @@ pub(crate) struct Request<'a> {
     pub key_prefix: Option<&'a str>,
 }
 
+fn pr(t: &std::time::Instant, what: &str) {
+    if crate::executor::prof_on() { eprintln!("[prof] {:>8.1} ms    fusedagg {what}", t.elapsed().as_secs_f64() * 1000.0); }
+}
+
 pub(crate) fn run(req: Request) -> Option<DataBlock> {
+    let __t = std::time::Instant::now();
     let block = req.block;
     let n = block.num_rows;
     let wide = !crate::testing::no_wide_agg();
@@ -680,28 +733,15 @@ pub(crate) fn run(req: Request) -> Option<DataBlock> {
 
     // key columns, read in place (strings are interned to ids once)
     let mut key_cols: Vec<&Column> = Vec::new();
-    let mut parts: Vec<KeyPart> = Vec::new();
-    for g in req.group_cols {
-        let col = find_col(block, g)?;
-        key_cols.push(col);
-        parts.push(match &col.data {
-            ColumnData::Int64(v) => KeyPart::I(v),
-            ColumnData::StrDict { codes, .. } => KeyPart::D(codes),
-            ColumnData::Float64(v) if wide => KeyPart::F(v),
-            ColumnData::Str(v) if wide => KeyPart::U(intern_par(n, |r| v[r].as_deref())),
-            ColumnData::Str(v) => {
-                let mut ids: HashMap<&str, i64, BuildHasherDefault<FxHasher>> = HashMap::default();
-                KeyPart::O(v.iter().map(|s| s.as_deref().map(|t| { let next = ids.len() as i64; *ids.entry(t).or_insert(next) })).collect())
-            }
-            _ => return None,
-        });
-    }
-    // more than three key columns: fold the first three into one interned id until three are left
-    while parts.len() > 3 {
-        let head: Vec<KeyPart> = parts.drain(..3).collect();
-        let ids = intern_par(n, |r| Some(key_of(&head, r)));
-        parts.push(KeyPart::U(ids));
-    }
+    for g in req.group_cols { key_cols.push(find_col(block, g)?); }
+    // Text keys next to numeric ones usually follow from them (GROUP BY c_custkey, c_name, c_address, ...): group by
+    // the numeric columns alone and check afterwards that every row of a group carries the same text; only when
+    // that fails are the strings interned (the expensive part) and the aggregation repeated.
+    let is_str = |c: &Column| matches!(c.data, ColumnData::Str(_));
+    let fd = wide && req.pred.is_none() && n >= 20_000 && !crate::testing::no_fd_agg()
+        && key_cols.iter().any(|c| is_str(c)) && key_cols.iter().any(|c| !is_str(c));
+    let (parts, fd_strs) = make_parts(&key_cols, n, wide, fd)?;
+    pr(&__t, &format!("keys interned ({} parts, fd={fd})", parts.len()));
     let dict_keys = !parts.is_empty() && parts.len() <= 2 && parts.iter().all(|p| matches!(p, KeyPart::D(_)));
     let sorted = wide && !crate::testing::no_sorted_agg() && n >= 50_000
         && matches!(parts.as_slice(), [KeyPart::I(v)] if sorted_non_null(v));
@@ -758,16 +798,36 @@ pub(crate) fn run(req: Request) -> Option<DataBlock> {
     if specs.is_empty() { return None; }
     if req.group_cols.is_empty() && outs.iter().any(|o| matches!(o, Out::Key(..))) { return None; }
 
-    if sorted { crate::testing::SORTED_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
     if wide && (req.group_cols.len() > 3 || key_cols.iter().any(|c| matches!(c.data, ColumnData::Float64(_)))) {
         crate::testing::WIDE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-    let job = Job { block, pred: req.pred, parts, specs, nodes: plan.nodes, dict_keys, sorted };
-    let hc = !sorted && looks_high_cardinality(&job);
-    let groups = if hc { run_partitioned(&job)? } else { run_local(&job)? };
+    let mut job = Job { block, pred: req.pred, parts, specs, nodes: plan.nodes, dict_keys, sorted };
+    let mut groups = aggregate(&job)?;
+    pr(&__t, &format!("groups aggregated sorted={sorted}"));
+    if fd {
+        if groups.first.len() <= 1_000_000 && verify_fd(&job.parts, &groups.first, &fd_strs, n) {
+            crate::testing::FD_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            pr(&__t, "text keys follow from the numeric ones");
+        } else {
+            pr(&__t, "text keys differ within a group: full keys");
+            let (parts, _) = make_parts(&key_cols, n, wide, false)?;
+            job.dict_keys = !parts.is_empty() && parts.len() <= 2 && parts.iter().all(|p| matches!(p, KeyPart::D(_)));
+            job.sorted = wide && !crate::testing::no_sorted_agg() && n >= 50_000
+                && matches!(parts.as_slice(), [KeyPart::I(v)] if sorted_non_null(v));
+            job.parts = parts;
+            groups = aggregate(&job)?;
+        }
+    }
+    if job.sorted { crate::testing::SORTED_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
     let ng = groups.first.len();
     if ng == 0 { return None; }
 
+    // key columns are gathered from the first rows of the groups, one column per task (text clones are the cost)
+    let mut key_data: std::collections::VecDeque<ColumnData> = outs.par_iter().filter_map(|o| match o {
+        Out::Key(col, _) => Some(col.data.take_rows(&groups.first)),
+        _ => None,
+    }).collect::<Vec<_>>().into();
+    pr(&__t, "key columns gathered");
     let mut columns: Vec<Column> = Vec::with_capacity(outs.len());
     let mut si = 0usize;
     for o in &outs {
@@ -780,7 +840,7 @@ pub(crate) fn run(req: Request) -> Option<DataBlock> {
                         _ => col.name.clone(),
                     },
                 };
-                columns.push(Column { name, data: col.data.take_rows(&groups.first) });
+                columns.push(Column { name, data: key_data.pop_front()? });
             }
             Out::Agg { func, name, integral } => {
                 let (acc, cnt) = (&groups.acc[si], &groups.cnt[si]);

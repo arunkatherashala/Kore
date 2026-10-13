@@ -23,6 +23,7 @@ fn new_paths(on: bool) {
     testing::set_no_wide_agg(!on);
     testing::set_no_sorted_agg(!on);
     testing::set_no_substr_dict(!on);
+    testing::set_no_fd_agg(!on);
 }
 
 fn cell(c: &Column, r: usize) -> String {
@@ -266,4 +267,44 @@ fn new_paths_are_exercised() {
     rows(&ctx, "select y, count(*) as c from (select substr(s2, 1, 2) as y from f) as x group by y").unwrap();
     let (w1, s1, d1) = testing::agg_hits();
     assert!(w1 > w0 && s1 > s0 && d1 > d0, "wide {w0}->{w1}, sorted {s0}->{s1}, substr dict {d0}->{d1}");
+}
+
+/// Text keys that follow from the numeric ones (verified, not hashed) and ones that differ inside a group
+/// (a violation anywhere, including the very last row and NULL against a value, must give the full-key answer).
+#[test]
+fn text_keys_following_numeric_keys() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    new_paths(true);
+    let fd0 = testing::fd_hits();
+    let n = 90_000usize;
+    let mut r = Rng(77);
+    let id: Vec<Option<i64>> = (0..n).map(|_| Some(r.below(n / 5) as i64)).collect();
+    let name = |i: i64| format!("customer#{i:09}");
+    let build = |id: &Vec<Option<i64>>, tweak: Option<(usize, Option<String>)>| {
+        let mut nm: Vec<Option<String>> = id.iter().map(|i| i.map(name)).collect();
+        let cat: Vec<Option<String>> = id.iter().map(|i| i.filter(|i| i % 11 != 0).map(|i| format!("c{}", i % 7))).collect();
+        if let Some((row, v)) = tweak { nm[row] = v; }
+        let mut ctx = KqlContext::new();
+        ctx.register("t", DataBlock::new(vec![
+            Column::int64("id", id.clone()), Column::str_col("name", nm), Column::str_col("cat", cat),
+            Column::float64("w", (0..id.len()).map(|i| Some((i % 101) as f64)).collect()),
+            Column::float64("fl", id.iter().map(|i| i.map(|i| (i % 5) as f64 / 2.0)).collect()),
+        ]).unwrap());
+        ctx
+    };
+    let queries = [
+        "select id, name, cat, sum(w) as sw, count(*) as c from t group by id, name, cat",
+        "select id, name, fl, cat, avg(w) as aw, max(w) as mw from t group by id, name, fl, cat",
+        "select name, id, sum(w) as sw from t group by name, id having sum(w) > 300",
+        "select id, cat, count(*) as c from t group by id, cat",
+    ];
+    let clean = build(&id, None);
+    for q in queries { same(&clean, q); }
+    assert!(testing::fd_hits() > fd0, "the verified-text path did not run");
+    // violations: last row, first row, NULL replacing a value, a value replacing NULL
+    let last = n - 1;
+    for tweak in [(last, Some("other".to_string())), (0, Some("other".to_string())), (n / 2, None), (n / 3, Some("customer#000000000".to_string()))] {
+        let ctx = build(&id, Some(tweak));
+        for q in queries { same(&ctx, q); }
+    }
 }

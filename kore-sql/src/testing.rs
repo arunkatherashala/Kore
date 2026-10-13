@@ -64,6 +64,18 @@ pub fn agg_hits() -> (usize, usize, usize) {
     (WIDE_HITS.load(Ordering::Relaxed), SORTED_HITS.load(Ordering::Relaxed), SUBSTR_DICT_HITS.load(Ordering::Relaxed))
 }
 
+pub(crate) static FD_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Aggregations that grouped by the numeric keys only after verifying the text keys follow from them.
+pub fn fd_hits() -> usize { FD_HITS.load(Ordering::Relaxed) }
+
+pub(crate) static NO_FD_AGG: AtomicBool = AtomicBool::new(false);
+
+/// Intern every text key column instead of verifying that it follows from the numeric ones.
+pub fn set_no_fd_agg(on: bool) { NO_FD_AGG.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_fd_agg() -> bool { NO_FD_AGG.load(Ordering::Relaxed) }
+
 pub(crate) static NO_WIDE_AGG: AtomicBool = AtomicBool::new(false);
 
 /// Limit the fused GROUP BY to the old shapes (at most three integer / text columns, serial string interning).

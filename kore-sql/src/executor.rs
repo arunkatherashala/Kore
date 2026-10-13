@@ -1160,7 +1160,7 @@ fn join_blocks(ctx: &KqlContext, left: DataBlock, right: DataBlock, cfg: &JoinCo
     }
 }
 
-fn prof_on() -> bool { static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new(); *P.get_or_init(|| std::env::var_os("KORE_PROF").is_some()) }
+pub(crate) fn prof_on() -> bool { static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new(); *P.get_or_init(|| std::env::var_os("KORE_PROF").is_some()) }
 macro_rules! prof { ($t:expr, $($a:tt)*) => { if prof_on() { eprintln!("[prof] {:>8.1} ms  {}", $t.elapsed().as_secs_f64()*1000.0, format!($($a)*)); } } }
 
 pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
