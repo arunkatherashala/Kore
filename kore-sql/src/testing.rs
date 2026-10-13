@@ -59,6 +59,8 @@ pub(crate) static NO_PLAN_SIP: AtomicBool = AtomicBool::new(false);
 pub(crate) static NO_PLAN_ORDER: AtomicBool = AtomicBool::new(false);
 pub(crate) static NO_PLAN_LAZY_BASE: AtomicBool = AtomicBool::new(false);
 pub(crate) static NO_PLAN_DEFER: AtomicBool = AtomicBool::new(false);
+pub(crate) static NO_PLAN_SETS_FIRST: AtomicBool = AtomicBool::new(false);
+pub(crate) static PLAN_SETS_FIRST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 pub(crate) static NO_PLAN_PACK: AtomicBool = AtomicBool::new(false);
 pub(crate) static PLAN_PACKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -74,8 +76,12 @@ pub fn set_no_plan_defer(on: bool) { NO_PLAN_DEFER.store(on, Ordering::Relaxed);
 pub fn set_no_plan_pack(on: bool) { NO_PLAN_PACK.store(on, Ordering::Relaxed); }
 /// How many multi-key joins used the exact packed key so far.
 pub fn plan_packed_joins() -> usize { PLAN_PACKED.load(Ordering::Relaxed) }
+/// Evaluate a table's own predicate before its SIP key sets (the old order), for A/B tests.
+pub fn set_no_plan_sets_first(on: bool) { NO_PLAN_SETS_FIRST.store(on, Ordering::Relaxed); }
+/// How many table loads ran their key sets before the predicate so far.
+pub fn plan_sets_first_loads() -> usize { PLAN_SETS_FIRST.load(Ordering::Relaxed) }
 /// Turn every join-planner optimisation off (or on) at once.
-pub fn set_no_plan(on: bool) { set_no_plan_sip(on); set_no_plan_order(on); set_no_plan_lazy_base(on); set_no_plan_defer(on); set_no_plan_pack(on); }
+pub fn set_no_plan(on: bool) { set_no_plan_sets_first(on); set_no_plan_sip(on); set_no_plan_order(on); set_no_plan_lazy_base(on); set_no_plan_defer(on); set_no_plan_pack(on); }
 
 fn env_flag(name: &str, cell: &'static std::sync::OnceLock<bool>) -> bool {
     *cell.get_or_init(|| std::env::var_os(name).is_some())
@@ -100,6 +106,11 @@ pub(crate) fn no_plan_defer() -> bool {
 pub(crate) fn no_plan_pack() -> bool {
     static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     NO_PLAN_PACK.load(Ordering::Relaxed) || env_flag("KORE_NO_PLAN_PACK", &E)
+}
+#[inline]
+pub(crate) fn no_plan_sets_first() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_PLAN_SETS_FIRST.load(Ordering::Relaxed) || env_flag("KORE_NO_PLAN_SETS_FIRST", &E)
 }
 #[inline]
 pub(crate) fn no_plan_lazy_base() -> bool {

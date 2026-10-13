@@ -64,7 +64,7 @@ fn rows(c: &KqlContext, sql: &str) -> Vec<String> {
 }
 
 #[derive(Clone, Copy)]
-enum Mode { Plan, NoPlan, NoSip, NoOrder, NoLazyBase, NoDefer, NoPack }
+enum Mode { Plan, NoPlan, NoSip, NoOrder, NoLazyBase, NoDefer, NoPack, NoSetsFirst }
 
 fn set_mode(m: Mode) {
     testing::set_no_plan(false);
@@ -76,6 +76,7 @@ fn set_mode(m: Mode) {
         Mode::NoLazyBase => testing::set_no_plan_lazy_base(true),
         Mode::NoDefer => testing::set_no_plan_defer(true),
         Mode::NoPack => testing::set_no_plan_pack(true),
+        Mode::NoSetsFirst => testing::set_no_plan_sets_first(true),
     }
 }
 
@@ -154,7 +155,7 @@ fn check(ctx: &KqlContext, sql: &str, modes: &[Mode]) {
     }
 }
 
-const ALL: &[Mode] = &[Mode::Plan, Mode::NoSip, Mode::NoOrder, Mode::NoLazyBase, Mode::NoDefer, Mode::NoPack];
+const ALL: &[Mode] = &[Mode::Plan, Mode::NoSip, Mode::NoOrder, Mode::NoLazyBase, Mode::NoDefer, Mode::NoPack, Mode::NoSetsFirst];
 
 fn run_scenario(seed: u64, sizes: &[usize], large_from: usize, queries: usize) {
     let mut r = Rng(seed);
@@ -209,7 +210,7 @@ fn key_sets_around_the_400k_cap() {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // a 450k-row table whose filtered key set sits around SIP_MAX_KEYS next to a big fact table
     let sets0 = testing::plan_sip_sets();
-    run_scenario(31, &[450_000, 300_000, 90, 500_000, 7], 90_000, 5);
+    run_scenario(31, &[450_000, 300_000, 90, 500_000, 7], 90_000, 8);
     assert!(testing::plan_sip_sets() > sets0, "SIP key sets were never applied");
 }
 
@@ -303,4 +304,35 @@ fn packed_composite_keys() {
         for q in qs { check(&ctx, q, ALL); }
     }
     assert!(testing::plan_packed_joins() > packed0, "no join used the packed key");
+}
+
+/// A big fact table whose foreign key is restricted to a few rows of a filtered dimension: the key set is selective, so
+/// it runs before the fact table's own predicate (numeric, string and OR shaped predicates).
+#[test]
+fn selective_key_sets_run_first() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let first0 = testing::plan_sets_first_loads();
+    let mut r = Rng(11);
+    let mut ctx = KqlContext::new();
+    let (nd, nf) = (400usize, 260_000usize);
+    ctx.register("dim", DataBlock::new(vec![
+        Column::int64("d_k", (0..nd as i64).map(Some).collect()),
+        Column::int64("d_grp", (0..nd).map(|_| Some(r.below(40) as i64)).collect()),
+    ]).unwrap());
+    ctx.register("fact", DataBlock::new(vec![
+        Column::int64("fk", (0..nf).map(|_| if r.chance(2) { None } else { Some(r.below(nd + 20) as i64) }).collect()),
+        Column::int64("v", (0..nf).map(|_| if r.chance(3) { None } else { Some(r.below(1000) as i64) }).collect()),
+        Column::float64("f", (0..nf).map(|_| Some(r.below(400) as f64 * 0.25)).collect()),
+        Column::str_col("s", (0..nf).map(|_| if r.chance(3) { None } else { Some(format!("s{}", r.below(8))) }).collect()),
+        Column::str_col("d", (0..nf).map(|_| Some(format!("199{}-{:02}-{:02}", r.below(9), 1 + r.below(12), 1 + r.below(28)))).collect()),
+    ]).unwrap());
+    let qs = [
+        "select count(*) as n, sum(f) as t from dim, fact where d_k = fk and d_grp = 3 and v < 500",
+        "select count(*) as n, sum(f) as t from dim, fact where d_k = fk and d_grp < 2 and s = 's3'",
+        "select d_grp, count(*) as n, sum(f) as t from dim, fact where d_k = fk and d_grp = 7 and (v < 100 or s = 's1') group by d_grp",
+        "select count(*) as n from dim, fact where d_k = fk and d_grp = 5 and d >= '1994-01-01' and d < '1996-01-01'",
+        "select count(*) as n from dim, fact where d_k = fk and d_grp = 99 and v < 500",
+    ];
+    for q in qs { check(&ctx, q, ALL); }
+    assert!(testing::plan_sets_first_loads() > first0, "no load ran its key sets before the predicate");
 }

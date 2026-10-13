@@ -2306,10 +2306,20 @@ fn load_table_sets<'a>(
 
     let pred = crate::rewrite::and_all(mine.iter().map(|c| crate::rewrite::unqualify(c, alias)).collect());
     let __tl = std::time::Instant::now();
-    let mut idx: Option<Vec<usize>> = match &pred {
-        Some(p) => crate::vecexpr::filter_idx(p, src),
-        None => None,
-    };
+    // selective key sets first: the (more expensive) predicate then only runs on the rows that pass them
+    let mut sets_done = false;
+    let mut idx: Option<Vec<usize>> = None;
+    if let Some(p) = &pred {
+        if !sets.is_empty() && src.num_rows >= 200_000 && !crate::testing::no_plan_sets_first() {
+            if let Some(i) = filter_sets_first(p, src, sets) { idx = Some(i); sets_done = true; }
+        }
+    }
+    if !sets_done {
+        idx = match &pred {
+            Some(p) => crate::vecexpr::filter_idx(p, src),
+            None => None,
+        };
+    }
     prof!(__tl, "load_table {} filter_idx n={:?} src={}", alias, idx.as_ref().map(|v| v.len()), src.num_rows);
     if pred.is_some() && idx.is_none() {
         // not covered by the fast evaluator: copy what the whole statement needs, filter the copy
@@ -2318,7 +2328,7 @@ fn load_table_sets<'a>(
         conjuncts.extend(mine);
         return push_down_conjuncts(conjuncts, block, ctx).map(|b| (b, None));
     }
-    for (col, set) in sets {
+    for (col, set) in sets.iter().filter(|_| !sets_done) {
         if let Some(Column { data: ColumnData::Int64(v), .. }) = src.columns.iter().find(|c| c.name == *col) {
             idx = Some(set.filter(v, idx.as_deref()));
             crate::testing::PLAN_SIP_SETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2485,6 +2495,45 @@ fn sip_in_conjuncts(conjuncts: &[Expr], alias: &str, src: &DataBlock, blocks: &[
         }
     }
     out
+}
+
+/// Rows of `src` that pass every key set and `pred`, when the sets are selective enough (a strided sample passes at
+/// most a quarter of the rows) to evaluate `pred` on the survivors only. None = not applicable, use the ordinary order.
+fn filter_sets_first(pred: &Expr, src: &DataBlock, sets: &[(String, std::sync::Arc<crate::sipset::IntSet>)]) -> Option<Vec<usize>> {
+    let n = src.num_rows;
+    let cols: Vec<(&[Option<i64>], &crate::sipset::IntSet)> = sets.iter().filter_map(|(c, set)| {
+        match src.columns.iter().find(|x| x.name == *c) { Some(Column { data: ColumnData::Int64(v), .. }) => Some((v.as_slice(), &**set)), _ => None }
+    }).collect();
+    if cols.is_empty() { return None; }
+    let stride = ((n / 4096) | 1).max(1);
+    let (mut seen, mut pass) = (0usize, 0usize);
+    let mut i = 0;
+    while i < n {
+        seen += 1;
+        if cols.iter().all(|(v, set)| matches!(v[i], Some(k) if set.contains(k))) { pass += 1; }
+        i += stride;
+    }
+    if pass * 4 > seen { return None; }
+    let mut cand: Option<Vec<usize>> = None;
+    for (v, set) in &cols { cand = Some(set.filter(v, cand.as_deref())); }
+    let cand = cand?;
+    let mut names: Vec<String> = Vec::new();
+    let mut refs = Vec::new();
+    if !crate::rewrite::referenced_cols(pred, &mut refs) { return None; }
+    for c in refs { names.push(c.rsplit('.').next().unwrap_or(&c).to_string()); }
+    // String columns are cloned by the gather (the ISO-date accelerator only serves registered tables): only worth it
+    // when few rows survive the sets
+    if cand.len() * 16 > n && names.iter().any(|nm| src.columns.iter().any(|c| c.name == *nm && matches!(c.data, ColumnData::Str(_)))) { return None; }
+    let mut sub_cols = Vec::new();
+    for nm in &names {
+        if sub_cols.iter().any(|c: &Column| c.name == *nm) { continue; }
+        let c = src.columns.iter().find(|c| c.name == *nm)?;
+        sub_cols.push(Column { name: c.name.clone(), data: c.data.take_rows(&cand) });
+    }
+    let sub = DataBlock { num_rows: cand.len(), columns: sub_cols };
+    let keep = crate::vecexpr::filter_idx(pred, &sub)?;
+    crate::testing::PLAN_SETS_FIRST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Some(keep.into_iter().map(|k| cand[k]).collect())
 }
 
 /// Estimated rows of `src` (alias `alias`) after the conjuncts that only need its columns and the SIP key sets
