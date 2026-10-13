@@ -800,3 +800,12 @@ include!("fuzz_oracle/shapes.rs");
 
 const NULLT: &str = r"\N";
 const EMPTYT: &str = r"";
+
+/// Fast always-on check (runs under plain `cargo test`): the optimised plan against every switch-off variant, small data.
+#[test]
+fn smoke_differential_every_switch() {
+    // only this test touches the environment; the fuzzer itself is #[ignore]d
+    for (k, v) in [("FUZZ_SCALE", "small"), ("FUZZ_SEEDS", "6"), ("FUZZ_PER", "80"), ("FUZZ_FIRST", "9001"), ("FUZZ_NEW", "60")] { std::env::set_var(k, v); }
+    std::env::remove_var("FUZZ_DIR");
+    fuzz_joins_and_aggregates();
+}
