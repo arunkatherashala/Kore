@@ -12,6 +12,14 @@ use crate::JoinConfig;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static SERIAL: AtomicBool = AtomicBool::new(false);
+/// Per-stage switches (mask 1 = hash build, 2 = probe concatenation, 4 = in-column gather); used by the benchmark.
+static STAGE_OFF: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Turn single stages of the parallel join mechanics off (mask 1 build, 2 concat, 4 gather); 0 = all on.
+pub fn set_serial_stages(mask: u8) { STAGE_OFF.store(mask, Ordering::Relaxed); }
+
+#[inline]
+fn stage_off(bit: u8) -> bool { STAGE_OFF.load(Ordering::Relaxed) & bit != 0 }
 
 /// Force the original single-threaded hash build, serial output concatenation and per-column-only gather
 /// (A/B oracle for the parallel kernels). Results are identical either way.
@@ -199,7 +207,7 @@ impl HashJoin {
             (pi, bi)
         }).collect();
         let total: usize = parts.iter().map(|p| p.0.len()).sum();
-        let (pidx, bidx) = if serial_join() || total < PAR_GATHER_MIN {
+        let (pidx, bidx) = if serial_join() || stage_off(2) || total < PAR_GATHER_MIN {
             let mut pidx: Vec<u32> = Vec::with_capacity(total);
             let mut bidx: Vec<u32> = Vec::with_capacity(total);
             for (a, b) in &parts { pidx.extend_from_slice(a); bidx.extend_from_slice(b); }
@@ -284,7 +292,7 @@ impl FlatTable {
     }
 
     fn build(keys: &[Option<i64>]) -> Self {
-        if keys.len() >= PAR_BUILD_MIN && !serial_join() && rayon::current_num_threads() > 1 {
+        if keys.len() >= PAR_BUILD_MIN && !serial_join() && !stage_off(1) && rayon::current_num_threads() > 1 {
             if let Some(t) = Self::build_par(keys) { return t; }
         }
         Self::build_serial(keys)
@@ -475,7 +483,7 @@ pub fn gather_rows(src: &kore_core::ColumnData, idx: &[u32]) -> kore_core::Colum
 /// `out[i] = f(idx[i])`, in parallel chunks for long index vectors.
 fn gather_with<T: Send, F: Fn(u32) -> T + Sync>(idx: &[u32], f: F) -> Vec<T> {
     let n = idx.len();
-    if n < PAR_GATHER_MIN || serial_join() { return idx.iter().map(|&i| f(i)).collect(); }
+    if n < PAR_GATHER_MIN || serial_join() || stage_off(4) { return idx.iter().map(|&i| f(i)).collect(); }
     let mut out: Vec<T> = Vec::with_capacity(n);
     out.spare_capacity_mut()[..n].par_chunks_mut(GATHER_CHUNK).zip(idx.par_chunks(GATHER_CHUNK)).for_each(|(o, ix)| {
         for (slot, &i) in o.iter_mut().zip(ix) { slot.write(f(i)); }
@@ -752,6 +760,51 @@ mod tests {
             };
             assert_eq!(par, ser);
             assert_eq!(clone_column(c), c.clone());
+        }
+    }
+
+    /// Micro-benchmark of the join kernel stages, serial vs parallel in the same process (alternating, best of 5):
+    /// `cargo test --release -p kore-join --offline -- --ignored --nocapture --test-threads 1 bench_join_kernel`
+    #[test]
+    #[ignore]
+    fn bench_join_kernel() {
+        use kore_core::ColumnData;
+        use std::time::Instant;
+        let mut r = Rng(1);
+        for &(nb, np, stride) in &[(1_500_000usize, 6_000_000usize, 4i64), (4_500_000, 18_000_000, 4), (1_000_000, 6_000_000, 40_000_000_011)] {
+            // unique build keys in random row order, fact keys drawn from them
+            let mut bk: Vec<Option<i64>> = (0..nb as i64).map(|i| Some(i * stride)).collect();
+            for i in (1..nb).rev() { let j = r.below(i as u64 + 1) as usize; bk.swap(i, j); }
+            let pk: Vec<Option<i64>> = (0..np).map(|_| Some(r.below(nb as u64) as i64 * stride)).collect();
+            let sc = ColumnData::Str((0..nb).map(|i| Some(format!("clerk#{:09}", i % 1000))).collect());
+            let ic = ColumnData::Int64((0..nb as i64).map(Some).collect());
+            // stage masks: 0 all parallel, 7 all serial, 1 only build serial, 2 only concat serial, 4 only gather serial
+            let masks = [7u8, 0, 1, 2, 4];
+            let mut best = vec![[f64::MAX; 4]; masks.len()];
+            for _ in 0..5 {
+                for (m, &mask) in masks.iter().enumerate() {
+                    set_serial_stages(mask);
+                    let t = Instant::now();
+                    let tb = FlatTable::build(&bk);
+                    best[m][0] = best[m][0].min(t.elapsed().as_secs_f64() * 1e3);
+                    drop(tb);
+                    let t = Instant::now();
+                    let (li, ri) = HashJoin::join_row_ids(&pk, &bk, JoinType::Inner);
+                    best[m][1] = best[m][1].min(t.elapsed().as_secs_f64() * 1e3);
+                    let t = Instant::now();
+                    let g = gather(&sc, &ri);
+                    best[m][2] = best[m][2].min(t.elapsed().as_secs_f64() * 1e3);
+                    let t = Instant::now();
+                    let g2 = gather(&ic, &ri);
+                    best[m][3] = best[m][3].min(t.elapsed().as_secs_f64() * 1e3);
+                    assert_eq!(g.len(), li.len()); assert_eq!(g2.len(), li.len());
+                }
+            }
+            set_serial_stages(0);
+            println!("build={nb} probe={np} stride={stride}  [ms: FlatTable::build | join_row_ids | Str gather | Int gather]", );
+            for (m, &mask) in masks.iter().enumerate() {
+                println!("   serial-mask {mask}: {:.0} | {:.0} | {:.0} | {:.0}", best[m][0], best[m][1], best[m][2], best[m][3]);
+            }
         }
     }
 
