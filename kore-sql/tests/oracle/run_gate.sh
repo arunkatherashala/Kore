@@ -11,7 +11,8 @@ set -u
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$ROOT"
 JOBS=${GATE_JOBS:-4}
-OUT=${GATE_OUT:-$ROOT/target/gate}
+TD=${CARGO_TARGET_DIR:-$ROOT/target}
+OUT=${GATE_OUT:-$TD/gate}
 PY=${PY:-"$LOCALAPPDATA/miniconda3/envs/spark312/python.exe"}
 [ -x "$PY" ] || PY=python
 FIRST=${GATE_FIRST:-1}
@@ -23,8 +24,8 @@ if [ "${GATE_SKIP_TESTS:-0}" != 1 ]; then
   echo "[gate] cargo tests: $tests ($(grep -c '^test result' "$OUT/tests.log") result lines, failures: $(grep -c ' FAILED$' "$OUT/tests.log"))"
 fi
 cargo test --release -p kore-sql --offline -j "$JOBS" --test fuzz_oracle --no-run > "$OUT/build.log" 2>&1 || { echo "GATE FAIL (fuzz build failed, see $OUT/build.log)"; exit 2; }
-EXE=$(ls -t "$ROOT"/target/release/deps/fuzz_oracle-*.exe 2>/dev/null | head -1)
-[ -n "$EXE" ] || EXE=$(ls -t "$ROOT"/target/release/deps/fuzz_oracle-* | grep -v '\.d$' | head -1)
+EXE=$(ls -t "$TD"/release/deps/fuzz_oracle-*.exe 2>/dev/null | head -1)
+[ -n "$EXE" ] || EXE=$(ls -t "$TD"/release/deps/fuzz_oracle-* | grep -v '\.d$' | head -1)
 
 diff=0; mism=0; kerr=0
 run() {  # name, env... : one fuzz run + oracle replay
