@@ -2006,6 +2006,9 @@ fn exists_outer_cols(sub: &SelectStmt, ctx: &KqlContext) -> Option<std::collecti
 /// Columns of a filtered table that are not needed until after its joins: only the join keys (plus a
 /// `__rid` row number) are materialised up front, the rest is gathered once from `src` for the rows that
 /// survive the join (late materialisation).
+/// Row counts from which the serial pre-steps of the lazy join path run in parallel.
+const PAR_MIN: usize = 1 << 16;
+
 struct LazyCols<'a> {
     rid: String, src: &'a DataBlock, idx: Option<Vec<usize>>,
     /// payload columns (source column index, output name)
@@ -2017,7 +2020,7 @@ struct LazyCols<'a> {
 impl LazyCols<'_> {
     /// Key column `ci` restricted to the filtered rows.
     fn key_data(&self, ci: usize) -> ColumnData {
-        match &self.idx { Some(ix) => self.src.columns[ci].data.take_rows(ix), None => self.src.columns[ci].data.clone() }
+        match &self.idx { Some(ix) => kore_join::take_rows_par(&self.src.columns[ci].data, ix), None => kore_join::clone_column(&self.src.columns[ci].data) }
     }
 }
 
@@ -2026,7 +2029,11 @@ fn fill_keys(mut block: DataBlock, lz: &LazyCols<'_>) -> DataBlock {
     for (ci, name) in &lz.keys {
         if let Some(c) = block.columns.iter_mut().find(|c| c.name == *name) { c.data = lz.key_data(*ci); }
     }
-    block.columns.push(Column { name: lz.rid.clone(), data: ColumnData::Int64((0..block.num_rows as i64).map(Some).collect()) });
+    let rid: Vec<Option<i64>> = if block.num_rows >= PAR_MIN && !crate::testing::no_par_join() {
+        use rayon::prelude::*;
+        (0..block.num_rows as i64).into_par_iter().map(Some).collect()
+    } else { (0..block.num_rows as i64).map(Some).collect() };
+    block.columns.push(Column { name: lz.rid.clone(), data: ColumnData::Int64(rid) });
     block
 }
 
@@ -2041,12 +2048,16 @@ fn lazy_inner_join(left: DataBlock, lk: &str, lz: &LazyCols<'_>, rk: &str) -> Re
     let taken: Vec<Option<i64>>;
     let rv: &[Option<i64>] = match &lz.idx {
         None => rsrc,
-        Some(ix) => { taken = ix.iter().map(|&i| rsrc[i]).collect(); &taken }
+        Some(ix) => {
+            taken = if ix.len() >= PAR_MIN && !crate::testing::no_par_join() { ix.par_iter().map(|&i| rsrc[i]).collect() } else { ix.iter().map(|&i| rsrc[i]).collect() };
+            &taken
+        }
     };
     let (lidx, ridx) = kore_join::HashJoin::inner_join_row_ids(lv, rv);
     // row ids of the source table
     let src_rows: Vec<u32> = match &lz.idx {
         None => ridx,
+        Some(ix) if ridx.len() >= PAR_MIN && !crate::testing::no_par_join() => ridx.par_iter().map(|&r| ix[r as usize] as u32).collect(),
         Some(ix) => ridx.iter().map(|&r| ix[r as usize] as u32).collect(),
     };
     let n = lidx.len();
@@ -2069,13 +2080,14 @@ fn finish_lazy(mut block: DataBlock, lz: LazyCols<'_>) -> DataBlock {
     let Some(pos) = block.columns.iter().position(|c| c.name == lz.rid) else { return block };
     let rid = block.columns.remove(pos);
     let ColumnData::Int64(v) = rid.data else { return block };
-    let comp: Vec<usize> = v.iter().map(|x| {
+    let comp_of = |x: &Option<i64>| {
         let r = x.unwrap_or(0) as usize;
         match &lz.idx { Some(ix) => ix[r], None => r }
-    }).collect();
+    };
+    let comp: Vec<usize> = if v.len() >= PAR_MIN && !crate::testing::no_par_join() { v.par_iter().map(comp_of).collect() } else { v.iter().map(comp_of).collect() };
     drop(v);
     let cols: Vec<Column> = lz.cols.par_iter().map(|(ci, name)| Column {
-        name: name.clone(), data: lz.src.columns[*ci].data.take_rows(&comp),
+        name: name.clone(), data: kore_join::take_rows_par(&lz.src.columns[*ci].data, &comp),
     }).collect();
     block.columns.extend(cols);
     block
@@ -2378,32 +2390,40 @@ fn find_links(conjuncts: &[Expr], left: &DataBlock, right: &DataBlock) -> Vec<(u
 
 /// Add an Int64 column holding a hash of the given key columns, row by row.
 fn add_composite_key(block: &mut DataBlock, cols: &[String], name: &str) {
+    use rayon::prelude::*;
     const K: u64 = 0x9E37_79B9_7F4A_7C15;
+    const SEED: u64 = 0xcbf2_9ce4_8422_2325;
     let n = block.num_rows;
-    let mut h = vec![0xcbf2_9ce4_8422_2325u64; n];
-    for c in cols {
-        let Some(col) = block.columns.iter().find(|x| x.name == *c) else { continue };
-        let mix = |acc: &mut u64, v: u64| { *acc = (*acc ^ v).wrapping_mul(K).rotate_left(29); };
-        match &col.data {
-            ColumnData::Int64(v)   => for (acc, x) in h.iter_mut().zip(v) { mix(acc, x.map_or(u64::MAX, |i| (i as f64).to_bits())); },
-            ColumnData::Float64(v) => for (acc, x) in h.iter_mut().zip(v) { mix(acc, x.map_or(u64::MAX, |f| float_key(f))); },
-            ColumnData::Bool(v)    => for (acc, x) in h.iter_mut().zip(v) { mix(acc, x.map_or(2, |b| b as u64)); },
-            ColumnData::Str(v)     => for (acc, x) in h.iter_mut().zip(v) {
-                let mut s = 0xcbf2_9ce4_8422_2325u64;
-                if let Some(t) = x { for b in t.bytes() { s = (s ^ b as u64).wrapping_mul(0x100_0000_01b3); } } else { s = u64::MAX; }
-                mix(acc, s);
-            },
-            ColumnData::StrDict { codes, dict } => for (acc, &code) in h.iter_mut().zip(codes) {
-                let mut s = 0xcbf2_9ce4_8422_2325u64;
-                match dict.get(code as usize).filter(|_| code != u8::MAX) {
-                    Some(t) => for b in t.bytes() { s = (s ^ b as u64).wrapping_mul(0x100_0000_01b3); },
-                    None => s = u64::MAX,
-                }
-                mix(acc, s);
-            },
+    let par = n >= PAR_MIN && !crate::testing::no_par_join();
+    let mut h = vec![SEED; n];
+    #[inline(always)]
+    fn mix(acc: &mut u64, v: u64) { *acc = (*acc ^ v).wrapping_mul(K).rotate_left(29); }
+    #[inline(always)]
+    fn fnv(t: &str) -> u64 { let mut s = SEED; for b in t.bytes() { s = (s ^ b as u64).wrapping_mul(0x100_0000_01b3); } s }
+    // one column folded into the running hashes; `f` maps a cell to its 64-bit key
+    fn fold<T: Sync>(h: &mut [u64], v: &[T], par: bool, f: impl Fn(&T) -> u64 + Sync) {
+        if par {
+            h.par_chunks_mut(1 << 14).zip(v.par_chunks(1 << 14)).for_each(|(hc, vc)| for (acc, x) in hc.iter_mut().zip(vc) { mix(acc, f(x)); });
+        } else {
+            for (acc, x) in h.iter_mut().zip(v) { mix(acc, f(x)); }
         }
     }
-    block.columns.push(Column { name: name.to_string(), data: ColumnData::Int64(h.into_iter().map(|x| Some(x as i64)).collect()) });
+    for c in cols {
+        let Some(col) = block.columns.iter().find(|x| x.name == *c) else { continue };
+        match &col.data {
+            // an integer hashes as the f64 of its value so it meets an equal DOUBLE key; values above 2^53 may
+            // collide, which only adds candidates (the equalities are re-checked exactly afterwards)
+            ColumnData::Int64(v)   => fold(&mut h, v, par, |x| x.map_or(u64::MAX, |i| (i as f64).to_bits())),
+            ColumnData::Float64(v) => fold(&mut h, v, par, |x| x.map_or(u64::MAX, |f| float_key(f))),
+            ColumnData::Bool(v)    => fold(&mut h, v, par, |x| x.map_or(2, |b| b as u64)),
+            ColumnData::Str(v)     => fold(&mut h, v, par, |x| x.as_deref().map_or(u64::MAX, fnv)),
+            ColumnData::StrDict { codes, dict } => fold(&mut h, codes, par, |&code| {
+                match dict.get(code as usize).filter(|_| code != u8::MAX) { Some(t) => fnv(t), None => u64::MAX }
+            }),
+        }
+    }
+    let out: Vec<Option<i64>> = if par { h.par_iter().map(|&x| Some(x as i64)).collect() } else { h.into_iter().map(|x| Some(x as i64)).collect() };
+    block.columns.push(Column { name: name.to_string(), data: ColumnData::Int64(out) });
 }
 
 /// An equality conjunct `a = b` whose sides live in `left` and `right` respectively:

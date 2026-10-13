@@ -99,3 +99,10 @@ pub fn set_no_substr_dict(on: bool) { NO_SUBSTR_DICT.store(on, Ordering::Relaxed
 
 #[inline]
 pub(crate) fn no_substr_dict() -> bool { NO_SUBSTR_DICT.load(Ordering::Relaxed) }
+
+/// Turn off the parallel join mechanics (partitioned hash build, parallel concatenation / gather / composite
+/// key / lazy-join pre-steps) so results can be compared with the original serial code, exactly.
+pub fn set_no_par_join(on: bool) { kore_join::set_serial_join(on); }
+
+#[inline]
+pub(crate) fn no_par_join() -> bool { kore_join::serial_join() }
