@@ -388,6 +388,8 @@ impl<'a> G<'a> {
                 let op = *self.r.pick(&["union", "union all", "intersect", "except"]);
                 let (t1, t2) = (*self.r.pick(&[0usize, 1, 2, 3, 4]), *self.r.pick(&[0usize, 1, 2, 3, 4]));
                 let (c1, c2) = (*self.r.pick(&["k1", "g", "k2", "v", "f"]), *self.r.pick(&["k1", "g", "k2", "v", "f"]));
+                // FLOAT vs BIGINT branches are promoted to DOUBLE by kore (and Spark); SQLite keeps both: not comparable
+                let c2 = if (c1 == "f") != (c2 == "f") { c1 } else { c2 };
                 let w1 = if self.r.chance(50) { format!(" where {}", self.tab_pred_alias("x")) } else { String::new() };
                 let w2 = if self.r.chance(50) { format!(" where {}", self.tab_pred_alias("y")) } else { String::new() };
                 let outer = if self.r.chance(50) { format!("select count(*), sum(u) from (select x.{c1} as u from {} x{w1} {op} select y.{c2} from {} y{w2}) z", TABS[t1], TABS[t2]) } else { format!("select x.{c1} from {} x{w1} {op} select y.{c2} from {} y{w2}", TABS[t1], TABS[t2]) };
@@ -688,6 +690,7 @@ fn fuzz_joins_and_aggregates() {
         for qi in 0..per {
             let (sql, ordered) = { let mut g = G { r: &mut qr, n: sz.a, ks: sz.ka, tm }; g.query() };
             total += 1;
+            let tq = std::time::Instant::now();
             testing::set_force_general(false); testing::set_no_vecexpr(false); testing::set_no_fused(false);
             if std::env::var("FUZZ_TRACE").is_ok() { eprintln!("TRACE seed {seed} q{qi}: {sql}"); }
             let t0 = std::time::Instant::now();
@@ -695,15 +698,16 @@ fn fuzz_joins_and_aggregates() {
             if t0.elapsed().as_secs_f64() > 5.0 { println!("SLOW {:.1}s seed {seed} q{qi}: {sql}", t0.elapsed().as_secs_f64()); }
             // every optimisation switch on its own (and all together on small data): a disagreement names the switch
             let mut variants: Vec<(String, Result<Vec<String>, String>)> = Vec::new();
-            for (name, set) in &sw {
+            for (name, set, max_a) in &sw {
+                if sz.a > *max_a { continue; }
                 set(true);
                 variants.push((name.to_string(), answer(&ctx, &sql)));
                 set(false);
             }
             if sz.a < 60_000 && sw.len() > 2 {
-                for (_, set) in &sw { set(true); }
+                for (_, set, max_a) in &sw { if sz.a <= *max_a { set(true); } }
                 variants.push(("all_off".to_string(), answer(&ctx, &sql)));
-                for (_, set) in &sw { set(false); }
+                for (_, set, _) in &sw { set(false); }
             }
             // the row-based general tail is quadratic on joins: only run it on small data
             if sz.a < 200 { testing::set_force_general(true); variants.push(("general".to_string(), answer(&ctx, &sql))); testing::set_force_general(false); }
@@ -720,6 +724,7 @@ fn fuzz_joins_and_aggregates() {
                 for (n, v) in &variants { if !agree(&fast, v) { m.push_str(&format!("\n   {n:<14}{}", show(v))); } }
                 mismatches.push(m);
             }
+            if tq.elapsed().as_secs_f64() > 8.0 { println!("SLOWALL {:.1}s seed {seed} q{qi}: {sql}", tq.elapsed().as_secs_f64()); }
             if sdir.is_some() {
                 let _ = writeln!(out_q, "{}\t{}", if ordered { "O" } else { "U" }, sql);
                 match &fast {
@@ -743,11 +748,12 @@ fn fuzz_joins_and_aggregates() {
 ///   ("no_agg_pushdown", testing::set_no_agg_pushdown), ("no_par_build", testing::set_no_par_build),
 ///   ("no_cost_order", testing::set_no_cost_order), ("no_lazy_base", testing::set_no_lazy_base),
 ///   ("no_sip_bitmap", testing::set_no_sip_bitmap)
-fn switches() -> Vec<(&'static str, fn(bool))> {
-    let mut v: Vec<(&'static str, fn(bool))> = vec![("no_fused", testing::set_no_fused), ("no_vecexpr", testing::set_no_vecexpr)];
+/// The third field is the largest big-table size the switch is run at (no_hash_residual is a quadratic nested loop).
+fn switches() -> Vec<(&'static str, fn(bool), usize)> {
+    let mut v: Vec<(&'static str, fn(bool), usize)> = vec![("no_fused", testing::set_no_fused, usize::MAX), ("no_vecexpr", testing::set_no_vecexpr, usize::MAX)];
     if std::env::var("FUZZ_SWITCHES").map_or(true, |x| x != "0") {
-        v.push(("no_date_accel", testing::set_no_date_accel));
-        v.push(("no_hash_residual", testing::set_no_hash_residual));
+        v.push(("no_date_accel", testing::set_no_date_accel, usize::MAX));
+        v.push(("no_hash_residual", testing::set_no_hash_residual, 3000));
     }
     v
 }

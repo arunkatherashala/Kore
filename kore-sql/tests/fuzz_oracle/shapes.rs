@@ -168,27 +168,27 @@ impl<'a> G<'a> {
                 let conds: Vec<String> = (0..nc).map(|_| self.pred2(al)).collect();
                 self.agg_query(&als, &format!("{t} {al}"), &conds, &keys, 5)
             }
-            // explicit JOIN chain followed by comma-joined tables
+            // comma-joined tables followed by an explicit JOIN chain (the parser has no `JOIN .. ON .., table` form)
             7 | 8 => {
                 let mut idx: Vec<usize> = vec![0, 2, 3, 4, 5, 6];
                 for i in (1..idx.len()).rev() { let j = self.r.below(i + 1); idx.swap(i, j); }
                 if big && !idx[..3].contains(&0) { idx[0] = 0; }
-                let nj = 2 + self.r.below(2);
                 let ncomma = self.r.below(3);
-                let als: Vec<String> = idx.iter().take(nj + ncomma).map(|&i| POOL[i].1.to_string()).collect();
+                let nj = 1 + self.r.below(3);
+                let als: Vec<String> = idx.iter().take(1 + ncomma + nj).map(|&i| POOL[i].1.to_string()).collect();
                 let mut from = format!("{} {}", POOL[idx[0]].0, POOL[idx[0]].1);
-                for i in 1..nj {
+                let mut conds: Vec<String> = Vec::new();
+                for i in 1..=ncomma {
+                    from.push_str(&format!(", {} {}", POOL[idx[i]].0, POOL[idx[i]].1));
+                    let par = als[self.r.below(i)].clone();
+                    conds.push(format!("{}.k1 = {par}.k1", als[i]));
+                }
+                for i in 1 + ncomma..1 + ncomma + nj {
                     let (t, par) = (als[i].clone(), als[self.r.below(i)].clone());
                     let kind = *self.r.pick(&["join", "left join", "join", "inner join"]);
                     let key = match self.r.below(4) { 0 => format!("{t}.k1 = {par}.k1 and {t}.k2 = {par}.k2"), 1 => format!("{par}.k1 = {t}.k1 and {t}.s2 = {par}.s2"), _ => format!("{t}.k1 = {par}.k1") };
                     let extra = if self.r.chance(30) { format!(" and {}", self.pred2(&t)) } else { String::new() };
                     from.push_str(&format!(" {kind} {} {t} on {key}{extra}", POOL[idx[i]].0));
-                }
-                let mut conds: Vec<String> = Vec::new();
-                for i in nj..nj + ncomma {
-                    from.push_str(&format!(", {} {}", POOL[idx[i]].0, POOL[idx[i]].1));
-                    let par = als[self.r.below(i)].clone();
-                    conds.push(format!("{}.k1 = {par}.k1", als[i]));
                 }
                 for al in &als { if self.r.chance(30) { let p = self.pred2(al); conds.push(p); } }
                 let keys = if self.r.chance(15) { Vec::new() } else { let mk = 1 + self.r.below(5); self.group_keys(&als, mk, None, None) };

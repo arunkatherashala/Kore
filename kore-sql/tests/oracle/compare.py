@@ -62,6 +62,7 @@ def sortkey(r):
     return out
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     root = sys.argv[1]; verbose = "-v" in sys.argv
     bad = total = skipped = 0
     for sub in sorted(os.listdir(root)):
