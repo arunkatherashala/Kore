@@ -1547,19 +1547,61 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
                 }
                 Some((pi, links)) => {
                     // Several equalities connect the two sides (e.g. ps_partkey = l_partkey AND
-                    // ps_suppkey = l_suppkey): hash on all of them at once. A hash collision only adds
-                    // a candidate row; the equalities stay in `conjuncts` and are applied exactly below.
+                    // ps_suppkey = l_suppkey). Int64 keys whose combined range fits are packed into one exact key
+                    // (the equalities are then fully applied by the join); otherwise hash on all of them at once:
+                    // a hash collision only adds a candidate row, the equalities stay in `conjuncts` and are
+                    // applied exactly below.
                     let mut pb = pending.remove(pi);
                     let lz = lazies.remove(pi);
-                    if let Some(lz) = &lz { pb = fill_keys(pb, lz); }
                     let lcols: Vec<String> = links.iter().map(|l| l.1.clone()).collect();
                     let rcols: Vec<String> = links.iter().map(|l| l.2.clone()).collect();
-                    add_composite_key(&mut result, &lcols, "__jkL");
-                    add_composite_key(&mut pb, &rcols, "__jkR");
-                    let cfg = JoinConfig { left_key: "__jkL".into(), right_key: "__jkR".into(), join_type: JoinType::Inner };
-                    result = join_blocks(ctx, std::mem::replace(&mut result, DataBlock::empty()), pb, &cfg)?;
-                    result.columns.retain(|c| c.name != "__jkL" && c.name != "__jkR");
-                    if let Some(lz) = lz { result = finish_lazy(result, lz); }
+                    let mut packed: Option<(Vec<Option<i64>>, Vec<Option<i64>>)> = None;
+                    if plan_defer && !crate::testing::no_plan_pack() {
+                        // right-hand key columns of the filtered rows: from the lazy source or the loaded block
+                        let rdata: Option<Vec<ColumnData>> = rcols.iter().map(|n| match &lz {
+                            Some(lz) => lz.keys.iter().find(|(_, kn)| kn == n).map(|(ci, _)| lz.key_data(*ci)),
+                            None => pb.columns.iter().find(|c| c.name == *n).map(|c| c.data.clone()),
+                        }).collect();
+                        let lref: Option<Vec<&[Option<i64>]>> = lcols.iter().map(|n| match result.columns.iter().find(|c| c.name == *n).map(|c| &c.data) {
+                            Some(ColumnData::Int64(v)) => Some(v.as_slice()), _ => None }).collect();
+                        if let (Some(rd), Some(lr)) = (&rdata, &lref) {
+                            let rref: Option<Vec<&[Option<i64>]>> = rd.iter().map(|d| match d { ColumnData::Int64(v) => Some(v.as_slice()), _ => None }).collect();
+                            if let Some(rr) = rref {
+                                if result.num_rows < u32::MAX as usize && pb.num_rows < u32::MAX as usize { packed = pack_int_keys(lr, &rr); }
+                            }
+                        }
+                    }
+                    if let Some((lk, rk)) = packed {
+                        crate::testing::PLAN_PACKED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        // the packed equality replaces the link conjuncts
+                        let mut drop_idx: Vec<usize> = links.iter().map(|l| l.0).collect();
+                        drop_idx.sort_unstable_by(|a, b| b.cmp(a));
+                        for ci in drop_idx { conjuncts.remove(ci); }
+                        let left = std::mem::replace(&mut result, DataBlock::empty());
+                        match lz {
+                            Some(lz) => {
+                                let (lidx, ridx) = kore_join::HashJoin::inner_join_row_ids(&lk, &rk);
+                                result = lazy_gather(left, lidx, ridx, &lz, plan_defer);
+                                if !lz.cols.is_empty() { crate::testing::PLAN_DEFERRED.fetch_add(1, std::sync::atomic::Ordering::Relaxed); deferred_lz.push(lz); }
+                            }
+                            None => {
+                                let mut left = left;
+                                left.columns.push(Column { name: "__jkL".into(), data: ColumnData::Int64(lk) });
+                                pb.columns.push(Column { name: "__jkR".into(), data: ColumnData::Int64(rk) });
+                                let cfg = JoinConfig { left_key: "__jkL".into(), right_key: "__jkR".into(), join_type: JoinType::Inner };
+                                result = join_blocks(ctx, left, pb, &cfg)?;
+                                result.columns.retain(|c| c.name != "__jkL" && c.name != "__jkR");
+                            }
+                        }
+                    } else {
+                        if let Some(lz) = &lz { pb = fill_keys(pb, lz); }
+                        add_composite_key(&mut result, &lcols, "__jkL");
+                        add_composite_key(&mut pb, &rcols, "__jkR");
+                        let cfg = JoinConfig { left_key: "__jkL".into(), right_key: "__jkR".into(), join_type: JoinType::Inner };
+                        result = join_blocks(ctx, std::mem::replace(&mut result, DataBlock::empty()), pb, &cfg)?;
+                        result.columns.retain(|c| c.name != "__jkL" && c.name != "__jkR");
+                        if let Some(lz) = lz { result = finish_lazy(result, lz); }
+                    }
                 }
                 None => {
                     // no equality connects the remaining tables: fall back to a cross product (smallest first)
@@ -2110,6 +2152,13 @@ fn lazy_inner_join(left: DataBlock, lk: &str, lz: &LazyCols<'_>, rk: &str, defer
         Some(ix) => { taken = ix.iter().map(|&i| rsrc[i]).collect(); &taken }
     };
     let (lidx, ridx) = kore_join::HashJoin::inner_join_row_ids(lv, rv);
+    Ok(lazy_gather(left, lidx, ridx, lz, defer))
+}
+
+/// The gather half of `lazy_inner_join`: `lidx` / `ridx` are the matching row numbers of `left` and of the filtered
+/// rows of `lz`.
+fn lazy_gather(left: DataBlock, lidx: Vec<u32>, ridx: Vec<u32>, lz: &LazyCols<'_>, defer: bool) -> DataBlock {
+    use rayon::prelude::*;
     // `defer`: the payload columns are not gathered here but later, once, for the rows that survive every join
     // (the caller keeps `lz` and calls `finish_lazy`); a `__rid` column with the filtered-row numbers carries them
     let defer = defer && !lz.cols.is_empty();
@@ -2132,7 +2181,49 @@ fn lazy_inner_join(left: DataBlock, lk: &str, lz: &LazyCols<'_>, rk: &str, defer
     }).collect();
     let mut columns = columns;
     columns.extend(rid_col);
-    Ok(DataBlock { columns, num_rows: n })
+    DataBlock { columns, num_rows: n }
+}
+
+/// Exact single-key packing of several Int64 key columns per side: each component is offset by the minimum over both
+/// sides and the components are combined mixed-radix, so equal tuples give equal keys and different tuples different
+/// ones. A tuple with a NULL component becomes NULL (never matches). None when the combined range does not fit.
+fn pack_int_keys(left: &[&[Option<i64>]], right: &[&[Option<i64>]]) -> Option<(Vec<Option<i64>>, Vec<Option<i64>>)> {
+    use rayon::prelude::*;
+    const CH: usize = 1 << 16;
+    if left.is_empty() || left.len() != right.len() { return None; }
+    let mut los = Vec::new();
+    let mut mults: Vec<u128> = Vec::new();
+    let mut total: u128 = 1;
+    for (l, r) in left.iter().zip(right) {
+        let mm = |v: &[Option<i64>]| v.par_chunks(CH).map(|ch| {
+            let (mut lo, mut hi) = (i64::MAX, i64::MIN);
+            for x in ch { if let Some(k) = x { if *k < lo { lo = *k; } if *k > hi { hi = *k; } } }
+            (lo, hi)
+        }).reduce(|| (i64::MAX, i64::MIN), |a, b| (a.0.min(b.0), a.1.max(b.1)));
+        let (a, b) = (mm(l), mm(r));
+        let (lo, hi) = (a.0.min(b.0), a.1.max(b.1));
+        // a side without any non-NULL key: nothing can match, any packing will do
+        let span: u128 = if lo > hi { 1 } else { (hi as i128 - lo as i128) as u128 + 1 };
+        los.push(if lo > hi { 0 } else { lo });
+        mults.push(total);
+        total = total.checked_mul(span)?;
+        if total > (1u128 << 62) { return None; }
+    }
+    let pack = |cols: &[&[Option<i64>]]| -> Vec<Option<i64>> {
+        let n = cols[0].len();
+        (0..n.div_ceil(CH)).into_par_iter().flat_map_iter(|c| {
+            let (lo, hi) = (c * CH, ((c + 1) * CH).min(n));
+            (lo..hi).map(|i| {
+                let mut key: i64 = 0;
+                for (j, col) in cols.iter().enumerate() {
+                    let x = col[i]?;
+                    key += ((x as i128 - los[j] as i128) as i64) * (mults[j] as i64);
+                }
+                Some(key)
+            }).collect::<Vec<_>>()
+        }).collect()
+    };
+    Some((pack(left), pack(right)))
 }
 
 /// Append the lazy columns of `lz` to `block`, which carries a `__rid` column (row numbers of the filtered table).

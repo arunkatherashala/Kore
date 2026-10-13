@@ -64,7 +64,7 @@ fn rows(c: &KqlContext, sql: &str) -> Vec<String> {
 }
 
 #[derive(Clone, Copy)]
-enum Mode { Plan, NoPlan, NoSip, NoOrder, NoLazyBase, NoDefer }
+enum Mode { Plan, NoPlan, NoSip, NoOrder, NoLazyBase, NoDefer, NoPack }
 
 fn set_mode(m: Mode) {
     testing::set_no_plan(false);
@@ -75,6 +75,7 @@ fn set_mode(m: Mode) {
         Mode::NoOrder => testing::set_no_plan_order(true),
         Mode::NoLazyBase => testing::set_no_plan_lazy_base(true),
         Mode::NoDefer => testing::set_no_plan_defer(true),
+        Mode::NoPack => testing::set_no_plan_pack(true),
     }
 }
 
@@ -153,7 +154,7 @@ fn check(ctx: &KqlContext, sql: &str, modes: &[Mode]) {
     }
 }
 
-const ALL: &[Mode] = &[Mode::Plan, Mode::NoSip, Mode::NoOrder, Mode::NoLazyBase, Mode::NoDefer];
+const ALL: &[Mode] = &[Mode::Plan, Mode::NoSip, Mode::NoOrder, Mode::NoLazyBase, Mode::NoDefer, Mode::NoPack];
 
 fn run_scenario(seed: u64, sizes: &[usize], large_from: usize, queries: usize) {
     let mut r = Rng(seed);
@@ -268,4 +269,38 @@ fn tpch_shaped_chains() {
     }
     assert!(testing::plan_sip_sets() > sets0, "SIP key sets were never applied");
     assert!(testing::plan_derived_equalities() > eqs0, "no transitive equality was derived");
+}
+
+/// Multi-column Int64 keys: negative values, NULL components, duplicates, spans too wide to pack exactly.
+#[test]
+fn packed_composite_keys() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let packed0 = testing::plan_packed_joins();
+    for (seed, wide) in [(1u64, false), (2, false), (3, true), (4, true)] {
+        let mut r = Rng(seed);
+        let mut ctx = KqlContext::new();
+        for (name, n) in [("ta", 400usize), ("tb", 300), ("tc", 150)] {
+            let col = |r: &mut Rng, dom: usize, null_pct: usize| -> Vec<Option<i64>> {
+                (0..n).map(|_| if r.chance(null_pct) { None } else {
+                    let v = r.below(dom) as i64 - (dom as i64) / 2;
+                    // wide: values near the ends of the i64 range, so the combined range cannot be packed
+                    Some(if wide && v % 3 == 0 { v.wrapping_mul(1 << 60) } else { v })
+                }).collect()
+            };
+            let (x, y, z) = (col(&mut r, 9, 6), col(&mut r, 7, 6), col(&mut r, 5, 3));
+            let pay: Vec<Option<f64>> = (0..n).map(|_| Some(r.below(100) as f64 * 0.5)).collect();
+            let c = |s: &str| format!("{s}_{name}");
+            ctx.register(name, DataBlock::new(vec![
+                Column::int64(&c("x"), x), Column::int64(&c("y"), y), Column::int64(&c("z"), z), Column::float64(&c("p"), pay),
+            ]).unwrap());
+        }
+        let qs = [
+            "select count(*) as n, sum(p_ta) as s, sum(p_tb) as t from ta, tb where x_ta = x_tb and y_ta = y_tb",
+            "select count(*) as n, sum(p_ta) as s from ta, tb where x_ta = x_tb and y_ta = y_tb and z_ta = z_tb",
+            "select x_ta, count(*) as n, sum(p_tc) as s from ta, tb, tc where x_ta = x_tb and y_ta = y_tb and x_tb = x_tc and y_tb = y_tc and z_tc = z_ta group by x_ta",
+            "select ta.x_ta, tb.y_tb, tc.p_tc from ta, tb, tc where ta.x_ta = tb.x_tb and ta.y_ta = tb.y_tb and tb.z_tb = tc.z_tc and tb.y_tb = tc.y_tc and ta.p_ta < 30",
+        ];
+        for q in qs { check(&ctx, q, ALL); }
+    }
+    assert!(testing::plan_packed_joins() > packed0, "no join used the packed key");
 }
