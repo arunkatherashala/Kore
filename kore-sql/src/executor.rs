@@ -1513,16 +1513,46 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
                 let links = find_links(&conjuncts, &result, pb);
                 if links.is_empty() { None } else { Some((pi, links)) }
             }).collect();
-            let lookup = linked.iter()
-                .filter(|(pi, links)| links.len() == 1 && pending[*pi].num_rows <= 2_000_000
-                    && *unique_cache.entry(links[0].2.clone()).or_insert_with(|| match &lazies[*pi] {
-                        Some(lz) => lz.keys.iter().find(|(_, n)| *n == links[0].2).map_or(false, |(ci, n)| is_unique_key(
-                            &DataBlock { num_rows: pending[*pi].num_rows, columns: vec![Column { name: n.clone(), data: lz.key_data(*ci) }] }, n)),
-                        None => is_unique_key(&pending[*pi], &links[0].2),
-                    }))
-                .min_by_key(|(pi, _)| pending[*pi].num_rows).map(|(pi, _)| *pi);
+            // With the planner on, a table is also a lookup when any one of several linking equalities hits a unique
+            // key (the others only filter), and the size cap is higher: a unique key never blows the result up.
+            let plan_order = planned && !crate::testing::no_plan_order();
+            let cap = if plan_order { 16_000_000 } else { 2_000_000 };
+            let lookup = {
+                let mut uniq = |pi: usize, name: &String| -> bool {
+                    *unique_cache.entry(name.clone()).or_insert_with(|| match &lazies[pi] {
+                        Some(lz) => lz.keys.iter().find(|(_, n)| n == name).map_or(false, |(ci, n)| is_unique_key(
+                            &DataBlock { num_rows: pending[pi].num_rows, columns: vec![Column { name: n.clone(), data: lz.key_data(*ci) }] }, n)),
+                        None => is_unique_key(&pending[pi], name),
+                    })
+                };
+                let mut best: Option<(usize, usize)> = None;
+                for (pi, links) in &linked {
+                    if !(plan_order || links.len() == 1) || pending[*pi].num_rows > cap { continue; }
+                    let n_check = if plan_order { links.len() } else { 1 };
+                    if links.iter().take(n_check).any(|l| uniq(*pi, &l.2)) && best.map_or(true, |b| pending[*pi].num_rows < b.1) {
+                        best = Some((*pi, pending[*pi].num_rows));
+                    }
+                }
+                best.map(|b| b.0)
+            };
             let link = match lookup {
                 Some(pi) => linked.into_iter().find(|(i, _)| *i == pi),
+                None if plan_order && linked.len() > 1 => {
+                    // no lookup: join the candidate with the smallest estimated output (rows * rows / distinct keys)
+                    // from the actual row and distinct-key counts; unusable estimates or an estimate that grows the
+                    // result a lot keep the FROM order
+                    let ests: Vec<Option<f64>> = linked.iter().map(|(pi, links)| {
+                        let (_, lk, rk) = &links[0];
+                        est_join_rows(&result, lk, &pending[*pi], lazies[*pi].as_ref(), rk)
+                    }).collect();
+                    let mut pick = 0usize;
+                    if ests.iter().all(|e| e.is_some()) {
+                        let (bi, be) = ests.iter().enumerate().map(|(i, e)| (i, e.unwrap())).fold((0usize, f64::INFINITY), |a, b| if b.1 < a.1 { b } else { a });
+                        let (pi, _) = &linked[bi];
+                        if be <= 4.0 * (result.num_rows.max(pending[*pi].num_rows) as f64) { pick = bi; crate::testing::PLAN_ESTIMATED_PICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+                    }
+                    linked.into_iter().nth(pick)
+                }
                 None => linked.into_iter().next(),
             };
             match link {
@@ -2534,6 +2564,24 @@ fn filter_sets_first(pred: &Expr, src: &DataBlock, sets: &[(String, std::sync::A
     let keep = crate::vecexpr::filter_idx(pred, &sub)?;
     crate::testing::PLAN_SETS_FIRST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Some(keep.into_iter().map(|k| cand[k]).collect())
+}
+
+/// Estimated output rows of an inner join of `result` (key `lk`) with a pending table (key `rk`) as
+/// rows * rows / max(distinct left keys, distinct right keys), from the actual data. None when a key is not Int64.
+fn est_join_rows(result: &DataBlock, lk: &str, pb: &DataBlock, lz: Option<&LazyCols<'_>>, rk: &str) -> Option<f64> {
+    let ColumnData::Int64(lv) = &result.columns.iter().find(|c| c.name == lk)?.data else { return None };
+    let owned;
+    let rv: &[Option<i64>] = match lz {
+        Some(lz) => {
+            let (ci, _) = lz.keys.iter().find(|(_, n)| n == rk)?;
+            owned = lz.key_data(*ci);
+            match &owned { ColumnData::Int64(v) => v, _ => return None }
+        }
+        None => match &pb.columns.iter().find(|c| c.name == rk)?.data { ColumnData::Int64(v) => v, _ => return None },
+    };
+    let dl = crate::sipset::IntSet::build(lv, 4_000_000)?.count.max(1);
+    let dr = crate::sipset::IntSet::build(rv, 4_000_000)?.count.max(1);
+    Some(lv.len() as f64 * rv.len() as f64 / dl.max(dr) as f64)
 }
 
 /// Estimated rows of `src` (alias `alias`) after the conjuncts that only need its columns and the SIP key sets

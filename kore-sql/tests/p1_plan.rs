@@ -179,7 +179,7 @@ fn run_scenario(seed: u64, sizes: &[usize], large_from: usize, queries: usize) {
 #[test]
 fn small_random_joins_match() {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let deferred0 = testing::plan_deferred_tables();
+    let (deferred0, picks0) = (testing::plan_deferred_tables(), testing::plan_estimated_picks());
     for seed in 0..12u64 {
         let mut r = Rng(seed * 977 + 1);
         let n = 3 + r.below(5);
@@ -188,6 +188,7 @@ fn small_random_joins_match() {
         run_scenario(seed + 100, &sizes, usize::MAX, 14);
     }
     assert!(testing::plan_deferred_tables() > deferred0, "no table was ever gathered late");
+    assert!(testing::plan_estimated_picks() > picks0, "no join step was ordered by estimate");
 }
 
 #[test]

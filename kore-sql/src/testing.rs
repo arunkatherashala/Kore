@@ -129,3 +129,7 @@ pub fn plan_derived_equalities() -> usize { PLAN_DERIVED_EQS.load(Ordering::Rela
 pub(crate) static PLAN_DEFERRED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// How many tables had their payload columns gathered after the last join (late materialisation) so far.
 pub fn plan_deferred_tables() -> usize { PLAN_DEFERRED.load(Ordering::Relaxed) }
+
+pub(crate) static PLAN_ESTIMATED_PICKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// How many join steps picked their next table from distinct-key estimates so far.
+pub fn plan_estimated_picks() -> usize { PLAN_ESTIMATED_PICKS.load(Ordering::Relaxed) }
