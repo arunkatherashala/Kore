@@ -2346,9 +2346,17 @@ fn load_table_sets<'a>(
     }
     if !sets_done {
         idx = match &pred {
+            Some(p) if !sets.is_empty() => {
+                // predicate and key sets in one pass over the table
+                let cols: Vec<(&[Option<i64>], &crate::sipset::IntSet)> = sets.iter().filter_map(|(c, set)| {
+                    match src.columns.iter().find(|x| x.name == *c) { Some(Column { data: ColumnData::Int64(v), .. }) => Some((v.as_slice(), &**set)), _ => None }
+                }).collect();
+                if cols.len() == sets.len() { sets_done = true; crate::vecexpr::filter_idx_sets(p, src, &cols) } else { crate::vecexpr::filter_idx(p, src) }
+            }
             Some(p) => crate::vecexpr::filter_idx(p, src),
             None => None,
         };
+        if sets_done && idx.is_some() { crate::testing::PLAN_SIP_SETS.fetch_add(sets.len(), std::sync::atomic::Ordering::Relaxed); }
     }
     prof!(__tl, "load_table {} filter_idx n={:?} src={}", alias, idx.as_ref().map(|v| v.len()), src.num_rows);
     if pred.is_some() && idx.is_none() {
