@@ -645,6 +645,18 @@ fn run_partitioned(job: &Job) -> Option<Groups> {
     Some(Groups { first, acc, cnt })
 }
 
+/// `data.take_rows(idx)`, spread over the threads for many rows.
+fn gather(data: &ColumnData, idx: &[usize]) -> ColumnData {
+    if idx.len() < 100_000 || crate::testing::no_wide_agg() { return data.take_rows(idx); }
+    match data {
+        ColumnData::Int64(v) => ColumnData::Int64(idx.par_iter().map(|&i| v[i]).collect()),
+        ColumnData::Float64(v) => ColumnData::Float64(idx.par_iter().map(|&i| v[i]).collect()),
+        ColumnData::Str(v) => ColumnData::Str(idx.par_iter().map(|&i| v[i].clone()).collect()),
+        ColumnData::StrDict { codes, dict } => ColumnData::StrDict { codes: idx.par_iter().map(|&i| codes[i]).collect(), dict: dict.clone() },
+        _ => data.take_rows(idx),
+    }
+}
+
 /// One run of the aggregation over `job` (groups in order of first appearance).
 fn aggregate(job: &Job) -> Option<Groups> {
     let hc = !job.sorted && looks_high_cardinality(job);
@@ -824,7 +836,7 @@ pub(crate) fn run(req: Request) -> Option<DataBlock> {
 
     // key columns are gathered from the first rows of the groups, one column per task (text clones are the cost)
     let mut key_data: std::collections::VecDeque<ColumnData> = outs.par_iter().filter_map(|o| match o {
-        Out::Key(col, _) => Some(col.data.take_rows(&groups.first)),
+        Out::Key(col, _) => Some(gather(&col.data, &groups.first)),
         _ => None,
     }).collect::<Vec<_>>().into();
     pr(&__t, "key columns gathered");
@@ -844,12 +856,13 @@ pub(crate) fn run(req: Request) -> Option<DataBlock> {
             }
             Out::Agg { func, name, integral } => {
                 let (acc, cnt) = (&groups.acc[si], &groups.cnt[si]);
-                let data: Vec<Option<f64>> = (0..ng).map(|g| match func {
+                let one = |g: usize| -> Option<f64> { match func {
                     AggFunc::Count => Some(cnt[g] as f64),
                     _ if cnt[g] == 0 => None,
                     AggFunc::Avg => Some(acc[g] / cnt[g] as f64),
                     _ => Some(acc[g]),
-                }).collect();
+                } };
+                let data: Vec<Option<f64>> = if ng >= 100_000 { (0..ng).into_par_iter().map(one).collect() } else { (0..ng).map(one).collect() };
                 si += 1;
                 if matches!(func, AggFunc::Count) {
                     columns.push(Column { name: name.clone(), data: ColumnData::Int64(data.into_iter().map(|v| v.map(|x| x as i64)).collect()) });
