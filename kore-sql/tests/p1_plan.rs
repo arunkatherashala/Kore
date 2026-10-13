@@ -64,7 +64,7 @@ fn rows(c: &KqlContext, sql: &str) -> Vec<String> {
 }
 
 #[derive(Clone, Copy)]
-enum Mode { Plan, NoPlan, NoSip, NoOrder, NoLazyBase }
+enum Mode { Plan, NoPlan, NoSip, NoOrder, NoLazyBase, NoDefer }
 
 fn set_mode(m: Mode) {
     testing::set_no_plan(false);
@@ -74,6 +74,7 @@ fn set_mode(m: Mode) {
         Mode::NoSip => testing::set_no_plan_sip(true),
         Mode::NoOrder => testing::set_no_plan_order(true),
         Mode::NoLazyBase => testing::set_no_plan_lazy_base(true),
+        Mode::NoDefer => testing::set_no_plan_defer(true),
     }
 }
 
@@ -152,7 +153,7 @@ fn check(ctx: &KqlContext, sql: &str, modes: &[Mode]) {
     }
 }
 
-const ALL: &[Mode] = &[Mode::Plan, Mode::NoSip, Mode::NoOrder, Mode::NoLazyBase];
+const ALL: &[Mode] = &[Mode::Plan, Mode::NoSip, Mode::NoOrder, Mode::NoLazyBase, Mode::NoDefer];
 
 fn run_scenario(seed: u64, sizes: &[usize], large_from: usize, queries: usize) {
     let mut r = Rng(seed);
@@ -176,6 +177,7 @@ fn run_scenario(seed: u64, sizes: &[usize], large_from: usize, queries: usize) {
 #[test]
 fn small_random_joins_match() {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let deferred0 = testing::plan_deferred_tables();
     for seed in 0..12u64 {
         let mut r = Rng(seed * 977 + 1);
         let n = 3 + r.below(5);
@@ -183,6 +185,7 @@ fn small_random_joins_match() {
         // tables of 0 rows or more: the generator needs at least two
         run_scenario(seed + 100, &sizes, usize::MAX, 14);
     }
+    assert!(testing::plan_deferred_tables() > deferred0, "no table was ever gathered late");
 }
 
 #[test]

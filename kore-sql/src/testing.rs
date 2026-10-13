@@ -58,6 +58,7 @@ pub(crate) fn slow_window() -> bool { SLOW_WINDOW.load(Ordering::Relaxed) }
 pub(crate) static NO_PLAN_SIP: AtomicBool = AtomicBool::new(false);
 pub(crate) static NO_PLAN_ORDER: AtomicBool = AtomicBool::new(false);
 pub(crate) static NO_PLAN_LAZY_BASE: AtomicBool = AtomicBool::new(false);
+pub(crate) static NO_PLAN_DEFER: AtomicBool = AtomicBool::new(false);
 
 /// Disable the bitmap/hash-set SIP side channel and derived equalities (back to capped `IN (...)` lists), for A/B tests.
 pub fn set_no_plan_sip(on: bool) { NO_PLAN_SIP.store(on, Ordering::Relaxed); }
@@ -65,8 +66,10 @@ pub fn set_no_plan_sip(on: bool) { NO_PLAN_SIP.store(on, Ordering::Relaxed); }
 pub fn set_no_plan_order(on: bool) { NO_PLAN_ORDER.store(on, Ordering::Relaxed); }
 /// Load the base table of a comma join eagerly (the old behaviour), for A/B tests.
 pub fn set_no_plan_lazy_base(on: bool) { NO_PLAN_LAZY_BASE.store(on, Ordering::Relaxed); }
+/// Gather payload columns after every join (the old behaviour) instead of once for the final rows, for A/B tests.
+pub fn set_no_plan_defer(on: bool) { NO_PLAN_DEFER.store(on, Ordering::Relaxed); }
 /// Turn every join-planner optimisation off (or on) at once.
-pub fn set_no_plan(on: bool) { set_no_plan_sip(on); set_no_plan_order(on); set_no_plan_lazy_base(on); }
+pub fn set_no_plan(on: bool) { set_no_plan_sip(on); set_no_plan_order(on); set_no_plan_lazy_base(on); set_no_plan_defer(on); }
 
 fn env_flag(name: &str, cell: &'static std::sync::OnceLock<bool>) -> bool {
     *cell.get_or_init(|| std::env::var_os(name).is_some())
@@ -83,6 +86,11 @@ pub(crate) fn no_plan_order() -> bool {
     NO_PLAN_ORDER.load(Ordering::Relaxed) || env_flag("KORE_NO_PLAN_ORDER", &E)
 }
 #[inline]
+pub(crate) fn no_plan_defer() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_PLAN_DEFER.load(Ordering::Relaxed) || env_flag("KORE_NO_PLAN_DEFER", &E)
+}
+#[inline]
 pub(crate) fn no_plan_lazy_base() -> bool {
     static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     NO_PLAN_LAZY_BASE.load(Ordering::Relaxed) || env_flag("KORE_NO_PLAN_LAZY_BASE", &E)
@@ -95,3 +103,7 @@ pub(crate) static PLAN_DERIVED_EQS: std::sync::atomic::AtomicUsize = std::sync::
 pub fn plan_sip_sets() -> usize { PLAN_SIP_SETS.load(Ordering::Relaxed) }
 /// How many transitive equalities the planner derived so far.
 pub fn plan_derived_equalities() -> usize { PLAN_DERIVED_EQS.load(Ordering::Relaxed) }
+
+pub(crate) static PLAN_DEFERRED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// How many tables had their payload columns gathered after the last join (late materialisation) so far.
+pub fn plan_deferred_tables() -> usize { PLAN_DEFERRED.load(Ordering::Relaxed) }
