@@ -337,3 +337,39 @@ fn selective_key_sets_run_first() {
     for q in qs { check(&ctx, q, ALL); }
     assert!(testing::plan_sets_first_loads() > first0, "no load ran its key sets before the predicate");
 }
+
+/// `select *` and explicit column lists must keep their column order and names whatever the planner does with payload
+/// columns (late gather appends them after the join keys).
+#[test]
+fn star_column_order_is_stable() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut r = Rng(3);
+    let mut ctx = KqlContext::new();
+    ctx.register("t0", make_table(&mut r, 0, 300, false, 50));
+    ctx.register("t1", make_table(&mut r, 1, 200, false, 50));
+    ctx.register("t2", make_table(&mut r, 2, 120_000, false, 30_000));
+    let queries = [
+        "select * from t0, t1 where k0a = k1a and v0 < 700",
+        "select * from t1, t0 where k0b = k1b",
+        "select * from t0, t1, t2 where k0a = k1a and k2a = k0a and v2 < 500",
+        "select t1.*, t0.v0 from t0, t1 where k0a = k1a",
+        "select s1, k0a, f0, v1 from t0, t1 where k0a = k1a",
+    ];
+    for q in queries {
+        set_mode(Mode::NoPlan);
+        let want = ctx.query(q).unwrap();
+        let want_names: Vec<String> = want.columns.iter().map(|c| c.name.clone()).collect();
+        let mut want_rows = rows(&ctx, q);
+        want_rows.sort();
+        for m in [Mode::Plan, Mode::NoDefer, Mode::NoLazyBase, Mode::NoSip] {
+            set_mode(m);
+            let got = ctx.query(q).unwrap();
+            let names: Vec<String> = got.columns.iter().map(|c| c.name.clone()).collect();
+            assert_eq!(want_names, names, "column order/names differ for {q}");
+            let mut got_rows = rows(&ctx, q);
+            got_rows.sort();
+            assert_eq!(want_rows, got_rows, "rows differ for {q}");
+        }
+    }
+    set_mode(Mode::Plan);
+}
