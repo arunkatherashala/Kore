@@ -59,6 +59,8 @@ impl<'a> G<'a> {
     fn chain(&mut self, nt: usize, star: bool) -> (Vec<String>, String, Vec<String>) {
         let big = self.n >= 200;
         let mut idx: Vec<usize> = if star { vec![0, 2, 3, 4, 5, 6] } else { (0..7).collect() };
+        // small data: te has 0..5 rows and empties every chain it is in; keep it in only sometimes
+        if !big && self.r.chance(75) { idx.retain(|&i| i != 4); }
         for i in (1..idx.len()).rev() { let j = self.r.below(i + 1); idx.swap(i, j); }
         idx.truncate(nt.min(idx.len()));
         // root: the fact table most of the time (the push-down precondition is a many-side join key)
@@ -71,7 +73,7 @@ impl<'a> G<'a> {
         for i in 1..als.len() {
             let (t, par) = (als[i].clone(), als[self.r.below(i)].clone());
             let both_many = is_many(&t) && is_many(&par);
-            let kind = if both_many { self.r.below(3) } else { self.r.below(10) };
+            let kind = if both_many { self.r.below(3) } else if !big && self.r.chance(55) { 0 } else { self.r.below(10) };
             let small_pair = t == "e" || par == "e" || (!is_many(&t) && !is_many(&par));
             let c = match kind {
                 0..=4 => format!("{t}.k1 = {par}.k1"),
@@ -93,7 +95,7 @@ impl<'a> G<'a> {
         let mut order = idx.clone();
         for i in (1..order.len()).rev() { if self.r.chance(40) { let j = self.r.below(i + 1); order.swap(i, j); } }
         let from = order.iter().map(|&i| format!("{} {}", POOL[i].0, POOL[i].1)).collect::<Vec<_>>().join(", ");
-        for al in &als { if self.r.chance(40) { let p = self.pred2(al); conds.push(p); } }
+        for al in &als { if self.r.chance(self.fpct) { let p = self.pred2(al); conds.push(p); } }
         (als, from, conds)
     }
 
@@ -190,7 +192,7 @@ impl<'a> G<'a> {
                     let extra = if self.r.chance(30) { format!(" and {}", self.pred2(&t)) } else { String::new() };
                     from.push_str(&format!(" {kind} {} {t} on {key}{extra}", POOL[idx[i]].0));
                 }
-                for al in &als { if self.r.chance(30) { let p = self.pred2(al); conds.push(p); } }
+                for al in &als { if self.r.chance(self.fpct) { let p = self.pred2(al); conds.push(p); } }
                 let keys = if self.r.chance(15) { Vec::new() } else { let mk = 1 + self.r.below(5); self.group_keys(&als, mk, None, None) };
                 self.agg_query(&als, &from, &conds, &keys, 4)
             }

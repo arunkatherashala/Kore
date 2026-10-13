@@ -146,7 +146,7 @@ fn canon(rows: &[String], ordered: bool) -> Vec<String> {
 
 // ───────────────────────── query generator ─────────────────────────
 
-struct G<'a> { r: &'a mut Rng, n: usize, ks: usize, tm: (i64, i64) }
+struct G<'a> { r: &'a mut Rng, n: usize, ks: usize, tm: (i64, i64), fpct: usize }
 
 impl<'a> G<'a> {
     /// A constant from the (transformed) key domain.
@@ -688,7 +688,7 @@ fn fuzz_joins_and_aggregates() {
         }
         let mut qr = Rng(seed * 31 + 7);
         for qi in 0..per {
-            let (sql, ordered) = { let mut g = G { r: &mut qr, n: sz.a, ks: sz.ka, tm }; g.query() };
+            let (sql, ordered) = { let mut g = G { r: &mut qr, n: sz.a, ks: sz.ka, tm, fpct: if sz.a < 200 { 12 } else { 30 } }; g.query() };
             total += 1;
             let tq = std::time::Instant::now();
             testing::set_force_general(false); testing::set_no_vecexpr(false); testing::set_no_fused(false);
