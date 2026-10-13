@@ -29,6 +29,10 @@ fn sizes(scale: &str, r: &mut Rng) -> Sizes {
     // FUZZ_A pins the row count of the big table (threshold probing: 4096, 8192, 65536, 100000 +/- 1 ...)
     if let Some(a) = std::env::var("FUZZ_A").ok().and_then(|v| v.parse().ok()) { sz.a = a; }
     if let Some(b) = std::env::var("FUZZ_B").ok().and_then(|v| v.parse().ok()) { sz.b = b; }
+    // FUZZ_C / FUZZ_D pin the unique-key tables (size cliffs around the 2M lookup-join cap, 400k SIP keys), FUZZ_KA the key domain
+    if let Some(c) = std::env::var("FUZZ_C").ok().and_then(|v| v.parse().ok()) { sz.c = c; }
+    if let Some(d) = std::env::var("FUZZ_D").ok().and_then(|v| v.parse().ok()) { sz.d = d; }
+    if let Some(k) = std::env::var("FUZZ_KA").ok().and_then(|v| v.parse().ok()) { sz.ka = k; }
     sz
 }
 
@@ -46,7 +50,15 @@ fn onull<T>(r: &mut Rng, pct: usize, v: T) -> Option<T> { if r.chance(pct) { Non
 
 /// Columns of every table: k1, k2 (join keys), g (small group domain), v (int), f (float), s (text).
 /// `uniq`: k1 is unique (a permutation prefix of 0..n, so key domain is `n` or `ka` whichever is larger).
-fn make_table(r: &mut Rng, n: usize, ka: usize, uniq: bool, with_id: bool, null_pct: usize, dict: bool, tm: (i64, i64)) -> DataBlock {
+const STRS2: [&str; 8] = ["\u{dc}n\u{ef}", "\u{65e5}\u{672c}\u{8a9e}", "x", "", "ab", "\u{e9}", "zz", "\u{65e5}\u{672c}"];
+const FGS: [f64; 6] = [-1.5, 0.0, 0.5, 2.25, 100.125, -37.0];
+const BAD_DATES: [&str; 6] = ["2020-13-45", "20-01-01", "2021-02-30", "abc", "", "1994/05/06"];
+
+/// ISO date string from a 420-value domain (1992..1998, 12 months, days 1,6,..,26).
+fn iso_date(r: &mut Rng) -> String { format!("{}-{:02}-{:02}", 1992 + r.below(7), 1 + r.below(12), 1 + 5 * r.below(6)) }
+
+#[allow(clippy::too_many_arguments)]
+fn make_table(r: &mut Rng, n: usize, ka: usize, uniq: bool, with_id: bool, null_pct: usize, dict: bool, tm: (i64, i64), bad_dt: bool) -> DataBlock {
     let mut cols = Vec::new();
     if with_id { cols.push(Column::int64("id", (1..=n as i64).map(Some).collect())); }
     let k1: Vec<Option<i64>> = if uniq {
@@ -75,6 +87,14 @@ fn make_table(r: &mut Rng, n: usize, ka: usize, uniq: bool, with_id: bool, null_
     // high-cardinality group key (many groups: forces partitioned / hashed group-by)
     let hi = (n / 3).max(2);
     cols.push(Column::int64("h", (0..n).map(|_| { let v = r.below(hi) as i64 * tm.0 + tm.1; onull(r, null_pct / 2, v) }).collect()));
+    // fg: float group key (few values, NULLs); dt: ISO date text (malformed values when `bad_dt`: must disable the date
+    // accelerator for the column); s2: plain (never dictionary) text with non-ASCII values
+    cols.push(Column::float64("fg", (0..n).map(|_| { let v = *r.pick(&FGS); onull(r, null_pct, v) }).collect()));
+    cols.push(Column::str_col("dt", (0..n).map(|_| {
+        let v = if bad_dt && r.chance(3) { r.pick(&BAD_DATES).to_string() } else { iso_date(r) };
+        onull(r, null_pct, v)
+    }).collect()));
+    cols.push(Column::str_col("s2", (0..n).map(|_| { let v = r.pick(&STRS2).to_string(); onull(r, null_pct, v) }).collect()));
     DataBlock::new(cols).unwrap()
 }
 
@@ -131,8 +151,8 @@ struct G<'a> { r: &'a mut Rng, n: usize, ks: usize, tm: (i64, i64) }
 impl<'a> G<'a> {
     /// A constant from the (transformed) key domain.
     fn kc(&mut self, bound: usize) -> String { (self.r.below(bound) as i64 * self.tm.0 + self.tm.1).to_string() }
-    fn col(&mut self, t: usize, kind: &str) -> String {
-        let a = ALIAS[t];
+    fn col(&mut self, t: usize, kind: &str) -> String { self.col_a(ALIAS[t], kind) }
+    fn col_a(&mut self, a: &str, kind: &str) -> String {
         match kind {
             // SUM / AVG arguments: keys are excluded (a transformed key near 2^60 would overflow BIGINT)
             "sumint" => format!("{a}.{}", self.r.pick(&["v", "g", "k2", "v"])),
@@ -140,11 +160,20 @@ impl<'a> G<'a> {
             "key" => format!("{a}.{}", self.r.pick(&["k1", "k2", "g"])),
             "grp" => format!("{a}.{}", self.r.pick(&["g", "k2", "s", "k1", "h"])),
             "float" => format!("{a}.f"),
+            "float2" => format!("{a}.{}", self.r.pick(&["f", "fg", "f"])),
+            "str2" => format!("{a}.{}", self.r.pick(&["s", "s2", "dt"])),
+            // rich group keys: ints, floats, dictionary / plain / non-ASCII text, dates, expressions
+            "grp2" => match self.r.below(14) {
+                0 => format!("{a}.g"), 1 => format!("{a}.k2"), 2 => format!("{a}.fg"), 3 => format!("{a}.s"), 4 => format!("{a}.s2"),
+                5 => format!("{a}.dt"), 6 => format!("substr({a}.dt, 1, 4)"), 7 => format!("substr({a}.dt, 1, 7)"), 8 => format!("{a}.k1"),
+                9 => format!("{a}.k2 + {a}.g"), 10 => format!("{a}.g % 3"), 11 => format!("length({a}.s2)"), 12 => format!("{a}.h"),
+                _ => format!("substr({a}.s2, 1, 2)"),
+            },
             _ => format!("{a}.s"),
         }
     }
-    fn tab_pred(&mut self, t: usize) -> String {
-        let a = ALIAS[t];
+    fn tab_pred(&mut self, t: usize) -> String { self.tab_pred_a(ALIAS[t]) }
+    fn tab_pred_a(&mut self, a: &str) -> String {
         let cmp = *self.r.pick(&["=", "<>", "<", "<=", ">", ">="]);
         match self.r.below(14) {
             0 => format!("{a}.v {cmp} {}", self.r.below(60) as i64 - 30),
@@ -248,6 +277,9 @@ impl<'a> G<'a> {
     /// Returns (sql, ordered). Unordered answers are compared as multisets.
     fn query(&mut self) -> (String, bool) {
         let big = self.n >= 200;
+        // FUZZ_NEW = percentage of queries drawn from the join / aggregate machinery shapes (shapes.rs); default 40
+        let new_pct = std::env::var("FUZZ_NEW").ok().and_then(|v| v.parse().ok()).unwrap_or(40usize);
+        if self.r.chance(new_pct) { return self.query2(); }
         let mut pick = self.r.below(54);
         // the row-based window evaluator is quadratic in the partition size: keep windows to small / mid tables
         if self.n >= 60_000 && matches!(pick, 18 | 19 | 20) { pick = 0; }
@@ -609,6 +641,7 @@ fn fuzz_joins_and_aggregates() {
     let per: usize = std::env::var("FUZZ_PER").ok().and_then(|v| v.parse().ok()).unwrap_or(150);
     let first: u64 = std::env::var("FUZZ_FIRST").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
     let dir = std::env::var("FUZZ_DIR").ok();
+    let sw = switches();
     let mut mismatches: Vec<String> = Vec::new();
     let (mut total, mut ok) = (0usize, 0usize);
     for seed in first..first + seeds {
@@ -620,11 +653,13 @@ fn fuzz_joins_and_aggregates() {
         // 2^53 that differ by less than a double's resolution (exactness of every key comparison)
         let tms: [(i64, i64); 5] = [(1, 0), (7, -1_000_000), (100_003, 1_000_000_000_000), (3, 1i64 << 60), (1, -(1i64 << 62))];
         let tm = match std::env::var("FUZZ_TM").ok().and_then(|v| v.parse::<usize>().ok()) { Some(i) => tms[i % 5], None => tms[(seed as usize / 2) % 5] };
-        let ta = make_table(&mut r, sz.a, sz.ka, false, true, np, dict, tm);
-        let tb = make_table(&mut r, sz.b, sz.ka, false, false, np, false, tm);
-        let tc = make_table(&mut r, sz.c, sz.ka, true, false, if np == 0 { 0 } else { 8 }, false, tm);
-        let td = make_table(&mut r, sz.d, sz.ka, true, false, 0, dict, tm);
-        let te = make_table(&mut r, sz.e, sz.ka, false, false, 10, false, tm);
+        // malformed dates in some tables of some seeds (bit i of `bad` = table i)
+        let bad = if seed % 3 == 0 { r.below(32) } else { 0 };
+        let ta = make_table(&mut r, sz.a, sz.ka, false, true, np, dict, tm, bad & 1 != 0);
+        let tb = make_table(&mut r, sz.b, sz.ka, false, false, np, false, tm, bad & 2 != 0);
+        let tc = make_table(&mut r, sz.c, sz.ka, true, false, if np == 0 { 0 } else { 8 }, false, tm, bad & 4 != 0);
+        let td = make_table(&mut r, sz.d, sz.ka, true, false, 0, dict, tm, bad & 8 != 0);
+        let te = make_table(&mut r, sz.e, sz.ka, false, false, 10, false, tm, bad & 16 != 0);
         let mut ctx = KqlContext::new();
         let blocks = [("ta", ta), ("tb", tb), ("tc", tc), ("td", td), ("te", te)];
         for (n, b) in &blocks { ctx.register(*n, b.clone()); }
@@ -658,25 +693,32 @@ fn fuzz_joins_and_aggregates() {
             let t0 = std::time::Instant::now();
             let fast = answer(&ctx, &sql);
             if t0.elapsed().as_secs_f64() > 5.0 { println!("SLOW {:.1}s seed {seed} q{qi}: {sql}", t0.elapsed().as_secs_f64()); }
-            testing::set_no_fused(true);
-            let nofused = answer(&ctx, &sql);
-            testing::set_no_fused(false);
-            testing::set_no_vecexpr(true);
-            let rowonly = answer(&ctx, &sql);
-            testing::set_no_vecexpr(false);
+            // every optimisation switch on its own (and all together on small data): a disagreement names the switch
+            let mut variants: Vec<(String, Result<Vec<String>, String>)> = Vec::new();
+            for (name, set) in &sw {
+                set(true);
+                variants.push((name.to_string(), answer(&ctx, &sql)));
+                set(false);
+            }
+            if sz.a < 60_000 && sw.len() > 2 {
+                for (_, set) in &sw { set(true); }
+                variants.push(("all_off".to_string(), answer(&ctx, &sql)));
+                for (_, set) in &sw { set(false); }
+            }
             // the row-based general tail is quadratic on joins: only run it on small data
-            let general = if sz.a < 200 { testing::set_force_general(true); let g = answer(&ctx, &sql); testing::set_force_general(false); Some(g) } else { None };
+            if sz.a < 200 { testing::set_force_general(true); variants.push(("general".to_string(), answer(&ctx, &sql))); testing::set_force_general(false); }
             let agree = |a: &Result<Vec<String>, String>, b: &Result<Vec<String>, String>| match (a, b) {
                 (Ok(x), Ok(y)) => canon(x, ordered) == canon(y, ordered),
                 (Err(_), Err(_)) => true,
                 _ => false,
             };
             if fast.is_ok() { ok += 1; }
-            let spilled = ctx_spill.as_ref().map(|c| answer(c, &sql));
-            let bad = !agree(&fast, &nofused) || !agree(&fast, &rowonly) || general.as_ref().map_or(false, |g| !agree(&fast, g))
-                || spilled.as_ref().map_or(false, |g| !agree(&fast, g));
-            if bad {
-                mismatches.push(format!("DIFF seed {seed} {scale}: {sql}\n   fast    {}\n   nofused {}\n   rowonly {}\n   general {}\n   spilled {}", show(&fast), show(&nofused), show(&rowonly), general.as_ref().map(show).unwrap_or_default(), spilled.as_ref().map(show).unwrap_or_default()));
+            if let Some(c) = ctx_spill.as_ref() { variants.push(("spilled".to_string(), answer(c, &sql))); }
+            let bad_names: Vec<&str> = variants.iter().filter(|(_, v)| !agree(&fast, v)).map(|(n, _)| n.as_str()).collect();
+            if !bad_names.is_empty() {
+                let mut m = format!("DIFF [{}] seed {seed} {scale} q{qi}: {sql}\n   fast {}", bad_names.join(","), show(&fast));
+                for (n, v) in &variants { if !agree(&fast, v) { m.push_str(&format!("\n   {n:<14}{}", show(v))); } }
+                mismatches.push(m);
             }
             if sdir.is_some() {
                 let _ = writeln!(out_q, "{}\t{}", if ordered { "O" } else { "U" }, sql);
@@ -696,6 +738,20 @@ fn fuzz_joins_and_aggregates() {
     assert!(mismatches.is_empty(), "{} of {} queries disagree across paths", mismatches.len(), total);
 }
 
+/// Every optimisation switch, by name. FUZZ_SWITCHES=0 keeps only the original two (no_fused, no_vecexpr).
+/// To be wired after the p1-agg / p1-join / p1-plan merge (the functions do not exist on this tip), add:
+///   ("no_agg_pushdown", testing::set_no_agg_pushdown), ("no_par_build", testing::set_no_par_build),
+///   ("no_cost_order", testing::set_no_cost_order), ("no_lazy_base", testing::set_no_lazy_base),
+///   ("no_sip_bitmap", testing::set_no_sip_bitmap)
+fn switches() -> Vec<(&'static str, fn(bool))> {
+    let mut v: Vec<(&'static str, fn(bool))> = vec![("no_fused", testing::set_no_fused), ("no_vecexpr", testing::set_no_vecexpr)];
+    if std::env::var("FUZZ_SWITCHES").map_or(true, |x| x != "0") {
+        v.push(("no_date_accel", testing::set_no_date_accel));
+        v.push(("no_hash_residual", testing::set_no_hash_residual));
+    }
+    v
+}
+
 fn show(a: &Result<Vec<String>, String>) -> String {
     match a { Ok(v) => format!("{} rows [{}]", v.len(), v.iter().take(6).cloned().collect::<Vec<_>>().join(" | ")), Err(e) => e.clone() }
 }
@@ -712,7 +768,8 @@ fn repro() {
         let hdr: Vec<&str> = lines.next().unwrap().split(',').collect();
         let rows: Vec<Vec<&str>> = lines.map(|l| l.split(',').collect()).collect();
         let cols: Vec<Column> = hdr.iter().enumerate().map(|(i, h)| match *h {
-            "f" => Column::float64(h, rows.iter().map(|r| if r[i] == NULLT { None } else { Some(r[i].parse().unwrap()) }).collect()),
+            "dt" | "s2" => Column::str_col(h, rows.iter().map(|r| match r[i] { NULLT => None, EMPTYT => Some(String::new()), x => Some(x.to_string()) }).collect()),
+            "f" | "fg" =>Column::float64(h, rows.iter().map(|r| if r[i] == NULLT { None } else { Some(r[i].parse().unwrap()) }).collect()),
             "s" => {
                 let v: Vec<Option<String>> = rows.iter().map(|r| match r[i] { NULLT => None, EMPTYT => Some(String::new()), x => Some(x.to_string()) }).collect();
                 if std::env::var("FUZZ_DICT").is_ok() {
@@ -733,5 +790,7 @@ fn repro() {
     println!("{} rows", rows.len());
     for r in rows.iter().take(40) { println!("{r}"); }
 }
+include!("fuzz_oracle/shapes.rs");
+
 const NULLT: &str = r"\N";
 const EMPTYT: &str = r"";

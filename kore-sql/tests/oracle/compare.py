@@ -13,7 +13,7 @@ def load(db, d, name):
         kinds = {}
         for h in raw:
             if ":" in h: n, k = h.split(":"); kinds[n] = {"i": "INTEGER", "f": "REAL", "s": "TEXT"}[k]
-        default = {"id": "INTEGER", "f": "REAL", "s": "TEXT"}
+        default = {"id": "INTEGER", "f": "REAL", "fg": "REAL", "s": "TEXT", "dt": "TEXT", "s2": "TEXT"}
         types = {c: kinds.get(c) or default.get(c, "INTEGER") for c in hdr}
         db.execute("create table %s (%s)" % (name, ", ".join(c + " " + types[c] for c in hdr)))
         def conv(c, v):
