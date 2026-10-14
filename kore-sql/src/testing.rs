@@ -184,3 +184,21 @@ pub fn plan_deferred_tables() -> usize { PLAN_DEFERRED.load(Ordering::Relaxed) }
 pub(crate) static PLAN_ESTIMATED_PICKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// How many join steps picked their next table from distinct-key estimates so far.
 pub fn plan_estimated_picks() -> usize { PLAN_ESTIMATED_PICKS.load(Ordering::Relaxed) }
+
+// ---- phase 2: subquery / outer-join operators ----
+pub(crate) static NO_SUBQ_DIRECT: AtomicBool = AtomicBool::new(false);
+pub(crate) static SUBQ_DIRECT_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Evaluate a correlated scalar aggregate subquery over a single table straight from the catalog table (filter ids +
+/// one parallel pass over per-outer-key slots) instead of materialising the inner rows first, for A/B tests.
+pub fn set_no_subq_direct(on: bool) { NO_SUBQ_DIRECT.store(on, Ordering::Relaxed); }
+/// How many correlated scalar subqueries took the direct path so far.
+pub fn subq_direct_hits() -> usize { SUBQ_DIRECT_HITS.load(Ordering::Relaxed) }
+/// Turn every phase-2 subquery optimisation off (or on) at once.
+pub fn set_no_subq(on: bool) { set_no_subq_direct(on); }
+
+#[inline]
+pub(crate) fn no_subq_direct() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_SUBQ_DIRECT.load(Ordering::Relaxed) || env_flag("KORE_NO_SUBQ_DIRECT", &E)
+}
