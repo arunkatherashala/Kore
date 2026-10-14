@@ -143,3 +143,21 @@ fn left_join_count_matches_joined_rows() {
         }
     }
 }
+
+#[test]
+fn correlated_scalar_sets_first_matches() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // a big inner table (>= 200k rows) and few outer keys: the key set restricts the inner rows before the filter runs
+    let mut r = Rng(4242);
+    let mut c = KqlContext::new();
+    c.register("inn", inner(&mut r, 210_000, 100_000));
+    c.register("outr", outer(&mut r, 300, 100_000));
+    let before = testing::plan_sets_first_loads();
+    for agg in ["0.5 * sum(iv)", "count(*)", "avg(iq)", "max(iv)"] {
+        for filt in ["", " and iq < 40", " and iv is not null and iq between 5 and 30", " and iq > 1000"] {
+            check(&c, &format!("select oid, (select {agg} from inn where ik = ok{filt}) as s from outr order by oid"));
+            check(&c, &format!("select oid from outr where ov < (select {agg} from inn where ik = ok{filt}) order by oid"));
+        }
+    }
+    assert!(testing::plan_sets_first_loads() > before, "key-set-first restriction never used");
+}

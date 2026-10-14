@@ -4143,7 +4143,19 @@ fn correlated_scalar_values(outer: &DataBlock, sq: &SelectStmt, ctx: &KqlContext
             let inner = src.get();
             let sel: Option<Option<Vec<usize>>> = if inner_filters.is_empty() { Some(None) } else {
                 let p = crate::rewrite::and_all(inner_filters.iter().map(|f| crate::rewrite::unqualify(f, &alias)).collect());
-                p.and_then(|p| crate::vecexpr::filter_idx(&p, inner)).map(Some)
+                // the outer rows' first key restricts the inner rows first when that is selective (Q20: 1% of lineitem);
+                // the (more expensive) filter then runs on the survivors only
+                let mut keyed: Option<Vec<usize>> = None;
+                if let (Some(p), true) = (&p, inner.num_rows >= 200_000) {
+                    if let (Expr::Col(kn), Some(KeyCol::I(ov))) = (crate::rewrite::unqualify(&corr[0].0, &alias), key_col(&corr[0].1, outer)) {
+                        if matches!(inner.columns.iter().find(|c| c.name == kn), Some(Column { data: ColumnData::Int64(_), .. })) {
+                            if let Some(set) = crate::sipset::IntSet::build(ov, 4_000_000) {
+                                keyed = filter_sets_first(p, inner, &[(kn, std::sync::Arc::new(set))]);
+                            }
+                        }
+                    }
+                }
+                match keyed { Some(k) => Some(Some(k)), None => p.and_then(|p| crate::vecexpr::filter_idx(&p, inner)).map(Some) }
             };
             if let Some(sel) = sel {
                 let ik: Option<Vec<KeyCol>> = corr.iter().map(|(ie, _)| key_col(&crate::rewrite::unqualify(ie, &alias), inner)).collect();
