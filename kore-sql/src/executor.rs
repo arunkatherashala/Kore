@@ -1163,6 +1163,130 @@ fn join_blocks(ctx: &KqlContext, left: DataBlock, right: DataBlock, cfg: &JoinCo
 pub(crate) fn prof_on() -> bool { static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new(); *P.get_or_init(|| std::env::var_os("KORE_PROF").is_some()) }
 macro_rules! prof { ($t:expr, $($a:tt)*) => { if prof_on() { eprintln!("[prof] {:>8.1} ms  {}", $t.elapsed().as_secs_f64()*1000.0, format!($($a)*)); } } }
 
+/// `SELECT a.k, COUNT(b.x) [, COUNT(*)] FROM a LEFT JOIN b ON a.k = b.k [AND <filters on b>] GROUP BY a.k` (TPC-H Q13
+/// shape) with a unique, non-NULL BIGINT `a.k`: one parallel counting pass over `b` into a per-key slot table instead of
+/// materialising the joined rows and grouping them. None = shape not covered (the general path runs).
+fn try_left_join_count(stmt: &SelectStmt, ctx: &KqlContext) -> Result<Option<DataBlock>, KoreError> {
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    if crate::testing::no_subq_leftcount() { return Ok(None); }
+    if stmt.joins.len() != 1 || stmt.joins[0].join_type != JoinKind::Left || stmt.group_by.len() != 1
+        || stmt.where_clause.is_some() || stmt.having.is_some() || stmt.distinct || stmt.qualify.is_some()
+        || !stmt.order_by.is_empty() || stmt.limit.is_some() || stmt.offset.is_some() || stmt.grouping != Grouping::Plain
+        || !stmt.group_exprs.is_empty() || !stmt.windows.is_empty() || !stmt.lateral_views.is_empty()
+        || stmt.pivot.is_some() || stmt.unpivot.is_some() || stmt.projections.len() > 5 { return Ok(None); }
+    let j = &stmt.joins[0];
+    let (lt, rt) = (&stmt.from, &j.table);
+    if lt.subquery.is_some() || lt.values.is_some() || rt.subquery.is_some() || rt.values.is_some()
+        || lt.push_filter.is_some() || rt.push_filter.is_some() || !j.using.is_empty() { return Ok(None); }
+    let (Some(on), Some(lsrc), Some(rsrc)) = (&j.on.expr, ctx.get(&lt.name), ctx.get(&rt.name)) else { return Ok(None) };
+    let (la, ra) = (lt.alias.as_deref().unwrap_or(lt.name.as_str()), rt.alias.as_deref().unwrap_or(rt.name.as_str()));
+    if la == ra { return Ok(None); }
+    let names = |src: &DataBlock, alias: &str| DataBlock {
+        num_rows: 0,
+        columns: src.columns.iter().map(|c| Column { name: format!("{alias}.{}", c.name.rsplit('.').next().unwrap_or(&c.name)), data: ColumnData::Int64(Vec::new()) }).collect(),
+    };
+    let (ln, rn) = (names(lsrc, la), names(rsrc, ra));
+    // a name both tables provide would be ambiguous here
+    let dup = |n: &str| find_col_in_block(n, &ln).is_some() && find_col_in_block(n, &rn).is_some();
+    let mut conjuncts = Vec::new();
+    crate::rewrite::split_conjuncts(on, &mut conjuncts);
+    let Some((ci, lk, rk)) = find_link(&conjuncts, &ln, &rn) else { return Ok(None) };
+    let bare_of = |n: &str, a: &str| n.strip_prefix(a).and_then(|r| r.strip_prefix('.')).map(str::to_string);
+    let (Some(lkb), Some(rkb)) = (bare_of(&lk, la), bare_of(&rk, ra)) else { return Ok(None) };
+    conjuncts.remove(ci);
+    let mut right_only = Vec::new();
+    for c in conjuncts {
+        let mut cols = Vec::new();
+        if !(crate::rewrite::referenced_cols(&c, &mut cols) && !cols.is_empty()) { return Ok(None); }
+        if cols.iter().any(|n| dup(n)) || !cols.iter().all(|n| find_col_in_block(n, &rn).is_some()) { return Ok(None); }
+        right_only.push(crate::rewrite::unqualify(&c, ra));
+    }
+    let (Some(Column { data: ColumnData::Int64(lv), .. }), Some(Column { data: ColumnData::Int64(rv), .. })) = (
+        lsrc.columns.iter().find(|c| c.name.rsplit('.').next() == Some(lkb.as_str())),
+        rsrc.columns.iter().find(|c| c.name.rsplit('.').next() == Some(rkb.as_str())),
+    ) else { return Ok(None) };
+    // GROUP BY must be the left join key
+    let gb = &stmt.group_by[0];
+    let gb_ok = match find_col_in_block(gb, &ln) { Some(n) => n == lk, None => false };
+    if !gb_ok || dup(gb) { return Ok(None); }
+    // projections: the key, COUNT(b.col) (non-NULL values) or COUNT(*) (matched rows, at least 1 per left row)
+    enum Out { Key, CountStar, CountCol(usize) }
+    let mut outs: Vec<(String, Out)> = Vec::new();
+    let mut count_cols: Vec<&Column> = Vec::new();
+    for p in &stmt.projections {
+        let Projection::Expr { expr, alias } = p else { return Ok(None) };
+        match expr {
+            Expr::Col(_) | Expr::QualCol(..) => {
+                let Some(n) = crate::rewrite::col_ref(expr) else { return Ok(None) };
+                if find_col_in_block(&n, &ln).as_deref() != Some(lk.as_str()) || dup(&n) { return Ok(None); }
+                outs.push((alias.clone().unwrap_or_else(|| lkb.clone()), Out::Key));
+            }
+            Expr::Agg { func: AggFunc::Count, expr: arg } => {
+                let Some(alias) = alias else { return Ok(None) };
+                if matches!(arg.as_ref(), Expr::Col(c) if c == "*") { outs.push((alias.clone(), Out::CountStar)); continue; }
+                let Some(n) = crate::rewrite::col_ref(arg) else { return Ok(None) };
+                if dup(&n) { return Ok(None); }
+                let Some(full) = find_col_in_block(&n, &rn) else { return Ok(None) };
+                let Some(b) = bare_of(&full, ra) else { return Ok(None) };
+                let Some(col) = rsrc.columns.iter().find(|c| c.name.rsplit('.').next() == Some(b.as_str())) else { return Ok(None) };
+                if !matches!(col.data, ColumnData::Int64(_) | ColumnData::Float64(_) | ColumnData::Str(_)) { return Ok(None); }
+                count_cols.push(col);
+                outs.push((alias.clone(), Out::CountCol(count_cols.len() - 1)));
+            }
+            _ => return Ok(None),
+        }
+    }
+    if outs.is_empty() { return Ok(None); }
+    // unique, non-NULL left keys in a modest range -> flat slot table (slot = left row)
+    let (mut lo, mut hi) = (i64::MAX, i64::MIN);
+    for k in lv.iter() { match k { Some(k) => { lo = lo.min(*k); hi = hi.max(*k); } None => return Ok(None) } }
+    if lv.is_empty() || (hi as i128 - lo as i128) >= (1i128 << 27) { return Ok(None); }
+    let mut tbl = vec![u32::MAX; (hi - lo) as usize + 1];
+    for (r, k) in lv.iter().enumerate() {
+        let s = &mut tbl[(k.unwrap() - lo) as usize];
+        if *s != u32::MAX { return Ok(None); }
+        *s = r as u32;
+    }
+    let __tj = std::time::Instant::now();
+    let fidx: Option<Vec<usize>> = match crate::rewrite::and_all(right_only) {
+        Some(p) => match crate::vecexpr::filter_idx(&p, rsrc) { Some(i) => Some(i), None => return Ok(None) },
+        None => None,
+    };
+    prof!(__tj, "left-count right filtered rows={}", fidx.as_ref().map_or(rsrc.num_rows, |f| f.len()));
+    let n = lv.len();
+    let all: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
+    let per: Vec<Vec<AtomicU32>> = count_cols.iter().map(|_| (0..n).map(|_| AtomicU32::new(0)).collect()).collect();
+    let nrows = fidx.as_ref().map_or(rsrc.num_rows, |f| f.len());
+    let chunk = 1usize << 16;
+    (0..nrows.div_ceil(chunk)).into_par_iter().for_each(|c| {
+        for i in c * chunk..((c + 1) * chunk).min(nrows) {
+            let r = match &fidx { Some(f) => f[i], None => i };
+            let Some(k) = rv[r] else { continue };
+            let d = (k as i128 - lo as i128) as u128;
+            if d >= tbl.len() as u128 { continue; }
+            let s = tbl[d as usize];
+            if s == u32::MAX { continue; }
+            all[s as usize].fetch_add(1, Ordering::Relaxed);
+            for (ci, col) in count_cols.iter().enumerate() {
+                let nn = match &col.data { ColumnData::Int64(v) => v[r].is_some(), ColumnData::Float64(v) => v[r].is_some(), ColumnData::Str(v) => v[r].is_some(), _ => false };
+                if nn { per[ci][s as usize].fetch_add(1, Ordering::Relaxed); }
+            }
+        }
+    });
+    prof!(__tj, "left-count counted");
+    let columns: Vec<Column> = outs.iter().map(|(name, o)| Column {
+        name: name.clone(),
+        data: ColumnData::Int64(match o {
+            Out::Key => lv.clone(),
+            Out::CountStar => all.iter().map(|a| Some(a.load(Ordering::Relaxed).max(1) as i64)).collect(),
+            Out::CountCol(ci) => per[*ci].iter().map(|a| Some(a.load(Ordering::Relaxed) as i64)).collect(),
+        }),
+    }).collect();
+    crate::testing::SUBQ_LEFTCOUNT_HITS.fetch_add(1, Ordering::Relaxed);
+    Ok(Some(DataBlock { columns, num_rows: n }))
+}
+
 pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
     let __t0 = std::time::Instant::now();
     let r = execute_select_inner(stmt, ctx);
@@ -1185,6 +1309,9 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
         if let Some(named) = crate::general::name_unaliased_aggregates(stmt) {
             return execute_select(&named, ctx);
         }
+    }
+    if !use_general {
+        if let Some(done) = try_left_join_count(stmt, ctx)? { return Ok(done); }
     }
     if !use_general && stmt.grouping != Grouping::Plain && !stmt.group_by.is_empty() {
         return execute_grouping_sets(stmt, ctx);

@@ -195,10 +195,22 @@ pub fn set_no_subq_direct(on: bool) { NO_SUBQ_DIRECT.store(on, Ordering::Relaxed
 /// How many correlated scalar subqueries took the direct path so far.
 pub fn subq_direct_hits() -> usize { SUBQ_DIRECT_HITS.load(Ordering::Relaxed) }
 /// Turn every phase-2 subquery optimisation off (or on) at once.
-pub fn set_no_subq(on: bool) { set_no_subq_direct(on); }
+pub fn set_no_subq(on: bool) { set_no_subq_direct(on); set_no_subq_leftcount(on); }
 
 #[inline]
 pub(crate) fn no_subq_direct() -> bool {
     static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     NO_SUBQ_DIRECT.load(Ordering::Relaxed) || env_flag("KORE_NO_SUBQ_DIRECT", &E)
+}
+
+pub(crate) static NO_SUBQ_LEFTCOUNT: AtomicBool = AtomicBool::new(false);
+pub(crate) static SUBQ_LEFTCOUNT_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Evaluate `a LEFT JOIN b ... GROUP BY a.k` with COUNTs through the joined rows (the old way), for A/B tests.
+pub fn set_no_subq_leftcount(on: bool) { NO_SUBQ_LEFTCOUNT.store(on, Ordering::Relaxed); }
+/// How many statements took the fused left-join count path so far.
+pub fn subq_leftcount_hits() -> usize { SUBQ_LEFTCOUNT_HITS.load(Ordering::Relaxed) }
+#[inline]
+pub(crate) fn no_subq_leftcount() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_SUBQ_LEFTCOUNT.load(Ordering::Relaxed) || env_flag("KORE_NO_SUBQ_LEFTCOUNT", &E)
 }

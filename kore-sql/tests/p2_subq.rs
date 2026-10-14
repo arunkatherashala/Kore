@@ -97,3 +97,49 @@ fn correlated_scalar_direct_matches_materialised() {
         if ni > 0 && no > 0 { assert!(testing::subq_direct_hits() > before, "direct path never taken for sizes {ni}/{no}"); }
     }
 }
+
+// ---- LEFT JOIN + COUNT + GROUP BY (Q13 shape) ----
+
+fn lj_tables(r: &mut Rng, nc: usize, no: usize, unique: bool, with_null: bool) -> (DataBlock, DataBlock) {
+    let mut keys: Vec<i64> = (0..nc as i64).map(|k| k * 3 + 10).collect();
+    for i in (1..keys.len()).rev() { let j = r.below(i + 1); keys.swap(i, j); }
+    let cust = DataBlock::new(vec![
+        Column::int64("ck", keys.iter().enumerate().map(|(i, &k)| {
+            if with_null && i % 17 == 3 { None } else if !unique && i % 11 == 0 { Some(10) } else { Some(k) }
+        }).collect()),
+        Column::int64("cv", (0..nc).map(|_| Some(r.below(5) as i64)).collect()),
+    ]).unwrap();
+    let ord = DataBlock::new(vec![
+        Column::int64("ok", (0..no).map(|_| if r.below(10) == 0 { None } else { Some((r.below(nc + 20) * 3 + 10) as i64 - r.below(2) as i64) }).collect()),
+        Column::int64("oid", (0..no).map(|i| if r.below(6) == 0 { None } else { Some(i as i64) }).collect()),
+        Column::float64("ox", (0..no).map(|_| if r.below(4) == 0 { None } else { Some(r.below(9) as f64) }).collect()),
+        Column::str_col("os", (0..no).map(|_| if r.below(5) == 0 { None } else { Some(["special requests", "plain", "x"][r.below(3)].to_string()) }).collect()),
+    ]).unwrap();
+    (cust, ord)
+}
+
+#[test]
+fn left_join_count_matches_joined_rows() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let qs = [
+        "select ck, count(oid) as n from cust left outer join ord on ck = ok group by ck order by ck",
+        "select ck, count(*) as n from cust left join ord on ck = ok group by ck order by ck",
+        "select ck, count(ox) as a, count(os) as b, count(*) as c from cust left join ord on ok = ck and os not like '%special%' group by ck order by ck",
+        "select ck as k, count(oid) as n from cust c left join ord o on c.ck = o.ok and o.ox > 3 and o.oid is not null group by ck order by k",
+        "select n, count(*) as d from (select ck, count(oid) as n from cust left join ord on ck = ok and os <> 'plain' group by ck) t group by n order by d desc, n desc",
+        "select ck, count(oid) as n from cust left join ord on ck = ok and ox > 100 group by ck order by ck",
+        "select cv, count(oid) as n from cust left join ord on ck = ok group by cv order by cv",
+    ];
+    for (seed, (nc, no)) in [(0usize, 30usize), (40, 0), (50, 200), (1000, 90_000), (70_000, 150_000)].into_iter().enumerate() {
+        for (unique, with_null) in [(true, false), (false, false), (true, true)] {
+            let mut r = Rng(77 + seed as u64);
+            let (cust, ord) = lj_tables(&mut r, nc, no, unique, with_null);
+            let mut c = KqlContext::new();
+            c.register("cust", cust);
+            c.register("ord", ord);
+            let before = testing::subq_leftcount_hits();
+            for q in qs { check(&c, q); }
+            if nc > 0 && no > 0 && unique && !with_null { assert!(testing::subq_leftcount_hits() > before, "fused path never taken for {nc}/{no}"); }
+        }
+    }
+}
