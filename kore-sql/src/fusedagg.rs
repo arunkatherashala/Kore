@@ -730,6 +730,31 @@ pub(crate) struct Request<'a> {
     pub projections: &'a [Projection],
     /// prefix for key columns whose name has none (the table alias the ordinary path would have added)
     pub key_prefix: Option<&'a str>,
+    /// `output alias <op> constant`: groups whose aggregate certainly fails it are dropped before the output is built
+    /// (the caller still applies the same filter to the result, so this only saves work)
+    pub having: Option<(String, BinOpKind, f64)>,
+}
+
+thread_local! {
+    /// (inner statement, hidden aggregate alias, comparison, constant) of the outer `WHERE alias <op> constant` that
+    /// is about to run over the derived table made by `inner`.
+    static HAVING_HINT: std::cell::RefCell<Option<(SelectStmt, String, BinOpKind, f64)>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) struct HintGuard(Option<(SelectStmt, String, BinOpKind, f64)>);
+impl Drop for HintGuard {
+    fn drop(&mut self) { let prev = self.0.take(); HAVING_HINT.with(|h| *h.borrow_mut() = prev); }
+}
+
+/// Announce that the statement `inner` is read only through `WHERE alias <op> k` until the guard is dropped.
+pub(crate) fn set_having_hint(inner: &SelectStmt, alias: String, op: BinOpKind, k: f64) -> HintGuard {
+    let prev = HAVING_HINT.with(|h| h.borrow_mut().replace((inner.clone(), alias, op, k)));
+    HintGuard(prev)
+}
+
+fn having_hint_for(stmt: &SelectStmt) -> Option<(String, BinOpKind, f64)> {
+    if crate::testing::no_having_push() { return None; }
+    HAVING_HINT.with(|h| h.borrow().as_ref().filter(|(s, ..)| s == stmt).map(|(_, a, o, k)| (a.clone(), o.clone(), *k)))
 }
 
 fn pr(t: &std::time::Instant, what: &str) {
@@ -831,6 +856,30 @@ pub(crate) fn run(req: Request) -> Option<DataBlock> {
         }
     }
     if job.sorted { crate::testing::SORTED_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+    if let Some((alias, op, k)) = &req.having {
+        let aggs: Vec<(&AggFunc, &String)> = outs.iter().filter_map(|o| match o { Out::Agg { func, name, .. } => Some((*func, name)), _ => None }).collect();
+        if let Some(si) = aggs.iter().position(|(_, n)| *n == alias) {
+            let func = aggs[si].0;
+            let (acc, cnt) = (&groups.acc[si], &groups.cnt[si]);
+            // drop only on a definite failure: NULL and NaN stay for the caller's own filter to decide
+            let keep = |g: usize| -> bool {
+                let v = match func { AggFunc::Count => cnt[g] as f64, _ if cnt[g] == 0 => return true, AggFunc::Avg => acc[g] / cnt[g] as f64, _ => acc[g] };
+                if v.is_nan() { return true; }
+                match op { BinOpKind::Gt => v > *k, BinOpKind::Ge => v >= *k, BinOpKind::Lt => v < *k, BinOpKind::Le => v <= *k, _ => true }
+            };
+            let ng0 = groups.first.len();
+            let mask: Vec<bool> = if ng0 >= 100_000 { (0..ng0).into_par_iter().map(keep).collect() } else { (0..ng0).map(keep).collect() };
+            let kept = mask.iter().filter(|&&m| m).count();
+            if kept < ng0 {
+                let pick = |v: &Vec<usize>| -> Vec<usize> { v.iter().zip(&mask).filter(|p| *p.1).map(|p| *p.0).collect() };
+                groups.first = pick(&groups.first);
+                for a in groups.acc.iter_mut() { *a = a.iter().zip(&mask).filter(|p| *p.1).map(|p| *p.0).collect(); }
+                for c in groups.cnt.iter_mut() { *c = c.iter().zip(&mask).filter(|p| *p.1).map(|p| *p.0).collect(); }
+                crate::testing::HAVING_PUSH_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                pr(&__t, &format!("having threshold kept {kept} of {ng0} groups"));
+            }
+        }
+    }
     let ng = groups.first.len();
     if ng == 0 { return None; }
 
@@ -960,5 +1009,5 @@ pub(crate) fn try_fused(stmt: &SelectStmt, src: &DataBlock, alias: &str, conjunc
         columns: src.columns.iter().map(|c| Column { name: format!("{alias}.{}", c.name), data: c.data.take_rows(&(0..64.min(src.num_rows)).collect::<Vec<_>>()) }).collect(),
     };
     if crate::general::block_needs_general(stmt, &sample) { return None; }
-    run(Request { block: src, pred: pred.as_ref(), group_cols: &group_cols, projections: &projections, key_prefix: Some(alias) })
+    run(Request { block: src, pred: pred.as_ref(), group_cols: &group_cols, projections: &projections, key_prefix: Some(alias), having: having_hint_for(stmt) })
 }
