@@ -205,7 +205,7 @@ impl KqlContext {
         let mut block = self.query_raw(sql)?;
         let lower = sql.to_ascii_lowercase();
         if lower.contains("decimal") || lower.contains("numeric") || lower.contains("dec(") {
-            if let Ok(q) = crate::parser::parse_query(sql.trim()) {
+            if let Ok(q) = parse_cached(sql.trim()) {
                 apply_decimal_display(&mut block, &q);
             }
         }
@@ -317,7 +317,7 @@ impl KqlContext {
             ]);
         }
 
-        let query = crate::parser::parse_query(sql_trim)?;
+        let query = parse_cached(sql_trim)?;
         validate_functions(&query, self)?;
 
         // Phase 17: try vectorized fast-path before falling into the row-loop
@@ -340,7 +340,7 @@ impl KqlContext {
     /// as a temporary table, then running the final SELECT in an extended context.
     /// Supports multiple CTEs: `WITH a AS (...), b AS (...) SELECT ...`
     fn execute_cte(&self, sql: &str) -> Result<DataBlock, KoreError> {
-        let query = crate::parser::parse_query(sql)?;
+        let query = parse_cached(sql)?;
         validate_functions(&query, self)?;
         CURRENT_UDFS.with(|cell| { *cell.borrow_mut() = self.udfs.clone(); });
         execute_query(&query, self)
@@ -1070,6 +1070,27 @@ pub fn execute(sql: &str, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
 }
 
 /// Execute a full Query (with CTEs and set operations).
+/// Parsed statements by SQL text. The parser is a pure function of the text (no catalog access), so a cached
+/// AST is valid across any DDL/DML/register; everything that depends on the catalog (function validation,
+/// rewrites, planning) still runs per execution on the immutable AST.
+fn parse_cached(sql: &str) -> Result<std::sync::Arc<Query>, KoreError> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Query>>>> = OnceLock::new();
+    if crate::testing::no_stmt_cache() || sql.len() > 32 * 1024 {
+        return crate::parser::parse_query(sql).map(Arc::new);
+    }
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(g) = cache.lock() {
+        if let Some(q) = g.get(sql) { return Ok(q.clone()); }
+    }
+    let q = Arc::new(crate::parser::parse_query(sql)?);
+    if let Ok(mut g) = cache.lock() {
+        if g.len() >= 256 { g.clear(); }
+        g.insert(sql.to_string(), q.clone());
+    }
+    Ok(q)
+}
+
 pub fn execute_query(query: &Query, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
     // 1. Register CTEs in an extended context. Cloning the context copies every registered table,
     // so only do it when the query actually defines CTEs.
