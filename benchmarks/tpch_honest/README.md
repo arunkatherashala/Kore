@@ -112,6 +112,40 @@ join-heavy queries (Q3 486 vs 129 ms, Q5 255 vs 83, Q9 1018 vs 270, Q10 814 vs 1
 Not measured: KORE's peak memory at SF 3 (it ran in the roughly 9.7 GB of RAM that was available, with other programs open), Spark at SF 3, anything larger.
 Same caveats as above: one shared machine with large run-to-run variance, TPC-H-shaped data, warm in-memory runs.
 
+## After the Phase 1 optimisation round (2026-10-14)
+
+Changes in this round (all merged behind on/off switches, each with a differential test): wider fused group-by (any number of key columns, text keys
+verified against numeric keys, sorted-run mode, SUBSTR as dictionary column), parallel partitioned hash build / probe concatenation / in-column gather,
+SIP key sets as bitmaps (no 400k cap), estimate-ordered joins, lazy base table and one late payload gather, exact packed multi-column Int64 join keys.
+Aggregate push-down below joins was investigated and deliberately not implemented: the join output is already small after filters and SIP, so
+pre-aggregating would cost more than it saves and adds wrong-answer risk.
+
+Interleaved A/B on the same machine (previous build vs merged build, geometric mean over all 22 queries, ms, two rounds each):
+
+| Scale | Previous build | Merged build |
+|---|---|---|
+| SF 1 | 98 and 75 | 61 and 57 |
+| SF 3 | 246 and 212 | 150 and 149 |
+
+That is roughly 30-40% faster. All answers still match (22/22 vs Spark at SF 1, 22/22 vs DuckDB at SF 3).
+
+KORE vs DuckDB, alternating runs (DuckDB measured before and after each KORE run; geometric mean over 22 queries, ms):
+
+| | DuckDB before | KORE | DuckDB after |
+|---|---|---|---|
+| SF 1 round 1 | 65 | 52 | 45 |
+| SF 1 round 2 | 45 | 69 | 85 |
+| SF 3 round 1 | 176 | 165 | 126 |
+| SF 3 round 2 | 127 | 174 | 121 |
+
+Reading: at SF 1 the two are indistinguishable (DuckDB alone swings between 45 and 85 ms on this machine). At SF 3, comparing against DuckDB's quiet runs
+(120-127 ms), KORE is about 1.4x slower (165-174 ms), down from about 2x before this round. **The target "KORE faster than DuckDB at SF 3" was not reached.**
+Remaining gap by area: string-heavy group-by and gathers (Q10, Q18, Q9), subquery and outer-join queries (Q4, Q11, Q13, Q15, Q17, Q20, Q21, Q22),
+fixed per-query overhead on the 10-60 ms queries.
+
+Correctness gate on the merged code (`kore-sql/tests/oracle/run_gate.sh`: in-process differential with every optimisation switch on/off plus the
+SQLite oracle, small, mid and five threshold sizes): GATE PASS, 0 disagreements, 0 oracle mismatches; 284 unit/integration tests pass.
+
 Full tables: `results/`. Read these numbers with care:
 
 * Spark here is a single-JVM local-mode run on a data set that fits in memory; its strengths (scale-out, spilling,

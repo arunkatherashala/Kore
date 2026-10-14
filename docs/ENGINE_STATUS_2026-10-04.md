@@ -84,6 +84,14 @@ larger data, cold start, concurrency or other query shapes. Spark's times are fr
 
 KORE completed all 22 queries on 18M lineitem rows with answers matching DuckDB (used as the reference, since Spark does not fit alongside it in the available memory), but at geometric mean 236 ms vs DuckDB 119 ms it was about 2.0x slower, wider than at SF 1, mostly on join-heavy queries (Q3, Q5, Q9, Q10, Q18). Peak memory was not measured. Details: `benchmarks/tpch_honest/README.md`.
 
+## Phase 1 optimisation round (2026-10-14)
+
+Merged: wider fused group-by, parallel join mechanics (partitioned build, in-column gather), SIP bitmaps, estimate-ordered joins, lazy base table with one
+late payload gather, packed multi-column keys, plus a correctness gate (`run_gate.sh`, SQLite oracle + switch-differential fuzzing: GATE PASS, 284 tests).
+Interleaved A/B vs the previous build: about 30-40% faster (SF 1 geometric mean 57-61 ms vs 75-98 ms; SF 3 149-150 ms vs 212-246 ms). Against DuckDB in
+alternating runs: indistinguishable at SF 1 (DuckDB alone swings 45-85 ms), about 1.4x slower at SF 3 (KORE 165-174 ms vs DuckDB 120-127 ms in its quiet
+runs). The Phase 1 target (beat DuckDB at SF 3) was NOT reached. Details: `benchmarks/tpch_honest/README.md`.
+
 ## What was added in this round
 
 - Join planning: filters derived from `OR` branches, unique-key (lookup) tables joined first.
@@ -100,7 +108,7 @@ KORE completed all 22 queries on 18M lineitem rows with answers matching DuckDB 
 
 ## Test evidence
 
-- 260 tests pass across `kore-sql`, `kore-join` and `kore-ffi`, including about 960 hand-derived regression
+- 284 tests pass across `kore-sql`, `kore-join` and `kore-ffi`, including about 960 hand-derived regression
   cases, a differential test across execution paths, and a SQLite oracle over 60k generated queries.
 - A mutation fuzzer ran about 1.6M mutants with no panics (reported by the SQL-coverage work, not re-run here).
 - Not run: the whole workspace, because a Python-binding crate does not build against Python 3.14 here.
@@ -110,7 +118,7 @@ KORE completed all 22 queries on 18M lineitem rows with answers matching DuckDB 
 | Area | Limit |
 |---|---|
 | Scale | Everything is in memory as row vectors of `Option<T>`. Spilling bounds operator working state only, not input tables or results. A skewed key can still exceed the budget. |
-| SF3 (18M lineitem rows) | Completes all 22 queries with answers matching DuckDB (2026-10-12), about 2x slower than DuckDB overall. Before the memory work an SF3 run needed 8-10 GB per query process and one run failed with an out-of-memory error; peak memory was not re-measured on the final build. Nothing larger than SF 3 has been tried. |
+| SF3 (18M lineitem rows) | Completes all 22 queries with answers matching DuckDB, about 1.4x slower than DuckDB's quiet-machine runs (KORE 149-174 ms vs 120-127 ms geometric mean, 2026-10-14). Peak memory at SF 3 was not re-measured on the final build. Nothing larger than SF 3 has been tried. |
 | Strings | `Option<String>` columns that cannot be dictionary-encoded (dictionary holds at most 254 values) dominate memory and are slow to sort and group. |
 | Other engines | At SF1 (warm, in-memory) KORE and DuckDB are about equal overall. DuckDB is the better-engineered baseline and was only exercised on these 22 queries. Untested: larger data, cold start, concurrency. |
 | Distributed | No cluster execution, no fault tolerance, no connectors (S3, Hive, JDBC, Kafka), no streaming or ML. |

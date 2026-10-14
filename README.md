@@ -25,7 +25,7 @@ Measured against a live Spark 4.2.0 (local mode) on one 8-core, 32 GB machine, s
 | Queries | all 22 TPC-H-shaped queries, SF 1 (about 6M lineitem rows) |
 | Result agreement with Spark | 22 of 22 |
 | Speed (in-memory, KORE time / Spark time) | faster on all 22; between 0.02x and 0.6x of Spark's time in the final quiet-machine run (timings vary by about +/-20%) |
-| Tests | 260 pass in `kore-sql`, `kore-join`, `kore-ffi` (including a SQLite oracle over 60k generated queries) |
+| Tests | 284 pass in `kore-sql`, `kore-join`, `kore-ffi` (including a SQLite oracle over 60k generated queries) |
 | Memory | about 2.4-2.5 GB of table data at SF 1; peak commit 2.6-3.3 GB per query |
 
 What this does **not** show: larger-than-memory data (spill-to-disk bounds operator working state only), clusters and fault tolerance,
