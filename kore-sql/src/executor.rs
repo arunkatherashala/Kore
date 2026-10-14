@@ -3578,6 +3578,7 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
                     None => NO,
                     Some(k) => { let next = slots.len() as u32; *slots.entry(k).or_insert(next) }
                 }).collect();
+                prof!(__ts, "semi outer slots done");
                 let ns = slots.len();
                 // One integral key whose values span a modest range: a flat slot table instead of hashing every inner row.
                 let direct: Option<(f64, Vec<u32>)> = if eqs.len() == 1 && ns > 0 {
@@ -3630,6 +3631,7 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
                     }
                     st
                 }).collect();
+                prof!(__ts, "semi scan done ns={}", ns);
                 let mut merged = vec![empty; ns];
                 for part in &parts {
                     for (m, p) in merged.iter_mut().zip(part) {
