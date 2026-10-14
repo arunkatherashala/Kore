@@ -184,3 +184,20 @@ pub fn plan_deferred_tables() -> usize { PLAN_DEFERRED.load(Ordering::Relaxed) }
 pub(crate) static PLAN_ESTIMATED_PICKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// How many join steps picked their next table from distinct-key estimates so far.
 pub fn plan_estimated_picks() -> usize { PLAN_ESTIMATED_PICKS.load(Ordering::Relaxed) }
+
+pub(crate) static NO_STMT_CACHE: AtomicBool = AtomicBool::new(false);
+
+/// Re-parse every statement instead of reusing the cached AST.
+pub fn set_no_stmt_cache(on: bool) { NO_STMT_CACHE.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_stmt_cache() -> bool { NO_STMT_CACHE.load(Ordering::Relaxed) }
+
+pub(crate) static NO_SERIAL_SMALL: AtomicBool = AtomicBool::new(false);
+
+/// Always take the parallel code path, even for tiny inputs.
+pub fn set_no_serial_small(on: bool) { NO_SERIAL_SMALL.store(on, Ordering::Relaxed); }
+
+#[inline]
+#[allow(dead_code)]
+pub(crate) fn no_serial_small() -> bool { NO_SERIAL_SMALL.load(Ordering::Relaxed) }

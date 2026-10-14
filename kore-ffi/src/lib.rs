@@ -632,20 +632,41 @@ fn block_to_json_stripped(block: &DataBlock) -> Vec<u8> {
         for (n, (_, ci)) in keys.iter().enumerate() {
             if n > 0 { out.push(b','); }
             out.extend_from_slice(&key_json[n]);
-            match block.columns[*ci].data.get_value(r) {
-                kore_core::Value::Int(i)   => { let _ = serde_json::to_writer(&mut out, &i); }
-                kore_core::Value::Float(f) => { let _ = serde_json::to_writer(&mut out, &f); }
-                kore_core::Value::Bool(b)  => { let _ = serde_json::to_writer(&mut out, &b); }
-                kore_core::Value::Str(s)   => { let _ = serde_json::to_writer(&mut out, &s); }
-                kore_core::Value::Array(_) => out.extend_from_slice(b"[]"),
-                kore_core::Value::Map(_)   => out.extend_from_slice(b"{}"),
-                kore_core::Value::Null     => out.extend_from_slice(b"null"),
-            }
+            write_cell(&mut out, &block.columns[*ci].data, r);
         }
         out.push(b'}');
     }
     out.push(b']');
     out
+}
+
+#[inline]
+fn write_json_str(out: &mut Vec<u8>, s: &str) {
+    // serde_json escapes only quote, backslash and bytes below 0x20; a string without them is written verbatim
+    if s.bytes().all(|b| b >= 0x20 && b != b'"' && b != b'\\') {
+        out.reserve(s.len() + 2);
+        out.push(b'"');
+        out.extend_from_slice(s.as_bytes());
+        out.push(b'"');
+    } else {
+        let _ = serde_json::to_writer(&mut *out, s);
+    }
+}
+
+/// One cell, written straight from the typed column (no `Value` / `String` clone). Same bytes as the
+/// `get_value` based writer: a missing slot is `null`, non-finite floats are `null` (serde_json).
+#[inline]
+fn write_cell(out: &mut Vec<u8>, data: &ColumnData, r: usize) {
+    match data {
+        ColumnData::Int64(v) => match v.get(r) { Some(Some(i)) => { let _ = serde_json::to_writer(&mut *out, i); } _ => out.extend_from_slice(b"null") },
+        ColumnData::Float64(v) => match v.get(r) { Some(Some(f)) => { let _ = serde_json::to_writer(&mut *out, f); } _ => out.extend_from_slice(b"null") },
+        ColumnData::Bool(v) => match v.get(r) { Some(Some(true)) => out.extend_from_slice(b"true"), Some(Some(false)) => out.extend_from_slice(b"false"), _ => out.extend_from_slice(b"null") },
+        ColumnData::Str(v) => match v.get(r) { Some(Some(s)) => write_json_str(out, s), _ => out.extend_from_slice(b"null") },
+        ColumnData::StrDict { codes, dict } => {
+            let c = codes.get(r).copied().unwrap_or(u8::MAX);
+            match if c == u8::MAX { None } else { dict.get(c as usize) } { Some(s) => write_json_str(out, s), None => out.extend_from_slice(b"null") }
+        }
+    }
 }
 
 fn block_to_json_via_map(block: &DataBlock) -> String {
@@ -714,3 +735,38 @@ mod csv_loader_tests {
     }
 }
 
+
+#[cfg(test)]
+mod json_tests {
+    use super::*;
+
+    #[test]
+    fn typed_json_writer_matches_value_based_writer_byte_for_byte() {
+        let floats = [0.0, -0.0, 1.0, -1.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX, f64::MIN_POSITIVE,
+                      5e-324, 1e21, 1e-7, 123456789.123456789, 0.1 + 0.2, 1e300, -1e-300];
+        let mut fv: Vec<Option<f64>> = floats.iter().map(|&f| Some(f)).collect();
+        // pseudo random bit patterns (includes subnormals, NaNs, infinities)
+        let mut x: u64 = 0x9E3779B97F4A7C15;
+        for _ in 0..2000 { x ^= x << 13; x ^= x >> 7; x ^= x << 17; fv.push(Some(f64::from_bits(x))); }
+        fv.push(None);
+        let n = fv.len();
+        let strs = ["", "plain", "quo\"te", "back\\slash", "trail\\", "tab\tnl\ncr\r", "\u{0}\u{1}\u{1f}", "del\u{7f}", "caf\u{e9} \u{4e2d}\u{6587} \u{1F600}",
+                    "</script>", "\u{2028}\u{2029}", "a'b"];
+        let sv: Vec<Option<String>> = (0..n).map(|i| if i % 9 == 0 { None } else { Some(strs[i % strs.len()].to_string()) }).collect();
+        let dict: Vec<String> = strs.iter().map(|s| s.to_string()).collect();
+        let codes: Vec<u8> = (0..n).map(|i| if i % 7 == 0 { u8::MAX } else { (i % strs.len()) as u8 }).collect();
+        let iv: Vec<Option<i64>> = (0..n).map(|i| match i % 6 { 0 => None, 1 => Some(i64::MIN), 2 => Some(i64::MAX), 3 => Some(0), 4 => Some(-(i as i64)), _ => Some(i as i64) }).collect();
+        let bv: Vec<Option<bool>> = (0..n).map(|i| match i % 3 { 0 => None, 1 => Some(true), _ => Some(false) }).collect();
+        let block = DataBlock::new(vec![
+            Column { name: "t.f".into(), data: ColumnData::Float64(fv) },
+            Column { name: "s".into(), data: ColumnData::Str(sv) },
+            Column { name: "d".into(), data: ColumnData::StrDict { codes, dict } },
+            Column { name: "i".into(), data: ColumnData::Int64(iv) },
+            Column { name: "b".into(), data: ColumnData::Bool(bv) },
+        ]).unwrap();
+        let new = block_to_json_stripped(&block);
+        let old = block_to_json_via_map(&block).into_bytes();
+        // the map based writer sorts keys too (serde_json::Map is a BTreeMap)
+        assert_eq!(String::from_utf8(new).unwrap(), String::from_utf8(old).unwrap());
+    }
+}
