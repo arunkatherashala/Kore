@@ -1200,6 +1200,130 @@ fn join_blocks(ctx: &KqlContext, left: DataBlock, right: DataBlock, cfg: &JoinCo
 pub(crate) fn prof_on() -> bool { static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new(); *P.get_or_init(|| std::env::var_os("KORE_PROF").is_some()) }
 macro_rules! prof { ($t:expr, $($a:tt)*) => { if prof_on() { eprintln!("[prof] {:>8.1} ms  {}", $t.elapsed().as_secs_f64()*1000.0, format!($($a)*)); } } }
 
+/// `SELECT a.k, COUNT(b.x) [, COUNT(*)] FROM a LEFT JOIN b ON a.k = b.k [AND <filters on b>] GROUP BY a.k` (TPC-H Q13
+/// shape) with a unique, non-NULL BIGINT `a.k`: one parallel counting pass over `b` into a per-key slot table instead of
+/// materialising the joined rows and grouping them. None = shape not covered (the general path runs).
+fn try_left_join_count(stmt: &SelectStmt, ctx: &KqlContext) -> Result<Option<DataBlock>, KoreError> {
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    if crate::testing::no_subq_leftcount() { return Ok(None); }
+    if stmt.joins.len() != 1 || stmt.joins[0].join_type != JoinKind::Left || stmt.group_by.len() != 1
+        || stmt.where_clause.is_some() || stmt.having.is_some() || stmt.distinct || stmt.qualify.is_some()
+        || !stmt.order_by.is_empty() || stmt.limit.is_some() || stmt.offset.is_some() || stmt.grouping != Grouping::Plain
+        || !stmt.group_exprs.is_empty() || !stmt.windows.is_empty() || !stmt.lateral_views.is_empty()
+        || stmt.pivot.is_some() || stmt.unpivot.is_some() || stmt.projections.len() > 5 { return Ok(None); }
+    let j = &stmt.joins[0];
+    let (lt, rt) = (&stmt.from, &j.table);
+    if lt.subquery.is_some() || lt.values.is_some() || rt.subquery.is_some() || rt.values.is_some()
+        || lt.push_filter.is_some() || rt.push_filter.is_some() || !j.using.is_empty() { return Ok(None); }
+    let (Some(on), Some(lsrc), Some(rsrc)) = (&j.on.expr, ctx.get(&lt.name), ctx.get(&rt.name)) else { return Ok(None) };
+    let (la, ra) = (lt.alias.as_deref().unwrap_or(lt.name.as_str()), rt.alias.as_deref().unwrap_or(rt.name.as_str()));
+    if la == ra { return Ok(None); }
+    let names = |src: &DataBlock, alias: &str| DataBlock {
+        num_rows: 0,
+        columns: src.columns.iter().map(|c| Column { name: format!("{alias}.{}", c.name.rsplit('.').next().unwrap_or(&c.name)), data: ColumnData::Int64(Vec::new()) }).collect(),
+    };
+    let (ln, rn) = (names(lsrc, la), names(rsrc, ra));
+    // a name both tables provide would be ambiguous here
+    let dup = |n: &str| find_col_in_block(n, &ln).is_some() && find_col_in_block(n, &rn).is_some();
+    let mut conjuncts = Vec::new();
+    crate::rewrite::split_conjuncts(on, &mut conjuncts);
+    let Some((ci, lk, rk)) = find_link(&conjuncts, &ln, &rn) else { return Ok(None) };
+    let bare_of = |n: &str, a: &str| n.strip_prefix(a).and_then(|r| r.strip_prefix('.')).map(str::to_string);
+    let (Some(lkb), Some(rkb)) = (bare_of(&lk, la), bare_of(&rk, ra)) else { return Ok(None) };
+    conjuncts.remove(ci);
+    let mut right_only = Vec::new();
+    for c in conjuncts {
+        let mut cols = Vec::new();
+        if !(crate::rewrite::referenced_cols(&c, &mut cols) && !cols.is_empty()) { return Ok(None); }
+        if cols.iter().any(|n| dup(n)) || !cols.iter().all(|n| find_col_in_block(n, &rn).is_some()) { return Ok(None); }
+        right_only.push(crate::rewrite::unqualify(&c, ra));
+    }
+    let (Some(Column { data: ColumnData::Int64(lv), .. }), Some(Column { data: ColumnData::Int64(rv), .. })) = (
+        lsrc.columns.iter().find(|c| c.name.rsplit('.').next() == Some(lkb.as_str())),
+        rsrc.columns.iter().find(|c| c.name.rsplit('.').next() == Some(rkb.as_str())),
+    ) else { return Ok(None) };
+    // GROUP BY must be the left join key
+    let gb = &stmt.group_by[0];
+    let gb_ok = match find_col_in_block(gb, &ln) { Some(n) => n == lk, None => false };
+    if !gb_ok || dup(gb) { return Ok(None); }
+    // projections: the key, COUNT(b.col) (non-NULL values) or COUNT(*) (matched rows, at least 1 per left row)
+    enum Out { Key, CountStar, CountCol(usize) }
+    let mut outs: Vec<(String, Out)> = Vec::new();
+    let mut count_cols: Vec<&Column> = Vec::new();
+    for p in &stmt.projections {
+        let Projection::Expr { expr, alias } = p else { return Ok(None) };
+        match expr {
+            Expr::Col(_) | Expr::QualCol(..) => {
+                let Some(n) = crate::rewrite::col_ref(expr) else { return Ok(None) };
+                if find_col_in_block(&n, &ln).as_deref() != Some(lk.as_str()) || dup(&n) { return Ok(None); }
+                outs.push((alias.clone().unwrap_or_else(|| lkb.clone()), Out::Key));
+            }
+            Expr::Agg { func: AggFunc::Count, expr: arg } => {
+                let Some(alias) = alias else { return Ok(None) };
+                if matches!(arg.as_ref(), Expr::Col(c) if c == "*") { outs.push((alias.clone(), Out::CountStar)); continue; }
+                let Some(n) = crate::rewrite::col_ref(arg) else { return Ok(None) };
+                if dup(&n) { return Ok(None); }
+                let Some(full) = find_col_in_block(&n, &rn) else { return Ok(None) };
+                let Some(b) = bare_of(&full, ra) else { return Ok(None) };
+                let Some(col) = rsrc.columns.iter().find(|c| c.name.rsplit('.').next() == Some(b.as_str())) else { return Ok(None) };
+                if !matches!(col.data, ColumnData::Int64(_) | ColumnData::Float64(_) | ColumnData::Str(_)) { return Ok(None); }
+                count_cols.push(col);
+                outs.push((alias.clone(), Out::CountCol(count_cols.len() - 1)));
+            }
+            _ => return Ok(None),
+        }
+    }
+    if outs.is_empty() { return Ok(None); }
+    // unique, non-NULL left keys in a modest range -> flat slot table (slot = left row)
+    let (mut lo, mut hi) = (i64::MAX, i64::MIN);
+    for k in lv.iter() { match k { Some(k) => { lo = lo.min(*k); hi = hi.max(*k); } None => return Ok(None) } }
+    if lv.is_empty() || (hi as i128 - lo as i128) >= (1i128 << 27) { return Ok(None); }
+    let mut tbl = vec![u32::MAX; (hi - lo) as usize + 1];
+    for (r, k) in lv.iter().enumerate() {
+        let s = &mut tbl[(k.unwrap() - lo) as usize];
+        if *s != u32::MAX { return Ok(None); }
+        *s = r as u32;
+    }
+    let __tj = std::time::Instant::now();
+    let fidx: Option<Vec<usize>> = match crate::rewrite::and_all(right_only) {
+        Some(p) => match crate::vecexpr::filter_idx(&p, rsrc) { Some(i) => Some(i), None => return Ok(None) },
+        None => None,
+    };
+    prof!(__tj, "left-count right filtered rows={}", fidx.as_ref().map_or(rsrc.num_rows, |f| f.len()));
+    let n = lv.len();
+    let all: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
+    let per: Vec<Vec<AtomicU32>> = count_cols.iter().map(|_| (0..n).map(|_| AtomicU32::new(0)).collect()).collect();
+    let nrows = fidx.as_ref().map_or(rsrc.num_rows, |f| f.len());
+    let chunk = 1usize << 16;
+    (0..nrows.div_ceil(chunk)).into_par_iter().for_each(|c| {
+        for i in c * chunk..((c + 1) * chunk).min(nrows) {
+            let r = match &fidx { Some(f) => f[i], None => i };
+            let Some(k) = rv[r] else { continue };
+            let d = (k as i128 - lo as i128) as u128;
+            if d >= tbl.len() as u128 { continue; }
+            let s = tbl[d as usize];
+            if s == u32::MAX { continue; }
+            all[s as usize].fetch_add(1, Ordering::Relaxed);
+            for (ci, col) in count_cols.iter().enumerate() {
+                let nn = match &col.data { ColumnData::Int64(v) => v[r].is_some(), ColumnData::Float64(v) => v[r].is_some(), ColumnData::Str(v) => v[r].is_some(), _ => false };
+                if nn { per[ci][s as usize].fetch_add(1, Ordering::Relaxed); }
+            }
+        }
+    });
+    prof!(__tj, "left-count counted");
+    let columns: Vec<Column> = outs.iter().map(|(name, o)| Column {
+        name: name.clone(),
+        data: ColumnData::Int64(match o {
+            Out::Key => lv.clone(),
+            Out::CountStar => all.iter().map(|a| Some(a.load(Ordering::Relaxed).max(1) as i64)).collect(),
+            Out::CountCol(ci) => per[*ci].iter().map(|a| Some(a.load(Ordering::Relaxed) as i64)).collect(),
+        }),
+    }).collect();
+    crate::testing::SUBQ_LEFTCOUNT_HITS.fetch_add(1, Ordering::Relaxed);
+    Ok(Some(DataBlock { columns, num_rows: n }))
+}
+
 pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
     let __t0 = std::time::Instant::now();
     let r = execute_select_inner(stmt, ctx);
@@ -1222,6 +1346,9 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
         if let Some(named) = crate::general::name_unaliased_aggregates(stmt) {
             return execute_select(&named, ctx);
         }
+    }
+    if !use_general {
+        if let Some(done) = try_left_join_count(stmt, ctx)? { return Ok(done); }
     }
     if !use_general && stmt.grouping != Grouping::Plain && !stmt.group_by.is_empty() {
         return execute_grouping_sets(stmt, ctx);
@@ -3613,6 +3740,7 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
                     None => NO,
                     Some(k) => { let next = slots.len() as u32; *slots.entry(k).or_insert(next) }
                 }).collect();
+                prof!(__ts, "semi outer slots done");
                 let ns = slots.len();
                 // One integral key whose values span a modest range: a flat slot table instead of hashing every inner row.
                 let direct: Option<(f64, Vec<u32>)> = if eqs.len() == 1 && ns > 0 {
@@ -3665,6 +3793,7 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
                     }
                     st
                 }).collect();
+                prof!(__ts, "semi scan done ns={}", ns);
                 let mut merged = vec![empty; ns];
                 for part in &parts {
                     for (m, p) in merged.iter_mut().zip(part) {
@@ -4151,6 +4280,62 @@ fn correlated_scalar_values(outer: &DataBlock, sq: &SelectStmt, ctx: &KqlContext
     }
     if corr.is_empty() { return Ok(None); }
 
+    let (rewritten, aggs) = crate::rewrite::extract_aggs(proj);
+    let mut funcs: Vec<AggFunc> = Vec::new();
+    let mut arg_exprs: Vec<Expr> = Vec::new();
+    for (_, a) in aggs.iter() {
+        let Expr::Agg { func, expr: arg } = a else { return Ok(None) };
+        if !matches!(func, AggFunc::Sum | AggFunc::Avg | AggFunc::Min | AggFunc::Max | AggFunc::Count) { return Ok(None); }
+        arg_exprs.push(if matches!(arg.as_ref(), Expr::Col(c) if c == "*") { Expr::Int(1) } else { (**arg).clone() });
+        funcs.push(func.clone());
+    }
+    // An outer row with no matching inner rows sees the aggregates of an empty set: COUNT = 0, everything else NULL.
+    let empty_val: Option<f64> = {
+        let cols: Vec<Column> = funcs.iter().enumerate().map(|(j, f)| Column {
+            name: aggs[j].0.clone(),
+            data: ColumnData::Float64(vec![if matches!(f, AggFunc::Count) { Some(0.0) } else { None }]),
+        }).collect();
+        let b = DataBlock { columns: cols, num_rows: 1 };
+        to_f64(&eval_expr(&rewritten, &b, 0))
+    };
+
+    // Single inner table: filter ids on the catalog table, then one parallel pass; no inner row copy.
+    if sq.joins.is_empty() && corr.len() <= 2 && !crate::testing::no_subq_direct() {
+        let __td = std::time::Instant::now();
+        if let Ok(src) = table_source(&sq.from, ctx) {
+            let alias = sq.from.alias.as_deref().unwrap_or(sq.from.name.as_str()).to_string();
+            let inner = src.get();
+            let sel: Option<Option<Vec<usize>>> = if inner_filters.is_empty() { Some(None) } else {
+                let p = crate::rewrite::and_all(inner_filters.iter().map(|f| crate::rewrite::unqualify(f, &alias)).collect());
+                // the outer rows' first key restricts the inner rows first when that is selective (Q20: 1% of lineitem);
+                // the (more expensive) filter then runs on the survivors only
+                let mut keyed: Option<Vec<usize>> = None;
+                if let (Some(p), true) = (&p, inner.num_rows >= 200_000) {
+                    if let (Expr::Col(kn), Some(KeyCol::I(ov))) = (crate::rewrite::unqualify(&corr[0].0, &alias), key_col(&corr[0].1, outer)) {
+                        if matches!(inner.columns.iter().find(|c| c.name == kn), Some(Column { data: ColumnData::Int64(_), .. })) {
+                            if let Some(set) = crate::sipset::IntSet::build(ov, 4_000_000) {
+                                keyed = filter_sets_first(p, inner, &[(kn, std::sync::Arc::new(set))]);
+                            }
+                        }
+                    }
+                }
+                match keyed { Some(k) => Some(Some(k)), None => p.and_then(|p| crate::vecexpr::filter_idx(&p, inner)).map(Some) }
+            };
+            if let Some(sel) = sel {
+                let ik: Option<Vec<KeyCol>> = corr.iter().map(|(ie, _)| key_col(&crate::rewrite::unqualify(ie, &alias), inner)).collect();
+                let ok: Option<Vec<KeyCol>> = corr.iter().map(|(_, oe)| key_col(oe, outer)).collect();
+                let av: Option<Vec<KeyCol>> = arg_exprs.iter().map(|e| key_col(&crate::rewrite::unqualify(e, &alias), inner)).collect();
+                if let (Some(ik), Some(ok), Some(av)) = (ik, ok, av) {
+                    prof!(__td, "corr direct filter n={:?}", sel.as_ref().map(|s| s.len()));
+                    let out = corr_accumulate(&ik, &ok, &av, sel.as_deref().map_or(inner.num_rows, |s| s.len()), sel.as_deref(), outer.num_rows, &funcs, &aggs, &rewritten, empty_val);
+                    prof!(__td, "corr direct done");
+                    crate::testing::SUBQ_DIRECT_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return Ok(Some(out));
+                }
+            }
+        }
+    }
+
     // Only the keys that occur in the outer rows matter: aggregating every group of a big inner table
     // (all 200k parts when the outer query kept 2k of them) is wasted work.
     {
@@ -4168,17 +4353,11 @@ fn correlated_scalar_values(outer: &DataBlock, sq: &SelectStmt, ctx: &KqlContext
         }
     }
 
-    let (rewritten, aggs) = crate::rewrite::extract_aggs(proj);
     let mut projections: Vec<Projection> = corr.iter().enumerate()
         .map(|(i, (ie, _))| Projection::Expr { expr: ie.clone(), alias: Some(format!("__k{i}")) })
         .collect();
-    let mut funcs: Vec<AggFunc> = Vec::new();
-    for (j, (_, a)) in aggs.iter().enumerate() {
-        let Expr::Agg { func, expr: arg } = a else { return Ok(None) };
-        if !matches!(func, AggFunc::Sum | AggFunc::Avg | AggFunc::Min | AggFunc::Max | AggFunc::Count) { return Ok(None); }
-        let arg_expr = if matches!(arg.as_ref(), Expr::Col(c) if c == "*") { Expr::Int(1) } else { (**arg).clone() };
-        projections.push(Projection::Expr { expr: arg_expr, alias: Some(format!("__a{j}")) });
-        funcs.push(func.clone());
+    for (j, e) in arg_exprs.iter().enumerate() {
+        projections.push(Projection::Expr { expr: e.clone(), alias: Some(format!("__a{j}")) });
     }
     let inner = SelectStmt {
         distinct: false, projections,
@@ -4196,16 +4375,6 @@ fn correlated_scalar_values(outer: &DataBlock, sq: &SelectStmt, ctx: &KqlContext
     #[derive(Clone, Default)]
     struct Acc { sum: f64, count: u64, min: Option<f64>, max: Option<f64> }
 
-    // An outer row with no matching inner rows sees the aggregates of an empty set: COUNT = 0, everything else NULL.
-    let empty_val: Option<f64> = {
-        let cols: Vec<Column> = funcs.iter().enumerate().map(|(j, f)| Column {
-            name: aggs[j].0.clone(),
-            data: ColumnData::Float64(vec![if matches!(f, AggFunc::Count) { Some(0.0) } else { None }]),
-        }).collect();
-        let b = DataBlock { columns: cols, num_rows: 1 };
-        to_f64(&eval_expr(&rewritten, &b, 0))
-    };
-
     // Fast path: one or two numeric correlation keys. Only the keys present in the outer rows get an
     // accumulator slot; the inner rows are then aggregated in parallel chunks (no hash table over the
     // inner side) and the per-chunk states merged in a fixed order.
@@ -4214,78 +4383,7 @@ fn correlated_scalar_values(outer: &DataBlock, sq: &SelectStmt, ctx: &KqlContext
         let ok: Option<Vec<KeyCol>> = corr.iter().map(|(_, oe)| key_col(oe, outer)).collect();
         let av: Option<Vec<KeyCol>> = (0..funcs.len()).map(|j| key_col(&Expr::Col(format!("__a{j}")), &rows)).collect();
         if let (Some(ik), Some(ok), Some(av)) = (ik, ok, av) {
-            use rayon::prelude::*;
-            // per key: raw integers when both sides are BIGINT columns (f64 bits would merge ids above 2^53)
-            let exact: Vec<bool> = ik.iter().zip(ok.iter()).map(|(a, b)| a.is_int() && b.is_int()).collect();
-            let key = |cols: &Vec<KeyCol>, r: usize| -> Option<(u64, u64)> {
-                let a = cols[0].bits_x(r, exact[0])?;
-                let b = if cols.len() > 1 { cols[1].bits_x(r, exact[1])? } else { 0 };
-                Some((a, b))
-            };
-            const NO: u32 = u32::MAX;
-            let mut slots: HashMap<(u64, u64), u32, std::hash::BuildHasherDefault<FxHasher>> = HashMap::default();
-            let outer_slot: Vec<u32> = (0..outer.num_rows).map(|r| match key(&ok, r) {
-                None => NO,
-                Some(k) => { let next = slots.len() as u32; *slots.entry(k).or_insert(next) }
-            }).collect();
-            let ns = slots.len();
-            let nf = funcs.len();
-            #[derive(Clone)]
-            struct FAcc { sum: f64, count: u64, min: f64, max: f64 }
-            let init = FAcc { sum: 0.0, count: 0, min: f64::INFINITY, max: f64::NEG_INFINITY };
-            let mut nthreads = rayon::current_num_threads().max(1);
-            while nthreads > 1 && ns * nf.max(1) * nthreads > (1 << 24) { nthreads /= 2; }
-            if rows.num_rows < 50_000 { nthreads = 1; }
-            let chunk = rows.num_rows.div_ceil(nthreads).max(1);
-            let parts: Vec<Vec<FAcc>> = (0..nthreads).into_par_iter().map(|t| {
-                let mut st = vec![init.clone(); ns * nf];
-                let lo = (t * chunk).min(rows.num_rows);
-                let hi = ((t + 1) * chunk).min(rows.num_rows);
-                for r in lo..hi {
-                    let Some(k) = key(&ik, r) else { continue };
-                    let Some(&s) = slots.get(&k) else { continue };
-                    let base = s as usize * nf;
-                    for j in 0..nf {
-                        if let Some(bits) = av[j].bits(r) {
-                            let x = f64::from_bits(bits);
-                            let acc = &mut st[base + j];
-                            acc.count += 1;
-                            acc.sum += x;
-                            if x < acc.min { acc.min = x; }
-                            if x > acc.max { acc.max = x; }
-                        }
-                    }
-                }
-                st
-            }).collect();
-            let mut merged = vec![init.clone(); ns * nf];
-            for part in &parts {
-                for (m, p) in merged.iter_mut().zip(part) {
-                    if p.count == 0 { continue; }
-                    m.count += p.count;
-                    m.sum += p.sum;
-                    if p.min < m.min { m.min = p.min; }
-                    if p.max > m.max { m.max = p.max; }
-                }
-            }
-            prof!(__tc, "corr groups done n={}", ns);
-            let cols: Vec<Column> = funcs.iter().enumerate().map(|(j, func)| {
-                let vals: Vec<Option<f64>> = (0..ns).map(|s| {
-                    let a = &merged[s * nf + j];
-                    match func {
-                        AggFunc::Count => Some(a.count as f64),
-                        AggFunc::Sum   => if a.count == 0 { None } else { Some(a.sum) },
-                        AggFunc::Avg   => if a.count == 0 { None } else { Some(a.sum / a.count as f64) },
-                        AggFunc::Min   => if a.count == 0 { None } else { Some(a.min) },
-                        _              => if a.count == 0 { None } else { Some(a.max) },
-                    }
-                }).collect();
-                Column { name: aggs[j].0.clone(), data: ColumnData::Float64(vals) }
-            }).collect();
-            let agg_block = DataBlock { columns: cols, num_rows: ns };
-            let finals = crate::vecexpr::num_vec(&rewritten, &agg_block)
-                .unwrap_or_else(|| (0..ns).map(|i| to_f64(&eval_expr(&rewritten, &agg_block, i))).collect());
-            let out = outer_slot.iter().map(|&s| if s == NO { empty_val } else { finals[s as usize] }).collect();
+            let out = corr_accumulate(&ik, &ok, &av, rows.num_rows, None, outer.num_rows, &funcs, &aggs, &rewritten, empty_val);
             prof!(__tc, "corr out done");
             return Ok(Some(out));
         }
@@ -4340,6 +4438,113 @@ fn correlated_scalar_values(outer: &DataBlock, sq: &SelectStmt, ctx: &KqlContext
     }
     Ok(Some(out))
 }
+
+/// Shared accumulation of a correlated scalar aggregate: per outer key slot, one parallel pass over the inner rows
+/// (`sel` = surviving row ids of the inner table, or all `n_inner` rows when None; `n_inner` counts the iterated rows).
+#[allow(clippy::too_many_arguments)]
+fn corr_accumulate(
+    ik: &[KeyCol], ok: &[KeyCol], av: &[KeyCol], n_inner: usize, sel: Option<&[usize]>, outer_rows: usize,
+    funcs: &[AggFunc], aggs: &[(String, Expr)], rewritten: &Expr, empty_val: Option<f64>,
+) -> Vec<Option<f64>> {
+    use std::collections::HashMap;
+        use rayon::prelude::*;
+        // per key: raw integers when both sides are BIGINT columns (f64 bits would merge ids above 2^53)
+        let exact: Vec<bool> = ik.iter().zip(ok.iter()).map(|(a, b)| a.is_int() && b.is_int()).collect();
+        let key = |cols: &[KeyCol], r: usize| -> Option<(u64, u64)> {
+            let a = cols[0].bits_x(r, exact[0])?;
+            let b = if cols.len() > 1 { cols[1].bits_x(r, exact[1])? } else { 0 };
+            Some((a, b))
+        };
+        const NO: u32 = u32::MAX;
+        let mut slots: HashMap<(u64, u64), u32, std::hash::BuildHasherDefault<FxHasher>> = HashMap::default();
+        let outer_slot: Vec<u32> = (0..outer_rows).map(|r| match key(&ok, r) {
+            None => NO,
+            Some(k) => { let next = slots.len() as u32; *slots.entry(k).or_insert(next) }
+        }).collect();
+        let ns = slots.len();
+        let nf = funcs.len();
+        #[derive(Clone)]
+        struct FAcc { sum: f64, count: u64, min: f64, max: f64 }
+        let init = FAcc { sum: 0.0, count: 0, min: f64::INFINITY, max: f64::NEG_INFINITY };
+        // one BIGINT key with a modest value range: a flat key -> slot table instead of hashing every inner row
+        let direct: Option<(i64, Vec<u32>)> = if ik.len() == 1 && exact[0] && ns > 0 && !crate::testing::no_subq_direct() {
+            let (mut lo, mut hi) = (i64::MAX, i64::MIN);
+            for (k, _) in slots.iter() { let v = k.0 as i64; lo = lo.min(v); hi = hi.max(v); }
+            if (hi as i128 - lo as i128) < (1i128 << 26) {
+                let mut tbl = vec![NO; (hi - lo) as usize + 1];
+                for (k, &sl) in slots.iter() { tbl[((k.0 as i64) - lo) as usize] = sl; }
+                Some((lo, tbl))
+            } else { None }
+        } else { None };
+        let mut nthreads = rayon::current_num_threads().max(1);
+        while nthreads > 1 && ns * nf.max(1) * nthreads > (1 << 24) { nthreads /= 2; }
+        if n_inner < 50_000 { nthreads = 1; }
+        let chunk = n_inner.div_ceil(nthreads).max(1);
+        let parts: Vec<Vec<FAcc>> = (0..nthreads).into_par_iter().map(|t| {
+            let mut st = vec![init.clone(); ns * nf];
+            let lo = (t * chunk).min(n_inner);
+            let hi = ((t + 1) * chunk).min(n_inner);
+            for i in lo..hi {
+                let r = match sel { Some(s) => s[i], None => i };
+                let s = match &direct {
+                    Some((mn, tbl)) => {
+                        let Some(Some(v)) = (match &ik[0] { KeyCol::I(v) => Some(v[r]), _ => None }) else { continue };
+                        let d = v.wrapping_sub(*mn) as u64;
+                        if d >= tbl.len() as u64 { continue; }
+                        let s = tbl[d as usize];
+                        if s == NO { continue; }
+                        s
+                    }
+                    None => {
+                        let Some(k) = key(&ik, r) else { continue };
+                        let Some(&s) = slots.get(&k) else { continue };
+                        s
+                    }
+                };
+                let base = s as usize * nf;
+                for j in 0..nf {
+                    if let Some(bits) = av[j].bits(r) {
+                        let x = f64::from_bits(bits);
+                        let acc = &mut st[base + j];
+                        acc.count += 1;
+                        acc.sum += x;
+                        if x < acc.min { acc.min = x; }
+                        if x > acc.max { acc.max = x; }
+                    }
+                }
+            }
+            st
+        }).collect();
+        let mut merged = vec![init.clone(); ns * nf];
+        for part in &parts {
+            for (m, p) in merged.iter_mut().zip(part) {
+                if p.count == 0 { continue; }
+                m.count += p.count;
+                m.sum += p.sum;
+                if p.min < m.min { m.min = p.min; }
+                if p.max > m.max { m.max = p.max; }
+            }
+        }
+        let cols: Vec<Column> = funcs.iter().enumerate().map(|(j, func)| {
+            let vals: Vec<Option<f64>> = (0..ns).map(|s| {
+                let a = &merged[s * nf + j];
+                match func {
+                    AggFunc::Count => Some(a.count as f64),
+                    AggFunc::Sum   => if a.count == 0 { None } else { Some(a.sum) },
+                    AggFunc::Avg   => if a.count == 0 { None } else { Some(a.sum / a.count as f64) },
+                    AggFunc::Min   => if a.count == 0 { None } else { Some(a.min) },
+                    _              => if a.count == 0 { None } else { Some(a.max) },
+                }
+            }).collect();
+            Column { name: aggs[j].0.clone(), data: ColumnData::Float64(vals) }
+        }).collect();
+        let agg_block = DataBlock { columns: cols, num_rows: ns };
+        let finals = crate::vecexpr::num_vec(&rewritten, &agg_block)
+            .unwrap_or_else(|| (0..ns).map(|i| to_f64(&eval_expr(&rewritten, &agg_block, i))).collect());
+        let out = outer_slot.iter().map(|&s| if s == NO { empty_val } else { finals[s as usize] }).collect();
+    out
+}
+
 
 /// Decompose a WHERE clause into correlation conditions (inner.key = outer.expr)
 /// and plain filter conditions. The inner_table name is used to identify which
