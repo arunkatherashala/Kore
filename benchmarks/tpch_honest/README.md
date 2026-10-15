@@ -63,7 +63,7 @@ Geometric mean over the 18 queries every engine answered correctly: Spark 1425 m
 Fastest engine per query: KORE 8-9 of 22, DuckDB 9-10, Polars 4 (two back-to-back KORE runs gave 9/9/4 and 8/10/4). KORE and DuckDB are
 about equal overall in this setup (KORE 48-50 ms vs DuckDB 47 ms geometric mean); KORE is about 29x faster than Spark local mode.
 
-**Run-to-run variance (read this before quoting any ratio).** The 48-50 ms vs 47 ms result above came from the quietest runs. Later repeated runs of the same code on the same shared machine gave KORE geometric means of 53, 86, 112, 137 and 141 ms (over the 22 queries the figures were 53-141 ms) and DuckDB 47-67 ms, mainly because other programs on the machine (Teams, Edge WebView, and three runaway helper processes that were found and stopped) took CPU in the middle of runs; in one run Q1-Q10 were unchanged and Q11-Q22 were 4-25x slower. An interleaved A/B of the previous and the current build (two rounds each) gave 56 / 84 ms and 66 / 70 ms: no consistent difference. So "about level with DuckDB" is a best case on a quiet machine. A fair summary is: between roughly level with and about 2x slower than DuckDB at SF1, much faster than Spark local mode, and the ordering with DuckDB is not stable across runs.
+**Earlier note, written on 2026-10-12 while the machine was busy (superseded for the KORE-vs-DuckDB ordering by the 2026-10-15 idle-machine results below/above, but still true about how noisy a shared machine is): run-to-run variance.** The 48-50 ms vs 47 ms result above came from the quietest runs. Later repeated runs of the same code on the same shared machine gave KORE geometric means of 53, 86, 112, 137 and 141 ms (over the 22 queries the figures were 53-141 ms) and DuckDB 47-67 ms, mainly because other programs on the machine (Teams, Edge WebView, and three runaway helper processes that were found and stopped) took CPU in the middle of runs; in one run Q1-Q10 were unchanged and Q11-Q22 were 4-25x slower. An interleaved A/B of the previous and the current build (two rounds each) gave 56 / 84 ms and 66 / 70 ms: no consistent difference. So "about level with DuckDB" is a best case on a quiet machine. A fair summary is: between roughly level with and about 2x slower than DuckDB at SF1, much faster than Spark local mode, and the ordering with DuckDB is not stable across runs.
 
 \* DataFusion returned no rows for Q15: the query compares a sum with `max()` of the same sum using float equality, and a different summation
 order gives a slightly different float. This is a property of the query, not necessarily a DataFusion bug. Polars' SQL layer rejects Q2, Q13 and Q17
@@ -145,6 +145,61 @@ fixed per-query overhead on the 10-60 ms queries.
 
 Correctness gate on the merged code (`kore-sql/tests/oracle/run_gate.sh`: in-process differential with every optimisation switch on/off plus the
 SQLite oracle, small, mid and five threshold sizes): GATE PASS, 0 disagreements, 0 oracle mismatches; 284 unit/integration tests pass.
+
+## Final results after Phase 1 and Phase 2 (2026-10-15, idle machine)
+
+Merged: Phase 1 (wider fused group-by, parallel join mechanics, SIP bitmaps, estimate-ordered joins, lazy base table, packed multi-column keys) and
+Phase 2 (text group keys gathered once per group, HAVING threshold inside the aggregation, extended top-N, direct correlated-scalar path, fused LEFT JOIN +
+COUNT, parse cache, faster FFI JSON writer). 295 tests pass; correctness gate (`kore-sql/tests/oracle/run_gate.sh`: in-process differential with every switch
+on/off + SQLite oracle, small, mid and five threshold sizes): GATE PASS, 0 disagreements, 0 oracle mismatches. All 22 answers match Spark (SF 1) and
+DuckDB (SF 3) in every run.
+
+Alternating runs, DuckDB measured before and after each KORE run, nothing else running (geometric mean over the 22 queries, ms):
+
+| | DuckDB before | KORE | DuckDB after |
+|---|---|---|---|
+| SF 1 round 1 | 43.0 | 49.1 | 43.9 |
+| SF 1 round 2 | 42.2 | 41.3 | 49.9 |
+| SF 1 round 3 | 43.2 | 49.1 | 42.9 |
+| SF 3 round 1 | 121.1 | 130.1 | 117.4 |
+| SF 3 round 2 | 124.0 | 128.9 | 114.6 |
+| SF 3 round 3 | 138.5 | 109.8 | 113.9 |
+
+Means: SF 1 KORE 46.5 ms vs DuckDB 44.2 ms; SF 3 KORE 122.9 ms vs DuckDB 121.6 ms. **KORE and DuckDB are at parity on this benchmark within run-to-run noise
+(about +/-10%): this is a tie, not a win.** The goal "KORE faster than DuckDB at SF 3" was not met in a way these runs can distinguish.
+
+SF 3, round 3 per query (single round: not a stable ranking; KORE faster on 11 queries, DuckDB on 11):
+
+| Query | KORE | DuckDB |
+|---|---|---|
+| Q1 | 155 | 202 |
+| Q2 | 26 | 48 |
+| Q3 | 136 | 138 |
+| Q4 | 171 | 160 |
+| Q5 | 85 | 78 |
+| Q6 | 36 | 69 |
+| Q7 | 86 | 133 |
+| Q8 | 65 | 57 |
+| Q9 | 430 | 223 |
+| Q10 | 136 | 184 |
+| Q11 | 33 | 16 |
+| Q12 | 166 | 207 |
+| Q13 | 189 | 201 |
+| Q14 | 89 | 84 |
+| Q15 | 128 | 90 |
+| Q16 | 230 | 228 |
+| Q17 | 28 | 41 |
+| Q18 | 171 | 236 |
+| Q19 | 42 | 184 |
+| Q20 | 290 | 114 |
+| Q21 | 627 | 524 |
+| Q22 | 81 | 41 |
+
+KORE's clearest remaining weak spots versus DuckDB: Q9 (430 vs 223 ms), Q20 (290 vs 114), Q11 (33 vs 16), Q22 (81 vs 41), Q15 (128 vs 90), Q21 (627 vs 524).
+KORE's clearest strengths: Q19 (42 vs 184), Q6, Q7, Q1, Q10, Q17, Q18.
+
+Scope of this claim: one machine (8 cores, 32 GB), TPC-H-shaped data (not the official dbgen), warm in-memory runs, 22 queries, SF 1 and SF 3 only. It says nothing
+about other workloads (TPC-DS, ClickBench), larger scales, cold data, concurrency or production features.
 
 Full tables: `results/`. Read these numbers with care:
 

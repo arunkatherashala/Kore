@@ -73,7 +73,7 @@ information passing, per-key correlated aggregates, a cached integer encoding of
 for Q13, and a fuzzing round that fixed 14 wrong-answer bugs). Where KORE is still behind DuckDB: Q17 (104 vs 18 ms), Q3 (94 vs 41),
 Q9 (256 vs 95), Q10 (150 vs 64), Q18 (165 vs 72), Q13 (149 vs 66).
 
-**Run-to-run variance (read this before quoting any ratio).** The 48-50 ms vs 47 ms result above came from the quietest runs. Later repeated runs of the same code on the same shared machine gave KORE geometric means of 53, 86, 112, 137 and 141 ms (over the 22 queries the figures were 53-141 ms) and DuckDB 47-67 ms, mainly because other programs on the machine (Teams, Edge WebView, and three runaway helper processes that were found and stopped) took CPU in the middle of runs; in one run Q1-Q10 were unchanged and Q11-Q22 were 4-25x slower. An interleaved A/B of the previous and the current build (two rounds each) gave 56 / 84 ms and 66 / 70 ms: no consistent difference. So "about level with DuckDB" is a best case on a quiet machine. A fair summary is: between roughly level with and about 2x slower than DuckDB at SF1, much faster than Spark local mode, and the ordering with DuckDB is not stable across runs.
+**Earlier note, written on 2026-10-12 while the machine was busy (superseded for the KORE-vs-DuckDB ordering by the 2026-10-15 idle-machine results below/above, but still true about how noisy a shared machine is): run-to-run variance.** The 48-50 ms vs 47 ms result above came from the quietest runs. Later repeated runs of the same code on the same shared machine gave KORE geometric means of 53, 86, 112, 137 and 141 ms (over the 22 queries the figures were 53-141 ms) and DuckDB 47-67 ms, mainly because other programs on the machine (Teams, Edge WebView, and three runaway helper processes that were found and stopped) took CPU in the middle of runs; in one run Q1-Q10 were unchanged and Q11-Q22 were 4-25x slower. An interleaved A/B of the previous and the current build (two rounds each) gave 56 / 84 ms and 66 / 70 ms: no consistent difference. So "about level with DuckDB" is a best case on a quiet machine. A fair summary is: between roughly level with and about 2x slower than DuckDB at SF1, much faster than Spark local mode, and the ordering with DuckDB is not stable across runs.
 
 How to read this: one machine, SF 1, TPC-H-shaped data (not dbgen), in memory, about +/-20% noise (two back-to-back KORE runs gave 48.3 and
 49.6 ms). KORE caches an integer encoding of date columns after the first query on a table (the warm-up run absorbs the one-time cost); every
@@ -92,6 +92,13 @@ Interleaved A/B vs the previous build: about 30-40% faster (SF 1 geometric mean 
 alternating runs: indistinguishable at SF 1 (DuckDB alone swings 45-85 ms), about 1.4x slower at SF 3 (KORE 165-174 ms vs DuckDB 120-127 ms in its quiet
 runs). The Phase 1 target (beat DuckDB at SF 3) was NOT reached. Details: `benchmarks/tpch_honest/README.md`.
 
+## Final results after Phase 1 and Phase 2 (2026-10-15)
+
+On an idle machine, alternating DuckDB and KORE runs (DuckDB before and after each): geometric mean over 22 queries SF 1 KORE 46.5 ms vs DuckDB 44.2 ms, SF 3 KORE
+122.9 ms vs DuckDB 121.6 ms: **parity within noise (about +/-10%), not a win**. All answers match; correctness gate PASS; 295 tests. Per-query SF 3: KORE faster on
+11, DuckDB on 11 (weak spots Q9, Q20, Q11, Q22, Q15, Q21). Scope: TPC-H-shaped data, one machine, warm in-memory, SF 1 and SF 3 only. Details:
+`benchmarks/tpch_honest/README.md`.
+
 ## What was added in this round
 
 - Join planning: filters derived from `OR` branches, unique-key (lookup) tables joined first.
@@ -108,7 +115,7 @@ runs). The Phase 1 target (beat DuckDB at SF 3) was NOT reached. Details: `bench
 
 ## Test evidence
 
-- 284 tests pass across `kore-sql`, `kore-join` and `kore-ffi`, including about 960 hand-derived regression
+- 295 tests pass across `kore-sql`, `kore-join` and `kore-ffi`, including about 960 hand-derived regression
   cases, a differential test across execution paths, and a SQLite oracle over 60k generated queries.
 - A mutation fuzzer ran about 1.6M mutants with no panics (reported by the SQL-coverage work, not re-run here).
 - Not run: the whole workspace, because a Python-binding crate does not build against Python 3.14 here.
@@ -118,9 +125,9 @@ runs). The Phase 1 target (beat DuckDB at SF 3) was NOT reached. Details: `bench
 | Area | Limit |
 |---|---|
 | Scale | Everything is in memory as row vectors of `Option<T>`. Spilling bounds operator working state only, not input tables or results. A skewed key can still exceed the budget. |
-| SF3 (18M lineitem rows) | Completes all 22 queries with answers matching DuckDB, about 1.4x slower than DuckDB's quiet-machine runs (KORE 149-174 ms vs 120-127 ms geometric mean, 2026-10-14). Peak memory at SF 3 was not re-measured on the final build. Nothing larger than SF 3 has been tried. |
+| SF3 (18M lineitem rows) | Completes all 22 queries with answers matching DuckDB; at parity with DuckDB in alternating idle-machine runs (KORE 109.8-130.1 ms vs DuckDB 113.9-138.5 ms geometric mean, 2026-10-15). Peak memory at SF 3 was not re-measured on the final build. Nothing larger than SF 3 has been tried. |
 | Strings | `Option<String>` columns that cannot be dictionary-encoded (dictionary holds at most 254 values) dominate memory and are slow to sort and group. |
-| Other engines | At SF1 (warm, in-memory) KORE and DuckDB are about equal overall. DuckDB is the better-engineered baseline and was only exercised on these 22 queries. Untested: larger data, cold start, concurrency. |
+| Other engines | At SF 1 and SF 3 (warm, in-memory, 22 TPC-H-shaped queries) KORE and DuckDB are at parity within noise. DuckDB is the better-engineered baseline and was only exercised on these queries. Untested: other workloads, larger data, cold start, concurrency. |
 | Distributed | No cluster execution, no fault tolerance, no connectors (S3, Hive, JDBC, Kafka), no streaming or ML. |
 | SQL | No STRUCT, TABLESAMPLE or native DECIMAL (DECIMAL is a double). A DATE compared with a TIMESTAMP is a string comparison. `EXPLAIN`/`DESCRIBE` output differs from Spark. |
 | Data | TPC-H-shaped data from `gen_data.py`, not the official dbgen. This is not an official TPC-H result. |
@@ -134,7 +141,7 @@ runs). The Phase 1 target (beat DuckDB at SF 3) was NOT reached. Details: `bench
 | Is it a real SQL engine? | Yes. |
 | Are the results correct? | On the 22 TPC-H-shaped queries, yes, checked against live Spark. In general, no guarantee: bugs are still being found at a rate of several per round. |
 | Faster than Spark on one machine, in-memory? | Yes at SF1, by 2x to 25x in these runs. |
-| Faster than DuckDB? | About equal at SF1 in this setup (48-50 ms vs 47 ms geometric mean); each is faster on about half the queries. Not shown for other workloads or scales. |
+| Faster than DuckDB? | No, and not slower either on this benchmark: parity within about +/-10% at SF 1 and SF 3 (each faster on about half the queries). Not shown for other workloads or scales. |
 | Replacement for Spark? | No. |
 | Production ready? | No. |
 | Best description | Strong research-grade prototype. |

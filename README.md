@@ -5,8 +5,9 @@
 KORE is a high-performance columnar query engine + Digital Life framework, written from scratch in Rust.  
 On a single 8-core machine with in-memory data (TPC-H-shaped, scale factor 1), its SQL engine returned the same results as live Apache Spark
 on all 22 TPC-H queries and was faster than Spark local mode on every one of them (see [Verified status](#verified-status-2026-10-04)).
-Against other single-node engines at SF 1 (warm, in-memory) it is between about level with DuckDB (best quiet runs: geometric mean 48-50 ms vs 47 ms) and about 2x slower
-(later runs on a busy machine), and faster than DataFusion and Polars overall. Run-to-run variance on the test machine is large: see `docs/ENGINE_STATUS_2026-10-04.md`. It does not replace Spark for large data or clusters.
+Against other single-node engines on this benchmark (22 TPC-H-shaped queries, SF 1 and SF 3, warm, in-memory, one machine) it is at parity with DuckDB within
+run-to-run noise (about +/-10%; latest alternating idle-machine runs) and faster than DataFusion and Polars overall. Not shown: other workloads, larger data, concurrency.
+Details and caveats: `docs/ENGINE_STATUS_2026-10-04.md`. It does not replace Spark for large data or clusters.
 
 ## Distributed engine — Phases 1–20 complete
 
@@ -25,7 +26,7 @@ Measured against a live Spark 4.2.0 (local mode) on one 8-core, 32 GB machine, s
 | Queries | all 22 TPC-H-shaped queries, SF 1 (about 6M lineitem rows) |
 | Result agreement with Spark | 22 of 22 |
 | Speed (in-memory, KORE time / Spark time) | faster on all 22; between 0.02x and 0.6x of Spark's time in the final quiet-machine run (timings vary by about +/-20%) |
-| Tests | 284 pass in `kore-sql`, `kore-join`, `kore-ffi` (including a SQLite oracle over 60k generated queries) |
+| Tests | 295 pass in `kore-sql`, `kore-join`, `kore-ffi` (including a SQLite oracle over 60k generated queries) |
 | Memory | about 2.4-2.5 GB of table data at SF 1; peak commit 2.6-3.3 GB per query |
 
 What this does **not** show: larger-than-memory data (spill-to-disk bounds operator working state only), clusters and fault tolerance,
