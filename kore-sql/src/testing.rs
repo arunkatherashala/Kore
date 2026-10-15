@@ -201,3 +201,41 @@ pub fn set_no_serial_small(on: bool) { NO_SERIAL_SMALL.store(on, Ordering::Relax
 #[inline]
 #[allow(dead_code)]
 pub(crate) fn no_serial_small() -> bool { NO_SERIAL_SMALL.load(Ordering::Relaxed) }
+pub(crate) static NO_DEFER_GB: AtomicBool = AtomicBool::new(false);
+pub(crate) static DEFER_GB_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Gather text/payload group keys before the GROUP BY (the old behaviour) instead of after it, for A/B tests.
+pub fn set_no_defer_gb(on: bool) { NO_DEFER_GB.store(on, Ordering::Relaxed); }
+/// How many aggregations grouped without the deferred payload keys and gathered them afterwards so far.
+pub fn defer_gb_hits() -> usize { DEFER_GB_HITS.load(Ordering::Relaxed) }
+
+#[inline]
+pub(crate) fn no_defer_gb() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_DEFER_GB.load(Ordering::Relaxed) || *E.get_or_init(|| std::env::var_os("KORE_NO_DEFER_GB").is_some())
+}
+
+pub(crate) static NO_HAVING_PUSH: AtomicBool = AtomicBool::new(false);
+pub(crate) static HAVING_PUSH_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Keep every group of an aggregate subquery until the outer `WHERE agg > c` runs (the old behaviour), for A/B tests.
+pub fn set_no_having_push(on: bool) { NO_HAVING_PUSH.store(on, Ordering::Relaxed); }
+/// How many aggregations dropped groups failing the HAVING threshold before building their output so far.
+pub fn having_push_hits() -> usize { HAVING_PUSH_HITS.load(Ordering::Relaxed) }
+
+#[inline]
+pub(crate) fn no_having_push() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_HAVING_PUSH.load(Ordering::Relaxed) || *E.get_or_init(|| std::env::var_os("KORE_NO_HAVING_PUSH").is_some())
+}
+
+pub(crate) static NO_TOPN_EXT: AtomicBool = AtomicBool::new(false);
+pub(crate) static TOPN_EXT_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Use the bounded top-N only for NULL-free keys without OFFSET / NULLS clauses (the old behaviour), for A/B tests.
+pub fn set_no_topn_ext(on: bool) { NO_TOPN_EXT.store(on, Ordering::Relaxed); }
+/// How many ORDER BY ... LIMIT queries used the NULL-aware / OFFSET-aware top-N so far.
+pub fn topn_ext_hits() -> usize { TOPN_EXT_HITS.load(Ordering::Relaxed) }
+
+#[inline]
+pub(crate) fn no_topn_ext() -> bool { NO_TOPN_EXT.load(Ordering::Relaxed) }

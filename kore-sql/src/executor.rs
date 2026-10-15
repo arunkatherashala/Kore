@@ -1017,6 +1017,22 @@ fn render_arrays(block: &mut DataBlock) {
 }
 
 /// A derived table (FROM subquery): its columns are visible under bare names, optionally renamed by `alias(c1, c2)`.
+/// The threshold test `__aggN <op> constant` of a lifted statement's outer WHERE, announced to the fused aggregation.
+fn having_hint_of(lifted: &SelectStmt) -> Option<crate::fusedagg::HintGuard> {
+    if crate::testing::no_having_push() { return None; }
+    let inner = lifted.from.subquery.as_deref()?;
+    let Some(Expr::BinOp { op, left, right }) = &lifted.where_clause else { return None };
+    let flip = |o: &BinOpKind| match o { BinOpKind::Gt => BinOpKind::Lt, BinOpKind::Ge => BinOpKind::Le, BinOpKind::Lt => BinOpKind::Gt, BinOpKind::Le => BinOpKind::Ge, x => x.clone() };
+    let num = |e: &Expr| match e { Expr::Int(i) if i.unsigned_abs() < (1u64 << 52) => Some(*i as f64), Expr::Float(f) if f.is_finite() => Some(*f), _ => None };
+    let (col, op, k) = match (left.as_ref(), right.as_ref()) {
+        (Expr::Col(c), r) => (c.clone(), op.clone(), num(r)?),
+        (l, Expr::Col(c)) => (c.clone(), flip(op), num(l)?),
+        _ => return None,
+    };
+    if !matches!(op, BinOpKind::Gt | BinOpKind::Ge | BinOpKind::Lt | BinOpKind::Le) || !col.starts_with("__agg") { return None; }
+    Some(crate::fusedagg::set_having_hint(inner, col, op, k))
+}
+
 fn derived_block(stmt: &SelectStmt, ctx: &KqlContext, col_aliases: &[String]) -> Result<DataBlock, KoreError> {
     let mut b = crate::general::strip_qualifiers(execute_select(stmt, ctx)?);
     if !col_aliases.is_empty() {
@@ -1214,6 +1230,9 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
     // plus an outer projection over its hidden outputs.
     if !use_general {
         if let Some(lifted) = crate::rewrite::lift_aggregates(stmt) {
+            // `GROUP BY k HAVING SUM(x) > c` became `WHERE __agg0 > c` over the aggregate subquery: tell the aggregation,
+            // which can then drop the groups that cannot pass before it builds millions of output rows
+            let _hint = having_hint_of(&lifted);
             return execute_select(&lifted, ctx);
         }
     }
@@ -1364,6 +1383,8 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
     let mut deferred_lz: Vec<LazyCols<'_>> = Vec::new();
     let plan_defer = planned && n_implicit > 0 && ctx.memory_limit.is_none() && !crate::testing::no_plan_defer();
     let plan_lazy_base = plan_defer && !crate::testing::no_plan_lazy_base();
+    // set when the aggregation already ran with its payload keys deferred (see `group_by_deferred`)
+    let mut gb_done = false;
     let mut result = if let Some(done) = fused {
         conjuncts.clear();
         done
@@ -1665,7 +1686,19 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
             result = push_down_conjuncts(&mut conjuncts, result, ctx)?;
             prof!(__tf, "  join step done rows={} cols={} pending={}", result.num_rows, result.columns.len(), pending.len());
         }
-        for lz in deferred_lz.drain(..) { result = finish_lazy(result, lz); }
+        let defer_gb = deferred.is_empty() && conjuncts.is_empty() && stmt.joins.len() == n_implicit && stmt.lateral_views.is_empty() && !crate::testing::no_defer_gb() && group_defer_shape(stmt) && !use_general;
+        // payload tables whose columns are only GROUP BY keys are gathered after the aggregation instead
+        let mut post_lz: Vec<LazyCols<'_>> = Vec::new();
+        let oks: Vec<bool> = deferred_lz.iter().map(|lz| defer_gb && lz_defer_ok(lz, &deferred_lz, stmt, &result)).collect();
+        for (lz, ok) in deferred_lz.drain(..).zip(oks) {
+            if ok { post_lz.push(lz) } else { result = finish_lazy(result, lz); }
+        }
+        if !post_lz.is_empty() {
+            if !crate::general::block_needs_general(stmt, &result) {
+                if let Some(done) = group_by_deferred(&result, &post_lz, stmt) { result = done; gb_done = true; }
+            }
+            if !gb_done { for lz in post_lz.drain(..) { result = finish_lazy(result, lz); } }
+        }
         conjuncts.append(&mut deferred);
         where_pred = crate::rewrite::and_all(std::mem::take(&mut conjuncts));
     } else if planned {
@@ -1858,13 +1891,13 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
 
     prof!(__tf, "  after where rows={}", result.num_rows);
     // 3.5 anything the numeric fast paths below cannot do correctly
-    if !agg_done && (use_general || crate::general::block_needs_general(stmt, &result)) {
+    if !agg_done && !gb_done && (use_general || crate::general::block_needs_general(stmt, &result)) {
         return crate::general::run(stmt, result, ctx);
     }
 
     // 4. GROUP BY  (or global aggregation if no GROUP BY but has aggregates)
     let has_agg = stmt.projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Agg { .. }, .. }));
-    if agg_done {
+    if agg_done || gb_done {
         // already aggregated by the fused path
     } else if !stmt.group_by.is_empty() {
         // Materialize any GROUP BY columns that are SELECT expression aliases
@@ -1928,21 +1961,26 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
     }
     // ORDER BY ... LIMIT k on NULL-free plain columns: keep the k best rows instead of sorting everything.
     if !spill_sorted && !stmt.order_by.is_empty() {
-        if let (Some(lim), None) = (stmt.limit, stmt.offset) {
-            let k = lim as usize;
+        let ext = !crate::testing::no_topn_ext();
+        if let (Some(lim), true) = (stmt.limit, ext || stmt.offset.is_none()) {
+            // with OFFSET the first LIMIT+OFFSET rows are selected; the offset and limit are applied below
+            let k = (lim as usize).saturating_add(stmt.offset.unwrap_or(0) as usize);
             if k > 0 && k <= 100_000 && result.num_rows > k.saturating_mul(8).max(50_000) {
-                let mut keys: Vec<(usize, bool)> = Vec::new();
+                let mut keys: Vec<(usize, bool, Option<bool>)> = Vec::new();
                 for item in &stmt.order_by {
-                    if item.col.is_empty() || item.nulls_first.is_some() { break; }
+                    if item.col.is_empty() || (item.nulls_first.is_some() && !ext) { break; }
                     let col_raw = resolve_col_name(&item.col, "");
                     let col = find_order_col_in_result(&col_raw, &result, &stmt.projections).unwrap_or(col_raw);
                     match sort_col_name(&result, &col).and_then(|n| result.columns.iter().position(|c| c.name == n)) {
-                        Some(i) => keys.push((i, item.desc)),
+                        Some(i) => keys.push((i, item.desc, item.nulls_first)),
                         None => break,
                     }
                 }
                 if keys.len() == stmt.order_by.len() {
-                    if let Some(idx) = top_n_indices(&result, &keys, k) {
+                    if let Some(idx) = top_n_indices_ex(&result, &keys, k, ext) {
+                        if ext && (stmt.offset.is_some() || stmt.order_by.iter().any(|o| o.nulls_first.is_some())) {
+                            crate::testing::TOPN_EXT_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                         result = result.select_rows(&idx);
                         spill_sorted = true; // already ordered; skip the full sorts below
                     }
@@ -2305,6 +2343,109 @@ fn finish_lazy(mut block: DataBlock, lz: LazyCols<'_>) -> DataBlock {
     }).collect();
     block.columns.extend(cols);
     block
+}
+
+/// Does `have` name the column `want` (equal, or one is the other with a table prefix)?
+fn col_name_matches(want: &str, have: &str) -> bool {
+    have.eq_ignore_ascii_case(want)
+        || (have.len() > want.len() && have.as_bytes()[have.len() - want.len() - 1] == b'.' && have[have.len() - want.len()..].eq_ignore_ascii_case(want))
+        || (want.len() > have.len() && want.as_bytes()[want.len() - have.len() - 1] == b'.' && want[want.len() - have.len()..].eq_ignore_ascii_case(have))
+}
+
+/// Statement shapes for which the deferred GROUP BY applies: plain GROUP BY over columns, projections that are
+/// group keys or plain aggregates, nothing else that could read the payload columns.
+fn group_defer_shape(stmt: &SelectStmt) -> bool {
+    !stmt.group_by.is_empty() && stmt.grouping == Grouping::Plain && stmt.group_exprs.is_empty() && stmt.pivot.is_none()
+        && stmt.qualify.is_none() && stmt.windows.is_empty() && !stmt.distinct
+        && stmt.projections.iter().all(|p| matches!(p, Projection::Expr { expr: Expr::Col(_) | Expr::QualCol(..) | Expr::Agg { .. }, .. }))
+}
+
+/// Every payload column of `lz` is a GROUP BY key (by name), is not read by an aggregate / HAVING, and no other column
+/// of the joined block or select alias shares its name.
+fn lz_defer_ok(lz: &LazyCols<'_>, all: &[LazyCols<'_>], stmt: &SelectStmt, block: &DataBlock) -> bool {
+    if lz.cols.is_empty() || !block.columns.iter().any(|c| c.name == lz.rid) { return false; }
+    let bare = |n: &str| n.rsplit('.').next().unwrap_or(n).to_ascii_lowercase();
+    let lz_bares: Vec<String> = lz.cols.iter().map(|(_, n)| bare(n)).collect();
+    // each payload column is named by exactly one group-by item, which resolves nowhere else
+    for (_, name) in &lz.cols {
+        let hits = stmt.group_by.iter().filter(|g| col_name_matches(g, name)).count();
+        if hits != 1 { return false; }
+    }
+    for g in &stmt.group_by {
+        let mine = lz.cols.iter().any(|(_, n)| col_name_matches(g, n));
+        if mine && find_col(block, g).is_some() { return false; }
+        // a key of another payload table is fine (it is gathered or deferred on its own)
+        let other = all.iter().any(|o| !std::ptr::eq(o, lz) && o.cols.iter().any(|(_, n)| col_name_matches(g, n)));
+        if !mine && !other && find_col(block, g).is_none() { return false; }
+    }
+    if all.iter().any(|o| !std::ptr::eq(o, lz) && o.cols.iter().any(|(_, n)| lz_bares.contains(&bare(n)))) { return false; }
+    // same name elsewhere (another table, a select alias): leave it to the ordinary path
+    if block.columns.iter().any(|c| lz_bares.contains(&bare(&c.name))) { return false; }
+    let mut refs: Vec<String> = Vec::new();
+    for p in &stmt.projections {
+        let Projection::Expr { expr, alias } = p else { return false };
+        if let Some(a) = alias { if lz_bares.contains(&a.to_ascii_lowercase()) { return false; } }
+        if let Expr::Agg { expr: inner, .. } = expr { if !crate::rewrite::referenced_cols(inner, &mut refs) { return false; } }
+    }
+    if let Some(h) = &stmt.having { if !crate::rewrite::referenced_cols(h, &mut refs) { return false; } }
+    // an aggregate or HAVING reading a payload column would need it before the aggregation
+    !refs.iter().any(|r| lz_bares.contains(&bare(r)))
+}
+
+/// GROUP BY where the text / payload keys of lazily loaded tables are left out of the grouping: they follow from the
+/// table's row number (`__rid`, constant within every group when the join key is unique), so they are gathered once per
+/// group afterwards instead of once per joined row. None (nothing consumed) when the aggregation is outside the fused
+/// shapes or some group holds several different rows of a payload table; the caller then gathers and groups as before.
+fn group_by_deferred(block: &DataBlock, lzs: &[LazyCols<'_>], stmt: &SelectStmt) -> Option<DataBlock> {
+    use rayon::prelude::*;
+    let in_lz = |g: &str| lzs.iter().any(|lz| lz.cols.iter().any(|(_, n)| col_name_matches(g, n)));
+    let group_cols: Vec<String> = stmt.group_by.iter().filter(|g| !in_lz(g)).cloned().collect();
+    if group_cols.is_empty() { return None; }
+    // projections: payload keys are taken out, one MIN and one MAX of every row number are added
+    let mut projections: Vec<Projection> = Vec::new();
+    let mut deferred: Vec<(usize, usize, String)> = Vec::new(); // (lz index, source column, output name)
+    for p in &stmt.projections {
+        let Projection::Expr { expr, alias } = p else { return None };
+        if let Expr::Col(_) | Expr::QualCol(..) = expr {
+            let name = crate::rewrite::col_ref(expr)?;
+            let hit = lzs.iter().enumerate().find_map(|(li, lz)| lz.cols.iter().find(|(_, n)| col_name_matches(&name, n)).map(|(ci, n)| (li, *ci, n.clone())));
+            if let Some((li, ci, n)) = hit {
+                deferred.push((li, ci, alias.clone().unwrap_or(n)));
+                continue;
+            }
+        }
+        projections.push(p.clone());
+    }
+    for (i, lz) in lzs.iter().enumerate() {
+        for (tag, func) in [("min", AggFunc::Min), ("max", AggFunc::Max)] {
+            projections.push(Projection::Expr {
+                expr: Expr::Agg { func, expr: Box::new(Expr::Col(lz.rid.clone())) },
+                alias: Some(format!("__dgb_{tag}{i}")),
+            });
+        }
+    }
+    let mut grouped = group_by_fast(block, &group_cols, &projections)?;
+    // one source row per group and payload table, or the shortcut does not apply
+    let mut rids: Vec<Vec<usize>> = Vec::new();
+    for (i, lz) in lzs.iter().enumerate() {
+        let take = |g: &mut DataBlock, tag: &str| -> Option<Vec<Option<i64>>> {
+            let pos = g.columns.iter().position(|c| c.name == format!("__dgb_{tag}{i}"))?;
+            match std::mem::replace(&mut g.columns[pos].data, ColumnData::Int64(Vec::new())) { ColumnData::Int64(v) => Some(v), _ => None }
+        };
+        let (lo, hi) = (take(&mut grouped, "min")?, take(&mut grouped, "max")?);
+        if lo.len() != hi.len() || lo.len() != grouped.num_rows { return None; }
+        let same = lo.par_iter().zip(hi.par_iter()).all(|(a, b)| a.is_some() && a == b);
+        if !same { return None; }
+        let comp: Vec<usize> = lo.par_iter().map(|x| { let r = x.unwrap_or(0) as usize; match &lz.idx { Some(ix) => ix[r], None => r } }).collect();
+        rids.push(comp);
+    }
+    grouped.columns.retain(|c| !c.name.starts_with("__dgb_"));
+    let extra: Vec<Column> = deferred.par_iter().map(|(li, ci, name)| Column {
+        name: name.clone(), data: kore_join::take_rows_par(&lzs[*li].src.columns[*ci].data, &rids[*li]),
+    }).collect();
+    grouped.columns.extend(extra);
+    crate::testing::DEFER_GB_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Some(grouped)
 }
 
 fn load_table<'a>(
@@ -5518,30 +5659,63 @@ fn sort_block_nulls(block: DataBlock, col: &str, desc: bool, nulls_first: Option
 
 // ─── Limit ────────────────────────────────────────────────────────────────────
 
-/// Row indices of the first `k` rows of a stable multi-key sort (ties keep input order), computed with
-/// per-chunk partial selection. None when a key column has NULLs / NaN or an unsupported type (the full
-/// sort then handles it).
 fn top_n_indices(block: &DataBlock, keys: &[(usize, bool)], k: usize) -> Option<Vec<usize>> {
+    let ks: Vec<(usize, bool, Option<bool>)> = keys.iter().map(|&(c, d)| (c, d, None)).collect();
+    top_n_indices_ex(block, &ks, k, false)
+}
+
+/// Row indices of the first `k` rows of a stable multi-key sort (ties keep input order), computed with
+/// per-chunk partial selection. Each key is (column, descending, NULLS FIRST (Some(true)) / LAST / default).
+/// Without `allow_nulls` a key column holding NULLs gives None; NaN always does (the full sort handles those).
+/// The default NULL placement is the SQL one used by `sort_block_nulls`: first when ascending, last when descending.
+fn top_n_indices_ex(block: &DataBlock, keys: &[(usize, bool, Option<bool>)], k: usize, allow_nulls: bool) -> Option<Vec<usize>> {
     use rayon::prelude::*;
     use std::cmp::Ordering;
-    enum K<'a> { I(&'a [Option<i64>]), F(&'a [Option<f64>]), S(&'a [Option<String>]), D(&'a [u8], &'a [String]) }
-    let mut cols: Vec<(K, bool)> = Vec::new();
-    for &(ci, desc) in keys {
-        let k = match &block.columns[ci].data {
-            ColumnData::Int64(v) if v.iter().all(|x| x.is_some()) => K::I(v),
-            ColumnData::Float64(v) if v.iter().all(|x| matches!(x, Some(f) if !f.is_nan())) => K::F(v),
-            ColumnData::Str(v) if v.iter().all(|x| x.is_some()) => K::S(v),
-            ColumnData::StrDict { codes, dict } if codes.iter().all(|&c| c != u8::MAX && (c as usize) < dict.len()) => K::D(codes, dict),
+    enum K<'a> { I(&'a [Option<i64>]), F(&'a [Option<f64>], bool), S(&'a [Option<String>]), B(&'a [Option<bool>]), D(&'a [u8], &'a [String]) }
+    // (key, descending, nulls first, column has NULLs)
+    let mut cols: Vec<(K, bool, bool, bool)> = Vec::new();
+    for &(ci, desc, nf) in keys {
+        let nf = nf.unwrap_or(!desc);
+        let (k, nulls) = match &block.columns[ci].data {
+            ColumnData::Int64(v) => { let n = v.iter().any(|x| x.is_none()); (K::I(v), n) }
+            ColumnData::Float64(v) => {
+                if v.iter().any(|x| matches!(x, Some(f) if f.is_nan())) { return None; }
+                let n = v.iter().any(|x| x.is_none());
+                // the NULL-aware sort compares floats with total_cmp, the plain one with partial_cmp
+                (K::F(v, n), n)
+            }
+            ColumnData::Str(v) => { let n = v.iter().any(|x| x.is_none()); (K::S(v), n) }
+            ColumnData::Bool(v) if allow_nulls => { let n = v.iter().any(|x| x.is_none()); (K::B(v), n) }
+            ColumnData::StrDict { codes, dict } if codes.iter().all(|&c| c == u8::MAX || (c as usize) < dict.len()) => {
+                let n = codes.iter().any(|&c| c == u8::MAX);
+                (K::D(codes, dict), n)
+            }
             _ => return None,
         };
-        cols.push((k, desc));
+        if nulls && !allow_nulls { return None; }
+        cols.push((k, desc, nf, nulls));
     }
     let cmp = |a: usize, b: usize| -> Ordering {
-        for (kc, desc) in &cols {
+        for (kc, desc, nf, nulls) in &cols {
+            if *nulls {
+                let (an, bn) = match kc {
+                    K::I(v) => (v[a].is_none(), v[b].is_none()),
+                    K::F(v, _) => (v[a].is_none(), v[b].is_none()),
+                    K::S(v) => (v[a].is_none(), v[b].is_none()),
+                    K::B(v) => (v[a].is_none(), v[b].is_none()),
+                    K::D(c, _) => (c[a] == u8::MAX, c[b] == u8::MAX),
+                };
+                if an || bn {
+                    if an && bn { continue; }
+                    // a NULL sorts before every value when NULLS FIRST, after when LAST (not reversed by DESC)
+                    return if an == *nf { Ordering::Less } else { Ordering::Greater };
+                }
+            }
             let o = match kc {
                 K::I(v) => v[a].cmp(&v[b]),
-                K::F(v) => v[a].partial_cmp(&v[b]).unwrap_or(Ordering::Equal),
+                K::F(v, total) => if *total { v[a].unwrap_or(0.0).total_cmp(&v[b].unwrap_or(0.0)) } else { v[a].partial_cmp(&v[b]).unwrap_or(Ordering::Equal) },
                 K::S(v) => v[a].as_deref().cmp(&v[b].as_deref()),
+                K::B(v) => v[a].cmp(&v[b]),
                 K::D(c, d) => d[c[a] as usize].cmp(&d[c[b] as usize]),
             };
             let o = if *desc { o.reverse() } else { o };
@@ -6452,7 +6626,7 @@ impl std::hash::Hasher for FxHasher {
 /// flat accumulator arrays. Returns None for anything else (the general path then runs).
 fn group_by_fast(block: &DataBlock, group_cols: &[String], projections: &[Projection]) -> Option<DataBlock> {
     if group_cols.is_empty() { return None; }
-    crate::fusedagg::run(crate::fusedagg::Request { block, pred: None, group_cols, projections, key_prefix: None })
+    crate::fusedagg::run(crate::fusedagg::Request { block, pred: None, group_cols, projections, key_prefix: None, having: None })
 }
 
 fn group_by_agg(
