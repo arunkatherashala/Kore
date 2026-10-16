@@ -309,7 +309,20 @@ pub fn lift_aggregates(stmt: &SelectStmt) -> Option<SelectStmt> {
         group_exprs: Vec::new(), group_sets: Vec::new(), windows: Vec::new(), parenthesized: false, set_ops: Vec::new(),
         having: None,
         qualify: None,
-        order_by: stmt.order_by.clone(),
+        // `ORDER BY a.g` over a select item `a.g AS gg`: the outer statement only sees the item's output name
+        order_by: stmt.order_by.iter().map(|o| {
+            if let (Some(full), false) = (col_ref(&o.expr), o.col.is_empty()) {
+                let bare = full.rsplit('.').next().unwrap_or(&full).to_string();
+                for p in &stmt.projections {
+                    if let Projection::Expr { expr, alias: Some(al) } = p {
+                        if !contains_agg(expr) && col_ref(expr).map_or(false, |c| c == full || (!full.contains('.') && c.rsplit('.').next() == Some(bare.as_str()))) {
+                            return OrderByItem { expr: Expr::Col(al.clone()), col: al.clone(), desc: o.desc, nulls_first: o.nulls_first };
+                        }
+                    }
+                }
+            }
+            o.clone()
+        }).collect(),
         limit: stmt.limit,
         offset: stmt.offset,
         scan_limit: None,

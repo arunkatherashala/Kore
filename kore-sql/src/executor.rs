@@ -4691,19 +4691,8 @@ fn materialize_groupby_aliases(mut block: DataBlock, group_by: &[String], projec
                 if alias == gb_col {
                     // Evaluate this expression for every row and add as new column
                     let n = block.num_rows;
-                    let values: Vec<Option<String>> = (0..n).map(|row| {
-                        Some(match eval_expr(expr, &block, row) {
-                            ExprVal::Str(s)   => s,
-                            ExprVal::Int(i)   => i.to_string(),
-                            ExprVal::Float(f) => format!("{f:.4}"),
-                            ExprVal::Bool(b)  => b.to_string(),
-                            ExprVal::Null     => return None,
-                        })
-                    }).collect();
-                    block.columns.push(kore_core::Column {
-                        name: gb_col.clone(),
-                        data: kore_core::ColumnData::Str(values),
-                    });
+                    let vals: Vec<ExprVal> = (0..n).map(|row| eval_expr(expr, &block, row)).collect();
+                    block.columns.push(crate::general::vals_to_column(gb_col.clone(), vals, None));
                     break;
                 }
             }

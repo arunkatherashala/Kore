@@ -83,3 +83,38 @@ fn constant_select_item_with_group_by_keeps_type() {
         ("select * from (select 0 as k, g, avg(v) a from t group by g union all select 1 as k, null as g, avg(v) a from t) q order by k desc, g nulls first limit 2", "1,NULL,34|0,NULL,60"),
     ]);
 }
+
+/// TPC-DS Q40/Q49/Q80/Q93: comma joins after an explicit JOIN ... ON.
+/// u = (1,a),(2,b),(7,c); w = (1),(2); t has ids 1..6.
+#[test]
+fn comma_join_after_explicit_join() {
+    check(&[
+        ("select uid, un, wid, id from u left join w on uid = wid, t where t.id = u.uid order by uid",
+         "1,'a',1,1|2,'b',2,2"),
+        ("select uid, wid, id from u left join w on uid = wid, t where t.id = u.uid + 3 order by uid",
+         "1,1,4|2,2,5"),
+        // the LEFT JOIN keeps the unmatched u row 7 (no t row with id 7+0 though: filtered by the WHERE equality)
+        ("select count(*) from u left join w on uid = wid, t where t.id = 6 and w.wid is null", "1"),
+        ("select uid, wid from u left join w on uid = wid, t where t.id = 1 order by uid", "1,1|2,2|7,NULL"),
+    ]);
+}
+
+/// TPC-DS Q6: ORDER BY a qualified GROUP BY column that the select list renames, with HAVING count(*).
+#[test]
+fn order_by_qualified_group_column_with_having() {
+    check(&[
+        ("select a.g gg, count(*) cnt from t a where a.g is not null group by a.g having count(*) >= 1 order by a.g desc",
+         "'z',1|'y',2|'x',2"),
+        ("select a.g gg, count(*) cnt from t a where a.g is not null group by a.g having count(*) >= 2 order by cnt, a.g",
+         "'x',2|'y',2"),
+    ]);
+}
+
+/// GROUP BY a select alias of a computed expression keeps the expression's type (was rendered as text).
+#[test]
+fn group_by_expression_alias_keeps_type() {
+    check(&[
+        ("select id % 2 as par, count(*) n from t group by par order by par", "0,3|1,3"),
+        ("select f * 1.0001 as ff, count(*) n from t where f = 1.5 group by ff", "1.50015,1"),
+    ]);
+}

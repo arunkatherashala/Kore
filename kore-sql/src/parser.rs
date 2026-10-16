@@ -183,9 +183,35 @@ impl Parser {
             lateral_views.push(self.parse_lateral_view()?);
         }
 
-        // JOINs
-        while self.is_join_keyword() {
-            joins.push(self.parse_join()?);
+        // JOINs; a comma after an explicit join (`a LEFT JOIN b ON .. , c, d`) starts further implicit joins.
+        // The ON conditions of the explicit joins cannot see the comma tables (JOIN binds tighter than the comma),
+        // so for INNER / LEFT / CROSS joins `(a JOIN b ON ..) x c` equals `(a x c) JOIN b ON ..`: the comma tables are
+        // moved in front of the explicit joins, where the executor expects the implicit prefix. Any other kind of
+        // explicit join (RIGHT / FULL / SEMI ..) does not commute with that, so it stays an error.
+        let n_prefix = joins.len();
+        let mut late_implicit = Vec::new();
+        loop {
+            if self.is_join_keyword() {
+                joins.push(self.parse_join()?);
+            } else if self.peek() == &Token::Comma && joins.len() > n_prefix {
+                self.pos += 1;
+                let table = self.parse_table_expr()?;
+                late_implicit.push(JoinClause {
+                    join_type: JoinKind::Implicit,
+                    table,
+                    on: JoinOn { left_col: String::new(), right_col: String::new(), expr: None },
+                    push_filter: None,
+                    using: Vec::new(),
+                    natural: false,
+                });
+            } else { break; }
+        }
+        if !late_implicit.is_empty() {
+            if joins[n_prefix..].iter().any(|j| !matches!(j.join_type, JoinKind::Inner | JoinKind::Left | JoinKind::Cross)) {
+                return Err(KoreError::InvalidArgument(
+                    "a comma join after a RIGHT / FULL / SEMI / ANTI join is not supported".into()));
+            }
+            joins.splice(n_prefix..n_prefix, late_implicit);
         }
 
         // WHERE
