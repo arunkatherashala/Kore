@@ -279,4 +279,20 @@ pub fn set_no_deep_uncorr(on: bool) { NO_DEEP_UNCORR.store(on, Ordering::Relaxed
 pub(crate) fn no_deep_uncorr() -> bool { NO_DEEP_UNCORR.load(Ordering::Relaxed) }
 
 /// Master switch for the p3-gap optimisations (each also has its own switch): everything off = the 830475a4 behaviour.
-pub fn set_no_gap(on: bool) { set_no_deep_uncorr(on); }
+pub fn set_no_gap(on: bool) { set_no_deep_uncorr(on); set_no_small_dict(on); set_no_proj_take(on); }
+
+pub(crate) static NO_SMALL_DICT: AtomicBool = AtomicBool::new(false);
+
+/// Keep text columns of small tables as plain strings through joins (no dictionary codes), for A/B comparison.
+pub fn set_no_small_dict(on: bool) { NO_SMALL_DICT.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_small_dict() -> bool { NO_SMALL_DICT.load(Ordering::Relaxed) }
+
+pub(crate) static NO_PROJ_TAKE: AtomicBool = AtomicBool::new(false);
+
+/// Always clone the source column for a plain-column projection that sits beside computed expressions.
+pub fn set_no_proj_take(on: bool) { NO_PROJ_TAKE.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_proj_take() -> bool { NO_PROJ_TAKE.load(Ordering::Relaxed) }

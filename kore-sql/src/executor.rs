@@ -2373,6 +2373,38 @@ fn exists_outer_cols(sub: &SelectStmt, ctx: &KqlContext) -> Option<std::collecti
 /// Row counts from which the serial pre-steps of the lazy join path run in parallel.
 const PAR_MIN: usize = 1 << 16;
 
+/// Tables up to this many rows hand their low-cardinality text columns on as dictionary codes: a gather of the
+/// column through the joins then moves one byte per row instead of allocating a String per row (TPC-H nation.n_name).
+const SMALL_DICT_ROWS: usize = 4096;
+
+/// `col` as `StrDict` when it is a text column of a small table with at most 250 distinct values.
+fn small_dict(col: &ColumnData) -> Option<ColumnData> {
+    let ColumnData::Str(v) = col else { return None };
+    if v.len() > SMALL_DICT_ROWS || crate::testing::no_small_dict() { return None; }
+    let mut map: HashMap<&str, u8> = HashMap::new();
+    let mut dict: Vec<String> = Vec::new();
+    let mut codes: Vec<u8> = Vec::with_capacity(v.len());
+    for x in v {
+        match x {
+            None => codes.push(u8::MAX),
+            Some(s) => {
+                let c = match map.get(s.as_str()) {
+                    Some(&c) => c,
+                    None => {
+                        if dict.len() >= 250 { return None; }
+                        let c = dict.len() as u8;
+                        map.insert(s.as_str(), c);
+                        dict.push(s.clone());
+                        c
+                    }
+                };
+                codes.push(c);
+            }
+        }
+    }
+    Some(ColumnData::StrDict { codes, dict })
+}
+
 struct LazyCols<'a> {
     rid: String, src: &'a DataBlock, idx: Option<Vec<usize>>,
     /// payload columns (source column index, output name)
@@ -2444,7 +2476,10 @@ fn lazy_gather(left: DataBlock, lidx: Vec<u32>, ridx: Vec<u32>, lz: &LazyCols<'_
     for (ci, name) in right { jobs.push(Job::R(ci, name)); }
     let columns: Vec<Column> = jobs.into_par_iter().map(|j| match j {
         Job::L(name, data, ix) => { let g = kore_join::gather_rows(&data, ix); drop(data); Column { name, data: g } }
-        Job::R(ci, name) => Column { name, data: kore_join::gather_rows(&lz.src.columns[ci].data, &src_rows) },
+        Job::R(ci, name) => {
+            let sd = small_dict(&lz.src.columns[ci].data);
+            Column { name, data: kore_join::gather_rows(sd.as_ref().unwrap_or(&lz.src.columns[ci].data), &src_rows) }
+        }
     }).collect();
     let mut columns = columns;
     columns.extend(rid_col);
@@ -2506,7 +2541,7 @@ fn finish_lazy(mut block: DataBlock, lz: LazyCols<'_>) -> DataBlock {
     let comp: Vec<usize> = if v.len() >= PAR_MIN && !crate::testing::no_par_join() { v.par_iter().map(comp_of).collect() } else { v.iter().map(comp_of).collect() };
     drop(v);
     let cols: Vec<Column> = lz.cols.par_iter().map(|(ci, name)| Column {
-        name: name.clone(), data: kore_join::take_rows_par(&lz.src.columns[*ci].data, &comp),
+        name: name.clone(), data: { let sd = small_dict(&lz.src.columns[*ci].data); kore_join::take_rows_par(sd.as_ref().unwrap_or(&lz.src.columns[*ci].data), &comp) },
     }).collect();
     block.columns.extend(cols);
     block
@@ -2758,7 +2793,8 @@ fn load_table_sets<'a>(
     let columns: Vec<Column> = wanted.par_iter().map(|c| Column {
         name: c.name.clone(),
         // every row survives: a straight copy is cheaper than an indexed gather
-        data: match &idx { Some(ix) if ix.len() != src.num_rows => c.data.take_rows(ix), _ => c.data.clone() },
+        data: { let sd = small_dict(&c.data); let d = sd.as_ref().unwrap_or(&c.data);
+            match &idx { Some(ix) if ix.len() != src.num_rows => d.take_rows(ix), _ => d.clone() } },
     }).collect();
     let num_rows = idx.as_ref().map_or(src.num_rows, |ix| ix.len());
     prof!(__tl, "load_table {} take_rows done", alias);
@@ -6247,6 +6283,33 @@ fn project(mut block: DataBlock, projections: &[Projection]) -> Result<DataBlock
                     _ => proj_col_index(&block, expr, alias),
                 };
                 if let Some(i) = idx { last_use[i] = pi; }
+            }
+        }
+    }
+    else if !crate::testing::no_proj_take() && projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Col(_) | Expr::QualCol(..), .. })) {
+        // plain column copies mixed with computed expressions: a column the computed ones never read can be moved too
+        let mut refs: Vec<String> = Vec::new();
+        let mut ok = true;
+        for p in projections {
+            match p {
+                Projection::Expr { expr: Expr::Col(_) | Expr::QualCol(..), .. } => {}
+                Projection::Expr { expr, alias } => {
+                    if let Some(a) = alias { refs.push(a.clone()); }
+                    if crate::ast_walk::any_node(expr, &|x| matches!(x, Expr::Agg { .. } | Expr::AggX { .. } | Expr::Window { .. } | Expr::ScalarSubquery(_) | Expr::Exists { .. } | Expr::InSubquery { .. } | Expr::QuantSubquery { .. }))
+                        || !crate::rewrite::referenced_cols(expr, &mut refs) { ok = false; break; }
+                }
+                Projection::Star => { ok = false; break; }
+            }
+        }
+        if ok {
+            let bare = |n: &str| n.rsplit('.').next().unwrap_or(n).to_ascii_lowercase();
+            let refd: std::collections::HashSet<String> = refs.iter().map(|r| bare(r)).collect();
+            for (pi, p) in projections.iter().enumerate() {
+                if let Projection::Expr { expr: expr @ (Expr::Col(_) | Expr::QualCol(..)), alias } = p {
+                    if let Some(i) = proj_col_index(&block, expr, alias) {
+                        if !refd.contains(&bare(&block.columns[i].name)) { last_use[i] = pi; }
+                    }
+                }
             }
         }
     }

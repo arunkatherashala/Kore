@@ -41,6 +41,14 @@ fn make_ctx(r: &mut Rng, na: usize, nb: usize, nc: usize, nd: usize, dom: usize)
         Column::int64("dk2", (0..nd).map(|_| opt_i(r, 3, 15)).collect()),
         Column::float64("x", (0..nd).map(|_| if r.below(6) == 0 { None } else { Some(r.below(50) as f64) }).collect()),
     ]).unwrap());
+    // nat(nk unique, nm text with duplicates / NULLs; above 250 distinct values when the key domain is large)
+    let nn = dom + 3;
+    let modv = if dom > 300 { 100_000 } else { 7 };
+    ctx.register("nat", DataBlock::new(vec![
+        Column::int64("nk", (0..nn as i64).map(Some).collect()),
+        Column::str_col("nm", (0..nn).map(|i| if i % 11 == 5 { None } else { Some(format!("nm{}", i % modv)) }).collect()),
+        Column::int64("nr", (0..nn as i64).map(|i| Some(i % 3)).collect()),
+    ]).unwrap());
     ctx
 }
 
@@ -92,5 +100,33 @@ fn nested_in_subquery_is_precomputed_once() {
         "select id from a where k in (select bk from b where bq in (select ck from c where ck = a.k)) order by id",
         "select id from a where v in (select bv from b where bk in (select dk from d where dk = k)) order by id",
         "select id from a where k in (select bk from b where bv > (select 0.5 * sum(x) from d where dk = bk and x < v)) order by id",
+    ]);
+}
+
+#[test]
+fn small_table_text_through_joins_and_projection() {
+    for_all(&[
+        "select nm, count(*) as c, sum(v) as sv from a, nat where k = nk group by nm order by nm",
+        "select nm as nation, substr(s, 1, 2) as y, v * 2 as w, id from a, nat where k = nk order by id",
+        "select nation, y, sum(w) as t from (select nm as nation, substr(s, 1, 2) as y, v * 2 as w from a, nat where k = nk) as p group by nation, y order by nation, y desc",
+        "select nm, s, count(*) from a, nat, b where k = nk and bk = nk group by nm, s order by nm, s",
+        "select nm from a, nat where k = nk and nm like 'nm1%' order by nm, id",
+        "select nm, nr, id from a, nat where k = nk and nr = 1 order by id",
+        "select id, nm, nm as again from a left join nat on k = nk order by id",
+        "select id, k, nm from a, nat where k = nk and nm is null order by id",
+        "select nm, count(*) from nat group by nm order by nm",
+        "select id, nm, k, nk from a, nat where k = nk order by id desc limit 7",
+    ]);
+}
+
+#[test]
+fn projection_moves_plain_columns() {
+    for_all(&[
+        "select id, k, v + 1 as w, s from a order by id",
+        "select s as t, v * 2 as v2, s from a order by id",
+        "select id as v, v as id2, id + 1 as v from a order by id2",
+        "select k, k + 1 as k1, k from a order by id",
+        "select s, upper(s) as u, id from a where k > 1 order by id",
+        "select id as a1, id, id * 2 as id from a order by a1",
     ]);
 }
