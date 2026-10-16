@@ -12,6 +12,7 @@ have duplicate/unnamed column names. Numbers compare to 1e-6 relative; strings a
 equal dates. KORE timing is of the unwrapped query (one warm-up + best of --repeats).
 """
 import argparse
+from decimal import Decimal
 import json
 import math
 import os
@@ -57,7 +58,7 @@ def norm(v):
         return None
     if isinstance(v, bool):
         return float(v)
-    if isinstance(v, (int, float)):
+    if isinstance(v, (int, float, Decimal)):
         return float(v)
     if hasattr(v, "isoformat"):
         v = v.isoformat(sep=" ")
@@ -158,6 +159,27 @@ def run_duckdb(a):
     json.dump(old, open(f, "w", encoding="utf-8"), default=str)
 
 
+def wrap_positional(sql, ncols):
+    """SELECT * FROM (<query>) AS t(c0..cN): positional, collision-free column names. For `WITH ...` queries the
+    wrapper goes around the final SELECT, after the CTE list (KORE has no WITH inside a derived table)."""
+    alias = f" AS t({', '.join('c%d' % i for i in range(ncols))})"
+    if not re.match(r"\s*with\s", sql, re.I):
+        return f"SELECT * FROM ({sql}){alias}"
+    depth, i, n = 0, 0, len(sql)
+    while i < n:
+        c = sql[i]
+        if c == "'":
+            i = sql.index("'", i + 1)
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+        elif depth == 0 and sql[i:i + 6].lower() == "select" and re.match(r"\W", sql[i - 1:i] or " ") and re.search(r"\)\s*$", sql[:i]):
+            return f"{sql[:i]}SELECT * FROM ({sql[i:]}){alias}"
+        i += 1
+    return f"SELECT * FROM ({sql}){alias}"
+
+
 # ---- KORE worker: one query per process ----
 def kore_worker(a):
     sys.path.insert(0, os.path.join(ROOT, "kore-ffi", "bindings", "python"))
@@ -176,7 +198,7 @@ def kore_worker(a):
         t = time.perf_counter()
         s.query(sql)  # warm-up; also gives the engine's own error message for the unwrapped query
         first = (time.perf_counter() - t) * 1000
-        wrapped = f"SELECT * FROM ({sql}) AS t({', '.join('c%d' % i for i in range(ncols))})"
+        wrapped = wrap_positional(sql, ncols)
         rows = [[r.get(f"c{i}") for i in range(ncols)] for r in s.query(wrapped)]
         times = []
         for _ in range(a.repeats):
