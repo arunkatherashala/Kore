@@ -268,3 +268,15 @@ pub(crate) fn no_subq_leftcount() -> bool {
     static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     NO_SUBQ_LEFTCOUNT.load(Ordering::Relaxed) || env_flag("KORE_NO_SUBQ_LEFTCOUNT", &E)
 }
+
+pub(crate) static NO_DEEP_UNCORR: AtomicBool = AtomicBool::new(false);
+
+/// Treat a subquery that contains nested subqueries as correlated whenever any nested column is foreign to its own
+/// level (the old, conservative rule), so the scope-aware check can be compared with it.
+pub fn set_no_deep_uncorr(on: bool) { NO_DEEP_UNCORR.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_deep_uncorr() -> bool { NO_DEEP_UNCORR.load(Ordering::Relaxed) }
+
+/// Master switch for the p3-gap optimisations (each also has its own switch): everything off = the 830475a4 behaviour.
+pub fn set_no_gap(on: bool) { set_no_deep_uncorr(on); }

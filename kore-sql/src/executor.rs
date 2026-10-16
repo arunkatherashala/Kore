@@ -2267,6 +2267,9 @@ fn refers_to_enclosing_query(sub: &SelectStmt) -> bool {
 /// True when every column the subquery mentions comes from its own tables (or is one of its own aliases).
 fn is_uncorrelated(sub: &SelectStmt, ctx: &KqlContext) -> bool {
     if refers_to_enclosing_query(sub) { return false; }
+    if !crate::testing::no_deep_uncorr() && has_nested_subquery(sub) {
+        return scoped_uncorrelated(sub, ctx, &std::collections::HashSet::new());
+    }
     let mut avail: std::collections::HashSet<String> = std::collections::HashSet::new();
     for t in std::iter::once(&sub.from).chain(sub.joins.iter().map(|j| &j.table)) {
         if t.subquery.is_some() || t.values.is_some() { return false; }
@@ -2278,6 +2281,43 @@ fn is_uncorrelated(sub: &SelectStmt, ctx: &KqlContext) -> bool {
     let mut used = std::collections::HashSet::new();
     collect_cols_stmt(sub, &mut used);
     used.iter().all(|c| c == "*" || avail.contains(c) || aliases.contains(c))
+}
+
+/// Does any expression of `s`'s own clauses contain a subquery (a FROM subquery or set arms do not count)?
+fn has_nested_subquery(s: &SelectStmt) -> bool {
+    let mut any = false;
+    crate::ast_walk::walk_stmt(s, false, &mut |e| {
+        if matches!(e, Expr::ScalarSubquery(_) | Expr::Exists { .. } | Expr::InSubquery { .. } | Expr::QuantSubquery { .. }) { any = true; }
+    });
+    any
+}
+
+/// Scope-aware version of the check in `is_uncorrelated` for statements that contain nested subqueries: every
+/// column of a level must come from that level's own tables or from the levels enclosing it inside `sub`
+/// (TPC-H Q20: the IN subquery over partsupp holds a scalar subquery over lineitem that reads ps_partkey of
+/// its parent; the whole IN subquery is still independent of the outer query).
+fn scoped_uncorrelated(sub: &SelectStmt, ctx: &KqlContext, parents: &std::collections::HashSet<String>) -> bool {
+    if !sub.set_ops.is_empty() || sub.from.subquery.is_some() || sub.from.values.is_some() { return false; }
+    let mut avail: std::collections::HashSet<String> = parents.clone();
+    for t in std::iter::once(&sub.from).chain(sub.joins.iter().map(|j| &j.table)) {
+        if t.subquery.is_some() || t.values.is_some() { return false; }
+        let Some(b) = ctx.get(&t.name) else { return false };
+        avail.extend(b.columns.iter().map(|c| c.name.rsplit('.').next().unwrap_or(&c.name).to_string()));
+    }
+    let aliases: std::collections::HashSet<String> = sub.projections.iter()
+        .filter_map(|p| if let Projection::Expr { alias: Some(a), .. } = p { Some(a.clone()) } else { None }).collect();
+    let mut ok = true;
+    crate::ast_walk::walk_stmt(sub, false, &mut |e| {
+        if !ok { return; }
+        match e {
+            Expr::Col(c) | Expr::QualCol(_, c) => { if c != "*" && !avail.contains(c) && !aliases.contains(c) { ok = false; } }
+            Expr::ScalarSubquery(x) | Expr::Exists { subquery: x, .. } | Expr::InSubquery { subquery: x, .. } | Expr::QuantSubquery { subquery: x, .. } => {
+                if !scoped_uncorrelated(x, ctx, &avail) { ok = false; }
+            }
+            _ => {}
+        }
+    });
+    ok
 }
 
 /// A joined table's data, borrowed from the catalog when possible.
@@ -4009,11 +4049,14 @@ fn select_rows_owned(block: DataBlock, keep: &[usize]) -> DataBlock {
 /// Filter with context — supports scalar/IN/EXISTS subqueries.
 fn filter_block_ctx(block: DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
     // Pre-compute all IN subqueries ONCE into value sets (avoids O(n*m) re-execution per row)
+    let __tp = std::time::Instant::now();
     let pred = precompute_in_subqueries(pred, ctx);
     let pred = &pred;
+    prof!(__tp, "filter_block_ctx precompute_in done");
     // Column-at-a-time path (no per-row String allocation, SQL three-valued logic); the row
     // interpreter below handles whatever it does not cover (subqueries, scalar functions, ...).
     if let Some(mask) = crate::vecexpr::filter_mask(pred, &block) {
+        prof!(__tp, "filter_block_ctx vec mask done");
         let keep: Vec<usize> = mask.iter().enumerate().filter_map(|(i, &k)| if k { Some(i) } else { None }).collect();
         drop(mask);
         if keep.len() == block.num_rows { return Ok(block); }
