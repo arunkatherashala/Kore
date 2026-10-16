@@ -1518,7 +1518,7 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
     } else if planned {
         if base_deferred { DataBlock::empty() }
         else {
-            let (b, lz) = load_table(base_ref, base_alias, &mut conjuncts, &needed, &needed_wo_where, ctx, plan_lazy_base)?;
+            let (b, lz) = load_table_sets(base_ref, base_alias, &mut conjuncts, &needed, &needed_wo_where, ctx, plan_lazy_base, &[], n_implicit > 0)?;
             match lz {
                 Some(lz) => { let b = fill_keys(b, &lz); { crate::testing::PLAN_DEFERRED.fetch_add(1, std::sync::atomic::Ordering::Relaxed); deferred_lz.push(lz) }; b }
                 None => b,
@@ -1561,8 +1561,8 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
             }
             let (block, lz) = if planned {
                 match src.borrowed() {
-                    Some(b) => load_table(b, alias, &mut conjuncts, &needed, &needed_wo_where, ctx, true)?,
-                    None => (load_table(src.get(), alias, &mut conjuncts, &needed, &needed_wo_where, ctx, false)?.0, None),
+                    Some(b) => load_table_sets(b, alias, &mut conjuncts, &needed, &needed_wo_where, ctx, true, &[], n_implicit > 0)?,
+                    None => (load_table_sets(src.get(), alias, &mut conjuncts, &needed, &needed_wo_where, ctx, false, &[], n_implicit > 0)?.0, None),
                 }
             } else {
                 let block = prefix_columns(prune_block(src.into_owned(), &needed), alias);
@@ -1644,7 +1644,7 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
                 let (alias, src_block) = slot_info(slot);
                 conjuncts.extend(extra);
                 if slot == 0 {
-                    let (b, lz) = load_table_sets(src_block, &alias, &mut conjuncts, &needed, &needed_wo_where, ctx, plan_lazy_base, &sets)?;
+                    let (b, lz) = load_table_sets(src_block, &alias, &mut conjuncts, &needed, &needed_wo_where, ctx, plan_lazy_base, &sets, n_implicit > 0)?;
                     result = match lz {
                         Some(lz) => { let b = fill_keys(b, &lz); { crate::testing::PLAN_DEFERRED.fetch_add(1, std::sync::atomic::Ordering::Relaxed); deferred_lz.push(lz) }; b }
                         None => b,
@@ -1654,7 +1654,7 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
                     // deferred tables go through the lazy path, with the IN restriction already in their row ids;
                     // a lazy block has placeholder key columns, so it is not used as a key source for later tables
                     let borrowed = deferred_pending.iter().find(|(d, _)| *d + 1 == slot).and_then(|(_, s)| s.borrowed()).is_some();
-                    let (block, lz) = load_table_sets(src_block, &alias, &mut conjuncts, &needed, &needed_wo_where, ctx, borrowed, &sets)?;
+                    let (block, lz) = load_table_sets(src_block, &alias, &mut conjuncts, &needed, &needed_wo_where, ctx, borrowed, &sets, n_implicit > 0)?;
                     loaded[slot] = lz.is_none();
                     pending[slot - 1] = block;
                     lazies[slot - 1] = lz;
@@ -2411,6 +2411,8 @@ struct LazyCols<'a> {
     cols: Vec<(usize, String)>,
     /// join-key columns; the pending block holds only empty placeholders for them until `fill_keys`
     keys: Vec<(usize, String)>,
+    /// small text columns are gathered as dictionary codes (multi-table statements only)
+    dict_small: bool,
 }
 
 impl LazyCols<'_> {
@@ -2477,7 +2479,7 @@ fn lazy_gather(left: DataBlock, lidx: Vec<u32>, ridx: Vec<u32>, lz: &LazyCols<'_
     let columns: Vec<Column> = jobs.into_par_iter().map(|j| match j {
         Job::L(name, data, ix) => { let g = kore_join::gather_rows(&data, ix); drop(data); Column { name, data: g } }
         Job::R(ci, name) => {
-            let sd = small_dict(&lz.src.columns[ci].data);
+            let sd = if lz.dict_small { small_dict(&lz.src.columns[ci].data) } else { None };
             Column { name, data: kore_join::gather_rows(sd.as_ref().unwrap_or(&lz.src.columns[ci].data), &src_rows) }
         }
     }).collect();
@@ -2541,7 +2543,7 @@ fn finish_lazy(mut block: DataBlock, lz: LazyCols<'_>) -> DataBlock {
     let comp: Vec<usize> = if v.len() >= PAR_MIN && !crate::testing::no_par_join() { v.par_iter().map(comp_of).collect() } else { v.iter().map(comp_of).collect() };
     drop(v);
     let cols: Vec<Column> = lz.cols.par_iter().map(|(ci, name)| Column {
-        name: name.clone(), data: { let sd = small_dict(&lz.src.columns[*ci].data); kore_join::take_rows_par(sd.as_ref().unwrap_or(&lz.src.columns[*ci].data), &comp) },
+        name: name.clone(), data: { let sd = if lz.dict_small { small_dict(&lz.src.columns[*ci].data) } else { None }; kore_join::take_rows_par(sd.as_ref().unwrap_or(&lz.src.columns[*ci].data), &comp) },
     }).collect();
     block.columns.extend(cols);
     block
@@ -2656,7 +2658,7 @@ fn load_table<'a>(
     needed_wo_where: &Option<std::collections::HashSet<String>>,
     ctx: &KqlContext, lazy: bool,
 ) -> Result<(DataBlock, Option<LazyCols<'a>>), KoreError> {
-    load_table_sets(src, alias, conjuncts, needed, needed_wo_where, ctx, lazy, &[])
+    load_table_sets(src, alias, conjuncts, needed, needed_wo_where, ctx, lazy, &[], false)
 }
 
 /// Key sets from sideways information passing: (bare Int64 column of the source, keys that may survive).
@@ -2669,7 +2671,7 @@ fn load_table_sets<'a>(
     src: &'a DataBlock, alias: &str, conjuncts: &mut Vec<Expr>,
     needed: &Option<std::collections::HashSet<String>>,
     needed_wo_where: &Option<std::collections::HashSet<String>>,
-    ctx: &KqlContext, lazy: bool, sets: &[(String, std::sync::Arc<crate::sipset::IntSet>)],
+    ctx: &KqlContext, lazy: bool, sets: &[(String, std::sync::Arc<crate::sipset::IntSet>)], dict_small: bool,
 ) -> Result<(DataBlock, Option<LazyCols<'a>>), KoreError> {
     let (Some(needed), Some(after_where)) = (needed, needed_wo_where) else {
         return Ok((prefix_columns(src.clone(), alias), None));
@@ -2787,13 +2789,13 @@ fn load_table_sets<'a>(
             let num_rows = idx.as_ref().map_or(src.num_rows, |ix| ix.len());
             *conjuncts = rest;
             return Ok((DataBlock { columns, num_rows },
-                Some(LazyCols { rid: format!("{alias}.__rid"), src, idx, cols: lazy_cols, keys })));
+                Some(LazyCols { rid: format!("{alias}.__rid"), src, idx, cols: lazy_cols, keys, dict_small })));
         }
     }
     let columns: Vec<Column> = wanted.par_iter().map(|c| Column {
         name: c.name.clone(),
         // every row survives: a straight copy is cheaper than an indexed gather
-        data: { let sd = small_dict(&c.data); let d = sd.as_ref().unwrap_or(&c.data);
+        data: { let sd = if dict_small { small_dict(&c.data) } else { None }; let d = sd.as_ref().unwrap_or(&c.data);
             match &idx { Some(ix) if ix.len() != src.num_rows => d.take_rows(ix), _ => d.clone() } },
     }).collect();
     let num_rows = idx.as_ref().map_or(src.num_rows, |ix| ix.len());
