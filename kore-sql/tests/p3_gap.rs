@@ -215,3 +215,26 @@ fn substr_of_payload_text_is_computed_at_the_source() {
     }
     assert!(testing::lz_substr_hits() > 0, "the SUBSTR pushdown never ran");
 }
+
+#[test]
+fn lookup_joins_that_keep_every_row_in_order() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let qs = [
+        "select id, k2, v2, nm from a2, nat where k2 = nk order by id",
+        "select id, v2, nm, nr, bv from a2, nat, b where k2 = nk and bk = nk order by id, bv, nm",
+        "select nm, count(*) as c, sum(v2) as s from a2, nat where k2 = nk group by nm order by nm",
+        "select id, nm from a2, nat where k2 = nk and nr = 1 order by id",
+        "select id, k2, bk from a2, b where k2 = bk order by id, bq, bv",
+        "select count(*) from a2, nat n1, nat n2 where k2 = n1.nk and n1.nr = n2.nk",
+    ];
+    for (seed, (na, nb, nc, nd, dom)) in SIZES.into_iter().enumerate() {
+        let mut r = Rng(0x2468 ^ (seed as u64 * 17 + 3));
+        let mut ctx = make_ctx(&mut r, na, nb, nc, nd, dom);
+        ctx.register("a2", DataBlock::new(vec![
+            Column::int64("id", (0..na as i64).map(Some).collect()),
+            Column::int64("k2", (0..na).map(|_| Some(r.below(dom + 3) as i64)).collect()),
+            Column::float64("v2", (0..na).map(|_| Some(r.below(100) as f64 / 4.0)).collect()),
+        ]).unwrap());
+        for q in qs { check(&ctx, q); }
+    }
+}
