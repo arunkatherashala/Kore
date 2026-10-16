@@ -70,7 +70,8 @@ def norm(v):
 
 def _close(p, q):
     if p is None or q is None:
-        return p is None and q is None
+        # KORE's CSV loader reads an empty field (NULL and the empty string `""` alike) as NULL: lenient on that only
+        return (p is None or p == "") and (q is None or q == "")
     if isinstance(p, float) and isinstance(q, float):
         return math.isclose(p, q, rel_tol=1e-6, abs_tol=1e-4)
     return p == q
