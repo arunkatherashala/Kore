@@ -183,3 +183,35 @@ fn semi_scan_fuses_filter_and_sets_use_date_accel() {
     }
     assert!(testing::semi_fuse_hits() > 0, "the fused semi-join scan never ran");
 }
+
+#[test]
+fn substr_of_payload_text_is_computed_at_the_source() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let qs = [
+        "select nm as nation, substr(s, 1, 2) as sy, v * 2 as w from a, nat where k = nk order by nation, sy, w, nm",
+        "select substr(s, 2) as t, id from a, nat where k = nk and nr = 1 order by id",
+        "select substr(s, 1, 1) as t, s from a, nat where k = nk order by s, t, nm",
+        "select id, substr(s, 1, 3) as t, substr(s, 2, 1) as u from a, nat where k = nk order by id",
+        "select id, substr(s, 1, 3) as id from a, nat where k = nk order by id",
+        "select id, substr(s, 1, 3) as t from a, nat where k = nk and s like 'n1%' order by id",
+        "select id, substr(s, 1, 3) as t from a, nat where k = nk order by t, id",
+        "select substr(s, 1, 4) as t, count(*) as c from a, nat where k = nk group by substr(s, 1, 4) order by t",
+        "select id, substr(s, 1, 2) as t from a, nat, b where k = nk and bk = nk and bv > 20 order by id, t",
+        "select nation, y, sum(w) as t from (select nm as nation, substr(s, 1, 2) as y, v * 2 as w from a, nat where k = nk) as p group by nation, y order by nation, y desc",
+    ];
+    for (seed, (na, nb, nc, nd, dom)) in SIZES.into_iter().enumerate() {
+        let mut r = Rng(0x1357 ^ (seed as u64 * 31 + 5));
+        let mut ctx = make_ctx(&mut r, na, nb, nc, nd, dom);
+        // a larger, low-cardinality text payload so that the SUBSTR dictionary applies
+        if na >= 3000 {
+            ctx.register("a", DataBlock::new(vec![
+                Column::int64("id", (0..na as i64).map(Some).collect()),
+                Column::int64("k", (0..na).map(|_| opt_i(&mut r, dom + 3, 9)).collect()),
+                Column::float64("v", (0..na).map(|_| Some(r.below(100) as f64 / 4.0)).collect()),
+                Column::str_col("s", (0..na).map(|_| if r.below(8) == 0 { None } else { Some(format!("{}-{:02}-x", 1992 + r.below(7), 1 + r.below(12))) }).collect()),
+            ]).unwrap());
+        }
+        for q in qs { check(&ctx, q); }
+    }
+    assert!(testing::lz_substr_hits() > 0, "the SUBSTR pushdown never ran");
+}

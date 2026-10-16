@@ -279,7 +279,7 @@ pub fn set_no_deep_uncorr(on: bool) { NO_DEEP_UNCORR.store(on, Ordering::Relaxed
 pub(crate) fn no_deep_uncorr() -> bool { NO_DEEP_UNCORR.load(Ordering::Relaxed) }
 
 /// Master switch for the p3-gap optimisations (each also has its own switch): everything off = the 830475a4 behaviour.
-pub fn set_no_gap(on: bool) { set_no_deep_uncorr(on); set_no_small_dict(on); set_no_proj_take(on); set_no_sets_accel(on); set_no_semi_fuse(on); }
+pub fn set_no_gap(on: bool) { set_no_deep_uncorr(on); set_no_small_dict(on); set_no_proj_take(on); set_no_sets_accel(on); set_no_semi_fuse(on); set_no_semi_direct_int(on); set_no_lz_substr(on); }
 
 pub(crate) static NO_SMALL_DICT: AtomicBool = AtomicBool::new(false);
 
@@ -315,3 +315,22 @@ pub fn semi_fuse_hits() -> usize { SEMI_FUSE_HITS.load(Ordering::Relaxed) }
 
 #[inline]
 pub(crate) fn no_semi_fuse() -> bool { NO_SEMI_FUSE.load(Ordering::Relaxed) }
+
+pub(crate) static NO_SEMI_DIRECT_INT: AtomicBool = AtomicBool::new(false);
+
+/// Hash the inner keys of EXISTS / NOT EXISTS even when one exact BIGINT key spans a modest range (flat slot table).
+pub fn set_no_semi_direct_int(on: bool) { NO_SEMI_DIRECT_INT.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_semi_direct_int() -> bool { NO_SEMI_DIRECT_INT.load(Ordering::Relaxed) }
+
+pub(crate) static NO_LZ_SUBSTR: AtomicBool = AtomicBool::new(false);
+pub(crate) static LZ_SUBSTR_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Gather payload text columns that are only read through SUBSTR instead of computing the SUBSTR from the source rows.
+pub fn set_no_lz_substr(on: bool) { NO_LZ_SUBSTR.store(on, Ordering::Relaxed); }
+
+pub fn lz_substr_hits() -> usize { LZ_SUBSTR_HITS.load(Ordering::Relaxed) }
+
+#[inline]
+pub(crate) fn no_lz_substr() -> bool { NO_LZ_SUBSTR.load(Ordering::Relaxed) }

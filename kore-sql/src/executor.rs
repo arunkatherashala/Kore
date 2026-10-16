@@ -1817,8 +1817,14 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
         // payload tables whose columns are only GROUP BY keys are gathered after the aggregation instead
         let mut post_lz: Vec<LazyCols<'_>> = Vec::new();
         let oks: Vec<bool> = deferred_lz.iter().map(|lz| defer_gb && lz_defer_ok(lz, &deferred_lz, stmt, &result)).collect();
-        for (lz, ok) in deferred_lz.drain(..).zip(oks) {
-            if ok { post_lz.push(lz) } else { result = finish_lazy(result, lz); }
+        for (mut lz, ok) in deferred_lz.drain(..).zip(oks) {
+            if ok { post_lz.push(lz) } else {
+                if !use_general && !crate::testing::no_lz_substr() {
+                    let pend: Vec<&Expr> = conjuncts.iter().chain(deferred.iter()).collect();
+                    lz_substr_pushdown(&mut result, &mut lz, stmt, &pend);
+                }
+                result = finish_lazy(result, lz);
+            }
         }
         if !post_lz.is_empty() {
             if !crate::general::block_needs_general(stmt, &result) {
@@ -2530,9 +2536,51 @@ fn pack_int_keys(left: &[&[Option<i64>]], right: &[&[Option<i64>]]) -> Option<(V
     Some((pack(left), pack(right)))
 }
 
+/// A payload text column of a lazily loaded table that the statement only reads through `SUBSTR(col, a[, b])` in plain
+/// projections (TPC-H Q9: `substr(o_orderdate, 1, 4) as o_year`) is not gathered: the SUBSTR is computed straight from
+/// the source rows as a dictionary column named like the projection alias, which `project` then picks up.
+fn lz_substr_pushdown(block: &mut DataBlock, lz: &mut LazyCols<'_>, stmt: &SelectStmt, pending: &[&Expr]) {
+    if lz.cols.is_empty() || !stmt.group_by.is_empty() || stmt.grouping != Grouping::Plain || !stmt.group_exprs.is_empty()
+        || stmt.pivot.is_some() || stmt.qualify.is_some() || !stmt.windows.is_empty() || stmt.having.is_some() || stmt.distinct { return; }
+    let Some(pos) = block.columns.iter().position(|c| c.name == lz.rid) else { return };
+    let ColumnData::Int64(rid) = &block.columns[pos].data else { return };
+    let bare = |n: &str| n.rsplit('.').next().unwrap_or(n).to_ascii_lowercase();
+    for (pi, p) in stmt.projections.iter().enumerate() {
+        let Projection::Expr { expr: Expr::FuncCall { name, args }, alias: Some(alias) } = p else { continue };
+        if !(name.eq_ignore_ascii_case("SUBSTR") || name.eq_ignore_ascii_case("SUBSTRING")) || !(args.len() == 2 || args.len() == 3) { continue; }
+        let cname = match &args[0] { Expr::Col(c) => c.clone(), Expr::QualCol(t, c) => format!("{t}.{c}"), _ => continue };
+        let Expr::Int(start) = &args[1] else { continue };
+        if *start < 1 { continue; }
+        let len = match args.get(2) { None => None, Some(Expr::Int(l)) => Some((*l).max(0) as usize), _ => continue };
+        let Some(k) = lz.cols.iter().position(|(_, n)| col_name_matches(&cname, n)) else { continue };
+        let ci = lz.cols[k].0;
+        let ColumnData::Str(sv) = &lz.src.columns[ci].data else { continue };
+        let col_bare = bare(&lz.cols[k].1);
+        // nothing else may read the column: other projections, ORDER BY, predicates that still have to run
+        let mut refs: Vec<String> = Vec::new();
+        let mut ok = true;
+        for (qi, q) in stmt.projections.iter().enumerate() {
+            if qi == pi { continue; }
+            match q { Projection::Expr { expr, .. } => { if !crate::rewrite::referenced_cols(expr, &mut refs) { ok = false; break; } } _ => { ok = false; break; } }
+        }
+        for e in pending { if !crate::rewrite::referenced_cols(e, &mut refs) { ok = false; } }
+        for o in &stmt.order_by { if o.col.is_empty() { if !crate::rewrite::referenced_cols(&o.expr, &mut refs) { ok = false; } } else { refs.push(o.col.clone()); } }
+        if !ok || refs.iter().any(|r| bare(r) == col_bare) { continue; }
+        // the alias must not already name a column, and no other payload column may carry the name
+        if block.columns.iter().any(|c| bare(&c.name) == alias.to_ascii_lowercase()) || lz.cols.iter().any(|(_, n)| bare(n) == alias.to_ascii_lowercase()) { continue; }
+        let comp: Vec<usize> = rid.iter().map(|x| { let r = x.unwrap_or(0) as usize; match &lz.idx { Some(ix) => ix[r], None => r } }).collect();
+        let Some(data) = substr_dict_at(sv, Some(&comp), (*start - 1) as usize, len) else { continue };
+        block.columns.push(Column { name: alias.clone(), data });
+        lz.cols.remove(k);
+        crate::testing::LZ_SUBSTR_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return; // the borrowed `rid` is stale after a push; one column per call is enough
+    }
+}
+
 /// Append the lazy columns of `lz` to `block`, which carries a `__rid` column (row numbers of the filtered table).
 fn finish_lazy(mut block: DataBlock, lz: LazyCols<'_>) -> DataBlock {
     use rayon::prelude::*;
+    let __tfl = std::time::Instant::now();
     let Some(pos) = block.columns.iter().position(|c| c.name == lz.rid) else { return block };
     let rid = block.columns.remove(pos);
     let ColumnData::Int64(v) = rid.data else { return block };
@@ -2542,10 +2590,12 @@ fn finish_lazy(mut block: DataBlock, lz: LazyCols<'_>) -> DataBlock {
     };
     let comp: Vec<usize> = if v.len() >= PAR_MIN && !crate::testing::no_par_join() { v.par_iter().map(comp_of).collect() } else { v.iter().map(comp_of).collect() };
     drop(v);
+    prof!(__tfl, "finish_lazy {} comp done", lz.rid);
     let cols: Vec<Column> = lz.cols.par_iter().map(|(ci, name)| Column {
         name: name.clone(), data: { let sd = if lz.dict_small { small_dict(&lz.src.columns[*ci].data) } else { None }; kore_join::take_rows_par(sd.as_ref().unwrap_or(&lz.src.columns[*ci].data), &comp) },
     }).collect();
     block.columns.extend(cols);
+    prof!(__tfl, "finish_lazy {} gathered {} cols", lz.rid, lz.cols.len());
     block
 }
 
@@ -3849,6 +3899,17 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
                         Some((lo, tbl))
                     } else { None }
                 } else { None };
+                // the same for one exact BIGINT key (the slots then hold raw integers, not f64 bits)
+                let direct_i: Option<(i64, Vec<u32>)> = if eqs.len() == 1 && exact[0] && ns > 0 && !crate::testing::no_semi_direct_int() {
+                    let (mut lo, mut hi) = (i64::MAX, i64::MIN);
+                    for (k, _) in slots.iter() { let x = k.0 as i64; if x < lo { lo = x; } if x > hi { hi = x; } }
+                    if (hi as i128 - lo as i128) < (1i128 << 26) {
+                        let mut tbl = vec![NO; (hi - lo) as usize + 1];
+                        for (k, &sl) in slots.iter() { tbl[((k.0 as i64) - lo) as usize] = sl; }
+                        Some((lo, tbl))
+                    } else { None }
+                } else { None };
+                let ik0_int: Option<&[Option<i64>]> = match ik.first() { Some(KeyCol::I(v)) => Some(v), _ => None };
                 // state per slot: bit 0 = has a first <> value, bit 1 = two distinct values seen
                 #[derive(Clone, Copy)]
                 struct St { first: u64, flags: u8, present: bool }
@@ -3859,7 +3920,16 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
                 let failed = std::sync::atomic::AtomicBool::new(false);
                 let wc = crate::vecexpr::WinCtx::new();
                 let visit = |st: &mut Vec<St>, r: usize| {
-                    let s = match &direct {
+                    let s = match (&direct_i, ik0_int) {
+                        (Some((lo, tbl)), Some(v)) => {
+                            let Some(k) = v[r] else { return };
+                            let d = k.wrapping_sub(*lo) as u64;
+                            if d >= tbl.len() as u64 { return; }
+                            let s = tbl[d as usize];
+                            if s == NO { return; }
+                            s
+                        }
+                        _ => match &direct {
                         Some((mn, tbl)) => {
                             let Some(b) = ik[0].bits(r) else { return };
                             let d = f64::from_bits(b) - *mn;
@@ -3873,6 +3943,7 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
                             let Some(&s) = slots.get(&k) else { return };
                             s
                         }
+                        },
                     };
                     let g = &mut st[s as usize];
                     g.present = true;
@@ -6354,7 +6425,9 @@ fn project(mut block: DataBlock, projections: &[Projection]) -> Result<DataBlock
     }
     let nrows_in = block.num_rows;
     let mut new_cols: Vec<Column> = Vec::new();
+    let __tpa = std::time::Instant::now();
     for (pi, proj) in projections.iter().enumerate() {
+        if pi > 0 { prof!(__tpa, "project item {} done", pi - 1); }
         match proj {
             Projection::Star => { new_cols.extend(block.columns.iter().cloned()); }
             Projection::Expr { expr, alias } => {
@@ -6450,7 +6523,9 @@ fn project(mut block: DataBlock, projections: &[Projection]) -> Result<DataBlock
                                 continue;
                             }
                         }
+                        let __tpj = std::time::Instant::now();
                         if let Some(c) = fast_project_expr(expr, &block, out_name()) {
+                            prof!(__tpj, "project fast expr {}", out_name());
                             new_cols.push(c);
                             continue;
                         }
@@ -6550,16 +6625,24 @@ fn substr_slice(s: &str, start: usize, len: Option<usize>) -> &str {
 
 /// SUBSTR of a text column as a dictionary column, when it has at most 254 distinct values.
 fn substr_dict(v: &[Option<String>], start: usize, len: Option<usize>) -> Option<ColumnData> {
+    substr_dict_at(v, None, start, len)
+}
+
+/// `substr_dict` over the rows `idx` of `v` (all rows when None), read in place: no String is copied.
+fn substr_dict_at(v: &[Option<String>], idx: Option<&[usize]>, start: usize, len: Option<usize>) -> Option<ColumnData> {
     use rayon::prelude::*;
     use std::collections::HashMap;
     use std::hash::BuildHasherDefault;
     const CH: usize = 1 << 15;
-    if v.len() < 1024 { return None; }
-    let chunks: Option<Vec<(Vec<u8>, Vec<&str>)>> = v.par_chunks(CH).map(|c| {
+    let total = idx.map_or(v.len(), |ix| ix.len());
+    if total < 1024 { return None; }
+    let chunks: Option<Vec<(Vec<u8>, Vec<&str>)>> = (0..total.div_ceil(CH)).into_par_iter().map(|ci| {
+        let (lo, hi) = (ci * CH, ((ci + 1) * CH).min(total));
         let mut ids: HashMap<&str, u8, BuildHasherDefault<FxHasher>> = HashMap::default();
         let mut dict: Vec<&str> = Vec::new();
-        let mut codes: Vec<u8> = Vec::with_capacity(c.len());
-        for s in c {
+        let mut codes: Vec<u8> = Vec::with_capacity(hi - lo);
+        for i in lo..hi {
+            let s = &v[idx.map_or(i, |ix| ix[i])];
             match s {
                 None => codes.push(u8::MAX),
                 Some(s) => {
@@ -6583,7 +6666,7 @@ fn substr_dict(v: &[Option<String>], start: usize, len: Option<usize>) -> Option
     let chunks = chunks?;
     let mut global: HashMap<&str, u8, BuildHasherDefault<FxHasher>> = HashMap::default();
     let mut dict: Vec<String> = Vec::new();
-    let mut codes: Vec<u8> = Vec::with_capacity(v.len());
+    let mut codes: Vec<u8> = Vec::with_capacity(total);
     for (cc, cd) in &chunks {
         let mut remap: Vec<u8> = Vec::with_capacity(cd.len());
         for t in cd {
