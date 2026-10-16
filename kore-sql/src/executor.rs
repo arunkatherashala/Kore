@@ -2938,6 +2938,12 @@ fn filter_sets_first(pred: &Expr, src: &DataBlock, sets: &[(String, std::sync::A
     let mut refs = Vec::new();
     if !crate::rewrite::referenced_cols(pred, &mut refs) { return None; }
     for c in refs { names.push(c.rsplit('.').next().unwrap_or(&c).to_string()); }
+    // When every text column of the predicate is served by the ISO-date accelerator, one pass over the whole table on the
+    // encoded integers (key sets tested for the passing rows only) beats cloning the strings of the candidate rows
+    {
+        let strs: Vec<&Column> = names.iter().filter_map(|nm| src.columns.iter().find(|c| c.name == *nm && matches!(c.data, ColumnData::Str(_)))).collect();
+        if !strs.is_empty() && !crate::testing::no_sets_accel() && strs.iter().all(|c| crate::dateaccel::lookup(src, &c.data).is_some()) { return None; }
+    }
     // String columns are cloned by the gather (the ISO-date accelerator only serves registered tables): only worth it
     // when few rows survive the sets
     if cand.len() * 16 > n && names.iter().any(|nm| src.columns.iter().any(|c| c.name == *nm && matches!(c.data, ColumnData::Str(_)))) { return None; }
@@ -3775,11 +3781,20 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
     // Inner filters that vectorise: keep the surviving row ids and scan the catalog table through them
     // (no copy of the surviving rows' key columns).
     let mut sel: Option<Vec<usize>> = None;
+    // the filter is evaluated inside the scan, window by window (no row list of the surviving rows is built)
+    let mut fuse: Option<Expr> = None;
     if !inner_filters.is_empty() {
         let p = crate::rewrite::and_all(inner_filters.iter().map(|f| crate::rewrite::unqualify(f, &alias)).collect());
-        if let Some(p) = p { sel = crate::vecexpr::filter_idx(&p, src.get()); }
+        if let Some(p) = p {
+            let b = src.get();
+            let wc = crate::vecexpr::WinCtx::new();
+            let single_pass = !crate::testing::no_semi_fuse() && b.num_rows >= 200_000
+                && eqs.len() <= 2 && nes.len() <= 1
+                && crate::vecexpr::tri_window(&p, b, 0, 64.min(b.num_rows), &wc).is_some();
+            if single_pass { fuse = Some(p); } else { sel = crate::vecexpr::filter_idx(&p, b); }
+        }
     }
-    let inner: &DataBlock = if inner_filters.is_empty() || sel.is_some() {
+    let inner: &DataBlock = if inner_filters.is_empty() || sel.is_some() || fuse.is_some() {
         for p in eqs.iter_mut().chain(nes.iter_mut()) { p.0 = crate::rewrite::unqualify(&p.0, &alias); }
         src.get()
     } else {
@@ -3841,36 +3856,54 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
                 let nthreads = rayon::current_num_threads().max(1);
                 let chunk = inner_rows.div_ceil(nthreads).max(1);
                 let sel_ref = sel.as_deref();
+                let failed = std::sync::atomic::AtomicBool::new(false);
+                let wc = crate::vecexpr::WinCtx::new();
+                let visit = |st: &mut Vec<St>, r: usize| {
+                    let s = match &direct {
+                        Some((mn, tbl)) => {
+                            let Some(b) = ik[0].bits(r) else { return };
+                            let d = f64::from_bits(b) - *mn;
+                            if !(d >= 0.0 && d < tbl.len() as f64) { return; }
+                            let s = tbl[d as usize];
+                            if s == NO { return; }
+                            s
+                        }
+                        None => {
+                            let Some(k) = key(ik, r) else { return };
+                            let Some(&s) = slots.get(&k) else { return };
+                            s
+                        }
+                    };
+                    let g = &mut st[s as usize];
+                    g.present = true;
+                    if let Some(v) = ne_inner.as_ref().and_then(|c| c.bits_x(r, ne_exact)) {
+                        if g.flags & 1 == 0 { g.first = v; g.flags |= 1; }
+                        else if g.first != v { g.flags |= 2; }
+                    }
+                };
                 let parts: Vec<Vec<St>> = (0..nthreads).into_par_iter().map(|t| {
                     let mut st = vec![empty; ns];
                     let lo = (t * chunk).min(inner_rows);
                     let hi = ((t + 1) * chunk).min(inner_rows);
+                    if let Some(p) = &fuse {
+                        const W: usize = 16_384;
+                        let mut wlo = lo;
+                        while wlo < hi {
+                            let whi = (wlo + W).min(hi);
+                            let Some(v) = crate::vecexpr::tri_window(p, inner, wlo, whi, &wc) else { failed.store(true, std::sync::atomic::Ordering::Relaxed); break };
+                            for (i, &x) in v.iter().enumerate() { if x == 1 { visit(&mut st, wlo + i); } }
+                            wlo = whi;
+                        }
+                        return st;
+                    }
                     for r in lo..hi {
                         let r = match sel_ref { Some(s) => s[r], None => r };
-                        let s = match &direct {
-                            Some((mn, tbl)) => {
-                                let Some(b) = ik[0].bits(r) else { continue };
-                                let d = f64::from_bits(b) - *mn;
-                                if !(d >= 0.0 && d < tbl.len() as f64) { continue; }
-                                let s = tbl[d as usize];
-                                if s == NO { continue; }
-                                s
-                            }
-                            None => {
-                                let Some(k) = key(ik, r) else { continue };
-                                let Some(&s) = slots.get(&k) else { continue };
-                                s
-                            }
-                        };
-                        let g = &mut st[s as usize];
-                        g.present = true;
-                        if let Some(v) = ne_inner.as_ref().and_then(|c| c.bits_x(r, ne_exact)) {
-                            if g.flags & 1 == 0 { g.first = v; g.flags |= 1; }
-                            else if g.first != v { g.flags |= 2; }
-                        }
+                        visit(&mut st, r);
                     }
                     st
                 }).collect();
+                if failed.load(std::sync::atomic::Ordering::Relaxed) { return Ok(None); }
+                if fuse.is_some() { crate::testing::SEMI_FUSE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
                 prof!(__ts, "semi scan done ns={}", ns);
                 let mut merged = vec![empty; ns];
                 for part in &parts {
@@ -3904,6 +3937,10 @@ fn semi_join_mask(outer: &DataBlock, sub: &SelectStmt, negated: bool, ctx: &KqlC
     }
 
     // generic path: needs the surviving rows as a block of their own
+    if let Some(p) = fuse.take() {
+        // the in-scan filter belongs to the numeric fast path above; here the row list is needed
+        match crate::vecexpr::filter_idx(&p, src.get()) { Some(v) => sel = Some(v), None => return Ok(None) }
+    }
     let sel_block: DataBlock;
     let inner: &DataBlock = match &sel {
         Some(s) => {

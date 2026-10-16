@@ -279,7 +279,7 @@ pub fn set_no_deep_uncorr(on: bool) { NO_DEEP_UNCORR.store(on, Ordering::Relaxed
 pub(crate) fn no_deep_uncorr() -> bool { NO_DEEP_UNCORR.load(Ordering::Relaxed) }
 
 /// Master switch for the p3-gap optimisations (each also has its own switch): everything off = the 830475a4 behaviour.
-pub fn set_no_gap(on: bool) { set_no_deep_uncorr(on); set_no_small_dict(on); set_no_proj_take(on); }
+pub fn set_no_gap(on: bool) { set_no_deep_uncorr(on); set_no_small_dict(on); set_no_proj_take(on); set_no_sets_accel(on); set_no_semi_fuse(on); }
 
 pub(crate) static NO_SMALL_DICT: AtomicBool = AtomicBool::new(false);
 
@@ -296,3 +296,22 @@ pub fn set_no_proj_take(on: bool) { NO_PROJ_TAKE.store(on, Ordering::Relaxed); }
 
 #[inline]
 pub(crate) fn no_proj_take() -> bool { NO_PROJ_TAKE.load(Ordering::Relaxed) }
+
+pub(crate) static NO_SETS_ACCEL: AtomicBool = AtomicBool::new(false);
+
+/// Key-set-first table loads clone the date strings of the candidate rows even when the date accelerator could serve them.
+pub fn set_no_sets_accel(on: bool) { NO_SETS_ACCEL.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_sets_accel() -> bool { NO_SETS_ACCEL.load(Ordering::Relaxed) }
+
+pub(crate) static NO_SEMI_FUSE: AtomicBool = AtomicBool::new(false);
+pub(crate) static SEMI_FUSE_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Build the inner row list of EXISTS / NOT EXISTS filters before the scan instead of filtering inside it.
+pub fn set_no_semi_fuse(on: bool) { NO_SEMI_FUSE.store(on, Ordering::Relaxed); }
+
+pub fn semi_fuse_hits() -> usize { SEMI_FUSE_HITS.load(Ordering::Relaxed) }
+
+#[inline]
+pub(crate) fn no_semi_fuse() -> bool { NO_SEMI_FUSE.load(Ordering::Relaxed) }

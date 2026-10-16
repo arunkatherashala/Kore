@@ -130,3 +130,56 @@ fn projection_moves_plain_columns() {
         "select id as a1, id, id * 2 as id from a order by a1",
     ]);
 }
+
+fn date_s(r: &mut Rng, bad: bool) -> Option<String> {
+    if r.below(20) == 0 { return None; }
+    if bad && r.below(5000) == 0 { return Some("not-a-date".into()); }
+    Some(format!("199{}-{:02}-{:02}", 2 + r.below(5), 1 + r.below(12), 1 + r.below(28)))
+}
+
+/// li(lk order key, ls supplier, cd, rd dates), sup(sk, sn), ord(ok, st)
+fn lineitem_ctx(r: &mut Rng, n: usize, bad: bool) -> KqlContext {
+    let mut ctx = KqlContext::new();
+    let nord = (n / 4).max(1);
+    ctx.register("li", DataBlock::new(vec![
+        Column::int64("lk", (0..n).map(|_| if r.below(50) == 0 { None } else { Some(r.below(nord) as i64) }).collect()),
+        Column::int64("ls", (0..n).map(|_| if r.below(50) == 0 { None } else { Some(r.below(200) as i64) }).collect()),
+        Column::str_col("cd", (0..n).map(|_| date_s(r, bad)).collect()),
+        Column::str_col("rd", (0..n).map(|_| date_s(r, bad)).collect()),
+    ]).unwrap());
+    ctx.register("sup", DataBlock::new(vec![
+        Column::int64("sk", (0..200i64).map(Some).collect()),
+        Column::int64("sn", (0..200i64).map(|i| Some(i % 25)).collect()),
+    ]).unwrap());
+    ctx.register("ord", DataBlock::new(vec![
+        Column::int64("ok", (0..nord as i64).map(Some).collect()),
+        Column::str_col("st", (0..nord).map(|i| Some(if i % 3 == 0 { "F".to_string() } else { "O".to_string() })).collect()),
+    ]).unwrap());
+    ctx
+}
+
+#[test]
+fn semi_scan_fuses_filter_and_sets_use_date_accel() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let qs = [
+        // TPC-H Q21 shape
+        "select sk, count(*) as c from sup, li l1, ord where sk = l1.ls and ok = l1.lk and st = 'F' and l1.rd > l1.cd and sn = 3 \
+         and exists (select * from li l2 where l2.lk = l1.lk and l2.ls <> l1.ls) \
+         and not exists (select * from li l3 where l3.lk = l1.lk and l3.ls <> l1.ls and l3.rd > l3.cd) group by sk order by c desc, sk",
+        // TPC-H Q4 shape
+        "select st, count(*) as c from ord where exists (select * from li where lk = ok and rd > cd) group by st order by st",
+        "select st, count(*) as c from ord where not exists (select * from li where lk = ok and rd > cd and ls < 50) group by st order by st",
+        "select count(*) from ord where exists (select * from li where lk = ok and cd >= '1994-01-01' and cd < '1995-01-01')",
+        "select count(*) from sup, li l1 where sk = l1.ls and l1.rd > l1.cd and sn = 7",
+        "select count(*) from sup, li l1 where sk = l1.ls and l1.rd > l1.cd and substr(l1.cd, 1, 4) = '1995' and sn = 7",
+        // a predicate the vectorised evaluator may not cover: upper() on text
+        "select count(*) from ord where exists (select * from li where lk = ok and upper(cd) > '1994')",
+        "select st, count(*) as c from ord where exists (select * from li where lk = ok and rd > cd and ls <> 5) group by st order by st",
+    ];
+    for (seed, (n, bad)) in [(0usize, false), (300, false), (260_000, false), (260_000, true)].into_iter().enumerate() {
+        let mut r = Rng(0xabcdef12345 + seed as u64);
+        let ctx = lineitem_ctx(&mut r, n, bad);
+        for q in qs { check(&ctx, q); }
+    }
+    assert!(testing::semi_fuse_hits() > 0, "the fused semi-join scan never ran");
+}
