@@ -225,6 +225,20 @@ fn bin(op: &BinOpKind, a: &R, b: &R, n: usize) -> Vec<Option<f64>> {
     }
 }
 
+/// Value of plan node `k` at row `r` (no Opaque nodes): the same arithmetic as `eval_nodes`, one row at a time.
+fn node_at(nodes: &[PN<'_>], k: usize, r: usize) -> Option<f64> {
+    match &nodes[k] {
+        PN::ColF(v) => v[r],
+        PN::ColI(v) => v[r].map(|i| i as f64),
+        PN::Const(c) => Some(*c),
+        PN::Bin(op, a, b) => match (node_at(nodes, *a, r), node_at(nodes, *b, r)) {
+            (Some(x), Some(y)) => apply(op, x, y),
+            _ => None,
+        },
+        PN::Opaque(_) => None,
+    }
+}
+
 fn eval_nodes<'a>(nodes: &[PN<'a>], block: &DataBlock, lo: usize, hi: usize, wc: &WinCtx) -> Option<Vec<R<'a>>> {
     let n = hi - lo;
     let mut res: Vec<R<'a>> = Vec::with_capacity(nodes.len());
@@ -391,7 +405,9 @@ impl<'a> Job<'a> {
                 gid.push(g);
             }
         }
-        let res = if self.nodes.is_empty() { Vec::new() } else { eval_nodes(&self.nodes, self.block, lo, hi, wc)? };
+        // few rows pass the filter: evaluate the input expressions for those rows only, not for the whole window
+        let sparse = !crate::testing::no_fused_sparse() && sel.len() * 4 < hi - lo && !self.nodes.iter().any(|nd| matches!(nd, PN::Opaque(_)));
+        let res = if self.nodes.is_empty() || sparse { Vec::new() } else { eval_nodes(&self.nodes, self.block, lo, hi, wc)? };
         for (si, s) in self.specs.iter().enumerate() {
             let (acc, cnt) = (&mut l.acc[si], &mut l.cnt[si]);
             match &s.src {
@@ -399,6 +415,7 @@ impl<'a> Job<'a> {
                 Src::NonNull(c) => for (j, &i) in sel.iter().enumerate() { if !is_null_at(c, lo + i as usize) { cnt[gid[j] as usize] += 1; } },
                 Src::ColF(v) => { let v = &v[lo..hi]; accum(s.func, sel, gid, |i| v[i], acc, cnt) }
                 Src::ColI(v) => { let v = &v[lo..hi]; accum(s.func, sel, gid, |i| v[i].map(|x| x as f64), acc, cnt) }
+                Src::Node(k) if sparse => { let k = *k; accum(s.func, sel, gid, |i| node_at(&self.nodes, k, lo + i), acc, cnt) }
                 Src::Node(k) => match &res[*k] {
                     R::B(v) => accum(s.func, sel, gid, |i| v[i], acc, cnt),
                     R::O(v) => accum(s.func, sel, gid, |i| v[i], acc, cnt),
@@ -544,11 +561,19 @@ fn run_partitioned(job: &Job) -> Option<Groups> {
                 rows[pos[p] as usize] = (lo + i as usize) as u32;
                 pos[p] += 1;
             }
-            let vals = if node_specs.is_empty() || sel.is_empty() { vec![Vec::new(); node_specs.len()] } else {
+            // values of the computed aggregate inputs, one per selected row in `rows` order (not per window row)
+            let sparse = !crate::testing::no_fused_sparse() && sel.len() * 4 < hi - lo && !job.nodes.iter().any(|nd| matches!(nd, PN::Opaque(_)));
+            let vals = if node_specs.is_empty() || sel.is_empty() { vec![Vec::new(); node_specs.len()] } else if sparse {
+                // few rows pass the filter: evaluate the expression for those rows only
+                node_specs.iter().map(|&si| {
+                    let Src::Node(k) = job.specs[si].src else { unreachable!() };
+                    rows.iter().map(|&r| node_at(&job.nodes, k, r as usize)).collect()
+                }).collect()
+            } else {
                 let res = eval_nodes(&job.nodes, job.block, lo, hi, wc)?;
                 node_specs.iter().map(|&si| {
                     let Src::Node(k) = job.specs[si].src else { unreachable!() };
-                    (0..hi - lo).map(|i| res[k].at(i)).collect()
+                    rows.iter().map(|&r| res[k].at(r as usize - lo)).collect()
                 }).collect()
             };
             Some(WinOut { lo, rows, off, vals })
@@ -557,7 +582,7 @@ fn run_partitioned(job: &Job) -> Option<Groups> {
 
     struct PartAgg { first: Vec<usize>, acc: Vec<Vec<f64>>, cnt: Vec<Vec<u64>> }
     // fold row `r` (window output `wo`) into group `g`
-    let update = |pa: &mut PartAgg, g: usize, r: usize, wo: &WinOut| {
+    let update = |pa: &mut PartAgg, g: usize, r: usize, pos: usize, wo: &WinOut| {
         let mut nk = 0usize;
         for (si, s) in job.specs.iter().enumerate() {
             let x: Option<f64> = match &s.src {
@@ -565,7 +590,7 @@ fn run_partitioned(job: &Job) -> Option<Groups> {
                 Src::NonNull(c) => { if !is_null_at(c, r) { pa.cnt[si][g] += 1; } continue }
                 Src::ColF(v) => v[r],
                 Src::ColI(v) => v[r].map(|x| x as f64),
-                Src::Node(_) => { let x = wo.vals[nk][r - wo.lo]; nk += 1; x }
+                Src::Node(_) => { let x = wo.vals[nk][pos]; nk += 1; x }
             };
             if let Some(x) = x {
                 pa.cnt[si][g] += 1;
@@ -587,11 +612,12 @@ fn run_partitioned(job: &Job) -> Option<Groups> {
             let off = base.wrapping_add(i0 as i64);
             let mut pa = PartAgg { first: vec![usize::MAX; size], acc: job.specs.iter().map(|s| vec![init(s.func); size]).collect(), cnt: vec![vec![0u64; size]; nspecs] };
             for wo in &outs {
-                for &r32 in wo.list(p) {
+                let base = wo.off[p] as usize;
+                for (jj, &r32) in wo.list(p).iter().enumerate() {
                     let r = r32 as usize;
                     let g = kv[r].unwrap().wrapping_sub(off) as usize;
                     if pa.first[g] == usize::MAX { pa.first[g] = r; }
-                    update(&mut pa, g, r, wo);
+                    update(&mut pa, g, r, base + jj, wo);
                 }
             }
             // compact to the groups that occurred
@@ -609,7 +635,8 @@ fn run_partitioned(job: &Job) -> Option<Groups> {
         if single_int.is_some() { index1.reserve(cap); } else { index.reserve(cap); }
         let mut null_gid = u32::MAX;
         for wo in &outs {
-            for &r32 in wo.list(p) {
+            let base = wo.off[p] as usize;
+            for (jj, &r32) in wo.list(p).iter().enumerate() {
                 let r = r32 as usize;
                 let next = pa.first.len() as u32;
                 let g = match single_int {
@@ -623,7 +650,7 @@ fn run_partitioned(job: &Job) -> Option<Groups> {
                     pa.first.push(r);
                     for (si, s) in job.specs.iter().enumerate() { pa.acc[si].push(init(s.func)); pa.cnt[si].push(0); }
                 }
-                update(&mut pa, g as usize, r, wo);
+                update(&mut pa, g as usize, r, base + jj, wo);
             }
         }
         pa

@@ -304,3 +304,76 @@ pub(crate) fn no_planned_tail() -> bool {
     static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     NO_PLANNED_TAIL.load(Ordering::Relaxed) || env_flag("KORE_NO_PLANNED_TAIL", &E)
 }
+pub(crate) static NO_DEEP_UNCORR: AtomicBool = AtomicBool::new(false);
+
+/// Treat a subquery that contains nested subqueries as correlated whenever any nested column is foreign to its own
+/// level (the old, conservative rule), so the scope-aware check can be compared with it.
+pub fn set_no_deep_uncorr(on: bool) { NO_DEEP_UNCORR.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_deep_uncorr() -> bool { NO_DEEP_UNCORR.load(Ordering::Relaxed) }
+
+/// Master switch for the p3-gap optimisations (each also has its own switch): everything off = the 830475a4 behaviour.
+pub fn set_no_gap(on: bool) { set_no_deep_uncorr(on); set_no_small_dict(on); set_no_proj_take(on); set_no_sets_accel(on); set_no_semi_fuse(on); set_no_semi_direct_int(on); set_no_lz_substr(on); kore_join::set_no_identity_gather(on); set_no_fused_sparse(on); }
+
+pub(crate) static NO_SMALL_DICT: AtomicBool = AtomicBool::new(false);
+
+/// Keep text columns of small tables as plain strings through joins (no dictionary codes), for A/B comparison.
+pub fn set_no_small_dict(on: bool) { NO_SMALL_DICT.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_small_dict() -> bool { NO_SMALL_DICT.load(Ordering::Relaxed) }
+
+pub(crate) static NO_PROJ_TAKE: AtomicBool = AtomicBool::new(false);
+
+/// Always clone the source column for a plain-column projection that sits beside computed expressions.
+pub fn set_no_proj_take(on: bool) { NO_PROJ_TAKE.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_proj_take() -> bool { NO_PROJ_TAKE.load(Ordering::Relaxed) }
+
+pub(crate) static NO_SETS_ACCEL: AtomicBool = AtomicBool::new(false);
+
+/// Key-set-first table loads clone the date strings of the candidate rows even when the date accelerator could serve them.
+pub fn set_no_sets_accel(on: bool) { NO_SETS_ACCEL.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_sets_accel() -> bool { NO_SETS_ACCEL.load(Ordering::Relaxed) }
+
+pub(crate) static NO_SEMI_FUSE: AtomicBool = AtomicBool::new(false);
+pub(crate) static SEMI_FUSE_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Build the inner row list of EXISTS / NOT EXISTS filters before the scan instead of filtering inside it.
+pub fn set_no_semi_fuse(on: bool) { NO_SEMI_FUSE.store(on, Ordering::Relaxed); }
+
+pub fn semi_fuse_hits() -> usize { SEMI_FUSE_HITS.load(Ordering::Relaxed) }
+
+#[inline]
+pub(crate) fn no_semi_fuse() -> bool { NO_SEMI_FUSE.load(Ordering::Relaxed) }
+
+pub(crate) static NO_SEMI_DIRECT_INT: AtomicBool = AtomicBool::new(false);
+
+/// Hash the inner keys of EXISTS / NOT EXISTS even when one exact BIGINT key spans a modest range (flat slot table).
+pub fn set_no_semi_direct_int(on: bool) { NO_SEMI_DIRECT_INT.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_semi_direct_int() -> bool { NO_SEMI_DIRECT_INT.load(Ordering::Relaxed) }
+
+pub(crate) static NO_LZ_SUBSTR: AtomicBool = AtomicBool::new(false);
+pub(crate) static LZ_SUBSTR_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Gather payload text columns that are only read through SUBSTR instead of computing the SUBSTR from the source rows.
+pub fn set_no_lz_substr(on: bool) { NO_LZ_SUBSTR.store(on, Ordering::Relaxed); }
+
+pub fn lz_substr_hits() -> usize { LZ_SUBSTR_HITS.load(Ordering::Relaxed) }
+
+#[inline]
+pub(crate) fn no_lz_substr() -> bool { NO_LZ_SUBSTR.load(Ordering::Relaxed) }
+
+pub(crate) static NO_FUSED_SPARSE: AtomicBool = AtomicBool::new(false);
+
+/// Evaluate fused-aggregate input expressions over whole windows even when few rows pass the filter.
+pub fn set_no_fused_sparse(on: bool) { NO_FUSED_SPARSE.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_fused_sparse() -> bool { NO_FUSED_SPARSE.load(Ordering::Relaxed) }

@@ -464,18 +464,36 @@ pub(crate) fn build_result_idx(left: &DataBlock, right: &DataBlock, lidx: &[u32]
 /// Same output as [`build_result_idx`], but each input column is dropped right after it has been gathered.
 fn build_result_idx_owned(left: DataBlock, right: DataBlock, lidx: &[u32], ridx: &[u32]) -> DataBlock {
     let left_names: std::collections::HashSet<String> = left.columns.iter().map(|c| c.name.clone()).collect();
-    let mut jobs: Vec<(String, kore_core::ColumnData, &[u32])> = Vec::with_capacity(left.columns.len() + right.columns.len());
-    for c in left.columns { jobs.push((c.name, c.data, lidx)); }
+    // a side whose row ids are 0, 1, 2, ... (every row kept once, in order: the probe side of a lookup join) is moved, not gathered
+    let (l_id, r_id) = (is_identity(lidx, left.num_rows), is_identity(ridx, right.num_rows));
+    let mut jobs: Vec<(String, kore_core::ColumnData, &[u32], bool)> = Vec::with_capacity(left.columns.len() + right.columns.len());
+    for c in left.columns { jobs.push((c.name, c.data, lidx, l_id)); }
     for c in right.columns {
         let name = if left_names.contains(c.name.as_str()) { format!("{}_r", c.name) } else { c.name };
-        jobs.push((name, c.data, ridx));
+        jobs.push((name, c.data, ridx, r_id));
     }
-    let columns: Vec<Column> = jobs.into_par_iter().map(|(name, data, idx)| {
+    let columns: Vec<Column> = jobs.into_par_iter().map(|(name, data, idx, id)| {
+        if id { return Column { name, data }; }
         let g = gather(&data, idx);
         drop(data);
         Column { name, data: g }
     }).collect();
     DataBlock { columns, num_rows: lidx.len() }
+}
+
+static NO_IDENTITY: AtomicBool = AtomicBool::new(false);
+
+/// Always gather join output columns, even when the row ids are the identity (A/B oracle for the move shortcut).
+pub fn set_no_identity_gather(on: bool) { NO_IDENTITY.store(on, Ordering::Relaxed); }
+
+/// `idx` is exactly `0, 1, ..., n - 1`: gathering through it would copy the column unchanged.
+pub fn is_identity(idx: &[u32], n: usize) -> bool {
+    if idx.len() != n || n == 0 || NO_IDENTITY.load(Ordering::Relaxed) { return false; }
+    if n >= PAR_GATHER_MIN && !serial_join() {
+        idx.par_chunks(GATHER_CHUNK).enumerate().all(|(c, ch)| ch.iter().enumerate().all(|(i, &x)| x as usize == c * GATHER_CHUNK + i))
+    } else {
+        idx.iter().enumerate().all(|(i, &x)| x as usize == i)
+    }
 }
 
 /// Take rows `idx` of `src` (u32::MAX = NULL).

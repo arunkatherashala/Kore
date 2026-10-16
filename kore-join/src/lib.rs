@@ -9,7 +9,7 @@ pub mod hash_join;
 pub mod broadcast_join;
 pub mod sort_merge_join;
 
-pub use hash_join::{HashJoin, gather_rows, clone_column, take_rows_par, set_serial_join, serial_join};
+pub use hash_join::{HashJoin, gather_rows, clone_column, take_rows_par, set_serial_join, serial_join, is_identity, set_no_identity_gather};
 pub use broadcast_join::BroadcastJoin;
 pub use sort_merge_join::SortMergeJoin;
 
