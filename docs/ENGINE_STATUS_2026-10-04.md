@@ -99,6 +99,15 @@ On an idle machine, alternating DuckDB and KORE runs (DuckDB before and after ea
 11, DuckDB on 11 (weak spots Q9, Q20, Q11, Q22, Q15, Q21). Scope: TPC-H-shaped data, one machine, warm in-memory, SF 1 and SF 3 only. Details:
 `benchmarks/tpch_honest/README.md`.
 
+## Phase 3 (2026-10-16): TPC-DS and remaining TPC-H gaps
+
+**TPC-DS (99 queries, SF 1, DuckDB reference):** 97 identical answers, 2 timeouts (Q47, Q95), 0 wrong after fixing 7 real bugs the benchmark found (e.g. `SELECT expr, *` silently
+dropped the expression, constants beside GROUP BY came back as text, EXISTS over multi-table subqueries ran per row). KORE is about **2.8x slower** than DuckDB on it
+(125 ms vs 44 ms geometric mean). Details: `benchmarks/tpcds_honest/README.md`.
+**TPC-H after the Phase 3 work:** KORE at or below DuckDB in six alternating rounds (SF 1: 34-40 ms vs 43-78; SF 3: 124-149 ms vs 154-373), on a machine that was not quiet
+(DuckDB's own readings varied up to 2x): level to somewhat ahead; margin not established. 309 tests, correctness gate PASS.
+Known hazard not fixed: a reference to a nonexistent column evaluates to NULL instead of raising an error.
+
 ## What was added in this round
 
 - Join planning: filters derived from `OR` branches, unique-key (lookup) tables joined first.
@@ -115,7 +124,7 @@ On an idle machine, alternating DuckDB and KORE runs (DuckDB before and after ea
 
 ## Test evidence
 
-- 295 tests pass across `kore-sql`, `kore-join` and `kore-ffi`, including about 960 hand-derived regression
+- 309 tests pass across `kore-sql`, `kore-join` and `kore-ffi`, including about 960 hand-derived regression
   cases, a differential test across execution paths, and a SQLite oracle over 60k generated queries.
 - A mutation fuzzer ran about 1.6M mutants with no panics (reported by the SQL-coverage work, not re-run here).
 - Not run: the whole workspace, because a Python-binding crate does not build against Python 3.14 here.
@@ -125,9 +134,9 @@ On an idle machine, alternating DuckDB and KORE runs (DuckDB before and after ea
 | Area | Limit |
 |---|---|
 | Scale | Everything is in memory as row vectors of `Option<T>`. Spilling bounds operator working state only, not input tables or results. A skewed key can still exceed the budget. |
-| SF3 (18M lineitem rows) | Completes all 22 queries with answers matching DuckDB; at parity with DuckDB in alternating idle-machine runs (KORE 109.8-130.1 ms vs DuckDB 113.9-138.5 ms geometric mean, 2026-10-15). Peak memory at SF 3 was not re-measured on the final build. Nothing larger than SF 3 has been tried. |
+| SF3 (18M lineitem rows) | Completes all 22 TPC-H queries with answers matching DuckDB, level with or slightly ahead of DuckDB in alternating runs (KORE 124-149 ms vs DuckDB 154-373 ms, 2026-10-16, noisy machine; 110-130 vs 114-138 on a quieter day). Peak memory at SF 3 was not re-measured on the final build. Nothing larger than SF 3 has been tried (SF 10 does not fit this machine; the compact-column prototype showed a full compact layout would be needed and would cost about 3.5 weeks). |
 | Strings | `Option<String>` columns that cannot be dictionary-encoded (dictionary holds at most 254 values) dominate memory and are slow to sort and group. |
-| Other engines | At SF 1 and SF 3 (warm, in-memory, 22 TPC-H-shaped queries) KORE and DuckDB are at parity within noise. DuckDB is the better-engineered baseline and was only exercised on these queries. Untested: other workloads, larger data, cold start, concurrency. |
+| Other engines | On TPC-H (SF 1, SF 3) KORE and DuckDB are level to slightly in KORE's favour in the latest runs; on TPC-DS (SF 1) KORE is about 2.8x slower than DuckDB. DuckDB is the better-engineered baseline. Untested: ClickBench-style scans, larger data, cold start, concurrency. |
 | Distributed | No cluster execution, no fault tolerance, no connectors (S3, Hive, JDBC, Kafka), no streaming or ML. |
 | SQL | No STRUCT, TABLESAMPLE or native DECIMAL (DECIMAL is a double). A DATE compared with a TIMESTAMP is a string comparison. `EXPLAIN`/`DESCRIBE` output differs from Spark. |
 | Data | TPC-H-shaped data from `gen_data.py`, not the official dbgen. This is not an official TPC-H result. |
@@ -141,7 +150,7 @@ On an idle machine, alternating DuckDB and KORE runs (DuckDB before and after ea
 | Is it a real SQL engine? | Yes. |
 | Are the results correct? | On the 22 TPC-H-shaped queries, yes, checked against live Spark. In general, no guarantee: bugs are still being found at a rate of several per round. |
 | Faster than Spark on one machine, in-memory? | Yes at SF1, by 2x to 25x in these runs. |
-| Faster than DuckDB? | No, and not slower either on this benchmark: parity within about +/-10% at SF 1 and SF 3 (each faster on about half the queries). Not shown for other workloads or scales. |
+| Faster than DuckDB? | On TPC-H: level to somewhat ahead in recent alternating runs (margin not established, noisy machine). On TPC-DS: no, about 2.8x slower. |
 | Replacement for Spark? | No. |
 | Production ready? | No. |
 | Best description | Strong research-grade prototype. |

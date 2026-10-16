@@ -201,6 +201,32 @@ KORE's clearest strengths: Q19 (42 vs 184), Q6, Q7, Q1, Q10, Q17, Q18.
 Scope of this claim: one machine (8 cores, 32 GB), TPC-H-shaped data (not the official dbgen), warm in-memory runs, 22 queries, SF 1 and SF 3 only. It says nothing
 about other workloads (TPC-DS, ClickBench), larger scales, cold data, concurrency or production features.
 
+## After Phase 3 (TPC-DS fixes, remaining TPC-H gaps), 2026-10-16
+
+Merged: fixes found by running all 99 TPC-DS queries (see `benchmarks/tpcds_honest/README.md`), plus Q9/Q20/Q21/Q15/Q4/Q22 work (correlated-scalar scoping fix for Q20,
+identity-move gather for lookup joins, direct integer slot table for EXISTS, selective fused aggregation, SUBSTR pushed to the source rows). 309 tests pass;
+correctness gate (`run_gate.sh`): GATE PASS, 0 disagreements, 0 oracle mismatches; 22/22 answers match Spark (SF 1) and DuckDB (SF 3) in every run.
+
+Alternating runs, DuckDB measured before and after each KORE run (geometric mean over 22 queries, ms):
+
+| | DuckDB before | KORE | DuckDB after |
+|---|---|---|---|
+| SF 1 round 1 | 47.5 | 36.4 | 46.0 |
+| SF 1 round 2 | 43.0 | 34.3 | 56.8 |
+| SF 1 round 3 | 56.1 | 39.5 | 77.6 |
+| SF 3 round 1 | 190.2 | 130.5 | 373.4 |
+| SF 3 round 2 | 311.9 | 148.7 | 162.2 |
+| SF 3 round 3 | 153.9 | 124.1 | 161.0 |
+
+KORE was at or below DuckDB in all six rounds. **Do not read a precise ratio from this:** the machine was not quiet (three leftover test processes of mine were running,
+one of them busy), and DuckDB's own before/after readings differ by up to 2x within one round (SF 3 round 1: 190 vs 373). On quieter days DuckDB measured 43-45 ms (SF 1) and
+114-127 ms (SF 3) and KORE was level with it (see the section above). A fair summary: KORE is level with, and in these runs somewhat ahead of, DuckDB on TPC-H-shaped data
+at SF 1 and SF 3; confirm on an idle machine before quoting a margin.
+
+TPC-DS (99 queries, SF 1, DuckDB as the reference; run before the Phase 3 TPC-H work): 97 answers identical to DuckDB, 2 timeouts (Q47, Q95), 0 wrong. **KORE is about 2.8x slower
+than DuckDB on TPC-DS** (geometric mean 125 ms vs 44 ms over the 97 agreeing queries; KORE faster on 32 of 97). Worst: Q70 and Q22 (ROLLUP), Q5, Q47 (offset self-join), Q95.
+So the TPC-H result does not carry over to TPC-DS.
+
 Full tables: `results/`. Read these numbers with care:
 
 * Spark here is a single-JVM local-mode run on a data set that fits in memory; its strengths (scale-out, spilling,
