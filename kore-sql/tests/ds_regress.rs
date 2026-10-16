@@ -5,6 +5,9 @@
 use kore_core::{Column, ColumnData, DataBlock};
 use kore_sql::KqlContext;
 
+/// The optimisation switches are process-wide: tests that flip one must not overlap other tests in this file.
+static SWITCHES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn s(v: &[Option<&str>]) -> Vec<Option<String>> { v.iter().map(|x| x.map(|y| y.to_string())).collect() }
 
 fn base() -> KqlContext {
@@ -65,6 +68,7 @@ fn check(cases: &[(&str, &str)]) {
 /// TPC-DS Q62/Q99: `SELECT expr AS a, * FROM t` silently dropped everything but the star columns.
 #[test]
 fn star_mixed_with_expressions() {
+    let _lock = SWITCHES.lock().unwrap_or_else(|e| e.into_inner());
     check(&[
         ("select id * 10 as x, * from t where id < 3 order by id", "10,1,'x',10,1.5|20,2,'x',20,2.5"),
         ("select *, uid + 1 as x from u order by uid", "1,'a',2|2,'b',3|7,'c',8"),
@@ -76,6 +80,7 @@ fn star_mixed_with_expressions() {
 /// constant was rounded to 4 digits.
 #[test]
 fn constant_select_item_with_group_by_keeps_type() {
+    let _lock = SWITCHES.lock().unwrap_or_else(|e| e.into_inner());
     check(&[
         ("select 0 as gflag, g, sum(v) s from t group by g order by g nulls first", "0,NULL,60|0,'x',30|0,'y',30|0,'z',50"),
         ("select 1.23456789 as c, g from t group by g order by g nulls first limit 1", "1.234568,NULL"),
@@ -88,6 +93,7 @@ fn constant_select_item_with_group_by_keeps_type() {
 /// u = (1,a),(2,b),(7,c); w = (1),(2); t has ids 1..6.
 #[test]
 fn comma_join_after_explicit_join() {
+    let _lock = SWITCHES.lock().unwrap_or_else(|e| e.into_inner());
     check(&[
         ("select uid, un, wid, id from u left join w on uid = wid, t where t.id = u.uid order by uid",
          "1,'a',1,1|2,'b',2,2"),
@@ -102,6 +108,7 @@ fn comma_join_after_explicit_join() {
 /// TPC-DS Q6: ORDER BY a qualified GROUP BY column that the select list renames, with HAVING count(*).
 #[test]
 fn order_by_qualified_group_column_with_having() {
+    let _lock = SWITCHES.lock().unwrap_or_else(|e| e.into_inner());
     check(&[
         ("select a.g gg, count(*) cnt from t a where a.g is not null group by a.g having count(*) >= 1 order by a.g desc",
          "'z',1|'y',2|'x',2"),
@@ -113,6 +120,7 @@ fn order_by_qualified_group_column_with_having() {
 /// GROUP BY a select alias of a computed expression keeps the expression's type (was rendered as text).
 #[test]
 fn group_by_expression_alias_keeps_type() {
+    let _lock = SWITCHES.lock().unwrap_or_else(|e| e.into_inner());
     check(&[
         ("select id % 2 as par, count(*) n from t group by par order by par", "0,3|1,3"),
         ("select f * 1.0001 as ff, count(*) n from t where f = 1.5 group by ff", "1.50015,1"),
@@ -123,6 +131,7 @@ fn group_by_expression_alias_keeps_type() {
 /// t.id 1..6; u.uid {1,2,7}; w.wid {1,2}. Expected values are hand-derived; also checked with the rewrite switched off.
 #[test]
 fn exists_over_multi_table_subquery() {
+    let _lock = SWITCHES.lock().unwrap_or_else(|e| e.into_inner());
     let cases: &[(&str, &str)] = &[
         // outer ids having a u row whose name is 'a' or 'b' (join u-w on uid = wid keeps uid 1, 2)
         ("select id from t where exists (select 1 from u, w where uid = wid and uid = t.id) order by id", "1|2"),
@@ -144,6 +153,7 @@ fn exists_over_multi_table_subquery() {
 /// (a WHERE on the left-joined table sees NULL-extended rows). u = (1,a),(2,b),(7,c); w = (1),(2); t ids 1..6.
 #[test]
 fn explicit_inner_chain_and_trailing_left_join() {
+    let _lock = SWITCHES.lock().unwrap_or_else(|e| e.into_inner());
     let cases: &[(&str, &str)] = &[
         ("select id, uid from t join u on t.id = u.uid order by id", "1,1|2,2"),
         ("select id, uid, wid from t join u on t.id = u.uid join w on w.wid = u.uid order by id", "1,1,1|2,2,2"),

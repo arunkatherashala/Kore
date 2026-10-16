@@ -11,6 +11,9 @@ use kore_core::{Column, ColumnData, DataBlock};
 use kore_sql::{testing, KqlContext};
 use std::fmt::Write as _;
 
+/// The optimisation switches are process-wide: tests that flip one must not overlap other tests in this file.
+static SWITCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct Rng(u64);
 impl Rng {
     fn next(&mut self) -> u64 {
@@ -638,6 +641,12 @@ impl<'a> G<'a> {
 #[test]
 #[ignore]
 fn fuzz_joins_and_aggregates() {
+    let _lock = SWITCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    fuzz_body();
+}
+
+/// The fuzzer itself, without the lock: `smoke_differential_every_switch` calls it while already holding the lock.
+fn fuzz_body() {
     let scale = std::env::var("FUZZ_SCALE").unwrap_or_else(|_| "small".into());
     let seeds: u64 = std::env::var("FUZZ_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
     let per: usize = std::env::var("FUZZ_PER").ok().and_then(|v| v.parse().ok()).unwrap_or(150);
@@ -766,6 +775,7 @@ fn show(a: &Result<Vec<String>, String>) -> String {
 #[test]
 #[ignore]
 fn repro() {
+    let _lock = SWITCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (Ok(dir), Ok(sql)) = (std::env::var("FUZZ_DATA"), std::env::var("FUZZ_SQL")) else { return };
     let mut ctx = KqlContext::new();
     for t in TABS {
@@ -804,8 +814,9 @@ const EMPTYT: &str = r"";
 /// Fast always-on check (runs under plain `cargo test`): the optimised plan against every switch-off variant, small data.
 #[test]
 fn smoke_differential_every_switch() {
+    let _lock = SWITCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // only this test touches the environment; the fuzzer itself is #[ignore]d
     for (k, v) in [("FUZZ_SCALE", "small"), ("FUZZ_SEEDS", "6"), ("FUZZ_PER", "80"), ("FUZZ_FIRST", "9001"), ("FUZZ_NEW", "60")] { std::env::set_var(k, v); }
     std::env::remove_var("FUZZ_DIR");
-    fuzz_joins_and_aggregates();
+    fuzz_body();
 }

@@ -3,7 +3,12 @@
 
 use kore_core::{Column, DataBlock};
 use kore_sql::{testing, KqlContext};
+use std::sync::Mutex;
 use std::time::Instant;
+
+/// The optimisation switches are process-wide: a test that turns one off must not overlap another test in this file
+/// (a 250k-row join that falls back to the nested loop takes minutes). Every test holds this lock for its whole run.
+static SWITCHES: Mutex<()> = Mutex::new(());
 
 struct Rng(u64);
 impl Rng {
@@ -50,6 +55,7 @@ const ONS: &[&str] = &[
 
 #[test]
 fn hash_path_equals_nested_loop() {
+    let _lock = SWITCHES.lock().unwrap_or_else(|e| e.into_inner());
     let mut r = Rng(12345);
     let mut checked = 0;
     for (na, nb) in [(0usize, 0usize), (0, 7), (9, 0), (1, 1), (13, 11), (60, 45), (200, 150)] {
@@ -80,6 +86,7 @@ fn hash_path_equals_nested_loop() {
 
 #[test]
 fn matching_on_key_but_failing_residual_is_unmatched() {
+    let _lock = SWITCHES.lock().unwrap_or_else(|e| e.into_inner());
     let mut c = KqlContext::new();
     c.register("ta", DataBlock::new(vec![Column::int64("k", vec![Some(1), Some(2), None]), Column::int64("v", vec![Some(5), Some(5), Some(5)])]).unwrap());
     c.register("tb", DataBlock::new(vec![Column::int64("k", vec![Some(1), Some(1), None]), Column::int64("v", vec![Some(1), Some(9), Some(9)])]).unwrap());
@@ -95,6 +102,7 @@ fn matching_on_key_but_failing_residual_is_unmatched() {
 
 #[test]
 fn composite_left_join_scales() {
+    let _lock = SWITCHES.lock().unwrap_or_else(|e| e.into_inner());
     let n = 250_000usize;
     let mut c = KqlContext::new();
     let k1: Vec<Option<i64>> = (0..n as i64).map(|i| Some(i % 5000)).collect();
@@ -115,6 +123,7 @@ fn composite_left_join_scales() {
 
 #[test]
 fn theta_join_is_blocked() {
+    let _lock = SWITCHES.lock().unwrap_or_else(|e| e.into_inner());
     let n = 3000usize;
     let mut c = KqlContext::new();
     c.register("ta", DataBlock::new(vec![Column::int64("v", (0..n as i64).map(Some).collect())]).unwrap());

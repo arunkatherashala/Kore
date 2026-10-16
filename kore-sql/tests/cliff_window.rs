@@ -9,6 +9,9 @@ use kore_core::{Column, DataBlock};
 use kore_sql::{testing, KqlContext};
 use std::time::Instant;
 
+/// The optimisation switches are process-wide: tests that flip one must not overlap other tests in this file.
+static SWITCHES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct Rng(u64);
 impl Rng {
     fn next(&mut self) -> u64 {
@@ -145,6 +148,7 @@ fn run_batch(seed: u64, n: usize, groups: usize, tspan: usize, queries: usize, w
 
 #[test]
 fn tiny_tables() {
+    let _lock = SWITCHES.lock().unwrap_or_else(|e| e.into_inner());
     for (i, n) in [0usize, 1, 2, 5].iter().enumerate() {
         for s in 0..6 {
             run_batch(100 + (i * 10 + s) as u64, *n, 3, 3, 120, true);
@@ -155,6 +159,7 @@ fn tiny_tables() {
 
 #[test]
 fn zz_queries_mostly_succeed() {
+    let _lock = SWITCHES.lock().unwrap_or_else(|e| e.into_inner());
     run_batch(900, 1000, 7, 6, 300, true);
     let (ok, all) = (OK.load(std::sync::atomic::Ordering::Relaxed), ALL.load(std::sync::atomic::Ordering::Relaxed));
     println!("{ok}/{all} queries ok");
@@ -163,6 +168,7 @@ fn zz_queries_mostly_succeed() {
 
 #[test]
 fn thousand_rows() {
+    let _lock = SWITCHES.lock().unwrap_or_else(|e| e.into_inner());
     for s in 0..4 {
         run_batch(300 + s, 1000, 7, 6, 150, true);
         run_batch(310 + s, 1000, 40, 300, 150, true);
@@ -172,6 +178,7 @@ fn thousand_rows() {
 
 #[test]
 fn large_rows_many_partitions() {
+    let _lock = SWITCHES.lock().unwrap_or_else(|e| e.into_inner());
     // 100k rows, ~400 partitions of ~250 rows: the reference is only quadratic per partition
     run_batch(400, 100_000, 400, 50, 14, true);
     let mut r = Rng(401);
@@ -190,6 +197,7 @@ fn large_rows_many_partitions() {
 
 #[test]
 fn named_windows_and_multiple_functions() {
+    let _lock = SWITCHES.lock().unwrap_or_else(|e| e.into_inner());
     let mut r = Rng(500);
     let ctx = table(&mut r, 1000, 9, 12);
     for q in [
@@ -226,6 +234,7 @@ fn timed(ctx: &KqlContext, name: &str, sql: &str, slow: bool) -> f64 {
 #[test]
 #[ignore]
 fn bench_window() {
+    let _lock = SWITCHES.lock().unwrap_or_else(|e| e.into_inner());
     let rows: usize = std::env::var("CLIFF_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(1_000_000);
     let groups: usize = std::env::var("CLIFF_GROUPS").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
     let old_rows: usize = std::env::var("CLIFF_OLD_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(150_000);
