@@ -466,10 +466,15 @@ fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(
 
     let mut hdr = String::new();
     r1.read_line(&mut hdr).map_err(|e| e.to_string())?;
+    // A header cell `name::str` declares a text column (no numeric inference: zip codes, ids with leading zeros).
+    let mut force_str: Vec<bool> = Vec::new();
     let headers: Vec<String> = {
         let mut f = Vec::new();
         split_csv(hdr.trim_end(), &mut f);
-        f.iter().map(|h| h.to_string()).collect()
+        f.iter().map(|h| match h.strip_suffix("::str") {
+            Some(n) => { force_str.push(true); n.to_string() }
+            None => { force_str.push(false); h.to_string() }
+        }).collect()
     };
     let nc = headers.len();
 
@@ -515,8 +520,8 @@ fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(
     enum CT { Int64, Float64, StrDict, Str }
     let mut col_types: Vec<CT> = (0..nc).map(|i| {
         if !any_val[i]       { return CT::Str; }
-        if all_i64[i]        { return CT::Int64; }
-        if all_f64[i]        { return CT::Float64; }
+        if !force_str[i] && all_i64[i] { return CT::Int64; }
+        if !force_str[i] && all_f64[i] { return CT::Float64; }
         if !seen_many[i]     { return CT::StrDict; }
         CT::Str
     }).collect();

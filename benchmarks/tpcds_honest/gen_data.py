@@ -29,9 +29,11 @@ def main():
     schema = {}
     for t in tables:
         p = os.path.join(out, t).replace("\\", "/")
-        con.execute(f"COPY {t} TO '{p}.csv' (HEADER, DELIMITER ',')")
-        con.execute(f"COPY {t} TO '{p}.parquet' (FORMAT PARQUET)")
         schema[t] = [(r[0], r[1]) for r in con.execute(f"describe {t}").fetchall()]
+        # KORE's load_csv infers types from a sample; a header `col::str` declares a text column (zip codes etc.)
+        sel = ", ".join(f'"{c}" AS "{c}::str"' if ty.startswith(("VARCHAR", "CHAR")) else f'"{c}"' for c, ty in schema[t])
+        con.execute(f"COPY (SELECT {sel} FROM {t}) TO '{p}.csv' (HEADER, DELIMITER ',')")
+        con.execute(f"COPY {t} TO '{p}.parquet' (FORMAT PARQUET)")
         n = con.execute(f"select count(*) from {t}").fetchone()[0]
         print(f"{t:24} {n:>10} rows", flush=True)
     json.dump(schema, open(os.path.join(out, "schema.json"), "w"), indent=1)

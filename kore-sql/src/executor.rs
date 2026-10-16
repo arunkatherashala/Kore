@@ -6189,7 +6189,7 @@ fn proj_agg_index(block: &DataBlock, func: &AggFunc, inner: &Expr, alias: &Optio
 
 fn project(mut block: DataBlock, projections: &[Projection]) -> Result<DataBlock, KoreError> {
     // Star = keep all
-    if projections.iter().any(|p| matches!(p, Projection::Star)) {
+    if projections.iter().all(|p| matches!(p, Projection::Star)) {
         return Ok(block);
     }
 
@@ -7153,20 +7153,10 @@ pub(crate) fn group_by_agg_ex(
                             }
                             // Fallback: evaluate expression for each representative row
                             let _n = first_rows.len();
-                            let values: Vec<Option<String>> = first_rows.iter().map(|&r| {
-                                Some(match eval_expr(other, &block, r) {
-                                    ExprVal::Str(s)   => s,
-                                    ExprVal::Int(i)   => i.to_string(),
-                                    ExprVal::Float(f) => format!("{f:.4}"),
-                                    ExprVal::Bool(b)  => b.to_string(),
-                                    ExprVal::Null     => return None,
-                                })
-                            }).collect();
+                            // typed result (a constant `0 AS g` must stay an integer, a float must keep its digits)
+                            let vals: Vec<ExprVal> = first_rows.iter().map(|&r| eval_expr(other, &block, r)).collect();
                             let name = alias.clone().unwrap_or_else(|| format!("col{}", new_cols.len()));
-                            new_cols.push(Column {
-                                name,
-                                data: ColumnData::Str(values),
-                            });
+                            new_cols.push(crate::general::vals_to_column(name, vals, None));
                         }
                     }
                 }

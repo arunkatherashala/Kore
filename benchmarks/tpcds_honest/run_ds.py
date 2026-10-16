@@ -116,6 +116,10 @@ def rows_equal(a, b):
     return True, ""
 
 
+def _js(v):
+    return float(v) if isinstance(v, Decimal) else str(v)
+
+
 # ---- DuckDB reference ----
 def run_duckdb(a):
     import duckdb
@@ -156,7 +160,7 @@ def run_duckdb(a):
     f = os.path.join(HERE, "results", f"duckdb_sf{a.sf}.json")
     old = json.load(open(f, encoding="utf-8")) if os.path.exists(f) else {}
     old.update(res)
-    json.dump(old, open(f, "w", encoding="utf-8"), default=str)
+    json.dump(old, open(f, "w", encoding="utf-8"), default=_js)
 
 
 def wrap_positional(sql, ncols):
