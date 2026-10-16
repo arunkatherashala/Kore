@@ -118,3 +118,24 @@ fn group_by_expression_alias_keeps_type() {
         ("select f * 1.0001 as ff, count(*) n from t where f = 1.5 group by ff", "1.50015,1"),
     ]);
 }
+
+/// TPC-DS Q10/Q35/Q69: EXISTS over a comma-join subquery, inside AND / OR, with NULL outer keys.
+/// t.id 1..6; u.uid {1,2,7}; w.wid {1,2}. Expected values are hand-derived; also checked with the rewrite switched off.
+#[test]
+fn exists_over_multi_table_subquery() {
+    let cases: &[(&str, &str)] = &[
+        // outer ids having a u row whose name is 'a' or 'b' (join u-w on uid = wid keeps uid 1, 2)
+        ("select id from t where exists (select 1 from u, w where uid = wid and uid = t.id) order by id", "1|2"),
+        ("select id from t where not exists (select 1 from u, w where uid = wid and uid = t.id) order by id", "3|4|5|6"),
+        ("select id from t where id > 1 and (exists (select 1 from u, w where uid = wid and uid = t.id and un = 'b') or exists (select 1 from u, w where uid = wid and uid = t.id + 1 and un = 'a')) order by id", "2"),
+        // NULL outer key (v is NULL for id 4): NOT EXISTS is TRUE, EXISTS is not
+        ("select id from t where not exists (select 1 from u, w where uid = wid and uid = t.v) order by id", "1|2|3|4|5|6"),
+        ("select id from t where exists (select 1 from u, w where uid = wid and uid = t.v / 10) order by id", "1|2"),
+        ("select id from t where not exists (select 1 from u, w where uid = wid and uid = t.v / 10) order by id", "3|4|5|6"),
+    ];
+    check(cases);
+    assert!(kore_sql::testing::exists_multi_hits() > 0, "the multi-table EXISTS rewrite did not run");
+    kore_sql::testing::set_no_exists_multi(true);
+    check(cases);
+    kore_sql::testing::set_no_exists_multi(false);
+}

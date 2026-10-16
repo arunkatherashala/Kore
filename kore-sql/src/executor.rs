@@ -4910,6 +4910,9 @@ fn decorrelate_exists(
 fn rewrite_exists(expr: &Expr, ctx: &KqlContext) -> Expr {
     match expr {
         Expr::Exists { subquery, negated } => {
+            if !subquery.joins.is_empty() {
+                if let Some(e) = rewrite_exists_multi(subquery, *negated, ctx) { return e; }
+            }
             // Detect pattern: EXISTS (SELECT ... FROM t [AS a] WHERE t.key = outer.key [AND ...])
             if let Some(where_clause) = &subquery.where_clause {
                 let inner_table = &subquery.from.name;
@@ -4984,6 +4987,89 @@ fn rewrite_exists(expr: &Expr, ctx: &KqlContext) -> Expr {
         Expr::Not(e) => Expr::Not(Box::new(rewrite_exists(e, ctx))),
         _ => expr.clone(),
     }
+}
+
+/// `EXISTS (SELECT .. FROM t1, t2 [, ..] WHERE <inner predicates, join keys> AND t1.k = <outer expr>)`: the subquery
+/// minus the one correlated equality is run once, its distinct key values become an IN list on the outer expression
+/// (TPC-DS Q10/Q35/Q69). NULL outer keys never match, so NOT EXISTS is TRUE for them. None = shape not covered.
+fn rewrite_exists_multi(sq: &SelectStmt, negated: bool, ctx: &KqlContext) -> Option<Expr> {
+    if crate::testing::no_exists_multi() { return None; }
+    if !sq.group_by.is_empty() || sq.having.is_some() || sq.limit.is_some() || sq.offset.is_some() || sq.distinct
+        || sq.qualify.is_some() || !sq.windows.is_empty() || sq.from.subquery.is_some() || sq.from.values.is_some()
+        || sq.joins.iter().any(|j| j.join_type != JoinKind::Implicit || j.table.subquery.is_some() || j.table.values.is_some())
+    { return None; }
+    let w = sq.where_clause.as_ref()?;
+    let mut inner_cols: Vec<(String, String)> = Vec::new();
+    for t in std::iter::once(&sq.from).chain(sq.joins.iter().map(|j| &j.table)) {
+        let alias = t.alias.as_deref().unwrap_or(t.name.as_str()).to_string();
+        let b = ctx.get(&t.name)?;
+        for c in &b.columns { inner_cols.push((alias.clone(), c.name.rsplit('.').next().unwrap_or(&c.name).to_string())); }
+    }
+    // 0 = no columns, 1 = inner only, 2 = outer only, 3 = both; None = cannot tell
+    let side = |e: &Expr| -> Option<u8> {
+        let mut cols = Vec::new();
+        if !crate::rewrite::referenced_cols(e, &mut cols) { return None; }
+        let (mut i, mut o) = (false, false);
+        for c in cols {
+            match c.split_once('.') {
+                Some((a, n)) => if inner_cols.iter().any(|(ia, ic)| ia == a && ic.eq_ignore_ascii_case(n)) { i = true } else { o = true },
+                None => if inner_cols.iter().any(|(_, ic)| ic.eq_ignore_ascii_case(&c)) { i = true } else { o = true },
+            }
+        }
+        Some(match (i, o) { (false, false) => 0, (true, false) => 1, (false, true) => 2, (true, true) => 3 })
+    };
+    let mut conj = Vec::new();
+    crate::rewrite::split_conjuncts(w, &mut conj);
+    let mut inner_filters = Vec::new();
+    let mut corr: Option<(Expr, Expr)> = None;
+    for c in conj {
+        match side(&c)? {
+            0 | 1 => inner_filters.push(c),
+            3 => {
+                let Expr::BinOp { op: BinOpKind::Eq, left, right } = &c else { return None };
+                let pair = match (side(left)?, side(right)?) {
+                    (1, 2) => ((**left).clone(), (**right).clone()),
+                    (2, 1) => ((**right).clone(), (**left).clone()),
+                    _ => return None,
+                };
+                if corr.is_some() { return None; }
+                corr = Some(pair);
+            }
+            _ => return None,
+        }
+    }
+    let (inner_key, outer_expr) = corr?;
+    let inner = SelectStmt {
+        distinct: false,
+        projections: vec![Projection::Expr { expr: inner_key, alias: Some("__k".into()) }],
+        from: sq.from.clone(), joins: sq.joins.clone(),
+        where_clause: crate::rewrite::and_all(inner_filters),
+        group_by: Vec::new(), grouping: Grouping::Plain, having: None, qualify: None, order_by: Vec::new(),
+        group_exprs: Vec::new(), group_sets: Vec::new(), windows: Vec::new(), parenthesized: false, set_ops: Vec::new(),
+        limit: None, offset: None, scan_limit: None, lateral_views: Vec::new(), pivot: None, unpivot: None, hints: Vec::new(),
+    };
+    let block = execute_select(&inner, ctx).ok()?;
+    let col = block.columns.first()?;
+    let mut seen_i = std::collections::HashSet::<i64>::new();
+    let mut seen_s = std::collections::HashSet::<String>::new();
+    let mut seen_f = std::collections::HashSet::<u64>::new();
+    let mut values: Vec<Expr> = Vec::new();
+    for r in 0..block.num_rows {
+        match col.data.get_value(r) {
+            Value::Int(i) => if seen_i.insert(i) { values.push(Expr::Int(i)) },
+            Value::Float(f) => if seen_f.insert(f.to_bits()) { values.push(Expr::Float(f)) },
+            Value::Str(st) => if !seen_s.contains(&st) { seen_s.insert(st.clone()); values.push(Expr::Str(st)) },
+            Value::Null => {}
+            _ => return None,
+        }
+    }
+    crate::testing::EXISTS_MULTI_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let is_in = Expr::In { expr: Box::new(outer_expr.clone()), values, negated };
+    Some(if negated {
+        Expr::BinOp { op: BinOpKind::Or, left: Box::new(Expr::IsNull(Box::new(outer_expr))), right: Box::new(is_in) }
+    } else {
+        Expr::BinOp { op: BinOpKind::And, left: Box::new(Expr::IsNotNull(Box::new(outer_expr))), right: Box::new(is_in) }
+    })
 }
 
 /// Collect the correlated equality pairs and non-correlated filters from an EXISTS WHERE clause.

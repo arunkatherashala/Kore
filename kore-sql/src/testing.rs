@@ -268,3 +268,17 @@ pub(crate) fn no_subq_leftcount() -> bool {
     static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     NO_SUBQ_LEFTCOUNT.load(Ordering::Relaxed) || env_flag("KORE_NO_SUBQ_LEFTCOUNT", &E)
 }
+
+// ---- TPC-DS round ----
+pub(crate) static NO_EXISTS_MULTI: AtomicBool = AtomicBool::new(false);
+pub(crate) static EXISTS_MULTI_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Run EXISTS / NOT EXISTS over a multi-table (comma join) subquery per outer row (the old way) instead of turning it
+/// into an IN list built once, for A/B tests.
+pub fn set_no_exists_multi(on: bool) { NO_EXISTS_MULTI.store(on, Ordering::Relaxed); }
+/// How many multi-table EXISTS subqueries were turned into IN lists so far.
+pub fn exists_multi_hits() -> usize { EXISTS_MULTI_HITS.load(Ordering::Relaxed) }
+#[inline]
+pub(crate) fn no_exists_multi() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_EXISTS_MULTI.load(Ordering::Relaxed) || env_flag("KORE_NO_EXISTS_MULTI", &E)
+}
