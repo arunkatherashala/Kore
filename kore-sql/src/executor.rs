@@ -6929,7 +6929,9 @@ fn count_non_null(
 fn global_agg(block: DataBlock, projections: &[Projection]) -> Result<DataBlock, KoreError> {
     let _all_rows: Vec<usize> = (0..block.num_rows).collect();
     let mut new_cols: Vec<Column> = Vec::new();
+    let __tg = std::time::Instant::now();
     for proj in projections {
+        prof!(__tg, "global_agg item start");
         if let Projection::Expr { expr: Expr::Agg { func, expr: inner }, alias } = proj {
             let is_direct = matches!(inner.as_ref(),
                 Expr::Col(_) | Expr::QualCol(_, _) | Expr::Star);
@@ -7037,6 +7039,9 @@ fn global_agg(block: DataBlock, projections: &[Projection]) -> Result<DataBlock,
             new_cols.push(Column { name, data });
         }
     }
+    prof!(__tg, "global_agg items done");
+    drop(block);
+    prof!(__tg, "global_agg block dropped");
     Ok(DataBlock { columns: new_cols, num_rows: 1 })
 }
 
