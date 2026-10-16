@@ -198,7 +198,8 @@ def kore_worker(a):
         s = kore.KoreSession()
         t = time.perf_counter()
         for tb in TABLES:
-            s.load_csv(tb, os.path.join(a.data, f"{tb}.csv"))
+            if re.search(r"\b" + tb + r"\b", sql):  # only the tables the query mentions (SF1 loads take a while)
+                s.load_csv(tb, os.path.join(a.data, f"{tb}.csv"))
         out["load_s"] = round(time.perf_counter() - t, 2)
         t = time.perf_counter()
         s.query(sql)  # warm-up; also gives the engine's own error message for the unwrapped query
