@@ -332,3 +332,34 @@ pub fn lift_aggregates(stmt: &SelectStmt) -> Option<SelectStmt> {
         hints: stmt.hints.clone(),
     })
 }
+
+/// `FROM a JOIN b ON p1 JOIN c ON p2 [LEFT JOIN d ON ..] WHERE w`: the leading INNER joins (after any comma joins, before the
+/// first other kind of join) become implicit joins with their ON predicates ANDed into the WHERE clause, so that the
+/// planner (per-table filters first, join keys from equalities, estimate-ordered joins) runs them instead of a left-deep
+/// chain in written order. Equal for inner joins: ON and WHERE are interchangeable there, and the rows the later
+/// outer joins see are the same set. None = nothing to convert.
+pub fn inner_joins_to_implicit(stmt: &SelectStmt) -> Option<SelectStmt> {
+    let start = stmt.joins.iter().take_while(|j| j.join_type == JoinKind::Implicit).count();
+    let k = stmt.joins[start..].iter()
+        .take_while(|j| j.join_type == JoinKind::Inner && (j.on.expr.is_some() || (!j.on.left_col.is_empty() && !j.on.right_col.is_empty()))
+            && j.using.is_empty() && !j.natural).count();
+    if k == 0 { return None; }
+    let mut out = stmt.clone();
+    let mut preds: Vec<Expr> = Vec::new();
+    for j in out.joins[start..start + k].iter_mut() {
+        // a plain `a = b` ON is kept as the two column names only
+        let col = |n: &str| match n.split_once('.') {
+            Some((t, c)) => Expr::QualCol(t.to_string(), c.to_string()),
+            None => Expr::Col(n.to_string()),
+        };
+        preds.push(match j.on.expr.take() {
+            Some(e) => e,
+            None => Expr::BinOp { op: BinOpKind::Eq, left: Box::new(col(&j.on.left_col)), right: Box::new(col(&j.on.right_col)) },
+        });
+        j.join_type = JoinKind::Implicit;
+        j.on = JoinOn { left_col: String::new(), right_col: String::new(), expr: None };
+    }
+    if let Some(w) = &stmt.where_clause { preds.push(w.clone()); }
+    out.where_clause = and_all(preds);
+    Some(out)
+}

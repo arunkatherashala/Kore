@@ -139,3 +139,29 @@ fn exists_over_multi_table_subquery() {
     check(cases);
     kore_sql::testing::set_no_exists_multi(false);
 }
+
+/// TPC-DS Q72/Q49/Q80: explicit inner-join chains are planned like comma joins, trailing LEFT JOINs keep their semantics
+/// (a WHERE on the left-joined table sees NULL-extended rows). u = (1,a),(2,b),(7,c); w = (1),(2); t ids 1..6.
+#[test]
+fn explicit_inner_chain_and_trailing_left_join() {
+    let cases: &[(&str, &str)] = &[
+        ("select id, uid from t join u on t.id = u.uid order by id", "1,1|2,2"),
+        ("select id, uid, wid from t join u on t.id = u.uid join w on w.wid = u.uid order by id", "1,1,1|2,2,2"),
+        ("select id, un from t join u on t.id + 0 = u.uid where un <> 'a' order by id", "2,'b'"),
+        // comma tables, then LEFT JOINs: unmatched rows survive, and a WHERE on the left-joined table filters afterwards
+        ("select id, wid from t, u left join w on w.wid = u.uid where t.id = u.uid order by id", "1,1|2,2"),
+        ("select uid, wid from u, t left join w on w.wid = t.id where u.uid = t.id + 5 order by uid", "7,2"),
+        ("select id, wid from t join u on t.id = u.uid left join w on w.wid = t.id + 1 order by id", "1,2|2,NULL"),
+        ("select count(*) from t join u on t.id = u.uid left join w on w.wid = t.id + 1 where w.wid is null", "1"),
+        ("select count(*) from t join u on t.id = u.uid left join w on w.wid = t.id + 1 where w.wid is not null", "1"),
+        // an INNER join after a LEFT join stays where it is
+        ("select id, wid, un from t left join w on w.wid = t.id join u on u.uid = t.id order by id", "1,1,'a'|2,2,'b'"),
+    ];
+    check(cases);
+    assert!(kore_sql::testing::inner_implicit_hits() > 0, "explicit inner joins were not handed to the planner");
+    kore_sql::testing::set_no_inner_implicit(true);
+    kore_sql::testing::set_no_planned_tail(true);
+    check(cases);
+    kore_sql::testing::set_no_inner_implicit(false);
+    kore_sql::testing::set_no_planned_tail(false);
+}

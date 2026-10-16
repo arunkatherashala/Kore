@@ -282,3 +282,25 @@ pub(crate) fn no_exists_multi() -> bool {
     static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     NO_EXISTS_MULTI.load(Ordering::Relaxed) || env_flag("KORE_NO_EXISTS_MULTI", &E)
 }
+
+pub(crate) static NO_INNER_IMPLICIT: AtomicBool = AtomicBool::new(false);
+pub(crate) static INNER_IMPLICIT_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Run leading `JOIN .. ON` inner joins as written (left-deep chain) instead of handing them to the comma-join planner,
+/// for A/B tests.
+pub fn set_no_inner_implicit(on: bool) { NO_INNER_IMPLICIT.store(on, Ordering::Relaxed); }
+/// How many statements had explicit inner joins converted to planner joins so far.
+pub fn inner_implicit_hits() -> usize { INNER_IMPLICIT_HITS.load(Ordering::Relaxed) }
+#[inline]
+pub(crate) fn no_inner_implicit() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_INNER_IMPLICIT.load(Ordering::Relaxed) || env_flag("KORE_NO_INNER_IMPLICIT", &E)
+}
+
+pub(crate) static NO_PLANNED_TAIL: AtomicBool = AtomicBool::new(false);
+/// Do not plan the comma-join prefix of a statement that also has trailing LEFT JOINs (the old behaviour), for A/B tests.
+pub fn set_no_planned_tail(on: bool) { NO_PLANNED_TAIL.store(on, Ordering::Relaxed); }
+#[inline]
+pub(crate) fn no_planned_tail() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_PLANNED_TAIL.load(Ordering::Relaxed) || env_flag("KORE_NO_PLANNED_TAIL", &E)
+}

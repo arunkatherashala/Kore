@@ -1340,6 +1340,12 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
     if let Some((rewritten, local)) = crate::desugar::rewrite_stmt(stmt, ctx)? {
         return execute_select(&rewritten, local.as_ref().unwrap_or(ctx));
     }
+    if !crate::testing::no_inner_implicit() && stmt.set_ops.is_empty() {
+        if let Some(r) = crate::rewrite::inner_joins_to_implicit(stmt) {
+            crate::testing::INNER_IMPLICIT_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return execute_select(&r, ctx);
+        }
+    }
     // shapes outside the specialised paths below (see general.rs) are run by the general tail
     let use_general = crate::general::needs_general(stmt);
     if !use_general {
@@ -1437,7 +1443,11 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
     // "Planned" queries (one table, or only comma joins, no SELECT *) filter each table while it is still
     // borrowed from the catalog and copy only the surviving rows of the columns still needed afterwards.
     // Cloning a whole 6M-row string column just to throw most of it away used to dominate the runtime.
-    let planned = needed.is_some() && stmt.joins.iter().all(|j| j.join_type == JoinKind::Implicit);
+    // Trailing LEFT JOINs (`FROM a, b, c LEFT JOIN d ON ..`, TPC-DS Q72/Q80) leave the comma-join planning intact: the
+    // planner runs the implicit prefix and the explicit loop below applies the LEFT JOINs to its result.
+    let tail_ok = n_implicit > 0 && !crate::testing::no_planned_tail()
+        && stmt.joins[n_implicit..].iter().all(|j| j.join_type == JoinKind::Left && (j.on.expr.is_some() || !j.on.left_col.is_empty()) && j.using.is_empty());
+    let planned = needed.is_some() && (stmt.joins.iter().all(|j| j.join_type == JoinKind::Implicit) || tail_ok);
     let mut needed_wo_where = needed.as_ref().map(|_| used_columns_without_where(stmt));
     let mut conjuncts: Vec<Expr> = Vec::new();
     if planned || n_implicit > 0 {
