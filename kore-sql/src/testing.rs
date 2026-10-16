@@ -279,7 +279,7 @@ pub fn set_no_deep_uncorr(on: bool) { NO_DEEP_UNCORR.store(on, Ordering::Relaxed
 pub(crate) fn no_deep_uncorr() -> bool { NO_DEEP_UNCORR.load(Ordering::Relaxed) }
 
 /// Master switch for the p3-gap optimisations (each also has its own switch): everything off = the 830475a4 behaviour.
-pub fn set_no_gap(on: bool) { set_no_deep_uncorr(on); set_no_small_dict(on); set_no_proj_take(on); set_no_sets_accel(on); set_no_semi_fuse(on); set_no_semi_direct_int(on); set_no_lz_substr(on); }
+pub fn set_no_gap(on: bool) { set_no_deep_uncorr(on); set_no_small_dict(on); set_no_proj_take(on); set_no_sets_accel(on); set_no_semi_fuse(on); set_no_semi_direct_int(on); set_no_lz_substr(on); kore_join::set_no_identity_gather(on); }
 
 pub(crate) static NO_SMALL_DICT: AtomicBool = AtomicBool::new(false);
 

@@ -1743,6 +1743,7 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
                         Some(lz) => { let j = join_blocks(ctx, left, fill_keys(pb, &lz), &cfg)?; finish_lazy(j, lz) }
                         None => join_blocks(ctx, left, pb, &cfg)?,
                     };
+                    prof!(__tf, "    joined single key {} = {}", cfg.left_key, cfg.right_key);
                 }
                 Some((pi, links)) => {
                     // Several equalities connect the two sides (e.g. ps_partkey = l_partkey AND
@@ -1770,6 +1771,7 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
                             }
                         }
                     }
+                    prof!(__tf, "    joining {} = {} (packed={})", lcols.join(","), rcols.join(","), packed.is_some());
                     if let Some((lk, rk)) = packed {
                         crate::testing::PLAN_PACKED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         // the packed equality replaces the link conjuncts
@@ -2476,14 +2478,17 @@ fn lazy_gather(left: DataBlock, lidx: Vec<u32>, ridx: Vec<u32>, lz: &LazyCols<'_
         Some(ix) => ridx.iter().map(|&r| ix[r as usize] as u32).collect(),
     };
     let n = lidx.len();
-    enum Job<'x> { L(String, ColumnData, &'x [u32]), R(usize, String) }
+    enum Job<'x> { L(String, ColumnData, &'x [u32], bool), R(usize, String) }
     let mut jobs: Vec<Job> = Vec::new();
-    for c in left.columns { jobs.push(Job::L(c.name, c.data, &lidx)); }
+    // every left row kept once and in order (a lookup join): the left columns move on unchanged
+    let l_id = kore_join::is_identity(&lidx, left.num_rows);
+    for c in left.columns { jobs.push(Job::L(c.name, c.data, &lidx, l_id)); }
     let mut right: Vec<(usize, String)> = if defer { lz.keys.clone() } else { lz.keys.iter().chain(lz.cols.iter()).cloned().collect() };
     right.sort_by_key(|(ci, _)| *ci);
     for (ci, name) in right { jobs.push(Job::R(ci, name)); }
     let columns: Vec<Column> = jobs.into_par_iter().map(|j| match j {
-        Job::L(name, data, ix) => { let g = kore_join::gather_rows(&data, ix); drop(data); Column { name, data: g } }
+        Job::L(name, data, _, true) => Column { name, data },
+        Job::L(name, data, ix, false) => { let g = kore_join::gather_rows(&data, ix); drop(data); Column { name, data: g } }
         Job::R(ci, name) => {
             let sd = if lz.dict_small { small_dict(&lz.src.columns[ci].data) } else { None };
             Column { name, data: kore_join::gather_rows(sd.as_ref().unwrap_or(&lz.src.columns[ci].data), &src_rows) }
