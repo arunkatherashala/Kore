@@ -238,3 +238,32 @@ fn lookup_joins_that_keep_every_row_in_order() {
         for q in qs { check(&ctx, q); }
     }
 }
+
+#[test]
+fn selective_fused_group_by_many_groups() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let qs = [
+        "select gk, sum(p * (1 - d)) as r from t where sel < 5 group by gk order by gk",
+        "select gk, sum(p * (1 - d)) as r, count(*) as c, min(p / d) as mn, max(p - d) as mx, avg(p * d) as av from t where sel < 3 group by gk order by gk",
+        "select gk, sum(p * (1 - d)) as r from t where sel < 60 group by gk order by gk",
+        "select gk, sum(p * (1 - d)) as r, sum(q) as sq from t where sel = 1 group by gk order by gk",
+        "select gk, gk2, sum(p * (1 - d) + q) as r from t where sel < 4 group by gk, gk2 order by gk, gk2",
+        "select gk, sum(p * (1 - d)) as r from t where sel > 100000 group by gk order by gk",
+        "select gk, sum(abs(p) * (1 - d)) as r from t where sel < 4 group by gk order by gk",
+        "select sum(p * (1 - d)) as r, count(*) as c from t where sel < 4",
+    ];
+    for (seed, n) in [0usize, 500, 70_000, 300_000].into_iter().enumerate() {
+        let mut r = Rng(0x777 + seed as u64);
+        let mut ctx = KqlContext::new();
+        let kd = (n / 4).max(2);
+        ctx.register("t", DataBlock::new(vec![
+            Column::int64("gk", (0..n).map(|_| if r.below(40) == 0 { None } else { Some(r.below(kd) as i64) }).collect()),
+            Column::int64("gk2", (0..n).map(|_| Some(r.below(3) as i64)).collect()),
+            Column::int64("sel", (0..n).map(|_| Some(r.below(200) as i64)).collect()),
+            Column::float64("p", (0..n).map(|_| if r.below(30) == 0 { None } else { Some(r.below(10_000) as f64 / 7.0) }).collect()),
+            Column::float64("d", (0..n).map(|_| if r.below(30) == 0 { None } else { Some(r.below(11) as f64 / 100.0) }).collect()),
+            Column::int64("q", (0..n).map(|_| Some(r.below(50) as i64)).collect()),
+        ]).unwrap());
+        for q in qs { check(&ctx, q); }
+    }
+}

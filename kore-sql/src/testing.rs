@@ -279,7 +279,7 @@ pub fn set_no_deep_uncorr(on: bool) { NO_DEEP_UNCORR.store(on, Ordering::Relaxed
 pub(crate) fn no_deep_uncorr() -> bool { NO_DEEP_UNCORR.load(Ordering::Relaxed) }
 
 /// Master switch for the p3-gap optimisations (each also has its own switch): everything off = the 830475a4 behaviour.
-pub fn set_no_gap(on: bool) { set_no_deep_uncorr(on); set_no_small_dict(on); set_no_proj_take(on); set_no_sets_accel(on); set_no_semi_fuse(on); set_no_semi_direct_int(on); set_no_lz_substr(on); kore_join::set_no_identity_gather(on); }
+pub fn set_no_gap(on: bool) { set_no_deep_uncorr(on); set_no_small_dict(on); set_no_proj_take(on); set_no_sets_accel(on); set_no_semi_fuse(on); set_no_semi_direct_int(on); set_no_lz_substr(on); kore_join::set_no_identity_gather(on); set_no_fused_sparse(on); }
 
 pub(crate) static NO_SMALL_DICT: AtomicBool = AtomicBool::new(false);
 
@@ -334,3 +334,11 @@ pub fn lz_substr_hits() -> usize { LZ_SUBSTR_HITS.load(Ordering::Relaxed) }
 
 #[inline]
 pub(crate) fn no_lz_substr() -> bool { NO_LZ_SUBSTR.load(Ordering::Relaxed) }
+
+pub(crate) static NO_FUSED_SPARSE: AtomicBool = AtomicBool::new(false);
+
+/// Evaluate fused-aggregate input expressions over whole windows even when few rows pass the filter.
+pub fn set_no_fused_sparse(on: bool) { NO_FUSED_SPARSE.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_fused_sparse() -> bool { NO_FUSED_SPARSE.load(Ordering::Relaxed) }
