@@ -25,6 +25,15 @@ pub fn set_no_fused(on: bool) { NO_FUSED.store(on, Ordering::Relaxed); }
 #[inline]
 pub(crate) fn no_fused() -> bool { NO_FUSED.load(Ordering::Relaxed) }
 
+pub(crate) static NO_GS_SHARED: AtomicBool = AtomicBool::new(false);
+
+/// Run ROLLUP / CUBE / GROUPING SETS the old way (every set hashes and aggregates the input rows itself)
+/// instead of deriving the coarser sets from the finest one (rollup.rs), so the two can be compared.
+pub fn set_no_gs_shared(on: bool) { NO_GS_SHARED.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_gs_shared() -> bool { NO_GS_SHARED.load(Ordering::Relaxed) }
+
 pub(crate) static NO_DATE_ACCEL: AtomicBool = AtomicBool::new(false);
 
 /// Disable the ISO-date integer accelerator (dateaccel.rs) so it can be compared with the string path.
@@ -423,3 +432,56 @@ pub(crate) fn no_typed_groups() -> bool {
     static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     NO_TYPED_GROUPS.load(Ordering::Relaxed) || *ENV.get_or_init(|| std::env::var_os("KORE_NO_TYPED_GROUPS").is_some())
 }
+
+pub(crate) static NO_SEMI_CTE: AtomicBool = AtomicBool::new(false);
+pub(crate) static SEMI_CTE_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Keep self-join pair CTEs (`a.k = b.k AND a.x <> b.x`) that are only used as IN key sets as pair
+/// materialisations instead of the distinct key set (semicte.rs), for A/B tests.
+pub fn set_no_semi_cte(on: bool) { NO_SEMI_CTE.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_semi_cte() -> bool {
+    static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_SEMI_CTE.load(Ordering::Relaxed) || *ENV.get_or_init(|| std::env::var_os("KORE_NO_SEMI_CTE").is_some())
+}
+
+/// How many pair CTEs were replaced by their key sets so far.
+pub fn semi_cte_hits() -> usize { SEMI_CTE_HITS.load(Ordering::Relaxed) }
+
+pub(crate) static NO_UNION_COLS: AtomicBool = AtomicBool::new(false);
+/// UNION ALL of numeric columns of different types goes through the row-at-a-time path (A/B tests).
+pub fn set_no_union_cols(on: bool) { NO_UNION_COLS.store(on, Ordering::Relaxed); }
+#[inline]
+pub(crate) fn no_union_cols() -> bool { NO_UNION_COLS.load(Ordering::Relaxed) }
+
+pub(crate) static NO_CONJ_SPLIT: AtomicBool = AtomicBool::new(false);
+/// Evaluate a WHERE conjunction that the column path does not cover as one row-wise predicate (A/B tests).
+pub fn set_no_conj_split(on: bool) { NO_CONJ_SPLIT.store(on, Ordering::Relaxed); }
+#[inline]
+pub(crate) fn no_conj_split() -> bool { NO_CONJ_SPLIT.load(Ordering::Relaxed) }
+
+pub(crate) static NO_UNCORR_QUAL: AtomicBool = AtomicBool::new(false);
+/// Treat a table qualifier inside a join subquery as an unknown column, i.e. judge `from a, b where a.k = b.k`
+/// subqueries correlated (the old behaviour, for A/B tests).
+pub fn set_no_uncorr_qual(on: bool) { NO_UNCORR_QUAL.store(on, Ordering::Relaxed); }
+#[inline]
+pub(crate) fn no_uncorr_qual() -> bool { NO_UNCORR_QUAL.load(Ordering::Relaxed) }
+
+pub(crate) static NO_EARLY_SCALAR: AtomicBool = AtomicBool::new(false);
+/// Leave uncorrelated scalar subqueries of comma-join predicates to the late evaluation (A/B tests).
+pub fn set_no_early_scalar(on: bool) { NO_EARLY_SCALAR.store(on, Ordering::Relaxed); }
+#[inline]
+pub(crate) fn no_early_scalar() -> bool { NO_EARLY_SCALAR.load(Ordering::Relaxed) }
+
+pub(crate) static NO_CAST_FOLD: AtomicBool = AtomicBool::new(false);
+/// Do not fold `CAST('literal' AS DATE)` in comma-join predicates (A/B tests).
+pub fn set_no_cast_fold(on: bool) { NO_CAST_FOLD.store(on, Ordering::Relaxed); }
+#[inline]
+pub(crate) fn no_cast_fold() -> bool { NO_CAST_FOLD.load(Ordering::Relaxed) }
+
+pub(crate) static NO_UNION_PUSH: AtomicBool = AtomicBool::new(false);
+/// Do not push join keys of a comma-joined dimension table into the arms of a UNION ALL derived table (A/B tests).
+pub fn set_no_union_push(on: bool) { NO_UNION_PUSH.store(on, Ordering::Relaxed); }
+#[inline]
+pub(crate) fn no_union_push() -> bool { NO_UNION_PUSH.load(Ordering::Relaxed) }

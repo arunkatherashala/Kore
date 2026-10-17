@@ -739,34 +739,76 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
         }
 
         // key columns and aggregate inputs, evaluated once over the input
-        // plain key columns of a single grouping set: grouped by typed codes, key values read from the first row of each group
-        let typed_keys: Option<Vec<usize>> = if crate::testing::no_typed_groups() || spec.sets.len() != 1 || spec.exprs.is_empty() { None } else {
-            spec.exprs.iter().map(|e| match e { Expr::Col(c) => find_col_idx(&input, c), _ => None }).collect()
+        let __tg = std::time::Instant::now();
+        // a plain input column is read in place (same lookup as `eval_expr`: the first column that matches the name)
+        let direct = |e: &Expr| -> Option<usize> {
+            let Expr::Col(name) = e else { return None };
+            let i = input.columns.iter().position(|c| {
+                c.name == *name || (c.name.len() > name.len() && c.name.as_bytes()[c.name.len() - name.len() - 1] == b'.' && c.name.ends_with(name.as_str()))
+            })?;
+            if input.columns[i].name == *name { Some(i) } else { None }
         };
-        let key_vals: Vec<Vec<V>> = if typed_keys.is_some() { Vec::new() }
-            else { spec.exprs.iter().map(|e| (0..n_in).map(|r| evaluator.eval(e, &input, r)).collect()).collect() };
-        let key_at = |k: usize, r: usize| -> V { match &typed_keys { Some(t) => cell_value(&input.columns[t[k]].data, r), None => key_vals[k][r].clone() } };
-        gprof!("key values done");
+        let shared = !crate::testing::no_gs_shared();
+        let key_vals: Vec<Vec<V>> = spec.exprs.iter().map(|e| {
+            if shared && direct(e).is_some() { Vec::new() } else { (0..n_in).map(|r| evaluator.eval(e, &input, r)).collect() }
+        }).collect();
+        let key_srcs: Vec<crate::rollup::KeySrc> = spec.exprs.iter().enumerate().map(|(k, e)| match direct(e) {
+            Some(ci) if shared => crate::rollup::KeySrc::Col(&input.columns[ci]),
+            _ => crate::rollup::KeySrc::Vals(&key_vals[k]),
+        }).collect();
+        // single grouping set over plain key columns: typed group codes (rollup's shared grouping serves multi-set statements)
+        let typed_keys: Option<Vec<usize>> = if crate::testing::no_typed_groups() || spec.sets.len() != 1 || spec.sets[0].is_empty() || spec.exprs.is_empty() { None } else {
+            spec.exprs.iter().map(|e| direct(e)).collect()
+        };
         let mut agg_inputs = Vec::with_capacity(aggs_list.len());
         for a in &aggs_list {
             let mut ev = |e: &Expr, r: usize| evaluator.eval(e, &input, r);
-            agg_inputs.push(aggs::prepare(a, n_in, &mut ev).ok_or_else(|| err("bad aggregate"))?);
+            let col_of = |x: &Expr| -> Option<Vec<V>> { if shared { direct(x).map(|ci| column_values(&input.columns[ci])) } else { None } };
+            agg_inputs.push(aggs::prepare_cols(a, n_in, &mut ev, &col_of).ok_or_else(|| err("bad aggregate"))?);
         }
         evaluator.check()?;
         gprof!("aggregate inputs done");
+        if crate::executor::prof_on() { eprintln!("[prof] {:>8.1} ms  general group inputs (keys+agg args) rows={}", __tg.elapsed().as_secs_f64()*1000.0, n_in); }
 
         let nk = spec.exprs.len();
         let mut out_keys: Vec<Vec<V>> = vec![Vec::new(); nk];
         let mut out_flags: Vec<Vec<V>> = vec![Vec::new(); nk];
         let mut out_aggs: Vec<Vec<V>> = vec![Vec::new(); aggs_list.len()];
+        if let Some(t) = &typed_keys {
+            let cols: Vec<&ColumnData> = spec.sets[0].iter().map(|&k| &input.columns[t[k]].data).collect();
+            let groups = typed_groups(&cols, n_in);
+            gprof!("groups built: {}", groups.len());
+            for rows in &groups {
+                for k in 0..nk {
+                    out_keys[k].push(cell_value(&input.columns[t[k]].data, rows[0]));
+                    out_flags[k].push(V::Int(0));
+                }
+                for (j, inp) in agg_inputs.iter().enumerate() { out_aggs[j].push(aggs::aggregate(inp, rows)?); }
+            }
+        } else if !crate::testing::no_gs_shared() {
+            // one pass over the input: the finest grouping once, the coarser sets derived from it
+            let res = crate::rollup::grouping_sets(&key_srcs, &agg_inputs, &spec.sets, n_in)?;
+            if crate::executor::prof_on() { eprintln!("[prof] {:>8.1} ms  general grouping_sets sets={}", __tg.elapsed().as_secs_f64()*1000.0, spec.sets.len()); }
+            for (set, sr) in spec.sets.iter().zip(res) {
+                for gi in 0..sr.rep_rows.len() {
+                    for k in 0..nk {
+                        if set.contains(&k) {
+                            out_keys[k].push(key_srcs[k].value_at(sr.rep_rows[gi]));
+                            out_flags[k].push(V::Int(0));
+                        } else {
+                            out_keys[k].push(V::Null);
+                            out_flags[k].push(V::Int(1));
+                        }
+                    }
+                }
+                for (j, col) in sr.aggs.into_iter().enumerate() { out_aggs[j].extend(col); }
+            }
+        } else {
         for set in &spec.sets {
             // rows grouped by the key values of this set, in order of first appearance
             let mut groups: Vec<Vec<usize>> = Vec::new();
             if set.is_empty() {
                 groups.push((0..n_in).collect());
-            } else if let Some(t) = &typed_keys {
-                let cols: Vec<&ColumnData> = set.iter().map(|&k| &input.columns[t[k]].data).collect();
-                groups = typed_groups(&cols, n_in);
             } else {
                 let mut index: HashMap<String, usize> = HashMap::new();
                 for r in 0..n_in {
@@ -776,11 +818,10 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
                     groups[gi].push(r);
                 }
             }
-            gprof!("groups built: {}", groups.len());
             for rows in &groups {
                 for k in 0..nk {
                     if set.contains(&k) {
-                        out_keys[k].push(key_at(k, rows[0]));
+                        out_keys[k].push(key_vals[k][rows[0]].clone());
                         out_flags[k].push(V::Int(0));
                     } else {
                         out_keys[k].push(V::Null);
@@ -791,6 +832,7 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
             }
         }
         gprof!("aggregated");
+        }
         let mut cols: Vec<Column> = Vec::new();
         for k in 0..nk {
             let hint = column_hint(&spec.exprs[k], &input);
@@ -800,6 +842,7 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
         for (j, v) in out_aggs.into_iter().enumerate() { cols.push(vals_to_column(format!("__a{j}"), v, None)); }
         let num_rows = cols.first().map(|c| c.data.len()).unwrap_or_else(|| if spec.sets.is_empty() { 0 } else { 1 });
         g_block = DataBlock { columns: cols, num_rows };
+        if crate::executor::prof_on() { eprintln!("[prof] {:>8.1} ms  general grouped block rows={}", __tg.elapsed().as_secs_f64()*1000.0, num_rows); }
         // a correlated subquery in the select list can still see the grouping keys of the outer row
         *evaluator.outer_map.borrow_mut() = spec.exprs.iter().enumerate()
             .filter_map(|(k, e)| if let Expr::Col(name) = e { Some((name.clone(), format!("__k{k}"))) } else { None })
@@ -1045,6 +1088,46 @@ fn block_of(names: &[String], rows: Vec<Vec<V>>, hints: &[ColumnData]) -> DataBl
     DataBlock { columns: cols, num_rows: n }
 }
 
+/// UNION ALL of numeric (Int64 / Float64) columns of different types, column at a time. Same typing as the row path
+/// (`vals_to_column`): the result is Float64 when any non-NULL float value is present, else Int64, else (all NULL) the left type.
+fn union_all_numeric(left: &DataBlock, right: &DataBlock) -> Option<DataBlock> {
+    let num = |c: &ColumnData| matches!(c, ColumnData::Int64(_) | ColumnData::Float64(_));
+    if !left.columns.iter().chain(&right.columns).all(|c| num(&c.data)) { return None; }
+    let has_float = |c: &ColumnData| match c { ColumnData::Float64(v) => v.iter().any(|x| x.is_some()), _ => false };
+    let has_int = |c: &ColumnData| match c { ColumnData::Int64(v) => v.iter().any(|x| x.is_some()), _ => false };
+    let mut cols = Vec::with_capacity(left.columns.len());
+    for (l, r) in left.columns.iter().zip(&right.columns) {
+        let (ld, rd) = (&l.data, &r.data);
+        let flt = has_float(ld) || has_float(rd);
+        let int = has_int(ld) || has_int(rd);
+        let n = left.num_rows + right.num_rows;
+        let data = if flt {
+            let f = |c: &ColumnData, out: &mut Vec<Option<f64>>| match c {
+                ColumnData::Float64(v) => out.extend_from_slice(v),
+                ColumnData::Int64(v) => out.extend(v.iter().map(|x| x.map(|i| i as f64))),
+                _ => {}
+            };
+            let mut out = Vec::with_capacity(n);
+            f(ld, &mut out); f(rd, &mut out);
+            ColumnData::Float64(out)
+        } else if int {
+            let f = |c: &ColumnData, out: &mut Vec<Option<i64>>| match c {
+                ColumnData::Int64(v) => out.extend_from_slice(v),
+                ColumnData::Float64(v) => out.extend(v.iter().map(|_| None)),
+                _ => {}
+            };
+            let mut out = Vec::with_capacity(n);
+            f(ld, &mut out); f(rd, &mut out);
+            ColumnData::Int64(out)
+        } else {
+            match ld { ColumnData::Int64(_) => ColumnData::Int64(vec![None; n]), _ => ColumnData::Float64(vec![None; n]) }
+        };
+        cols.push(Column { name: l.name.clone(), data });
+    }
+    Some(DataBlock { columns: cols, num_rows: left.num_rows + right.num_rows })
+}
+
+
 /// UNION / INTERSECT / EXCEPT (with ALL variants); column names come from the left side.
 pub fn apply_set_op(left: DataBlock, right: DataBlock, kind: &SetOpKind) -> Result<DataBlock, KoreError> {
     if left.columns.len() != right.columns.len() {
@@ -1059,7 +1142,7 @@ pub fn apply_set_op(left: DataBlock, right: DataBlock, kind: &SetOpKind) -> Resu
         return DataBlock::concat(vec![left, r]);
     }
     // UNION (distinct) of identically typed arms: concatenate, keep the first row of every distinct row (typed codes)
-    if matches!(kind, SetOpKind::Union) && same_types && left.num_rows + right.num_rows > 0 && !crate::testing::no_typed_groups() && !left.columns.is_empty() {
+    if matches!(kind, SetOpKind::Union) && same_types && left.num_rows + right.num_rows > 0 && !crate::testing::no_typed_groups() && !crate::testing::no_union_cols() && !left.columns.is_empty() {
         let names: Vec<String> = left.columns.iter().map(|c| c.name.clone()).collect();
         let mut r = right;
         for (c, nm) in r.columns.iter_mut().zip(&names) { c.name = nm.clone(); }
@@ -1070,6 +1153,9 @@ pub fn apply_set_op(left: DataBlock, right: DataBlock, kind: &SetOpKind) -> Resu
         for (row, &g) in ids.iter().enumerate() { if first[g as usize] == usize::MAX { first[g as usize] = row; } }
         // group ids follow first appearance, so `first` is ascending
         return Ok(all.select_rows(&first));
+    }
+    if matches!(kind, SetOpKind::UnionAll) && !crate::testing::no_union_cols() {
+        if let Some(b) = union_all_numeric(&left, &right) { return Ok(b); }
     }
     let names: Vec<String> = left.columns.iter().map(|c| c.name.clone()).collect();
     let hints: Vec<ColumnData> = left.columns.iter().map(|c| c.data.clone()).collect();

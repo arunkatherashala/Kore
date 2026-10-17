@@ -1115,6 +1115,9 @@ pub(crate) fn parse_cached(sql: &str) -> Result<std::sync::Arc<Query>, KoreError
 }
 
 pub fn execute_query(query: &Query, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
+    let semi = crate::semicte::rewrite(query, ctx);
+    if semi.is_some() { crate::testing::SEMI_CTE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+    let query = semi.as_ref().unwrap_or(query);
     // 1. Register CTEs in an extended context. Cloning the context copies every registered table,
     // so only do it when the query actually defines CTEs.
     let extended;
@@ -1353,6 +1356,10 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
             return execute_select(&r, ctx);
         }
     }
+    if let Some(r) = crate::semicte::push_union_keys(stmt, ctx) {
+        crate::testing::SEMI_CTE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return execute_select(&r, ctx);
+    }
     // shapes outside the specialised paths below (see general.rs) are run by the general tail
     let use_general = crate::general::needs_general(stmt);
     if !use_general {
@@ -1459,6 +1466,16 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
     let mut conjuncts: Vec<Expr> = Vec::new();
     if planned || n_implicit > 0 {
         if let Some(w) = &where_pred { crate::rewrite::split_conjuncts(w, &mut conjuncts); }
+        // `col <op> (SELECT ..)` with an uncorrelated scalar subquery: evaluate it now so the comparison is a plain
+        // column-vs-constant predicate that the table load, the key sets and the join planner can use (TPC-DS Q6)
+        if n_implicit > 0 && !crate::testing::no_early_scalar() {
+            for c in conjuncts.iter_mut() { fold_scalar_conjunct(c, ctx); }
+        }
+        // `cast('1999-04-02' AS date)` is a constant: as a plain string literal the date predicate runs column-at-a-time
+        // (and on the integer date encoding) instead of per row on the joined result
+        if !crate::testing::no_cast_fold() {
+            for c in conjuncts.iter_mut() { *c = fold_date_casts(c); }
+        }
         if n_implicit > 0 {
             // `a OR b` over bare column names: attribute every column to its table so the per-table parts of
             // each branch can be derived (and applied while loading the table) as well.
@@ -2348,6 +2365,12 @@ fn is_uncorrelated(sub: &SelectStmt, ctx: &KqlContext) -> bool {
         if t.subquery.is_some() || t.values.is_some() { return false; }
         let Some(b) = ctx.get(&t.name) else { return false };
         avail.extend(b.columns.iter().map(|c| c.name.rsplit('.').next().unwrap_or(&c.name).to_string()));
+        // `collect_cols_stmt` also records the qualifier of `t.col`; refers_to_enclosing_query already
+        // proved every qualifier is defined inside the subquery
+        if !crate::testing::no_uncorr_qual() {
+            avail.insert(t.name.clone());
+            if let Some(a) = &t.alias { avail.insert(a.clone()); }
+        }
     }
     let aliases: std::collections::HashSet<&String> = sub.projections.iter()
         .filter_map(|p| if let Projection::Expr { alias: Some(a), .. } = p { Some(a) } else { None }).collect();
@@ -4356,7 +4379,41 @@ fn filter_block_ctx(block: DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<D
         if keep.len() == block.num_rows { return Ok(block); }
         return Ok(select_rows_owned(block, &keep));
     }
+    // a conjunction the column path does not cover as a whole: run the conjuncts it does cover first (they shrink the
+    // input), the rest row by row on the survivors only
+    if !crate::testing::no_conj_split() && !crate::general::has_subq(pred) {
+        let mut conj = Vec::new();
+        crate::rewrite::split_conjuncts(pred, &mut conj);
+        if conj.len() > 1 {
+            let (mut block, mut rest) = (block, Vec::new());
+            let mut any = false;
+            for c in conj {
+                let __tc = std::time::Instant::now();
+                let m = crate::vecexpr::filter_mask(&c, &block);
+                prof!(__tc, "conj split mask covered={} rows={} {}", m.is_some(), block.num_rows, crate::ast_walk::expr_sql(&c).chars().take(100).collect::<String>());
+                match m {
+                    Some(mask) => {
+                        any = true;
+                        let keep: Vec<usize> = mask.iter().enumerate().filter_map(|(i, &k)| if k { Some(i) } else { None }).collect();
+                        if keep.len() != block.num_rows { block = select_rows_owned(block, &keep); }
+                    }
+                    None => rest.push(c),
+                }
+            }
+            if any {
+                return match crate::rewrite::and_all(rest) { Some(p) => filter_block_ctx(block, &p, ctx), None => Ok(block) };
+            }
+            let p = crate::rewrite::and_all(rest).unwrap();
+            return filter_block_rows(block, &p, ctx);
+        }
+    }
+    filter_block_rows(block, pred, ctx)
+}
+
+fn filter_block_rows(block: DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
     let n = block.num_rows;
+    let __tr = std::time::Instant::now();
+    prof!(__tr, "filter rows path n={} {}", n, crate::ast_walk::expr_sql(pred).chars().take(100).collect::<String>());
     // subqueries that survived the decorrelation rewrites run once per row, bound to that row
     let keep: Vec<bool> = if crate::general::has_subq(pred) {
         crate::general::filter_rows_with_subqueries(&block, pred, ctx)?
@@ -5043,7 +5100,10 @@ fn materialize_groupby_aliases(mut block: DataBlock, group_by: &[String], projec
 fn precompute_in_subqueries(expr: &Expr, ctx: &KqlContext) -> Expr {
     match expr {
         // a correlated IN (SELECT ..) is evaluated per outer row, never once against the whole table
-        Expr::InSubquery { subquery, .. } if !is_uncorrelated(subquery, ctx) => expr.clone(),
+        Expr::InSubquery { subquery, .. } if !is_uncorrelated(subquery, ctx) => {
+            if prof_on() { eprintln!("[prof] precompute_in: subquery from={} judged correlated", subquery.from.name); }
+            expr.clone()
+        }
         Expr::InSubquery { expr: e, subquery, negated } => {
             // Execute subquery once, collect all values
             let inner_ctx = ctx.clone();
@@ -5473,6 +5533,40 @@ fn bare_col_name(expr: &Expr) -> Option<String> {
         Expr::Col(c)        => Some(c.clone()),
         Expr::QualCol(_, c) => Some(c.clone()),
         _                   => None,
+    }
+}
+
+/// `CAST('literal' AS DATE)` -> the string literal the cast produces (dates are ISO strings in KORE).
+pub(crate) fn fold_date_casts(e: &Expr) -> Expr {
+    crate::ast_walk::map_expr(e, &mut |x| {
+        let Expr::FuncCall { name, args } = x else { return None };
+        if !name.eq_ignore_ascii_case("CAST") || args.len() != 2 || !matches!(args[0], Expr::Str(_)) { return None; }
+        let is_date = matches!(&args[1], Expr::Col(t) | Expr::Str(t) if t.eq_ignore_ascii_case("date"));
+        if !is_date { return None; }
+        match eval_expr(x, &DataBlock::empty(), 0) {
+            ExprVal::Str(s) if s.len() == 10 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-' => Some(Expr::Str(s)),
+            _ => None,
+        }
+    })
+}
+
+/// Replace an uncorrelated scalar subquery operand of a comparison by its single non-NULL value. Anything else
+/// (several rows, no row, NULL, an error, a correlated subquery) is left for the ordinary evaluation.
+fn fold_scalar_conjunct(c: &mut Expr, ctx: &KqlContext) {
+    let Expr::BinOp { op, left, right } = c else { return };
+    if !matches!(op, BinOpKind::Eq | BinOpKind::Ne | BinOpKind::Lt | BinOpKind::Le | BinOpKind::Gt | BinOpKind::Ge) { return; }
+    for side in [left, right] {
+        let Expr::ScalarSubquery(stmt) = side.as_ref() else { continue };
+        if !is_uncorrelated(stmt, ctx) { continue; }
+        let Ok(res) = execute_select(stmt, ctx) else { continue };
+        if res.num_rows != 1 || res.columns.is_empty() { continue; }
+        let lit = match res.columns[0].data.get_value(0) {
+            Value::Int(i) => Expr::Int(i),
+            Value::Float(f) => Expr::Float(f),
+            Value::Str(s) => Expr::Str(s),
+            _ => continue,
+        };
+        **side = lit;
     }
 }
 
