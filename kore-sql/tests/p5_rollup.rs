@@ -9,6 +9,8 @@ use kore_core::{Column, ColumnData, DataBlock};
 use kore_sql::{testing, KqlContext};
 
 static LOCK: Mutex<()> = Mutex::new(());
+static OK_PAIRS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static ERR_PAIRS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 struct Rng(u64);
 impl Rng {
@@ -43,10 +45,11 @@ fn same(ctx: &KqlContext, q: &str, ordered: bool) {
     match (old, new) {
         (Ok(mut a), Ok(mut b)) => {
             assert_eq!(a.len(), b.len(), "row count differs for {q}");
+            OK_PAIRS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if !ordered { a.sort(); b.sort(); }
             for (i, (x, y)) in a.iter().zip(&b).enumerate() { assert_eq!(x, y, "row {i} differs for {q}"); }
         }
-        (Err(_), Err(_)) => {}
+        (Err(e1), Err(_)) => { ERR_PAIRS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); let _ = e1; }
         (a, b) => panic!("one path failed for {q}: old ok={} new ok={}", a.is_ok(), b.is_ok()),
     }
 }
@@ -108,7 +111,7 @@ fn grouping_sets_duplicates_and_empty() {
             "select a, b, sum(v) as s, count(*) as c, grouping(a) as ga, grouping(b) as gb from t group by grouping sets ((a, b), (a), (a), ())",
             "select a, b, sum(v) as s, grouping_id(a, b) as gid from t group by grouping sets ((a), (b), ())",
             "select a, b, c, avg(w) as s, grouping_id(a, b, c) as gid from t group by grouping sets ((a, b), (b, c), (c), (), ())",
-            "select a, count(*) as c from t group by grouping sets (())",
+            "select count(*) as c, sum(v) as s from t group by grouping sets (())",
             "select a, b, sum(v) as s from t group by grouping sets ((a, b), (b, a))",
             "select a, b, min(v) as mn, max(v) as mx, sum(w) as sw from t group by a, rollup(b)",
             "select a, b, c, count(distinct b) as cb, count(distinct v) as cv from t group by cube(a, b, c)",
