@@ -108,6 +108,11 @@ dropped the expression, constants beside GROUP BY came back as text, EXISTS over
 (DuckDB's own readings varied up to 2x): level to somewhat ahead; margin not established. 316 tests, correctness gate PASS.
 Former hazard, now fixed (2026-10-17): a reference to a nonexistent column used to evaluate to NULL instead of raising an error. `kore-sql/src/bind.rs` now checks every column reference once per statement (about 50 microseconds) and raises `column not found: <name>; available columns: ...` (switch `KORE_NO_BIND_CHECK=1`). The check deliberately accepts anything it cannot be sure about, so some typos are still not caught: select aliases are accepted in WHERE, NATURAL joins, VALUES rows and PIVOT scopes are not checked, a derived table or CTE with an unaliased expression column makes its scope open, and a query executed through the low-level `execute_select` directly bypasses the check.
 
+## Idle-machine TPC-H timing (2026-10-17)
+
+Alternating DuckDB / KORE / DuckDB, three rounds each at SF 1 and SF 3: KORE at or below DuckDB in all six rounds (SF 1: 34.5-41.0 ms vs 39.9-70.7; SF 3: 67.7-91.3 ms vs 104.2-162.0), roughly 10-25% lower
+than DuckDB's quietest readings; DuckDB itself varied up to 1.6x within a round, so no precise margin is claimed. 22/22 answers match. Details in `benchmarks/tpch_honest/README.md`.
+
 ## What was added in this round
 
 - Join planning: filters derived from `OR` branches, unique-key (lookup) tables joined first.
@@ -150,7 +155,7 @@ Former hazard, now fixed (2026-10-17): a reference to a nonexistent column used 
 | Is it a real SQL engine? | Yes. |
 | Are the results correct? | On the 22 TPC-H-shaped queries, yes, checked against live Spark. In general, no guarantee: bugs are still being found at a rate of several per round. |
 | Faster than Spark on one machine, in-memory? | Yes at SF1, by 2x to 25x in these runs. |
-| Faster than DuckDB? | On TPC-H: level to somewhat ahead in recent alternating runs (margin not established, noisy machine). On TPC-DS: no, about 2.8x slower. |
+| Faster than DuckDB? | On TPC-H (SF 1, SF 3): yes in the latest alternating runs, roughly 10-25% lower than DuckDB's quietest readings, margin not precisely established. On TPC-DS (SF 1): no, about 2.8x slower. |
 | Replacement for Spark? | No. |
 | Production ready? | No. |
 | Best description | Strong research-grade prototype. |
