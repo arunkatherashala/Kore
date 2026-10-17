@@ -424,3 +424,10 @@ pub(crate) static NO_CONJ_SPLIT: AtomicBool = AtomicBool::new(false);
 pub fn set_no_conj_split(on: bool) { NO_CONJ_SPLIT.store(on, Ordering::Relaxed); }
 #[inline]
 pub(crate) fn no_conj_split() -> bool { NO_CONJ_SPLIT.load(Ordering::Relaxed) }
+
+pub(crate) static NO_UNCORR_QUAL: AtomicBool = AtomicBool::new(false);
+/// Treat a table qualifier inside a join subquery as an unknown column, i.e. judge `from a, b where a.k = b.k`
+/// subqueries correlated (the old behaviour, for A/B tests).
+pub fn set_no_uncorr_qual(on: bool) { NO_UNCORR_QUAL.store(on, Ordering::Relaxed); }
+#[inline]
+pub(crate) fn no_uncorr_qual() -> bool { NO_UNCORR_QUAL.load(Ordering::Relaxed) }

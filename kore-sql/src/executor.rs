@@ -2303,6 +2303,12 @@ fn is_uncorrelated(sub: &SelectStmt, ctx: &KqlContext) -> bool {
         if t.subquery.is_some() || t.values.is_some() { return false; }
         let Some(b) = ctx.get(&t.name) else { return false };
         avail.extend(b.columns.iter().map(|c| c.name.rsplit('.').next().unwrap_or(&c.name).to_string()));
+        // `collect_cols_stmt` also records the qualifier of `t.col`; refers_to_enclosing_query already
+        // proved every qualifier is defined inside the subquery
+        if !crate::testing::no_uncorr_qual() {
+            avail.insert(t.name.clone());
+            if let Some(a) = &t.alias { avail.insert(a.clone()); }
+        }
     }
     let aliases: std::collections::HashSet<&String> = sub.projections.iter()
         .filter_map(|p| if let Projection::Expr { alias: Some(a), .. } = p { Some(a) } else { None }).collect();
@@ -4242,7 +4248,10 @@ fn filter_block_ctx(block: DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<D
             let (mut block, mut rest) = (block, Vec::new());
             let mut any = false;
             for c in conj {
-                match crate::vecexpr::filter_mask(&c, &block) {
+                let __tc = std::time::Instant::now();
+                let m = crate::vecexpr::filter_mask(&c, &block);
+                prof!(__tc, "conj split mask covered={} rows={} {}", m.is_some(), block.num_rows, crate::ast_walk::expr_sql(&c).chars().take(100).collect::<String>());
+                match m {
                     Some(mask) => {
                         any = true;
                         let keep: Vec<usize> = mask.iter().enumerate().filter_map(|(i, &k)| if k { Some(i) } else { None }).collect();
@@ -4263,6 +4272,8 @@ fn filter_block_ctx(block: DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<D
 
 fn filter_block_rows(block: DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
     let n = block.num_rows;
+    let __tr = std::time::Instant::now();
+    prof!(__tr, "filter rows path n={} {}", n, crate::ast_walk::expr_sql(pred).chars().take(100).collect::<String>());
     // subqueries that survived the decorrelation rewrites run once per row, bound to that row
     let keep: Vec<bool> = if crate::general::has_subq(pred) {
         crate::general::filter_rows_with_subqueries(&block, pred, ctx)?
@@ -4949,7 +4960,10 @@ fn materialize_groupby_aliases(mut block: DataBlock, group_by: &[String], projec
 fn precompute_in_subqueries(expr: &Expr, ctx: &KqlContext) -> Expr {
     match expr {
         // a correlated IN (SELECT ..) is evaluated per outer row, never once against the whole table
-        Expr::InSubquery { subquery, .. } if !is_uncorrelated(subquery, ctx) => expr.clone(),
+        Expr::InSubquery { subquery, .. } if !is_uncorrelated(subquery, ctx) => {
+            if prof_on() { eprintln!("[prof] precompute_in: subquery from={} judged correlated", subquery.from.name); }
+            expr.clone()
+        }
         Expr::InSubquery { expr: e, subquery, negated } => {
             // Execute subquery once, collect all values
             let inner_ctx = ctx.clone();

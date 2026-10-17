@@ -162,3 +162,27 @@ fn conjunct_split_matches_whole_predicate() {
         }
     }
 }
+
+#[test]
+fn qualified_join_subquery_is_uncorrelated() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let qs = [
+        "select id from ws where substr(cast(w as string), 1, 1) <> 'x' and o in (select ro from wr, ws w2 where wr.ro = w2.o) order by id",
+        "select id from ws where concat('a', cast(w as string)) <> 'zz' and o in (select wr.ro from wr, ws x where x.o = wr.ro and x.v > 5) order by id",
+        "select id from ws where concat('a', cast(w as string)) <> 'zz' and o not in (select wr.ro from wr, ws x where x.o = wr.ro and wr.ro is not null) order by id",
+        // really correlated: must stay so
+        "select id from ws where concat('a', cast(w as string)) <> 'zz' and o in (select wr.ro from wr, ws x where x.o = wr.ro and x.w = ws.w) order by id",
+        "select id from ws where concat('a', cast(w as string)) <> 'zz' and o in (select wr.ro from wr where wr.rv > ws.v) order by id",
+    ];
+    for (seed, (nws, nwr, odom, wdom)) in SIZES.into_iter().enumerate() {
+        let mut r = Rng(0x777 ^ (seed as u64 * 13 + 1));
+        let ctx = make_ctx(&mut r, nws, nwr, odom, wdom);
+        for q in qs {
+            testing::set_no_uncorr_qual(true);
+            let w = ctx.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+            testing::set_no_uncorr_qual(false);
+            let g = ctx.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+            assert_eq!(w, g, "{q} (seed {seed})");
+        }
+    }
+}
