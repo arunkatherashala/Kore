@@ -343,6 +343,12 @@ pub fn agg_parts(e: &Expr) -> Option<(String, Vec<Expr>, bool, Option<Expr>)> {
 
 /// Evaluate the argument and FILTER expressions of an aggregate for every row of the input.
 pub fn prepare(e: &Expr, n: usize, ev: &mut dyn FnMut(&Expr, usize) -> V) -> Option<AggInput> {
+    prepare_cols(e, n, ev, &|_| None)
+}
+
+/// Like `prepare`, but `col_of` may supply the values of an argument expression directly (a plain input column)
+/// instead of evaluating it row by row.
+pub fn prepare_cols(e: &Expr, n: usize, ev: &mut dyn FnMut(&Expr, usize) -> V, col_of: &dyn Fn(&Expr) -> Option<Vec<V>>) -> Option<AggInput> {
     let (name, args, distinct, filter) = agg_parts(e)?;
     let star = args.first().map_or(false, |a| matches!(a, Expr::Col(c) if c == "*") || matches!(a, Expr::Star));
     let mut vals: Vec<Vec<V>> = Vec::new();
@@ -352,6 +358,8 @@ pub fn prepare(e: &Expr, n: usize, ev: &mut dyn FnMut(&Expr, usize) -> V) -> Opt
             if matches!(a, Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null) {
                 let v = ev(a, 0);
                 vals.push(vec![v; n.max(1)]);
+            } else if let Some(v) = col_of(a) {
+                vals.push(v);
             } else {
                 vals.push((0..n).map(|r| ev(a, r)).collect());
             }

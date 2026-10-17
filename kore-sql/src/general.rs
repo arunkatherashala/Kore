@@ -673,13 +673,31 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
         }
 
         // key columns and aggregate inputs, evaluated once over the input
-        let key_vals: Vec<Vec<V>> = spec.exprs.iter().map(|e| (0..n_in).map(|r| evaluator.eval(e, &input, r)).collect()).collect();
+        let __tg = std::time::Instant::now();
+        // a plain input column is read in place (same lookup as `eval_expr`: the first column that matches the name)
+        let direct = |e: &Expr| -> Option<usize> {
+            let Expr::Col(name) = e else { return None };
+            let i = input.columns.iter().position(|c| {
+                c.name == *name || (c.name.len() > name.len() && c.name.as_bytes()[c.name.len() - name.len() - 1] == b'.' && c.name.ends_with(name.as_str()))
+            })?;
+            if input.columns[i].name == *name { Some(i) } else { None }
+        };
+        let shared = !crate::testing::no_gs_shared();
+        let key_vals: Vec<Vec<V>> = spec.exprs.iter().map(|e| {
+            if shared && direct(e).is_some() { Vec::new() } else { (0..n_in).map(|r| evaluator.eval(e, &input, r)).collect() }
+        }).collect();
+        let key_srcs: Vec<crate::rollup::KeySrc> = spec.exprs.iter().enumerate().map(|(k, e)| match direct(e) {
+            Some(ci) if shared => crate::rollup::KeySrc::Col(&input.columns[ci]),
+            _ => crate::rollup::KeySrc::Vals(&key_vals[k]),
+        }).collect();
         let mut agg_inputs = Vec::with_capacity(aggs_list.len());
         for a in &aggs_list {
             let mut ev = |e: &Expr, r: usize| evaluator.eval(e, &input, r);
-            agg_inputs.push(aggs::prepare(a, n_in, &mut ev).ok_or_else(|| err("bad aggregate"))?);
+            let col_of = |x: &Expr| -> Option<Vec<V>> { if shared { direct(x).map(|ci| column_values(&input.columns[ci])) } else { None } };
+            agg_inputs.push(aggs::prepare_cols(a, n_in, &mut ev, &col_of).ok_or_else(|| err("bad aggregate"))?);
         }
         evaluator.check()?;
+        if crate::executor::prof_on() { eprintln!("[prof] {:>8.1} ms  general group inputs (keys+agg args) rows={}", __tg.elapsed().as_secs_f64()*1000.0, n_in); }
 
         let nk = spec.exprs.len();
         let mut out_keys: Vec<Vec<V>> = vec![Vec::new(); nk];
@@ -687,12 +705,13 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
         let mut out_aggs: Vec<Vec<V>> = vec![Vec::new(); aggs_list.len()];
         if !crate::testing::no_gs_shared() {
             // one pass over the input: the finest grouping once, the coarser sets derived from it
-            let res = crate::rollup::grouping_sets(&key_vals, &agg_inputs, &spec.sets, n_in)?;
+            let res = crate::rollup::grouping_sets(&key_srcs, &agg_inputs, &spec.sets, n_in)?;
+            if crate::executor::prof_on() { eprintln!("[prof] {:>8.1} ms  general grouping_sets sets={}", __tg.elapsed().as_secs_f64()*1000.0, spec.sets.len()); }
             for (set, sr) in spec.sets.iter().zip(res) {
                 for gi in 0..sr.rep_rows.len() {
                     for k in 0..nk {
                         if set.contains(&k) {
-                            out_keys[k].push(key_vals[k][sr.rep_rows[gi]].clone());
+                            out_keys[k].push(key_srcs[k].value_at(sr.rep_rows[gi]));
                             out_flags[k].push(V::Int(0));
                         } else {
                             out_keys[k].push(V::Null);
@@ -740,6 +759,7 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
         for (j, v) in out_aggs.into_iter().enumerate() { cols.push(vals_to_column(format!("__a{j}"), v, None)); }
         let num_rows = cols.first().map(|c| c.data.len()).unwrap_or_else(|| if spec.sets.is_empty() { 0 } else { 1 });
         g_block = DataBlock { columns: cols, num_rows };
+        if crate::executor::prof_on() { eprintln!("[prof] {:>8.1} ms  general grouped block rows={}", __tg.elapsed().as_secs_f64()*1000.0, num_rows); }
         // a correlated subquery in the select list can still see the grouping keys of the outer row
         *evaluator.outer_map.borrow_mut() = spec.exprs.iter().enumerate()
             .filter_map(|(k, e)| if let Expr::Col(name) = e { Some((name.clone(), format!("__k{k}"))) } else { None })

@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use kore_core::KoreError;
+use kore_core::{Column, ColumnData, KoreError};
 
 use crate::aggs::{aggregate, total_cmp, AggInput};
 use crate::executor::ExprVal;
@@ -23,22 +23,55 @@ pub struct SetResult {
 #[derive(Hash, PartialEq, Eq)]
 enum K<'a> { Null, Num(i64), Fl(u64), Nan, Str(&'a str), B(bool) }
 
-/// Dense ids (order of first appearance) of the values, equal where `aggs::key_of` would be equal.
-fn dense_ids(vals: &[V]) -> Vec<u32> {
-    let mut map: HashMap<K, u32> = HashMap::new();
-    let mut out = Vec::with_capacity(vals.len());
-    for v in vals {
-        let k = match v {
-            V::Null => K::Null,
-            V::Int(i) => K::Num(*i),
-            V::Float(f) => if f.is_nan() { K::Nan } else if f.fract() == 0.0 && f.abs() < 9.0e15 { K::Num(*f as i64) } else { K::Fl(f.to_bits()) },
-            V::Str(s) => K::Str(s.as_str()),
-            V::Bool(b) => K::B(*b),
-        };
-        let next = map.len() as u32;
-        out.push(*map.entry(k).or_insert(next));
+fn fkey<'a>(f: f64) -> K<'a> {
+    if f.is_nan() { K::Nan } else if f.fract() == 0.0 && f.abs() < 9.0e15 { K::Num(f as i64) } else { K::Fl(f.to_bits()) }
+}
+
+/// A grouping key column: evaluated values, or a column of the input read in place (no copy of text values).
+pub enum KeySrc<'a> { Vals(&'a [V]), Col(&'a Column) }
+
+impl KeySrc<'_> {
+    pub fn value_at(&self, r: usize) -> V {
+        match self {
+            KeySrc::Vals(v) => v[r].clone(),
+            KeySrc::Col(c) => match &c.data {
+                ColumnData::Int64(v) => v[r].map_or(V::Null, V::Int),
+                ColumnData::Float64(v) => v[r].map_or(V::Null, V::Float),
+                ColumnData::Bool(v) => v[r].map_or(V::Null, V::Bool),
+                ColumnData::Str(v) => v[r].as_ref().map_or(V::Null, |s| V::Str(s.clone())),
+                ColumnData::StrDict { codes, dict } => if codes[r] == u8::MAX { V::Null } else { dict.get(codes[r] as usize).map_or(V::Null, |s| V::Str(s.clone())) },
+            },
+        }
     }
-    out
+
+    /// Dense ids (order of first appearance) of the values, equal where `aggs::key_of` would be equal.
+    fn ids(&self) -> Vec<u32> {
+        fn run<'a>(it: impl Iterator<Item = K<'a>>, n: usize) -> Vec<u32> {
+            let mut map: HashMap<K, u32> = HashMap::new();
+            let mut out = Vec::with_capacity(n);
+            for k in it {
+                let next = map.len() as u32;
+                out.push(*map.entry(k).or_insert(next));
+            }
+            out
+        }
+        match self {
+            KeySrc::Vals(vals) => run(vals.iter().map(|v| match v {
+                V::Null => K::Null,
+                V::Int(i) => K::Num(*i),
+                V::Float(f) => fkey(*f),
+                V::Str(s) => K::Str(s.as_str()),
+                V::Bool(b) => K::B(*b),
+            }), vals.len()),
+            KeySrc::Col(c) => match &c.data {
+                ColumnData::Int64(v) => run(v.iter().map(|x| x.map_or(K::Null, K::Num)), v.len()),
+                ColumnData::Float64(v) => run(v.iter().map(|x| x.map_or(K::Null, fkey)), v.len()),
+                ColumnData::Bool(v) => run(v.iter().map(|x| x.map_or(K::Null, K::B)), v.len()),
+                ColumnData::Str(v) => run(v.iter().map(|x| x.as_deref().map_or(K::Null, K::Str)), v.len()),
+                ColumnData::StrDict { codes, dict } => run(codes.iter().map(|&c| if c == u8::MAX { K::Null } else { dict.get(c as usize).map_or(K::Null, |s| K::Str(s.as_str())) }), codes.len()),
+            },
+        }
+    }
 }
 
 /// Combine id columns into group ids (order of first appearance) over `n` items; returns (ids, group count).
@@ -133,21 +166,31 @@ fn merge(plan: Plan, parts: &[&Part]) -> V {
 }
 
 /// Aggregate every grouping set of `sets` (index lists into `key_vals`) over `n_in` input rows.
-pub fn grouping_sets(key_vals: &[Vec<V>], agg_inputs: &[AggInput], sets: &[Vec<usize>], n_in: usize) -> Result<Vec<SetResult>, KoreError> {
+pub fn grouping_sets(keys: &[KeySrc], agg_inputs: &[AggInput], sets: &[Vec<usize>], n_in: usize) -> Result<Vec<SetResult>, KoreError> {
     // finest grouping: every key any set uses
     let mut used: Vec<usize> = sets.iter().flatten().copied().collect();
     used.sort_unstable();
     used.dedup();
-    let ids: Vec<Vec<u32>> = used.iter().map(|&k| dense_ids(&key_vals[k])).collect();
+    let __t = std::time::Instant::now();
+    let ids: Vec<Vec<u32>> = if n_in >= 50_000 && used.len() > 1 {
+        use rayon::prelude::*;
+        used.par_iter().map(|&k| keys[k].ids()).collect()
+    } else {
+        used.iter().map(|&k| keys[k].ids()).collect()
+    };
+    let prof = crate::executor::prof_on();
+    if prof { eprintln!("[prof] {:>8.1} ms    rollup key ids", __t.elapsed().as_secs_f64() * 1000.0); }
     let id_refs: Vec<&[u32]> = ids.iter().map(|v| v.as_slice()).collect();
     let (gid, g_count) = combine(&id_refs, n_in);
 
+    if prof { eprintln!("[prof] {:>8.1} ms    rollup finest groups={}", __t.elapsed().as_secs_f64() * 1000.0, g_count); }
     let mut rows_of: Vec<Vec<usize>> = vec![Vec::new(); g_count];
     for (r, &g) in gid.iter().enumerate() { rows_of[g as usize].push(r); }
     // first row and per-key ids of every finest group
     let first_row: Vec<usize> = rows_of.iter().map(|v| v[0]).collect();
     let g_ids: Vec<Vec<u32>> = ids.iter().map(|c| first_row.iter().map(|&r| c[r]).collect()).collect();
 
+    if prof { eprintln!("[prof] {:>8.1} ms    rollup rows_of", __t.elapsed().as_secs_f64() * 1000.0); }
     let plans: Vec<Plan> = agg_inputs.iter().map(plan_of).collect();
     // partials of the mergeable aggregates per finest group
     let mut partials: Vec<Vec<Part>> = Vec::with_capacity(agg_inputs.len());
@@ -159,6 +202,7 @@ pub fn grouping_sets(key_vals: &[Vec<V>], agg_inputs: &[AggInput], sets: &[Vec<u
         });
     }
 
+    if prof { eprintln!("[prof] {:>8.1} ms    rollup finest partials", __t.elapsed().as_secs_f64() * 1000.0); }
     let mut out = Vec::with_capacity(sets.len());
     for set in sets {
         // coarse group of every finest group
