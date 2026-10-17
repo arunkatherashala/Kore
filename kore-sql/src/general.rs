@@ -685,6 +685,24 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
         let mut out_keys: Vec<Vec<V>> = vec![Vec::new(); nk];
         let mut out_flags: Vec<Vec<V>> = vec![Vec::new(); nk];
         let mut out_aggs: Vec<Vec<V>> = vec![Vec::new(); aggs_list.len()];
+        if !crate::testing::no_gs_shared() {
+            // one pass over the input: the finest grouping once, the coarser sets derived from it
+            let res = crate::rollup::grouping_sets(&key_vals, &agg_inputs, &spec.sets, n_in)?;
+            for (set, sr) in spec.sets.iter().zip(res) {
+                for gi in 0..sr.rep_rows.len() {
+                    for k in 0..nk {
+                        if set.contains(&k) {
+                            out_keys[k].push(key_vals[k][sr.rep_rows[gi]].clone());
+                            out_flags[k].push(V::Int(0));
+                        } else {
+                            out_keys[k].push(V::Null);
+                            out_flags[k].push(V::Int(1));
+                        }
+                    }
+                }
+                for (j, col) in sr.aggs.into_iter().enumerate() { out_aggs[j].extend(col); }
+            }
+        } else {
         for set in &spec.sets {
             // rows grouped by the key values of this set, in order of first appearance
             let mut groups: Vec<Vec<usize>> = Vec::new();
@@ -711,6 +729,7 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
                 }
                 for (j, inp) in agg_inputs.iter().enumerate() { out_aggs[j].push(aggs::aggregate(inp, rows)?); }
             }
+        }
         }
         let mut cols: Vec<Column> = Vec::new();
         for k in 0..nk {

@@ -19,6 +19,7 @@ pub mod rewrite;
 pub mod ast_walk;
 pub mod general;
 pub mod aggs;
+pub mod rollup;
 pub mod desugar;
 pub mod hashes;
 pub mod arrays;
