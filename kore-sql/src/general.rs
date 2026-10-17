@@ -532,7 +532,7 @@ fn subsets(n: usize) -> Vec<Vec<usize>> {
 /// Rows of each group when grouping by plain key columns: groups in order of first appearance, rows in input
 /// order. Same equality as `aggs::key_of` (NULLs together, integral floats by value, NaN together) without a
 /// `V` and a key string per cell.
-fn typed_groups(cols: &[&ColumnData], n: usize) -> Vec<Vec<usize>> {
+fn typed_group_ids(cols: &[&ColumnData], n: usize) -> (Vec<u32>, usize) {
     use std::hash::BuildHasherDefault;
     use crate::executor::FxHasher;
     #[derive(Hash, PartialEq, Eq)]
@@ -571,7 +571,11 @@ fn typed_groups(cols: &[&ColumnData], n: usize) -> Vec<Vec<usize>> {
         }
         cnt = pm.len();
     }
-    // single column: ids were assigned in order of first appearance already
+    (ids, cnt)
+}
+
+fn typed_groups(cols: &[&ColumnData], n: usize) -> Vec<Vec<usize>> {
+    let (ids, cnt) = typed_group_ids(cols, n);
     let mut counts = vec![0usize; cnt];
     for &g in &ids { counts[g as usize] += 1; }
     let mut groups: Vec<Vec<usize>> = counts.iter().map(|&c| Vec::with_capacity(c)).collect();
@@ -1053,6 +1057,19 @@ pub fn apply_set_op(left: DataBlock, right: DataBlock, kind: &SetOpKind) -> Resu
         let mut r = right.clone();
         for (c, l) in r.columns.iter_mut().zip(&left.columns) { c.name = l.name.clone(); }
         return DataBlock::concat(vec![left, r]);
+    }
+    // UNION (distinct) of identically typed arms: concatenate, keep the first row of every distinct row (typed codes)
+    if matches!(kind, SetOpKind::Union) && same_types && left.num_rows + right.num_rows > 0 && !crate::testing::no_typed_groups() && !left.columns.is_empty() {
+        let names: Vec<String> = left.columns.iter().map(|c| c.name.clone()).collect();
+        let mut r = right;
+        for (c, nm) in r.columns.iter_mut().zip(&names) { c.name = nm.clone(); }
+        let all = if left.num_rows == 0 { r } else if r.num_rows == 0 { left } else { DataBlock::concat(vec![left, r])? };
+        let cols: Vec<&ColumnData> = all.columns.iter().map(|c| &c.data).collect();
+        let (ids, cnt) = typed_group_ids(&cols, all.num_rows);
+        let mut first = vec![usize::MAX; cnt];
+        for (row, &g) in ids.iter().enumerate() { if first[g as usize] == usize::MAX { first[g as usize] = row; } }
+        // group ids follow first appearance, so `first` is ascending
+        return Ok(all.select_rows(&first));
     }
     let names: Vec<String> = left.columns.iter().map(|c| c.name.clone()).collect();
     let hints: Vec<ColumnData> = left.columns.iter().map(|c| c.data.clone()).collect();

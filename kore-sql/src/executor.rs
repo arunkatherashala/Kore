@@ -7448,6 +7448,7 @@ pub(crate) fn group_by_agg_ex(
     // Build result block from aggregated groups
     let first_rows: Vec<usize> = groups.iter().map(|(_, idxs)| idxs[0]).collect();
     let agg_block = block.select_rows(&first_rows);
+    prof!(__tg, "gb_ex key rows selected");
 
     // Handle SUM/COUNT/AVG/MIN/MAX in projections
     let has_agg = projections.iter().any(|p| matches!(p, Projection::Expr { expr: Expr::Agg { .. }, .. }));
@@ -7473,6 +7474,7 @@ pub(crate) fn group_by_agg_ex(
                         let agg_col = if is_direct { find_col(&block, &col_name) } else { None };
                         // Arbitrary expression (e.g. col*col): evaluate it once for the whole block
                         let pre_vals = if is_direct { None } else { crate::vecexpr::num_vec(inner, &block) };
+                        prof!(__tg, "gb_ex agg input ready (vectorised={})", pre_vals.is_some());
                         if matches!(func, AggFunc::Sum | AggFunc::Min | AggFunc::Max) {
                             if let Some(ColumnData::Int64(iv)) = agg_col.map(|c| &c.data) {
                                 let out: Vec<Option<i64>> = groups.iter()

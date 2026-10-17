@@ -199,6 +199,10 @@ fn typed_group_codes_match_key_strings() {
         "SELECT s, SUM(v) AS sv, AVG(SUM(v)) OVER () AS av FROM {t} GROUP BY s",
         "SELECT ed, k, MIN(v) AS mn, MAX(v) AS mx, row_number() OVER (ORDER BY ed, k) AS rn FROM {t} GROUP BY ed, k",
         "SELECT g, SUM(v) AS sv, SUM(SUM(v)) OVER () AS tot FROM {t} WHERE v > 1000 GROUP BY g",
+        "SELECT k, g, s, f FROM {t} UNION SELECT k, g, s, f FROM ta",
+        "SELECT k, s, big FROM {t} UNION SELECT k, s, big FROM {t} WHERE v < 50 UNION SELECT k, s, big FROM tb",
+        "SELECT f, ed FROM {t} UNION SELECT f, ed FROM tc",
+        "SELECT g FROM {t} UNION ALL SELECT g FROM tb UNION SELECT g FROM ta",
     ];
     for t in ["ta", "tb", "tc", "td"] {
         for q in qs {
