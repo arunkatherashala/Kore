@@ -393,5 +393,9 @@ fn check_costs_microseconds() {
     // includes the parse of each query; the check alone is a small fraction of it
     let per = t0.elapsed().as_micros() as f64 / (5.0 * parsed.len() as f64);
     eprintln!("parse + bind check: {per:.0} us per TPC-DS query");
+    let t1 = std::time::Instant::now();
+    for _ in 0..5 { for s in &parsed { kore_sql::parse_query(s.trim()).unwrap(); } }
+    let parse_only = t1.elapsed().as_micros() as f64 / (5.0 * parsed.len() as f64);
+    eprintln!("parse only: {parse_only:.0} us; bind check alone: about {:.0} us per TPC-DS query", per - parse_only);
     assert!(per < 5_000.0, "binding is too slow: {per} us per query");
 }

@@ -106,7 +106,7 @@ dropped the expression, constants beside GROUP BY came back as text, EXISTS over
 (125 ms vs 44 ms geometric mean). Details: `benchmarks/tpcds_honest/README.md`.
 **TPC-H after the Phase 3 work:** KORE at or below DuckDB in six alternating rounds (SF 1: 34-40 ms vs 43-78; SF 3: 124-149 ms vs 154-373), on a machine that was not quiet
 (DuckDB's own readings varied up to 2x): level to somewhat ahead; margin not established. 309 tests, correctness gate PASS.
-Known hazard not fixed: a reference to a nonexistent column evaluates to NULL instead of raising an error.
+Known hazard (fixed on branch p4-bind): a reference to a nonexistent column evaluated to NULL instead of raising an error; `kore-sql/src/bind.rs` now checks every column reference per statement (`column not found: <name>`; switch `KORE_NO_BIND_CHECK=1`).
 
 ## What was added in this round
 
