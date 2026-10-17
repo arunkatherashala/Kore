@@ -4233,6 +4233,35 @@ fn filter_block_ctx(block: DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<D
         if keep.len() == block.num_rows { return Ok(block); }
         return Ok(select_rows_owned(block, &keep));
     }
+    // a conjunction the column path does not cover as a whole: run the conjuncts it does cover first (they shrink the
+    // input), the rest row by row on the survivors only
+    if !crate::testing::no_conj_split() && !crate::general::has_subq(pred) {
+        let mut conj = Vec::new();
+        crate::rewrite::split_conjuncts(pred, &mut conj);
+        if conj.len() > 1 {
+            let (mut block, mut rest) = (block, Vec::new());
+            let mut any = false;
+            for c in conj {
+                match crate::vecexpr::filter_mask(&c, &block) {
+                    Some(mask) => {
+                        any = true;
+                        let keep: Vec<usize> = mask.iter().enumerate().filter_map(|(i, &k)| if k { Some(i) } else { None }).collect();
+                        if keep.len() != block.num_rows { block = select_rows_owned(block, &keep); }
+                    }
+                    None => rest.push(c),
+                }
+            }
+            if any {
+                return match crate::rewrite::and_all(rest) { Some(p) => filter_block_ctx(block, &p, ctx), None => Ok(block) };
+            }
+            let p = crate::rewrite::and_all(rest).unwrap();
+            return filter_block_rows(block, &p, ctx);
+        }
+    }
+    filter_block_rows(block, pred, ctx)
+}
+
+fn filter_block_rows(block: DataBlock, pred: &Expr, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
     let n = block.num_rows;
     // subqueries that survived the decorrelation rewrites run once per row, bound to that row
     let keep: Vec<bool> = if crate::general::has_subq(pred) {

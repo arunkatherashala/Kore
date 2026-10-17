@@ -139,3 +139,26 @@ fn union_all_mixed_numeric_types() {
         }
     }
 }
+
+#[test]
+fn conjunct_split_matches_whole_predicate() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let qs = [
+        "select id from ws where o in (select ro from wr) and substr(cast(w as string), 1, 1) = '1' order by id",
+        "select id from ws where v > 3 and concat('a', cast(o as string)) like 'a1%' and w in (select ro from wr where rv > 3) order by id",
+        "select id from ws where o in (select ro from wr) and coalesce(w, -1) <> 2 and cast('1999-01-01' as date) < cast('1999-02-01' as date) order by id",
+        "select id from ws where (v > 3 or concat('a', cast(o as string)) = 'a1') and o is not null order by id",
+        "select id from ws where o not in (select ro from wr where ro is not null) and length(cast(o as string)) > 0 order by id",
+    ];
+    for (seed, (nws, nwr, odom, wdom)) in SIZES.into_iter().enumerate() {
+        let mut r = Rng(0x1234 ^ (seed as u64 * 17 + 3));
+        let ctx = make_ctx(&mut r, nws, nwr, odom, wdom);
+        for q in qs {
+            testing::set_no_conj_split(true);
+            let w = ctx.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+            testing::set_no_conj_split(false);
+            let g = ctx.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+            assert_eq!(w, g, "{q} (seed {seed})");
+        }
+    }
+}

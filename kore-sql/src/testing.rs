@@ -418,3 +418,9 @@ pub(crate) static NO_UNION_COLS: AtomicBool = AtomicBool::new(false);
 pub fn set_no_union_cols(on: bool) { NO_UNION_COLS.store(on, Ordering::Relaxed); }
 #[inline]
 pub(crate) fn no_union_cols() -> bool { NO_UNION_COLS.load(Ordering::Relaxed) }
+
+pub(crate) static NO_CONJ_SPLIT: AtomicBool = AtomicBool::new(false);
+/// Evaluate a WHERE conjunction that the column path does not cover as one row-wise predicate (A/B tests).
+pub fn set_no_conj_split(on: bool) { NO_CONJ_SPLIT.store(on, Ordering::Relaxed); }
+#[inline]
+pub(crate) fn no_conj_split() -> bool { NO_CONJ_SPLIT.load(Ordering::Relaxed) }
