@@ -105,8 +105,8 @@ On an idle machine, alternating DuckDB and KORE runs (DuckDB before and after ea
 dropped the expression, constants beside GROUP BY came back as text, EXISTS over multi-table subqueries ran per row). KORE is about **2.8x slower** than DuckDB on it
 (125 ms vs 44 ms geometric mean). Details: `benchmarks/tpcds_honest/README.md`.
 **TPC-H after the Phase 3 work:** KORE at or below DuckDB in six alternating rounds (SF 1: 34-40 ms vs 43-78; SF 3: 124-149 ms vs 154-373), on a machine that was not quiet
-(DuckDB's own readings varied up to 2x): level to somewhat ahead; margin not established. 309 tests, correctness gate PASS.
-Known hazard (fixed on branch p4-bind): a reference to a nonexistent column evaluated to NULL instead of raising an error; `kore-sql/src/bind.rs` now checks every column reference per statement (`column not found: <name>`; switch `KORE_NO_BIND_CHECK=1`).
+(DuckDB's own readings varied up to 2x): level to somewhat ahead; margin not established. 316 tests, correctness gate PASS.
+Former hazard, now fixed (2026-10-17): a reference to a nonexistent column used to evaluate to NULL instead of raising an error. `kore-sql/src/bind.rs` now checks every column reference once per statement (about 50 microseconds) and raises `column not found: <name>; available columns: ...` (switch `KORE_NO_BIND_CHECK=1`). The check deliberately accepts anything it cannot be sure about, so some typos are still not caught: select aliases are accepted in WHERE, NATURAL joins, VALUES rows and PIVOT scopes are not checked, a derived table or CTE with an unaliased expression column makes its scope open, and a query executed through the low-level `execute_select` directly bypasses the check.
 
 ## What was added in this round
 
@@ -124,7 +124,7 @@ Known hazard (fixed on branch p4-bind): a reference to a nonexistent column eval
 
 ## Test evidence
 
-- 309 tests pass across `kore-sql`, `kore-join` and `kore-ffi`, including about 960 hand-derived regression
+- 316 tests pass across `kore-sql`, `kore-join` and `kore-ffi`, including about 960 hand-derived regression
   cases, a differential test across execution paths, and a SQLite oracle over 60k generated queries.
 - A mutation fuzzer ran about 1.6M mutants with no panics (reported by the SQL-coverage work, not re-run here).
 - Not run: the whole workspace, because a Python-binding crate does not build against Python 3.14 here.
