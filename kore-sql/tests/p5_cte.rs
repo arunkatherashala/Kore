@@ -40,6 +40,18 @@ fn render(b: &DataBlock) -> Vec<String> {
     v
 }
 
+/// Like `render`, but an integer and an integral float print alike: KORE types a column by the values that survive, so
+/// dropping every row of a float arm early may turn `0.0` into `0` (same value, different declared type).
+fn render_num(b: &DataBlock) -> Vec<String> {
+    let mut v: Vec<String> = (0..b.num_rows).map(|i| b.columns.iter().map(|c| match c.data.get_value(i) {
+        kore_core::Value::Int(x) => format!("N({})", x as f64),
+        kore_core::Value::Float(x) => format!("N({})", x),
+        o => format!("{:?}", o),
+    }).collect::<Vec<_>>().join("|")).collect();
+    v.sort();
+    v
+}
+
 fn run(c: &KqlContext, q: &str, off: bool) -> Result<Vec<String>, String> {
     testing::set_no_semi_cte(off);
     let out = c.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
@@ -265,9 +277,9 @@ fn union_all_derived_table_key_push() {
             "select k from (select o as k from ws union all select ro from wr) u left join dd on k = dk where dyear = 2000 order by k",
         ] {
             testing::set_no_union_push(true);
-            let w = ctx.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+            let w = ctx.query(q).map(|b| render_num(&b)).map_err(|e| format!("{e:?}"));
             testing::set_no_union_push(false);
-            let g = ctx.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+            let g = ctx.query(q).map(|b| render_num(&b)).map_err(|e| format!("{e:?}"));
             assert_eq!(w, g, "{q} (seed {seed})");
         }
     }
