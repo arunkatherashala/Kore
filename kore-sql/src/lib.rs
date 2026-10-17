@@ -27,6 +27,7 @@ pub mod tz;
 pub mod explain;
 pub mod testing;
 pub(crate) mod sipset;
+pub(crate) mod semicte;
 pub(crate) mod dateaccel;
 pub mod vecexpr;
 pub mod fusedagg;

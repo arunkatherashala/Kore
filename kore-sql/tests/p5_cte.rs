@@ -1,0 +1,286 @@
+//! Phase 5 CTE / semi-join work against the paths it replaces (on/off switch, exact result comparison on random tables with
+//! NULL keys, NULL x values, duplicates, empty sides and single-row groups).
+
+use kore_core::{Column, DataBlock};
+use kore_sql::{testing, KqlContext};
+use std::sync::Mutex;
+
+static LOCK: Mutex<()> = Mutex::new(());
+
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 >> 33
+    }
+    fn below(&mut self, n: usize) -> usize { (self.next() % n.max(1) as u64) as usize }
+}
+
+fn opt_i(r: &mut Rng, dom: usize, null_every: usize) -> Option<i64> { if null_every > 0 && r.below(null_every) == 0 { None } else { Some(r.below(dom) as i64) } }
+
+/// ws(o, w, v, id) : orders with warehouses; wr(ro, rv); cust(id2, o2)
+fn make_ctx(r: &mut Rng, nws: usize, nwr: usize, odom: usize, wdom: usize) -> KqlContext {
+    let mut ctx = KqlContext::new();
+    ctx.register("ws", DataBlock::new(vec![
+        Column::int64("o", (0..nws).map(|_| opt_i(r, odom, 10)).collect()),
+        Column::int64("w", (0..nws).map(|_| opt_i(r, wdom, 6)).collect()),
+        Column::float64("v", (0..nws).map(|_| Some(r.below(100) as f64 / 4.0)).collect()),
+        Column::int64("id", (0..nws as i64).map(Some).collect()),
+    ]).unwrap());
+    ctx.register("wr", DataBlock::new(vec![
+        Column::int64("ro", (0..nwr).map(|_| opt_i(r, odom + 2, 8)).collect()),
+        Column::float64("rv", (0..nwr).map(|_| Some(r.below(40) as f64)).collect()),
+    ]).unwrap());
+    ctx
+}
+
+fn render(b: &DataBlock) -> Vec<String> {
+    let mut v: Vec<String> = (0..b.num_rows).map(|i| b.columns.iter().map(|c| format!("{:?}", c.data.get_value(i))).collect::<Vec<_>>().join("|")).collect();
+    v.sort();
+    v
+}
+
+/// Like `render`, but an integer and an integral float print alike: KORE types a column by the values that survive, so
+/// dropping every row of a float arm early may turn `0.0` into `0` (same value, different declared type).
+fn render_num(b: &DataBlock) -> Vec<String> {
+    let mut v: Vec<String> = (0..b.num_rows).map(|i| b.columns.iter().map(|c| match c.data.get_value(i) {
+        kore_core::Value::Int(x) => format!("N({})", x as f64),
+        kore_core::Value::Float(x) => format!("N({})", x),
+        o => format!("{:?}", o),
+    }).collect::<Vec<_>>().join("|")).collect();
+    v.sort();
+    v
+}
+
+fn run(c: &KqlContext, q: &str, off: bool) -> Result<Vec<String>, String> {
+    testing::set_no_semi_cte(off);
+    let out = c.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+    testing::set_no_semi_cte(false);
+    out
+}
+
+fn check(c: &KqlContext, q: &str) {
+    let want = run(c, q, true);
+    let got = run(c, q, false);
+    match (want, got) {
+        (Ok(w), Ok(g)) => {
+            assert_eq!(w.len(), g.len(), "row count differs: {q}");
+            if let Some(i) = (0..w.len()).find(|&i| w[i] != g[i]) { panic!("row {i} differs: {q}\noff={}\non={}", w[i], g[i]); }
+        }
+        (Err(_), Err(_)) => {}
+        (w, g) => panic!("error mismatch {q}: off ok={} on ok={}", w.is_ok(), g.is_ok()),
+    }
+}
+
+// (rows of ws, rows of wr, order domain, warehouse domain)
+const SIZES: [(usize, usize, usize, usize); 7] = [(0, 0, 5, 3), (40, 0, 8, 3), (0, 30, 8, 3), (1, 3, 1, 1), (60, 40, 30, 1), (200, 120, 40, 4), (4000, 1500, 900, 5)];
+
+fn for_all(queries: &[&str]) -> usize {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let hits0 = testing::semi_cte_hits();
+    for (seed, (nws, nwr, odom, wdom)) in SIZES.into_iter().enumerate() {
+        let mut r = Rng(0x9e3779b97f4a7c15 ^ (seed as u64 * 7919 + 1));
+        let ctx = make_ctx(&mut r, nws, nwr, odom, wdom);
+        for q in queries { check(&ctx, q); }
+    }
+    testing::semi_cte_hits() - hits0
+}
+
+const CTE: &str = "with ws_wh as (select ws1.o, ws1.w wh1, ws2.w wh2 from ws ws1, ws ws2 where ws1.o = ws2.o and ws1.w <> ws2.w) ";
+
+#[test]
+fn q95_shape_both_in_contexts() {
+    let hits = for_all(&[
+        &format!("{CTE} select count(distinct id) c, sum(v) s from ws where o in (select o from ws_wh) and o in (select ro from wr, ws_wh where ro = ws_wh.o)"),
+        &format!("{CTE} select id from ws where o in (select o from ws_wh) order by id"),
+        &format!("{CTE} select id from ws where o in (select ro from wr, ws_wh where ro = ws_wh.o) order by id"),
+        &format!("{CTE} select id, v from ws where o not in (select o from ws_wh) order by id"),
+        &format!("{CTE} select id from ws where o in (select o from ws_wh where o > 3) and v > 5 order by id"),
+        &format!("{CTE} select id from ws where o in (select x.o from ws_wh x, ws_wh y where x.o = y.o) order by id"),
+        &format!("{CTE} select ro from wr where ro in (select o from ws_wh) and ro in (select ro from wr, ws_wh where ro = ws_wh.o) order by ro"),
+        &format!("{CTE} select id from ws where o in (select o from ws_wh) or v > 20 order by id"),
+        // other aliases and a swapped comparison
+        "with p as (select b.o as ord, a.w as w1, b.w as w2 from ws a, ws b where b.w <> a.w and b.o = a.o) select id from ws where o in (select ord from p) order by id",
+    ]);
+    assert!(hits > 0, "the semi rewrite never ran");
+}
+
+#[test]
+fn shapes_that_must_keep_the_pairs() {
+    let hits = for_all(&[
+        // reads another column of the CTE
+        &format!("{CTE} select id from ws where o in (select o from ws_wh where wh1 > 1) order by id"),
+        &format!("{CTE} select id from ws where o in (select o from ws_wh where ws_wh.wh2 is not null) order by id"),
+        // multiplicity visible
+        &format!("{CTE} select count(*) from ws_wh"),
+        &format!("{CTE} select o, count(*) c from ws_wh group by o order by o"),
+        &format!("{CTE} select id from ws, ws_wh where ws.o = ws_wh.o order by id"),
+        &format!("{CTE} select id from ws where o in (select count(*) from ws_wh) order by id"),
+        &format!("{CTE} select id from ws where o in (select o from ws_wh limit 2) order by id"),
+        &format!("{CTE} select id from ws where exists (select 1 from ws_wh where ws_wh.o = ws.o) order by id"),
+        // different pair predicates
+        "with p as (select a.o, a.w, b.w w2 from ws a, ws b where a.o = b.o and a.w < b.w) select id from ws where o in (select o from p) order by id",
+        "with p as (select a.o, a.w, b.w w2 from ws a, ws b where a.o = b.o and a.w <> b.w and a.v > 3) select id from ws where o in (select o from p) order by id",
+    ]);
+    assert_eq!(hits, 0, "a rewrite fired where the pair rows are observable");
+}
+
+fn run_union(c: &KqlContext, q: &str, off: bool) -> Result<Vec<String>, String> {
+    testing::set_no_union_cols(off);
+    let out = c.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+    testing::set_no_union_cols(false);
+    out
+}
+
+#[test]
+fn union_all_mixed_numeric_types() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for (seed, (nws, nwr, odom, wdom)) in SIZES.into_iter().enumerate() {
+        let mut r = Rng(0xabcdef ^ (seed as u64 * 31 + 5));
+        let ctx = make_ctx(&mut r, nws, nwr, odom, wdom);
+        for q in [
+            "select o as k, v as x from ws union all select ro, rv from wr",
+            "select o as k, v as x from ws union all select ro, 0 from wr",
+            "select ro as k, 0 as x from wr union all select o, v from ws",
+            "select o as k, w as x from ws union all select ro, ro from wr",
+            "select o, cast(0 as double) z from ws union all select ro, rv from wr union all select w, id from ws",
+            "select k, sum(x) s, count(*) c from (select o as k, v as x from ws union all select ro, 0 from wr) u group by k",
+        ] {
+            let (w, g) = (run_union(&ctx, q, true), run_union(&ctx, q, false));
+            assert_eq!(w, g, "{q} (seed {seed})");
+        }
+    }
+}
+
+#[test]
+fn conjunct_split_matches_whole_predicate() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let qs = [
+        "select id from ws where o in (select ro from wr) and substr(cast(w as string), 1, 1) = '1' order by id",
+        "select id from ws where v > 3 and concat('a', cast(o as string)) like 'a1%' and w in (select ro from wr where rv > 3) order by id",
+        "select id from ws where o in (select ro from wr) and coalesce(w, -1) <> 2 and cast('1999-01-01' as date) < cast('1999-02-01' as date) order by id",
+        "select id from ws where (v > 3 or concat('a', cast(o as string)) = 'a1') and o is not null order by id",
+        "select id from ws where o not in (select ro from wr where ro is not null) and length(cast(o as string)) > 0 order by id",
+    ];
+    for (seed, (nws, nwr, odom, wdom)) in SIZES.into_iter().enumerate() {
+        let mut r = Rng(0x1234 ^ (seed as u64 * 17 + 3));
+        let ctx = make_ctx(&mut r, nws, nwr, odom, wdom);
+        for q in qs {
+            testing::set_no_conj_split(true);
+            let w = ctx.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+            testing::set_no_conj_split(false);
+            let g = ctx.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+            assert_eq!(w, g, "{q} (seed {seed})");
+        }
+    }
+}
+
+#[test]
+fn qualified_join_subquery_is_uncorrelated() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let qs = [
+        "select id from ws where substr(cast(w as string), 1, 1) <> 'x' and o in (select ro from wr, ws w2 where wr.ro = w2.o) order by id",
+        "select id from ws where concat('a', cast(w as string)) <> 'zz' and o in (select wr.ro from wr, ws x where x.o = wr.ro and x.v > 5) order by id",
+        "select id from ws where concat('a', cast(w as string)) <> 'zz' and o not in (select wr.ro from wr, ws x where x.o = wr.ro and wr.ro is not null) order by id",
+        // really correlated: must stay so
+        "select id from ws where concat('a', cast(w as string)) <> 'zz' and o in (select wr.ro from wr, ws x where x.o = wr.ro and x.w = ws.w) order by id",
+        "select id from ws where concat('a', cast(w as string)) <> 'zz' and o in (select wr.ro from wr where wr.rv > ws.v) order by id",
+    ];
+    for (seed, (nws, nwr, odom, wdom)) in SIZES.into_iter().enumerate() {
+        let mut r = Rng(0x777 ^ (seed as u64 * 13 + 1));
+        let ctx = make_ctx(&mut r, nws, nwr, odom, wdom);
+        for q in qs {
+            testing::set_no_uncorr_qual(true);
+            let w = ctx.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+            testing::set_no_uncorr_qual(false);
+            let g = ctx.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+            assert_eq!(w, g, "{q} (seed {seed})");
+        }
+    }
+}
+
+#[test]
+fn early_scalar_subquery_folding() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let qs = [
+        "select a.id from ws a, wr b where a.o = b.ro and a.w = (select distinct w from ws where id = 0) order by a.id",
+        "select a.id from ws a, wr b where a.o = b.ro and a.v > 1.2 * (select avg(rv) from wr) order by a.id",
+        "select a.id from ws a, wr b where a.o = b.ro and a.v >= (select max(v) from ws where id < 0) order by a.id",
+        "select a.id from ws a, wr b where a.o = b.ro and a.w = (select w from ws) order by a.id",
+        "select a.id from ws a, wr b where a.o = b.ro and a.o <= (select min(ro) from wr) order by a.id",
+        "select a.id from ws a, wr b where a.o = b.ro and a.v > (select avg(x.v) from ws x where x.o = a.o) order by a.id",
+        "select a.id from ws a, wr b where a.o = b.ro and a.w <> (select max(w) from ws) and b.rv < (select avg(rv) from wr) order by a.id",
+    ];
+    for (seed, (nws, nwr, odom, wdom)) in SIZES.into_iter().enumerate() {
+        let mut r = Rng(0x999 ^ (seed as u64 * 29 + 7));
+        let ctx = make_ctx(&mut r, nws, nwr, odom, wdom);
+        for q in qs {
+            testing::set_no_early_scalar(true);
+            let w = ctx.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+            testing::set_no_early_scalar(false);
+            let g = ctx.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+            assert_eq!(w, g, "{q} (seed {seed})");
+        }
+    }
+}
+
+#[test]
+fn union_distinct_typed_and_date_cast_fold() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for (seed, (nws, nwr, odom, wdom)) in SIZES.into_iter().enumerate() {
+        let mut r = Rng(0x4242 ^ (seed as u64 * 11 + 9));
+        let mut ctx = make_ctx(&mut r, nws, nwr, odom, wdom);
+        let nd = 50 + nws;
+        ctx.register("dd", DataBlock::new(vec![
+            Column::int64("dk", (0..nd as i64).map(Some).collect()),
+            Column::str_col("d", (0..nd).map(|i| if i % 13 == 7 { None } else { Some(format!("1999-0{}-{:02}", 1 + i % 5, 1 + i % 28)) }).collect()),
+        ]).unwrap());
+        for q in [
+            "select o, w from ws union select ro, ro from wr",
+            "select o, v from ws union select o, v from ws",
+            "select o, w from ws union select o, w from ws union select w, o from ws",
+            "select o, cast(v as double) from ws union select ro, rv from wr",
+            "select d from dd union select d from dd",
+            "select count(*) c from (select o, w from ws union select ro, ro from wr) u",
+            "select ws.id, d from ws, dd where ws.o = dd.dk and d between '1999-02-01' and cast('1999-04-02' as date) order by ws.id",
+            "select ws.id from ws, dd where ws.o = dd.dk and d >= cast('1999-03-01' as date) and ws.w in (select ro from wr) order by ws.id",
+            "select ws.id from ws, dd where ws.o = dd.dk and d < cast('bogus' as date) order by ws.id",
+        ] {
+            testing::set_no_union_cols(true); testing::set_no_cast_fold(true);
+            let w = ctx.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+            testing::set_no_union_cols(false); testing::set_no_cast_fold(false);
+            let g = ctx.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+            assert_eq!(w, g, "{q} (seed {seed})");
+        }
+    }
+}
+
+#[test]
+fn union_all_derived_table_key_push() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for (seed, (nws, nwr, odom, wdom)) in SIZES.into_iter().enumerate() {
+        let mut r = Rng(0x5151 ^ (seed as u64 * 19 + 2));
+        let mut ctx = make_ctx(&mut r, nws, nwr, odom, wdom);
+        let nd = 30;
+        ctx.register("dd", DataBlock::new(vec![
+            Column::int64("dk", (0..nd as i64).map(Some).collect()),
+            Column::str_col("d", (0..nd).map(|i| if i % 11 == 7 { None } else { Some(format!("1999-0{}-{:02}", 1 + i % 5, 1 + i % 28)) }).collect()),
+            Column::int64("dyear", (0..nd as i64).map(|i| Some(1998 + i % 3)).collect()),
+        ]).unwrap());
+        for q in [
+            "select dyear, sum(x) s, count(*) c from (select o as k, v as x from ws union all select ro, rv from wr) u, dd where k = dk and dyear = 1999 group by dyear",
+            "select u.k, x from (select o as k, v as x from ws union all select ro, 0 from wr) u, dd where u.k = dd.dk and d between '1999-02-01' and cast('1999-04-02' as date) order by u.k, x",
+            "select k, x from (select o as k, v as x from ws union all select ro as k, rv as x from wr union all select w, id from ws) u, dd where k = dk and dyear <> 1998 order by k, x",
+            "select k from (select o as k from ws union all select ro from wr) u, dd where k = dk order by k",
+            "select k, w from (select o as k, w from ws union all select ro, o from wr) u, dd, ws z where k = dk and z.o = u.w and dyear = 2000 order by k, w",
+            "select k from (select o as k from ws where v > 3 union all select coalesce(ro, 1) from wr) u, dd where k = dk and dd.dk > 2 order by k",
+            "select k from (select o as k from ws union all select ro from wr) u left join dd on k = dk where dyear = 2000 order by k",
+        ] {
+            testing::set_no_union_push(true);
+            let w = ctx.query(q).map(|b| render_num(&b)).map_err(|e| format!("{e:?}"));
+            testing::set_no_union_push(false);
+            let g = ctx.query(q).map(|b| render_num(&b)).map_err(|e| format!("{e:?}"));
+            assert_eq!(w, g, "{q} (seed {seed})");
+        }
+    }
+}
