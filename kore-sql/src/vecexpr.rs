@@ -89,7 +89,7 @@ impl Val<'_> {
 
 /// Characters `start..start+len` of `s` (0-based start) as a slice.
 #[inline]
-fn sub_slice(s: &str, start: usize, len: Option<usize>) -> &str {
+pub(crate) fn sub_slice(s: &str, start: usize, len: Option<usize>) -> &str {
     let b = s.as_bytes();
     // ASCII prefix: byte offsets are character offsets
     let probe = match len { Some(l) => (start + l).min(b.len()), None => b.len() };

@@ -396,3 +396,19 @@ pub fn bind_check(sql: &str, ctx: &crate::executor::KqlContext) -> Result<(), ko
     let q = crate::parser::parse_query(sql.trim())?;
     crate::bind::check_query(&q, ctx)
 }
+
+pub(crate) static NO_EXPR_JOIN: AtomicBool = AtomicBool::new(false);
+
+/// Do not turn equalities with an expression on one side (`a.rn = b.rn + 1`) into hash-join keys, and keep the
+/// single-key + post-filter shape of `hash_join_with_residual` (A/B oracle for the expression-key joins).
+pub fn set_no_expr_join(on: bool) { NO_EXPR_JOIN.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_expr_join() -> bool {
+    static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_EXPR_JOIN.load(Ordering::Relaxed) || *ENV.get_or_init(|| std::env::var_os("KORE_NO_EXPR_JOIN").is_some())
+}
+
+pub(crate) static EXPR_JOIN_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Joins that used at least one expression key so far (tests assert the path was really exercised).
+pub fn expr_join_hits() -> usize { EXPR_JOIN_HITS.load(Ordering::Relaxed) }

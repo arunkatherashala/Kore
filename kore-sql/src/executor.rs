@@ -3463,6 +3463,10 @@ fn hash_join_with_residual(
         if ok && cols.iter().all(|n| find_col_in_block(n, right).is_some()) { right_only.push(c) } else { other.push(c) }
     }
     if *kind == JoinKind::Left && !other.is_empty() { return Ok(None); }
+    // another equality (plain or expression key) between the two sides: the composite-key join (join_general)
+    // hashes on all of them instead of joining on one key and filtering the (possibly huge) result afterwards
+    if !crate::testing::no_expr_join() && other.iter().any(|c| matches!(c, Expr::BinOp { op: BinOpKind::Eq, left: a, right: b }
+        if matches!((expr_side(a, left, right), expr_side(b, left, right)), (Some(x), Some(y)) if x != y))) { return Ok(None); }
 
     // Only the key and the columns the rest of the statement reads survive the join (pure ON-filter columns
     // such as o_comment are never gathered). Needs integer keys and no residual over the joined rows.
@@ -3570,6 +3574,40 @@ fn jeq(a: JCell<'_>, b: JCell<'_>) -> bool {
     }
 }
 
+/// Which input an expression's columns all come from: Some(true) = only `left`, Some(false) = only `right`.
+fn expr_side(e: &Expr, left: &DataBlock, right: &DataBlock) -> Option<bool> {
+    let mut cols = Vec::new();
+    if !crate::rewrite::referenced_cols(e, &mut cols) || cols.is_empty() { return None; }
+    let (mut in_l, mut in_r) = (true, true);
+    for n in &cols {
+        let (l, r) = (find_col_in_block(n, left).is_some(), find_col_in_block(n, right).is_some());
+        if l == r { return None; }
+        if l { in_r = false } else { in_l = false }
+    }
+    match (in_l, in_r) { (true, false) => Some(true), (false, true) => Some(false), _ => None }
+}
+
+/// `f(left cols) = g(right cols)` where at least one side is not a plain column: the two key columns
+/// (left's, right's) when both evaluate vectorised to the same class (number/text).
+fn expr_link(c: &Expr, left: &DataBlock, right: &DataBlock) -> Option<(ColumnData, ColumnData)> {
+    let Expr::BinOp { op: BinOpKind::Eq, left: a, right: b } = c else { return None };
+    if crate::rewrite::col_ref(a).is_some() && crate::rewrite::col_ref(b).is_some() { return None; }
+    let (la, lb) = match (expr_side(a, left, right)?, expr_side(b, left, right)?) {
+        (true, false) => (a, b),
+        (false, true) => (b, a),
+        _ => return None,
+    };
+    let key = |e: &Expr, blk: &DataBlock| -> Option<ColumnData> {
+        if crate::rewrite::col_ref(e).is_some() {
+            let n = find_col_in_block(&crate::rewrite::col_ref(e)?, blk)?;
+            find_col(blk, &n).map(|c| c.data.clone())
+        } else { crate::exprkey::key_column(e, blk) }
+    };
+    let (lk, rk) = (key(la, left)?, key(lb, right)?);
+    if jclass(&lk) != jclass(&rk) { return None; }
+    Some((lk, rk))
+}
+
 /// General ON condition: every equality between a left and a right column is a hash key (composite, confirmed
 /// cell by cell); all other conjuncts are evaluated on the hash-candidate pairs only. Outer-join rows are
 /// derived from the pairs that satisfy the WHOLE condition. With no equality at all the candidates are every
@@ -3586,6 +3624,14 @@ fn join_general(left: &DataBlock, right: &DataBlock, on: &Expr, kind: &JoinKind,
     crate::rewrite::split_conjuncts(on, &mut conjuncts);
     let mut keys: Vec<(&ColumnData, &ColumnData)> = Vec::new();
     let mut residual: Vec<Expr> = Vec::new();
+    // equalities with an expression of one input on a side: evaluated into temporary key columns; the equality
+    // itself stays in the residual as the exact re-check
+    let mut ekeys: Vec<(ColumnData, ColumnData)> = Vec::new();
+    if !crate::testing::no_expr_join() {
+        for c in &conjuncts {
+            if let Some(k) = expr_link(c, left, right) { ekeys.push(k); }
+        }
+    }
     for c in conjuncts {
         let mut key = None;
         if let Expr::BinOp { op: BinOpKind::Eq, left: a, right: b } = &c {
@@ -3606,6 +3652,9 @@ fn join_general(left: &DataBlock, right: &DataBlock, on: &Expr, kind: &JoinKind,
         }
         match key { Some(k) => keys.push(k), None => residual.push(c) }
     }
+    for (l, r) in &ekeys { keys.push((l, r)); }
+    if !ekeys.is_empty() { crate::testing::EXPR_JOIN_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+    prof!(std::time::Instant::now(), "    join_general: {} keys ({} expression), residual={}", keys.len(), ekeys.len(), residual.len());
 
     // which columns the residual reads (all of them when that cannot be told)
     let pred = crate::rewrite::and_all(residual);

@@ -29,6 +29,7 @@ pub mod testing;
 pub(crate) mod sipset;
 pub(crate) mod dateaccel;
 pub mod vecexpr;
+pub(crate) mod exprkey;
 pub mod fusedagg;
 pub mod window;
 pub mod scalar;
