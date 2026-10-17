@@ -39,7 +39,7 @@ The sf0.1 "before" column is the first full run **after** I fixed my own harness
 wrapper) but before any engine change and with the loader type issue still present, so some of its 8 WRONG are
 loader typing (zip codes read as numbers: Q15, Q45, Q50, Q81; empty-string/NULL: Q30) rather than engine bugs; the engine
 bugs among them are Q27, Q36 (constant column type) and Q62 (dropped column, see below). The ERROR queries were Q6, Q40, Q49, Q80,
-Q93, Q99; the TIMEOUTs Q35, Q69, Q72. Overall KORE is about **2.8x slower than DuckDB (geometric mean) at sf1** and about
+Q93, Q99; the TIMEOUTs Q35, Q69, Q72. Overall (early run, superseded by the final results at the end of this file) KORE is about **2.8x slower than DuckDB (geometric mean) at sf1** and about
 2x at sf0.1: this does NOT generalise the TPC-H parity result. Where it loses badly at sf1: Q70 (13.6 s vs 34 ms, ROLLUP + window), Q22 (7.2 s vs 0.2 s,
 ROLLUP), Q57 / Q47 (window self-joins), Q5 (4.8 s vs 57 ms, UNION ALL of CTEs), Q4 / Q11 (CTE self-joins).
 Timing noise: the machine was shared with other agents' builds and tests; DuckDB alone varies 1.5x between runs and the
@@ -176,3 +176,111 @@ Times in ms, KORE / DuckDB (shared machine). `rows` is the DuckDB result size.
 | Q97 | 1 | OK | 79.8 / 11.1 | OK | 908.2 / 81.7 |
 | Q98 | 2521 | OK | 137.4 / 17.2 | OK | 636.1 / 65.8 |
 | Q99 | 90 | OK | 23.2 / 11.5 | OK | 200.7 / 34.2 |
+
+## Final results on the combined code (2026-10-17, SF 1, 99 queries)
+
+All 99 answers identical to DuckDB, 0 wrong, 0 errors, 0 timeouts. Geometric mean KORE 101.4 ms vs DuckDB 45.5 ms (KORE about 2.2x slower). KORE is faster on 33 of 99 queries and within 2x of DuckDB (or faster) on 53; it is more than 5x slower on 28 and more than 10x slower on 17 (Q2, Q4, Q11, Q14, Q31, Q33, Q39, Q41, Q51, Q62, Q70, Q72, Q75, Q78, Q87, Q93, Q97). Total time over the 99 queries: KORE 63.3 s vs DuckDB 7.2 s (a few very slow queries dominate: Q70 10.3 s, Q4 8.6 s, Q67 6.9 s, Q51 5.4 s, Q14 4.6 s, Q11 4.0 s, Q78 2.9 s, Q23 1.8 s). SF 1, one machine, warm in-memory, repeats 2, DuckDB as the reference engine (no official answer set was available).
+
+Known causes of the slowest queries (from profiling): Q70 spends about 8 s evaluating `IN (select ... from (select ... rank() ...) tmp where ranking <= 5)` per row, because an IN over a derived table is not treated as uncorrelated; Q4/Q11 aggregate customer-by-fact over 2.7M rows with 8 text keys in three arms (about 1 s per arm); Q39 aggregates 540k groups with a non-vectorised stddev input; Q67/Q51/Q14/Q78 are not profiled yet.
+
+| Query | DuckDB (ms) | KORE (ms) |
+|---|---|---|
+| Q1 | 23.9 | 47.7 |
+| Q2 | 31.3 | 365.8 |
+| Q3 | 10.6 | 12.5 |
+| Q4 | 367.0 | 8581.7 |
+| Q5 | 56.9 | 146.3 |
+| Q6 | 29.3 | 34.2 |
+| Q7 | 73.0 | 31.2 |
+| Q8 | 146.4 | 48.8 |
+| Q9 | 82.8 | 80.6 |
+| Q10 | 51.7 | 41.2 |
+| Q11 | 176.5 | 4024.8 |
+| Q12 | 39.7 | 21.4 |
+| Q13 | 45.8 | 32.5 |
+| Q14 | 275.0 | 4591.5 |
+| Q15 | 25.2 | 24.4 |
+| Q16 | 24.7 | 7.9 |
+| Q17 | 26.5 | 48.6 |
+| Q18 | 69.5 | 110.8 |
+| Q19 | 29.9 | 17.5 |
+| Q20 | 42.4 | 26.9 |
+| Q21 | 14.4 | 115.5 |
+| Q22 | 211.8 | 978.8 |
+| Q23 | 329.6 | 1840.6 |
+| Q24 | 30.6 | 130.1 |
+| Q25 | 21.5 | 35.5 |
+| Q26 | 47.7 | 20.7 |
+| Q27 | 77.6 | 65.8 |
+| Q28 | 64.7 | 499.7 |
+| Q29 | 29.6 | 101.1 |
+| Q30 | 34.0 | 22.6 |
+| Q31 | 81.3 | 822.5 |
+| Q32 | 7.7 | 17.7 |
+| Q33 | 22.0 | 406.6 |
+| Q34 | 22.6 | 70.4 |
+| Q35 | 78.5 | 158.1 |
+| Q36 | 111.6 | 96.4 |
+| Q37 | 11.8 | 12.9 |
+| Q38 | 81.9 | 726.1 |
+| Q39 | 48.5 | 1617.6 |
+| Q40 | 19.6 | 23.5 |
+| Q41 | 16.3 | 233.4 |
+| Q42 | 13.3 | 7.4 |
+| Q43 | 26.7 | 69.6 |
+| Q44 | 31.8 | 91.4 |
+| Q45 | 21.7 | 28.9 |
+| Q46 | 60.8 | 141.1 |
+| Q47 | 188.9 | 1691.2 |
+| Q48 | 48.2 | 36.0 |
+| Q49 | 34.0 | 97.2 |
+| Q50 | 33.1 | 11.3 |
+| Q51 | 384.7 | 5409.1 |
+| Q52 | 20.2 | 5.6 |
+| Q53 | 26.3 | 87.3 |
+| Q54 | 23.4 | 117.1 |
+| Q55 | 14.8 | 7.0 |
+| Q56 | 34.1 | 26.6 |
+| Q57 | 115.0 | 610.6 |
+| Q58 | 71.1 | 93.0 |
+| Q59 | 79.6 | 184.1 |
+| Q60 | 41.2 | 41.6 |
+| Q61 | 30.3 | 17.0 |
+| Q62 | 23.7 | 384.3 |
+| Q63 | 22.7 | 94.4 |
+| Q64 | 94.6 | 162.7 |
+| Q65 | 70.1 | 125.5 |
+| Q66 | 102.8 | 47.7 |
+| Q67 | 731.4 | 6933.4 |
+| Q68 | 42.4 | 74.2 |
+| Q69 | 69.7 | 40.5 |
+| Q70 | 34.0 | 10306.9 |
+| Q71 | 35.4 | 78.2 |
+| Q72 | 86.3 | 1010.0 |
+| Q73 | 15.3 | 54.0 |
+| Q74 | 221.6 | 1250.0 |
+| Q75 | 85.7 | 978.6 |
+| Q76 | 43.2 | 394.4 |
+| Q77 | 25.6 | 32.7 |
+| Q78 | 194.0 | 2863.2 |
+| Q79 | 40.0 | 110.1 |
+| Q80 | 76.4 | 60.2 |
+| Q81 | 50.5 | 44.4 |
+| Q82 | 15.2 | 18.6 |
+| Q83 | 27.8 | 27.2 |
+| Q84 | 18.4 | 13.3 |
+| Q85 | 45.7 | 50.6 |
+| Q86 | 35.6 | 36.3 |
+| Q87 | 85.6 | 948.3 |
+| Q88 | 63.6 | 74.4 |
+| Q89 | 77.0 | 68.8 |
+| Q90 | 9.6 | 18.7 |
+| Q91 | 24.5 | 12.5 |
+| Q92 | 12.8 | 27.6 |
+| Q93 | 39.1 | 434.2 |
+| Q94 | 21.1 | 5.4 |
+| Q95 | 191.5 | 119.6 |
+| Q96 | 6.6 | 6.4 |
+| Q97 | 81.7 | 1074.4 |
+| Q98 | 65.8 | 54.1 |
+| Q99 | 34.2 | 175.4 |

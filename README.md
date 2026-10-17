@@ -6,8 +6,8 @@ KORE is a high-performance columnar query engine + Digital Life framework, writt
 On a single 8-core machine with in-memory data (TPC-H-shaped, scale factor 1), its SQL engine returned the same results as live Apache Spark
 on all 22 TPC-H queries and was faster than Spark local mode on every one of them (see [Verified status](#verified-status-2026-10-04)).
 Against other single-node engines: on 22 TPC-H-shaped queries (SF 1 and SF 3, warm, in-memory, one machine) KORE is level with DuckDB and in the latest alternating runs somewhat ahead
-(margin not established: the test machine was noisy), and faster than DataFusion and Polars; on the 99 TPC-DS queries (SF 1) it returns 97 identical answers (2 time out) and is about 2.8x slower
-than DuckDB. Not shown: larger data, concurrency, production features. Details and caveats: `docs/ENGINE_STATUS_2026-10-04.md`. It does not replace Spark for large data or clusters.
+(margin not established: the test machine was noisy), and faster than DataFusion and Polars; on the 99 TPC-DS queries (SF 1) it returns identical answers on all 99 and is about 2.2x slower
+than DuckDB overall (faster on 33 queries, more than 10x slower on 17). Not shown: larger data, concurrency, production features. Details and caveats: `docs/ENGINE_STATUS_2026-10-04.md`. It does not replace Spark for large data or clusters.
 
 ## Distributed engine — Phases 1–20 complete
 
@@ -26,7 +26,7 @@ Measured against a live Spark 4.2.0 (local mode) on one 8-core, 32 GB machine, s
 | Queries | all 22 TPC-H-shaped queries, SF 1 (about 6M lineitem rows) |
 | Result agreement with Spark | 22 of 22 |
 | Speed (in-memory, KORE time / Spark time) | faster on all 22; between 0.02x and 0.6x of Spark's time in the final quiet-machine run (timings vary by about +/-20%) |
-| Tests | 316 pass in `kore-sql`, `kore-join`, `kore-ffi` (including a SQLite oracle over 60k generated queries) |
+| Tests | 334 pass in `kore-sql`, `kore-join`, `kore-ffi` (including a SQLite oracle over 60k generated queries) |
 | Memory | about 2.4-2.5 GB of table data at SF 1; peak commit 2.6-3.3 GB per query |
 
 What this does **not** show: larger-than-memory data (spill-to-disk bounds operator working state only), clusters and fault tolerance,

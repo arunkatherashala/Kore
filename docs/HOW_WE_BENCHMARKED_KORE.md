@@ -35,7 +35,8 @@ the queries were simplified hand-written versions, and KORE's answers were never
 
 - On 22 TPC-H-shaped queries (SF 1 and SF 3, warm, in memory) KORE returns the same answers as Spark and DuckDB, is about 30x faster than Spark local mode, and is level with DuckDB
   (in the latest alternating runs somewhat ahead; the margin is not established because the machine was noisy).
-- On the 99 TPC-DS queries (SF 1) KORE returns 97 identical answers (2 time out) and is about 2.8x slower than DuckDB, so the TPC-H result does not generalise.
+- On the 99 TPC-DS queries (SF 1) KORE returns identical answers on all 99 and is about 2.2x slower than DuckDB overall (faster on 33, more than 10x slower on 17), so the TPC-H result does not generalise.
+  Early TPC-DS runs found wrong answers and timeouts; the later rounds were about speed (a pair self-join CTE, expression-key joins, shared grouping sets, columnar UNION).
 - Not tested: data beyond SF 3, concurrency, cold starts, larger-than-memory data, production features. "One of the strongest engines" is not something these runs establish.
 
 ## 5. Lessons

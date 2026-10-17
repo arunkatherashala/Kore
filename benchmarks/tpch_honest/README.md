@@ -223,7 +223,7 @@ one of them busy), and DuckDB's own before/after readings differ by up to 2x wit
 114-127 ms (SF 3) and KORE was level with it (see the section above). A fair summary: KORE is level with, and in these runs somewhat ahead of, DuckDB on TPC-H-shaped data
 at SF 1 and SF 3; confirm on an idle machine before quoting a margin.
 
-TPC-DS (99 queries, SF 1, DuckDB as the reference; run before the Phase 3 TPC-H work): 97 answers identical to DuckDB, 2 timeouts (Q47, Q95), 0 wrong. **KORE is about 2.8x slower
+TPC-DS (99 queries, SF 1, DuckDB as the reference; run before the Phase 3 TPC-H work; superseded by the final TPC-DS results in `benchmarks/tpcds_honest/README.md`): 97 answers identical to DuckDB, 2 timeouts (Q47, Q95), 0 wrong. **KORE is about 2.8x slower
 than DuckDB on TPC-DS** (geometric mean 125 ms vs 44 ms over the 97 agreeing queries; KORE faster on 32 of 97). Worst: Q70 and Q22 (ROLLUP), Q5, Q47 (offset self-join), Q95.
 So the TPC-H result does not carry over to TPC-DS.
 
