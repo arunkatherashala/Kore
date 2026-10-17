@@ -112,3 +112,30 @@ fn shapes_that_must_keep_the_pairs() {
     ]);
     assert_eq!(hits, 0, "a rewrite fired where the pair rows are observable");
 }
+
+fn run_union(c: &KqlContext, q: &str, off: bool) -> Result<Vec<String>, String> {
+    testing::set_no_union_cols(off);
+    let out = c.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+    testing::set_no_union_cols(false);
+    out
+}
+
+#[test]
+fn union_all_mixed_numeric_types() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for (seed, (nws, nwr, odom, wdom)) in SIZES.into_iter().enumerate() {
+        let mut r = Rng(0xabcdef ^ (seed as u64 * 31 + 5));
+        let ctx = make_ctx(&mut r, nws, nwr, odom, wdom);
+        for q in [
+            "select o as k, v as x from ws union all select ro, rv from wr",
+            "select o as k, v as x from ws union all select ro, 0 from wr",
+            "select ro as k, 0 as x from wr union all select o, v from ws",
+            "select o as k, w as x from ws union all select ro, ro from wr",
+            "select o, cast(0 as double) z from ws union all select ro, rv from wr union all select w, id from ws",
+            "select k, sum(x) s, count(*) c from (select o as k, v as x from ws union all select ro, 0 from wr) u group by k",
+        ] {
+            let (w, g) = (run_union(&ctx, q, true), run_union(&ctx, q, false));
+            assert_eq!(w, g, "{q} (seed {seed})");
+        }
+    }
+}

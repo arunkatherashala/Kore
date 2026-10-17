@@ -412,3 +412,9 @@ pub(crate) fn no_semi_cte() -> bool {
 
 /// How many pair CTEs were replaced by their key sets so far.
 pub fn semi_cte_hits() -> usize { SEMI_CTE_HITS.load(Ordering::Relaxed) }
+
+pub(crate) static NO_UNION_COLS: AtomicBool = AtomicBool::new(false);
+/// UNION ALL of numeric columns of different types goes through the row-at-a-time path (A/B tests).
+pub fn set_no_union_cols(on: bool) { NO_UNION_COLS.store(on, Ordering::Relaxed); }
+#[inline]
+pub(crate) fn no_union_cols() -> bool { NO_UNION_COLS.load(Ordering::Relaxed) }
