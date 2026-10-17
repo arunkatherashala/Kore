@@ -183,3 +183,33 @@ fn keys_above_2_pow_53_are_exact() {
         }
     }
 }
+
+/// General aggregation (window over aggregates) with typed group codes vs the per-cell key strings.
+#[test]
+fn typed_group_codes_match_key_strings() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut r = Rng(51);
+    let mut c = KqlContext::new();
+    for (name, n, dom) in [("ta", 500usize, 7usize), ("tb", 1, 3), ("tc", 0, 3), ("td", 5000, 60)] {
+        c.register(name, table(&mut r, n, dom));
+    }
+    let qs = [
+        "SELECT k, g, s, SUM(v) AS sv, AVG(SUM(v)) OVER (PARTITION BY g) AS av, rank() OVER (PARTITION BY g ORDER BY SUM(v), k, s) AS rn FROM {t} GROUP BY k, g, s",
+        "SELECT f, big, SUM(v) AS sv, COUNT(*) AS n, rank() OVER (ORDER BY SUM(v), f, big) AS rn FROM {t} GROUP BY f, big",
+        "SELECT s, SUM(v) AS sv, AVG(SUM(v)) OVER () AS av FROM {t} GROUP BY s",
+        "SELECT ed, k, MIN(v) AS mn, MAX(v) AS mx, row_number() OVER (ORDER BY ed, k) AS rn FROM {t} GROUP BY ed, k",
+        "SELECT g, SUM(v) AS sv, SUM(SUM(v)) OVER () AS tot FROM {t} WHERE v > 1000 GROUP BY g",
+    ];
+    for t in ["ta", "tb", "tc", "td"] {
+        for q in qs {
+            let q = q.replace("{t}", t);
+            let run = |off: bool| -> Result<Vec<String>, String> {
+                testing::set_no_typed_groups(off);
+                let o = c.query(&q).map(|b| { let mut v: Vec<String> = (0..b.num_rows).map(|i| b.columns.iter().map(|c| format!("{:?}", c.data.get_value(i))).collect::<Vec<_>>().join("|")).collect(); v.sort(); v }).map_err(|e| format!("{e:?}"));
+                testing::set_no_typed_groups(false);
+                o
+            };
+            assert_eq!(run(true), run(false), "{q}");
+        }
+    }
+}

@@ -529,7 +529,69 @@ fn subsets(n: usize) -> Vec<Vec<usize>> {
 }
 
 /// Run projections / grouping / windows / ordering over `input` (the rows left after FROM, JOIN and WHERE).
+/// Rows of each group when grouping by plain key columns: groups in order of first appearance, rows in input
+/// order. Same equality as `aggs::key_of` (NULLs together, integral floats by value, NaN together) without a
+/// `V` and a key string per cell.
+fn typed_groups(cols: &[&ColumnData], n: usize) -> Vec<Vec<usize>> {
+    use std::hash::BuildHasherDefault;
+    use crate::executor::FxHasher;
+    #[derive(Hash, PartialEq, Eq)]
+    enum K<'a> { Null, I(i64), F(u64), Nan, S(&'a str), B(bool) }
+    type M<'a, T> = HashMap<T, u32, BuildHasherDefault<FxHasher>>;
+    fn codes(d: &ColumnData, n: usize) -> (Vec<u32>, usize) {
+        let mut map: M<K<'_>> = M::default();
+        let mut out = Vec::with_capacity(n);
+        macro_rules! code { ($k:expr) => {{ let next = map.len() as u32; *map.entry($k).or_insert(next) }} }
+        match d {
+            ColumnData::Int64(v) => for x in v { out.push(code!(x.map_or(K::Null, K::I))); },
+            ColumnData::Float64(v) => for x in v {
+                out.push(code!(match x {
+                    None => K::Null,
+                    Some(f) if f.is_nan() => K::Nan,
+                    Some(f) if f.fract() == 0.0 && f.abs() < 9.0e15 => K::I(*f as i64),
+                    Some(f) => K::F(f.to_bits()),
+                }));
+            },
+            ColumnData::Bool(v) => for x in v { out.push(code!(x.map_or(K::Null, K::B))); },
+            ColumnData::Str(v) => for x in v { out.push(code!(x.as_deref().map_or(K::Null, K::S))); },
+            ColumnData::StrDict { codes: cs, dict } => for &c in cs {
+                out.push(code!(if c == u8::MAX { K::Null } else { dict.get(c as usize).map_or(K::Null, |s| K::S(s.as_str())) }));
+            },
+        }
+        let cnt = map.len();
+        (out, cnt)
+    }
+    let (mut ids, mut cnt) = codes(cols[0], n);
+    for c in &cols[1..] {
+        let (cd, _) = codes(c, n);
+        let mut pm: M<'_, (u32, u32)> = M::default();
+        for (i, id) in ids.iter_mut().enumerate() {
+            let next = pm.len() as u32;
+            *id = *pm.entry((*id, cd[i])).or_insert(next);
+        }
+        cnt = pm.len();
+    }
+    // single column: ids were assigned in order of first appearance already
+    let mut counts = vec![0usize; cnt];
+    for &g in &ids { counts[g as usize] += 1; }
+    let mut groups: Vec<Vec<usize>> = counts.iter().map(|&c| Vec::with_capacity(c)).collect();
+    for (r, &g) in ids.iter().enumerate() { groups[g as usize].push(r); }
+    groups
+}
+
+fn cell_value(d: &ColumnData, r: usize) -> V {
+    match d {
+        ColumnData::Int64(v) => v[r].map_or(V::Null, V::Int),
+        ColumnData::Float64(v) => v[r].map_or(V::Null, V::Float),
+        ColumnData::Bool(v) => v[r].map_or(V::Null, V::Bool),
+        ColumnData::Str(v) => v[r].as_ref().map_or(V::Null, |s| V::Str(s.clone())),
+        ColumnData::StrDict { codes, dict } => { let c = codes[r]; if c == u8::MAX { V::Null } else { dict.get(c as usize).map_or(V::Null, |s| V::Str(s.clone())) } }
+    }
+}
+
 pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
+    let __tg = std::time::Instant::now();
+    macro_rules! gprof { ($($a:tt)*) => { if crate::executor::prof_on() { eprintln!("[prof] {:>8.1} ms  general: {}", __tg.elapsed().as_secs_f64()*1000.0, format!($($a)*)); } } }
     let n_in = input.num_rows;
     let evaluator = Evaluator::new(ctx);
     {
@@ -673,13 +735,21 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
         }
 
         // key columns and aggregate inputs, evaluated once over the input
-        let key_vals: Vec<Vec<V>> = spec.exprs.iter().map(|e| (0..n_in).map(|r| evaluator.eval(e, &input, r)).collect()).collect();
+        // plain key columns of a single grouping set: grouped by typed codes, key values read from the first row of each group
+        let typed_keys: Option<Vec<usize>> = if crate::testing::no_typed_groups() || spec.sets.len() != 1 || spec.exprs.is_empty() { None } else {
+            spec.exprs.iter().map(|e| match e { Expr::Col(c) => find_col_idx(&input, c), _ => None }).collect()
+        };
+        let key_vals: Vec<Vec<V>> = if typed_keys.is_some() { Vec::new() }
+            else { spec.exprs.iter().map(|e| (0..n_in).map(|r| evaluator.eval(e, &input, r)).collect()).collect() };
+        let key_at = |k: usize, r: usize| -> V { match &typed_keys { Some(t) => cell_value(&input.columns[t[k]].data, r), None => key_vals[k][r].clone() } };
+        gprof!("key values done");
         let mut agg_inputs = Vec::with_capacity(aggs_list.len());
         for a in &aggs_list {
             let mut ev = |e: &Expr, r: usize| evaluator.eval(e, &input, r);
             agg_inputs.push(aggs::prepare(a, n_in, &mut ev).ok_or_else(|| err("bad aggregate"))?);
         }
         evaluator.check()?;
+        gprof!("aggregate inputs done");
 
         let nk = spec.exprs.len();
         let mut out_keys: Vec<Vec<V>> = vec![Vec::new(); nk];
@@ -690,6 +760,9 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
             let mut groups: Vec<Vec<usize>> = Vec::new();
             if set.is_empty() {
                 groups.push((0..n_in).collect());
+            } else if let Some(t) = &typed_keys {
+                let cols: Vec<&ColumnData> = set.iter().map(|&k| &input.columns[t[k]].data).collect();
+                groups = typed_groups(&cols, n_in);
             } else {
                 let mut index: HashMap<String, usize> = HashMap::new();
                 for r in 0..n_in {
@@ -699,10 +772,11 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
                     groups[gi].push(r);
                 }
             }
+            gprof!("groups built: {}", groups.len());
             for rows in &groups {
                 for k in 0..nk {
                     if set.contains(&k) {
-                        out_keys[k].push(key_vals[k][rows[0]].clone());
+                        out_keys[k].push(key_at(k, rows[0]));
                         out_flags[k].push(V::Int(0));
                     } else {
                         out_keys[k].push(V::Null);
@@ -712,6 +786,7 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
                 for (j, inp) in agg_inputs.iter().enumerate() { out_aggs[j].push(aggs::aggregate(inp, rows)?); }
             }
         }
+        gprof!("aggregated");
         let mut cols: Vec<Column> = Vec::new();
         for k in 0..nk {
             let hint = column_hint(&spec.exprs[k], &input);
@@ -782,6 +857,7 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
         rewrite = Box::new(|e: &Expr| Ok(e.clone()));
     }
     let n = g_block.num_rows;
+    gprof!("grouping done rows={}", n);
 
     // ── rewritten expressions ──
     let mut items_g: Vec<Expr> = items_exprs.iter().map(|e| rewrite(e)).collect::<Result<_, _>>()?;
@@ -831,6 +907,7 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
             let Expr::Window { func, spec } = w else { unreachable!() };
             let mut ev = |e: &Expr, r: usize| evaluator.eval(e, &g_block, r);
             let vals = window::evaluate(func, spec, nrows, &mut ev)?;
+            gprof!("window {} done", k);
             last_window_spec = Some(spec.clone());
             new_cols.push(vals_to_column(format!("__w{k}"), vals, None));
         }
@@ -845,6 +922,7 @@ pub fn run(stmt: &SelectStmt, input: DataBlock, ctx: &KqlContext) -> Result<Data
         order_g = order_g.into_iter().map(|o| o.map(|e| replace(&e))).collect();
     }
 
+    gprof!("windows done");
     // ── QUALIFY ──
     if let Some(q) = &qualify_g {
         let keep: Vec<usize> = (0..g_block.num_rows).filter(|&r| matches!(evaluator.eval(q, &g_block, r), V::Bool(true))).collect();

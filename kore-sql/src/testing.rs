@@ -412,3 +412,14 @@ pub(crate) fn no_expr_join() -> bool {
 pub(crate) static EXPR_JOIN_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// Joins that used at least one expression key so far (tests assert the path was really exercised).
 pub fn expr_join_hits() -> usize { EXPR_JOIN_HITS.load(Ordering::Relaxed) }
+
+pub(crate) static NO_TYPED_GROUPS: AtomicBool = AtomicBool::new(false);
+
+/// Group by value-per-cell key strings in the general aggregation (the original code) instead of typed key codes.
+pub fn set_no_typed_groups(on: bool) { NO_TYPED_GROUPS.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_typed_groups() -> bool {
+    static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_TYPED_GROUPS.load(Ordering::Relaxed) || *ENV.get_or_init(|| std::env::var_os("KORE_NO_TYPED_GROUPS").is_some())
+}
