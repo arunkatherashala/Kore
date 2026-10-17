@@ -299,13 +299,13 @@ impl<'a> Binder<'a> {
     }
 
     /// Can `c` be found unqualified: a source column, an alias, a table name (whole-row struct), in any visible scope?
-    fn resolves(&self, c: &str) -> bool {
+    fn resolves(&self, c: &str, whole_row: bool) -> bool {
         for scope in self.stack.iter().rev() {
             if scope.open { return true; }
             for s in &scope.sources {
                 match &s.cols {
                     None => return true,
-                    Some(v) => if has_name(v, c) || eq(&s.alias, c) { return true; },
+                    Some(v) => if has_name(v, c) || (whole_row && eq(&s.alias, c)) { return true; },
                 }
             }
             if scope.aliases.iter().any(|a| eq(a, c)) { return true; }
@@ -323,7 +323,7 @@ impl<'a> Binder<'a> {
         if c.starts_with("__") { return Ok(()); }
         match q {
             None => {
-                if self.lambdas.iter().any(|p| eq(p, c)) || special_word(c) || self.resolves(c) { return Ok(()); }
+                if self.lambdas.iter().any(|p| eq(p, c)) || special_word(c) || self.resolves(c, true) { return Ok(()); }
                 if let Some((q2, c2)) = c.split_once('.') {
                     if !q2.is_empty() && !c2.is_empty() { return self.col(Some(q2), c2); }
                 }
@@ -339,7 +339,7 @@ impl<'a> Binder<'a> {
                     break;
                 }
                 // `s.field` of a struct column `s`; or a column whose name itself contains the dot
-                if self.resolves(q) { return Ok(()); }
+                if self.resolves(q, false) { return Ok(()); }
                 let full = format!("{q}.{c}");
                 if self.stack.iter().any(|sc| sc.sources.iter().any(|s| s.cols.as_ref().map_or(false, |v| v.iter().any(|n| eq(n, &full))))) { return Ok(()); }
                 let cand = self.stack.iter().rev().flat_map(|sc| sc.sources.iter())
@@ -350,7 +350,7 @@ impl<'a> Binder<'a> {
     }
 
     fn qualifier_ok(&self, q: &str) -> bool {
-        self.lambdas.iter().any(|p| eq(p, q)) || self.resolves(q)
+        self.lambdas.iter().any(|p| eq(p, q)) || self.resolves(q, false)
             || self.stack.iter().any(|sc| sc.sources.iter().any(|s| eq(&s.alias, q) || eq(&s.real, q)))
     }
 

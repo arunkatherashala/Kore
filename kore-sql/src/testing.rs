@@ -389,3 +389,10 @@ pub(crate) fn no_bind_check() -> bool {
     static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     NO_BIND_CHECK.load(Ordering::Relaxed) || *ENV.get_or_init(|| std::env::var("KORE_NO_BIND_CHECK").map_or(false, |v| v == "1"))
 }
+
+/// Run only the static column-binding check on `sql` against the tables / views registered in `ctx` (nothing is executed).
+/// Used by the corpus tests that validate whole benchmark suites against their schemas.
+pub fn bind_check(sql: &str, ctx: &crate::executor::KqlContext) -> Result<(), kore_core::KoreError> {
+    let q = crate::parser::parse_query(sql.trim())?;
+    crate::bind::check_query(&q, ctx)
+}
