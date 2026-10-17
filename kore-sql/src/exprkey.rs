@@ -18,7 +18,8 @@ fn lookup<'a>(block: &'a DataBlock, e: &Expr) -> Option<&'a ColumnData> {
             .or_else(|| block.columns.iter().find(|c| c.name.ends_with(&suffix)))
             .or_else(|| block.columns.iter().find(|c| c.name.eq_ignore_ascii_case(&name)))
     };
-    found.map(|c| &c.data)
+    // a lazily loaded block holds empty placeholders for columns it has not filled yet
+    found.filter(|c| c.data.len() == block.num_rows).map(|c| &c.data)
 }
 
 enum V<'a> { I(std::borrow::Cow<'a, [Option<i64>]>), F(std::borrow::Cow<'a, [Option<f64>]>), S(ColumnData), IC(i64), FC(f64) }

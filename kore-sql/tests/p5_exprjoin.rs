@@ -66,7 +66,7 @@ const KINDS: [&str; 4] = ["JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"];
 
 #[test]
 fn expression_keys_all_join_kinds() {
-    let _g = LOCK.lock().unwrap();
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let before = testing::expr_join_hits();
     let conds = [
         "a.k = b.k + 1",
@@ -74,10 +74,6 @@ fn expression_keys_all_join_kinds() {
         "a.k = b.k - 1 AND a.g = b.g",
         "a.k = b.k + 1 AND a.s = b.s",
         "a.k * 2 = b.k",
-        "a.big = b.big + 1",
-        "a.ed = b.ed + 1",
-        "a.ed + 1 = b.ed",
-        "a.ed * 2 = b.ed",
         "a.f = b.f + 0.5",
         "a.k = b.f + 1",
         "a.f * 2 = b.k",
@@ -102,7 +98,7 @@ fn expression_keys_all_join_kinds() {
 
 #[test]
 fn multi_key_offset_self_join() {
-    let _g = LOCK.lock().unwrap();
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Q47 shape: several plain keys plus offset equalities in both directions on a self join
     let mut r = Rng(11);
     let n = 400;
@@ -127,7 +123,7 @@ fn multi_key_offset_self_join() {
 
 #[test]
 fn cte_used_one_to_four_times() {
-    let _g = LOCK.lock().unwrap();
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let c = ctx(21, 120, 10, 8);
     let cte = "WITH t AS (SELECT k, g, s, SUM(v) AS sv, COUNT(*) AS n FROM ta WHERE k IS NOT NULL GROUP BY k, g, s) ";
     let qs = [
@@ -142,11 +138,48 @@ fn cte_used_one_to_four_times() {
 
 #[test]
 fn comma_joins_with_offsets() {
-    let _g = LOCK.lock().unwrap();
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let c = ctx(31, 150, 150, 10);
     for q in [
         "SELECT a.k, b.k FROM ta a, tb b WHERE a.k = b.k + 1 AND a.g = b.g",
         "SELECT a.k, b.k FROM ta a, tb b WHERE a.k + 2 = b.k AND a.s = b.s AND a.v > 10",
         "SELECT a.k, b.s FROM ta a, tb b WHERE substr(a.s, 1, 1) = substr(b.s, 1, 1) AND a.g = b.g",
     ] { check(&c, q, "comma"); }
+}
+
+/// Keys above 2^53 / wrapping arithmetic: the old evaluators compare through f64 there, so the reference is computed
+/// here with the row evaluator's semantics (exact integers, wrapping).
+#[test]
+fn keys_above_2_pow_53_are_exact() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut r = Rng(41);
+    let (ta, tb) = (table(&mut r, 300, 40), table(&mut r, 300, 40));
+    let col = |b: &DataBlock, n: &str| -> Vec<Option<i64>> {
+        let c = b.columns.iter().find(|c| c.name == n).unwrap();
+        (0..b.num_rows).map(|i| match c.data.get_value(i) { kore_core::Value::Int(x) => Some(x), _ => None }).collect()
+    };
+    let cols = ["big", "ed"].map(|n| (col(&ta, n), col(&tb, n)));
+    let mut c = KqlContext::new();
+    c.register("ta", ta);
+    c.register("tb", tb);
+    type F = fn(i64, i64) -> bool;
+    let cases: [(&str, usize, F); 7] = [
+        ("a.big = b.big + 1", 0, |x, y| x == y.wrapping_add(1)),
+        ("a.big + 1 = b.big", 0, |x, y| x.wrapping_add(1) == y),
+        ("a.big = b.big - 3", 0, |x, y| x == y.wrapping_sub(3)),
+        ("a.ed = b.ed + 1", 1, |x, y| x == y.wrapping_add(1)),
+        ("a.ed + 1 = b.ed", 1, |x, y| x.wrapping_add(1) == y),
+        ("a.ed * 2 = b.ed", 1, |x, y| x.wrapping_mul(2) == y),
+        ("a.ed = b.ed * 2 + 1", 1, |x, y| x == y.wrapping_mul(2).wrapping_add(1)),
+    ];
+    for (cond, ci, f) in cases {
+        let (xs, ys) = &cols[ci];
+        let mut want = 0i64;
+        for x in xs.iter().flatten() { for y in ys.iter().flatten() { if f(*x, *y) { want += 1; } } }
+        for kind in ["JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"] {
+            // matched pairs only: count rows with both sides present
+            let got = c.query(&format!("SELECT COUNT(*) AS n FROM ta a {kind} tb b ON {cond} WHERE a.v IS NOT NULL AND b.v IS NOT NULL")).unwrap();
+            match got.columns[0].data.get_value(0) { kore_core::Value::Int(n) => assert_eq!(n, want, "{kind}: {cond}"), v => panic!("{v:?}") }
+        }
+    }
 }

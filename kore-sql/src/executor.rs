@@ -1691,6 +1691,7 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
         }
         result = push_down_conjuncts(&mut conjuncts, result, ctx)?;
         prof!(__tf, "  pre-join phase done rows={} pending={}", result.num_rows, pending.len());
+        let mut ek_count = 0usize;
         while !pending.is_empty() {
             // Tables that join on a unique key can only shrink or keep the result (a lookup), so those
             // go first, smallest first: selective dimension tables then cut the fact tables down before
@@ -1741,8 +1742,19 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
                 }
                 None => linked.into_iter().next(),
             };
+            // equalities with an expression of one input on a side (`a.rn = b.rn + 1`): extra key columns of the composite hash
+            let has_elinks = |pi: usize, r: &DataBlock, pend: &[DataBlock]| !expr_link_sides(&conjuncts, r, &pend[pi]).is_empty();
+            let link = match link {
+                None => {
+                    // no plain equality: a table linked only through expression equalities is joined on them
+                    // (smallest first) instead of the cross product
+                    let cand = pending.iter().enumerate().filter(|(pi, _)| has_elinks(*pi, &result, &pending)).min_by_key(|(_, b)| b.num_rows).map(|(i, _)| i);
+                    cand.map(|pi| (pi, Vec::new()))
+                }
+                l => l,
+            };
             match link {
-                Some((pi, links)) if links.len() == 1 => {
+                Some((pi, links)) if links.len() == 1 && !has_elinks(pi, &result, &pending) => {
                     let (ci, lk, rk) = links.into_iter().next().unwrap();
                     let pb = pending.remove(pi);
                     let lz = lazies.remove(pi);
@@ -1768,12 +1780,13 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
                     // (the equalities are then fully applied by the join); otherwise hash on all of them at once:
                     // a hash collision only adds a candidate row, the equalities stay in `conjuncts` and are
                     // applied exactly below.
+                    let elinks_present = has_elinks(pi, &result, &pending);
                     let mut pb = pending.remove(pi);
                     let lz = lazies.remove(pi);
-                    let lcols: Vec<String> = links.iter().map(|l| l.1.clone()).collect();
-                    let rcols: Vec<String> = links.iter().map(|l| l.2.clone()).collect();
+                    let mut lcols: Vec<String> = links.iter().map(|l| l.1.clone()).collect();
+                    let mut rcols: Vec<String> = links.iter().map(|l| l.2.clone()).collect();
                     let mut packed: Option<(Vec<Option<i64>>, Vec<Option<i64>>)> = None;
-                    if plan_defer && !crate::testing::no_plan_pack() {
+                    if plan_defer && !crate::testing::no_plan_pack() && !elinks_present {
                         // right-hand key columns of the filtered rows: from the lazy source or the loaded block
                         let rdata: Option<Vec<ColumnData>> = rcols.iter().map(|n| match &lz {
                             Some(lz) => lz.keys.iter().find(|(_, kn)| kn == n).map(|(ci, _)| lz.key_data(*ci)),
@@ -1813,12 +1826,41 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
                         }
                     } else {
                         if let Some(lz) = &lz { pb = fill_keys(pb, lz); }
+                        // expression keys: temporary key columns on both sides; an exact same-type pair replaces the
+                        // original equality by `__ekL = __ekR` (compared exactly after the join), others keep it
+                        if elinks_present {
+                            let mut repl: Vec<(usize, Expr)> = Vec::new();
+                            let mut new_cols: Vec<(String, ColumnData, String, ColumnData)> = Vec::new();
+                            for (ci, a, b) in expr_link_sides(&conjuncts, &result, &pb) {
+                                let (Some(lk), Some(rk)) = (expr_key_col(a, &result), expr_key_col(b, &pb)) else { continue };
+                                if jclass(&lk) != jclass(&rk) { continue; }
+                                let n = ek_count; ek_count += 1;
+                                let (ln, rn) = (format!("__ekL{n}"), format!("__ekR{n}"));
+                                if std::mem::discriminant(&lk) == std::mem::discriminant(&rk) && !matches!(lk, ColumnData::Bool(_)) {
+                                    repl.push((ci, Expr::BinOp { op: BinOpKind::Eq, left: Box::new(Expr::Col(ln.clone())), right: Box::new(Expr::Col(rn.clone())) }));
+                                }
+                                new_cols.push((ln, lk, rn, rk));
+                            }
+                            for (ci, e) in repl { conjuncts[ci] = e; }
+                            for (ln, lk, rn, rk) in new_cols {
+                                result.columns.push(Column { name: ln.clone(), data: lk });
+                                pb.columns.push(Column { name: rn.clone(), data: rk });
+                                lcols.push(ln); rcols.push(rn);
+                            }
+                            crate::testing::EXPR_JOIN_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        if lcols.is_empty() {
+                            // nothing could be evaluated as a key: plain cross product (the conjuncts filter afterwards)
+                            let pbx = match lz { Some(lz) => finish_lazy(pb, lz), None => pb };
+                            result = cross_join(&result, &pbx);
+                        } else {
                         add_composite_key(&mut result, &lcols, "__jkL");
                         add_composite_key(&mut pb, &rcols, "__jkR");
                         let cfg = JoinConfig { left_key: "__jkL".into(), right_key: "__jkR".into(), join_type: JoinType::Inner };
                         result = join_blocks(ctx, std::mem::replace(&mut result, DataBlock::empty()), pb, &cfg)?;
                         result.columns.retain(|c| c.name != "__jkL" && c.name != "__jkR");
                         if let Some(lz) = lz { result = finish_lazy(result, lz); }
+                        }
                     }
                 }
                 None => {
@@ -1830,6 +1872,12 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
                 }
             }
             result = push_down_conjuncts(&mut conjuncts, result, ctx)?;
+            if ek_count > 0 {
+                // temporary expression-key columns that no remaining conjunct reads
+                let mut refs: std::collections::HashSet<String> = std::collections::HashSet::new();
+                for c in &conjuncts { let mut v = Vec::new(); crate::rewrite::referenced_cols(c, &mut v); refs.extend(v); }
+                result.columns.retain(|c| !c.name.starts_with("__ek") || refs.contains(&c.name));
+            }
             prof!(__tf, "  join step done rows={} cols={} pending={}", result.num_rows, result.columns.len(), pending.len());
         }
         let defer_gb = deferred.is_empty() && conjuncts.is_empty() && stmt.joins.len() == n_implicit && stmt.lateral_views.is_empty() && !crate::testing::no_defer_gb() && group_defer_shape(stmt) && !use_general;
@@ -2837,6 +2885,11 @@ fn load_table_sets<'a>(
             if let Expr::BinOp { op: BinOpKind::Eq, left: a, right: b } = c {
                 if let (Some(x), Some(y)) = (crate::rewrite::col_ref(a), crate::rewrite::col_ref(b)) {
                     for n in [x, y] { keys.insert(n.rsplit('.').next().unwrap_or(&n).to_ascii_lowercase()); }
+                } else if !crate::testing::no_expr_join() {
+                    // an equality with an expression of this table on a side: the columns it reads are loaded as keys
+                    // (real data in the pending block) so the key expression can be evaluated before the join
+                    let mut cols = Vec::new();
+                    if crate::rewrite::referenced_cols(c, &mut cols) { for n in cols { keys.insert(n.rsplit('.').next().unwrap_or(&n).to_ascii_lowercase()); } }
                 }
             }
         }
@@ -3587,23 +3640,37 @@ fn expr_side(e: &Expr, left: &DataBlock, right: &DataBlock) -> Option<bool> {
     match (in_l, in_r) { (true, false) => Some(true), (false, true) => Some(false), _ => None }
 }
 
+/// Equalities `f(left cols) = g(right cols)` where at least one side is not a plain column:
+/// (conjunct index, expression over `left`, expression over `right`). Names only; nothing is evaluated.
+fn expr_link_sides<'a>(conjuncts: &'a [Expr], left: &DataBlock, right: &DataBlock) -> Vec<(usize, &'a Expr, &'a Expr)> {
+    let mut out = Vec::new();
+    if crate::testing::no_expr_join() { return out; }
+    for (i, c) in conjuncts.iter().enumerate() {
+        let Expr::BinOp { op: BinOpKind::Eq, left: a, right: b } = c else { continue };
+        if crate::rewrite::col_ref(a).is_some() && crate::rewrite::col_ref(b).is_some() { continue; }
+        match (expr_side(a, left, right), expr_side(b, left, right)) {
+            (Some(true), Some(false)) => out.push((i, a.as_ref(), b.as_ref())),
+            (Some(false), Some(true)) => out.push((i, b.as_ref(), a.as_ref())),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Key column of one side of an expression link (plain column or vectorised expression).
+fn expr_key_col(e: &Expr, blk: &DataBlock) -> Option<ColumnData> {
+    if let Some(n) = crate::rewrite::col_ref(e) {
+        let n = find_col_in_block(&n, blk)?;
+        find_col(blk, &n).filter(|c| c.data.len() == blk.num_rows).map(|c| c.data.clone())
+    } else { crate::exprkey::key_column(e, blk) }
+}
+
 /// `f(left cols) = g(right cols)` where at least one side is not a plain column: the two key columns
 /// (left's, right's) when both evaluate vectorised to the same class (number/text).
 fn expr_link(c: &Expr, left: &DataBlock, right: &DataBlock) -> Option<(ColumnData, ColumnData)> {
-    let Expr::BinOp { op: BinOpKind::Eq, left: a, right: b } = c else { return None };
-    if crate::rewrite::col_ref(a).is_some() && crate::rewrite::col_ref(b).is_some() { return None; }
-    let (la, lb) = match (expr_side(a, left, right)?, expr_side(b, left, right)?) {
-        (true, false) => (a, b),
-        (false, true) => (b, a),
-        _ => return None,
-    };
-    let key = |e: &Expr, blk: &DataBlock| -> Option<ColumnData> {
-        if crate::rewrite::col_ref(e).is_some() {
-            let n = find_col_in_block(&crate::rewrite::col_ref(e)?, blk)?;
-            find_col(blk, &n).map(|c| c.data.clone())
-        } else { crate::exprkey::key_column(e, blk) }
-    };
-    let (lk, rk) = (key(la, left)?, key(lb, right)?);
+    let one = std::slice::from_ref(c);
+    let (_, la, lb) = *expr_link_sides(one, left, right).first()?;
+    let (lk, rk) = (expr_key_col(la, left)?, expr_key_col(lb, right)?);
     if jclass(&lk) != jclass(&rk) { return None; }
     Some((lk, rk))
 }
@@ -3626,13 +3693,23 @@ fn join_general(left: &DataBlock, right: &DataBlock, on: &Expr, kind: &JoinKind,
     let mut residual: Vec<Expr> = Vec::new();
     // equalities with an expression of one input on a side: evaluated into temporary key columns; the equality
     // itself stays in the residual as the exact re-check
+    // (same-type Int64/Int64, Float64/Float64 or text/text keys are compared exactly by the join itself: no re-check)
     let mut ekeys: Vec<(ColumnData, ColumnData)> = Vec::new();
+    let mut ek_exact: std::collections::HashSet<usize> = std::collections::HashSet::new();
     if !crate::testing::no_expr_join() {
-        for c in &conjuncts {
-            if let Some(k) = expr_link(c, left, right) { ekeys.push(k); }
+        for (i, c) in conjuncts.iter().enumerate() {
+            if let Some(k) = expr_link(c, left, right) {
+                let same = match (&k.0, &k.1) {
+                    (ColumnData::Int64(_), ColumnData::Int64(_)) | (ColumnData::Float64(_), ColumnData::Float64(_)) => true,
+                    (a, b) => jclass(a) == 1 && jclass(b) == 1,
+                };
+                if same { ek_exact.insert(i); }
+                ekeys.push(k);
+            }
         }
     }
-    for c in conjuncts {
+    for (ci, c) in conjuncts.into_iter().enumerate() {
+        if ek_exact.contains(&ci) { continue; }
         let mut key = None;
         if let Expr::BinOp { op: BinOpKind::Eq, left: a, right: b } = &c {
             if let (Some(x), Some(y)) = (crate::rewrite::col_ref(a), crate::rewrite::col_ref(b)) {
