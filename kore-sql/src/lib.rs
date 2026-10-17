@@ -38,6 +38,7 @@ pub mod spill;
 pub mod dml;
 pub mod maps;
 pub mod hof;
+pub(crate) mod bind;
 pub(crate) mod spill_ops;
 
 pub use ast::*;

@@ -377,3 +377,15 @@ pub fn set_no_fused_sparse(on: bool) { NO_FUSED_SPARSE.store(on, Ordering::Relax
 
 #[inline]
 pub(crate) fn no_fused_sparse() -> bool { NO_FUSED_SPARSE.load(Ordering::Relaxed) }
+
+pub(crate) static NO_BIND_CHECK: AtomicBool = AtomicBool::new(false);
+
+/// Skip the static column-binding check (bind.rs): an unresolvable column then evaluates to NULL as it used to.
+/// `KORE_NO_BIND_CHECK=1` does the same for a whole process.
+pub fn set_no_bind_check(on: bool) { NO_BIND_CHECK.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_bind_check() -> bool {
+    static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_BIND_CHECK.load(Ordering::Relaxed) || *ENV.get_or_init(|| std::env::var("KORE_NO_BIND_CHECK").map_or(false, |v| v == "1"))
+}

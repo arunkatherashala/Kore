@@ -319,6 +319,7 @@ impl KqlContext {
 
         let query = parse_cached(sql_trim)?;
         validate_functions(&query, self)?;
+        if !crate::testing::no_bind_check() { crate::bind::check_query(&query, self)?; }
 
         // Phase 17: try vectorized fast-path before falling into the row-loop
         // interpreter.  Returns None if the query shape isn't supported, in
@@ -342,6 +343,7 @@ impl KqlContext {
     fn execute_cte(&self, sql: &str) -> Result<DataBlock, KoreError> {
         let query = parse_cached(sql)?;
         validate_functions(&query, self)?;
+        if !crate::testing::no_bind_check() { crate::bind::check_query(&query, self)?; }
         CURRENT_UDFS.with(|cell| { *cell.borrow_mut() = self.udfs.clone(); });
         execute_query(&query, self)
     }
@@ -789,6 +791,11 @@ impl KqlContext {
         DataBlock::new(columns)
     }
 
+    /// SQL text of a view (exact name first, then case-insensitive).
+    pub(crate) fn view_sql(&self, name: &str) -> Option<&String> {
+        self.views.get(name).or_else(|| self.views.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v))
+    }
+
     pub fn get(&self, name: &str) -> Option<&DataBlock> {
         if let Some(b) = self.tables.get(name).or_else(|| self.mut_tables.get(name)) { return Some(b.as_ref()); }
         // table names are case-insensitive (Spark default)
@@ -1089,7 +1096,7 @@ pub fn execute(sql: &str, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
 /// Parsed statements by SQL text. The parser is a pure function of the text (no catalog access), so a cached
 /// AST is valid across any DDL/DML/register; everything that depends on the catalog (function validation,
 /// rewrites, planning) still runs per execution on the immutable AST.
-fn parse_cached(sql: &str) -> Result<std::sync::Arc<Query>, KoreError> {
+pub(crate) fn parse_cached(sql: &str) -> Result<std::sync::Arc<Query>, KoreError> {
     use std::sync::{Arc, Mutex, OnceLock};
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<Query>>>> = OnceLock::new();
     if crate::testing::no_stmt_cache() || sql.len() > 32 * 1024 {
