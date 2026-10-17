@@ -25,6 +25,15 @@ pub fn set_no_fused(on: bool) { NO_FUSED.store(on, Ordering::Relaxed); }
 #[inline]
 pub(crate) fn no_fused() -> bool { NO_FUSED.load(Ordering::Relaxed) }
 
+pub(crate) static NO_GS_SHARED: AtomicBool = AtomicBool::new(false);
+
+/// Run ROLLUP / CUBE / GROUPING SETS the old way (every set hashes and aggregates the input rows itself)
+/// instead of deriving the coarser sets from the finest one (rollup.rs), so the two can be compared.
+pub fn set_no_gs_shared(on: bool) { NO_GS_SHARED.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_gs_shared() -> bool { NO_GS_SHARED.load(Ordering::Relaxed) }
+
 pub(crate) static NO_DATE_ACCEL: AtomicBool = AtomicBool::new(false);
 
 /// Disable the ISO-date integer accelerator (dateaccel.rs) so it can be compared with the string path.
