@@ -186,3 +186,28 @@ fn qualified_join_subquery_is_uncorrelated() {
         }
     }
 }
+
+#[test]
+fn early_scalar_subquery_folding() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let qs = [
+        "select a.id from ws a, wr b where a.o = b.ro and a.w = (select distinct w from ws where id = 0) order by a.id",
+        "select a.id from ws a, wr b where a.o = b.ro and a.v > 1.2 * (select avg(rv) from wr) order by a.id",
+        "select a.id from ws a, wr b where a.o = b.ro and a.v >= (select max(v) from ws where id < 0) order by a.id",
+        "select a.id from ws a, wr b where a.o = b.ro and a.w = (select w from ws) order by a.id",
+        "select a.id from ws a, wr b where a.o = b.ro and a.o <= (select min(ro) from wr) order by a.id",
+        "select a.id from ws a, wr b where a.o = b.ro and a.v > (select avg(x.v) from ws x where x.o = a.o) order by a.id",
+        "select a.id from ws a, wr b where a.o = b.ro and a.w <> (select max(w) from ws) and b.rv < (select avg(rv) from wr) order by a.id",
+    ];
+    for (seed, (nws, nwr, odom, wdom)) in SIZES.into_iter().enumerate() {
+        let mut r = Rng(0x999 ^ (seed as u64 * 29 + 7));
+        let ctx = make_ctx(&mut r, nws, nwr, odom, wdom);
+        for q in qs {
+            testing::set_no_early_scalar(true);
+            let w = ctx.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+            testing::set_no_early_scalar(false);
+            let g = ctx.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+            assert_eq!(w, g, "{q} (seed {seed})");
+        }
+    }
+}

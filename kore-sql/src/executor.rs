@@ -1462,6 +1462,11 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
     let mut conjuncts: Vec<Expr> = Vec::new();
     if planned || n_implicit > 0 {
         if let Some(w) = &where_pred { crate::rewrite::split_conjuncts(w, &mut conjuncts); }
+        // `col <op> (SELECT ..)` with an uncorrelated scalar subquery: evaluate it now so the comparison is a plain
+        // column-vs-constant predicate that the table load, the key sets and the join planner can use (TPC-DS Q6)
+        if n_implicit > 0 && !crate::testing::no_early_scalar() {
+            for c in conjuncts.iter_mut() { fold_scalar_conjunct(c, ctx); }
+        }
         if n_implicit > 0 {
             // `a OR b` over bare column names: attribute every column to its table so the per-table parts of
             // each branch can be derived (and applied while loading the table) as well.
@@ -5393,6 +5398,26 @@ fn bare_col_name(expr: &Expr) -> Option<String> {
         Expr::Col(c)        => Some(c.clone()),
         Expr::QualCol(_, c) => Some(c.clone()),
         _                   => None,
+    }
+}
+
+/// Replace an uncorrelated scalar subquery operand of a comparison by its single non-NULL value. Anything else
+/// (several rows, no row, NULL, an error, a correlated subquery) is left for the ordinary evaluation.
+fn fold_scalar_conjunct(c: &mut Expr, ctx: &KqlContext) {
+    let Expr::BinOp { op, left, right } = c else { return };
+    if !matches!(op, BinOpKind::Eq | BinOpKind::Ne | BinOpKind::Lt | BinOpKind::Le | BinOpKind::Gt | BinOpKind::Ge) { return; }
+    for side in [left, right] {
+        let Expr::ScalarSubquery(stmt) = side.as_ref() else { continue };
+        if !is_uncorrelated(stmt, ctx) { continue; }
+        let Ok(res) = execute_select(stmt, ctx) else { continue };
+        if res.num_rows != 1 || res.columns.is_empty() { continue; }
+        let lit = match res.columns[0].data.get_value(0) {
+            Value::Int(i) => Expr::Int(i),
+            Value::Float(f) => Expr::Float(f),
+            Value::Str(s) => Expr::Str(s),
+            _ => continue,
+        };
+        **side = lit;
     }
 }
 

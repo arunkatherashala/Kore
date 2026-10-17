@@ -431,3 +431,9 @@ pub(crate) static NO_UNCORR_QUAL: AtomicBool = AtomicBool::new(false);
 pub fn set_no_uncorr_qual(on: bool) { NO_UNCORR_QUAL.store(on, Ordering::Relaxed); }
 #[inline]
 pub(crate) fn no_uncorr_qual() -> bool { NO_UNCORR_QUAL.load(Ordering::Relaxed) }
+
+pub(crate) static NO_EARLY_SCALAR: AtomicBool = AtomicBool::new(false);
+/// Leave uncorrelated scalar subqueries of comma-join predicates to the late evaluation (A/B tests).
+pub fn set_no_early_scalar(on: bool) { NO_EARLY_SCALAR.store(on, Ordering::Relaxed); }
+#[inline]
+pub(crate) fn no_early_scalar() -> bool { NO_EARLY_SCALAR.load(Ordering::Relaxed) }
