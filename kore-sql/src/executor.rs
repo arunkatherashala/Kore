@@ -1115,6 +1115,9 @@ pub(crate) fn parse_cached(sql: &str) -> Result<std::sync::Arc<Query>, KoreError
 }
 
 pub fn execute_query(query: &Query, ctx: &KqlContext) -> Result<DataBlock, KoreError> {
+    let semi = crate::semicte::rewrite(query, ctx);
+    if semi.is_some() { crate::testing::SEMI_CTE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+    let query = semi.as_ref().unwrap_or(query);
     // 1. Register CTEs in an extended context. Cloning the context copies every registered table,
     // so only do it when the query actually defines CTEs.
     let extended;

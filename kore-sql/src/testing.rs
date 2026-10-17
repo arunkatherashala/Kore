@@ -396,3 +396,19 @@ pub fn bind_check(sql: &str, ctx: &crate::executor::KqlContext) -> Result<(), ko
     let q = crate::parser::parse_query(sql.trim())?;
     crate::bind::check_query(&q, ctx)
 }
+
+pub(crate) static NO_SEMI_CTE: AtomicBool = AtomicBool::new(false);
+pub(crate) static SEMI_CTE_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Keep self-join pair CTEs (`a.k = b.k AND a.x <> b.x`) that are only used as IN key sets as pair
+/// materialisations instead of the distinct key set (semicte.rs), for A/B tests.
+pub fn set_no_semi_cte(on: bool) { NO_SEMI_CTE.store(on, Ordering::Relaxed); }
+
+#[inline]
+pub(crate) fn no_semi_cte() -> bool {
+    static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    NO_SEMI_CTE.load(Ordering::Relaxed) || *ENV.get_or_init(|| std::env::var_os("KORE_NO_SEMI_CTE").is_some())
+}
+
+/// How many pair CTEs were replaced by their key sets so far.
+pub fn semi_cte_hits() -> usize { SEMI_CTE_HITS.load(Ordering::Relaxed) }
