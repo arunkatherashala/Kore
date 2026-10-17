@@ -1002,6 +1002,39 @@ fn union_all_numeric(left: &DataBlock, right: &DataBlock) -> Option<DataBlock> {
     Some(DataBlock { columns: cols, num_rows: left.num_rows + right.num_rows })
 }
 
+/// UNION (distinct) of arms whose columns have the same Int64 / Float64 / text type: concatenate, then keep the first
+/// row of every distinct value tuple (NULLs equal each other, integral floats are keyed like `key_of`).
+fn union_distinct_typed(left: &DataBlock, right: &DataBlock) -> Option<DataBlock> {
+    #[derive(Hash, PartialEq, Eq)]
+    enum K<'a> { N, I(i64), F(u64), S(&'a str) }
+    if left.num_rows == 0 || right.num_rows == 0 { return None; }
+    let ok = left.columns.iter().zip(&right.columns).all(|(a, b)| std::mem::discriminant(&a.data) == std::mem::discriminant(&b.data)
+        && matches!(a.data, ColumnData::Int64(_) | ColumnData::Float64(_) | ColumnData::Str(_)));
+    if !ok || left.columns.is_empty() { return None; }
+    let mut r = right.clone();
+    for (c, l) in r.columns.iter_mut().zip(&left.columns) { c.name = l.name.clone(); }
+    let all = DataBlock::concat(vec![left.clone(), r]).ok()?;
+    let n = all.num_rows;
+    let mut seen: HashSet<Vec<K>> = HashSet::with_capacity(n);
+    let mut keep: Vec<usize> = Vec::new();
+    for i in 0..n {
+        let key: Vec<K> = all.columns.iter().map(|c| match &c.data {
+            ColumnData::Int64(v) => v[i].map_or(K::N, K::I),
+            ColumnData::Float64(v) => match v[i] {
+                None => K::N,
+                Some(f) if f.is_nan() => K::F(u64::MAX),
+                Some(f) if f.fract() == 0.0 && f.abs() < 9.0e15 => K::I(f as i64),
+                Some(f) => K::F(f.to_bits()),
+            },
+            ColumnData::Str(v) => v[i].as_deref().map_or(K::N, K::S),
+            _ => K::N,
+        }).collect();
+        if seen.insert(key) { keep.push(i); }
+    }
+    if keep.len() == n { return Some(all); }
+    Some(all.select_rows(&keep))
+}
+
 /// UNION / INTERSECT / EXCEPT (with ALL variants); column names come from the left side.
 pub fn apply_set_op(left: DataBlock, right: DataBlock, kind: &SetOpKind) -> Result<DataBlock, KoreError> {
     if left.columns.len() != right.columns.len() {
@@ -1017,6 +1050,9 @@ pub fn apply_set_op(left: DataBlock, right: DataBlock, kind: &SetOpKind) -> Resu
     }
     if matches!(kind, SetOpKind::UnionAll) && !crate::testing::no_union_cols() {
         if let Some(b) = union_all_numeric(&left, &right) { return Ok(b); }
+    }
+    if matches!(kind, SetOpKind::Union) && !crate::testing::no_union_cols() {
+        if let Some(b) = union_distinct_typed(&left, &right) { return Ok(b); }
     }
     let names: Vec<String> = left.columns.iter().map(|c| c.name.clone()).collect();
     let hints: Vec<ColumnData> = left.columns.iter().map(|c| c.data.clone()).collect();

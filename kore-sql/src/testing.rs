@@ -437,3 +437,9 @@ pub(crate) static NO_EARLY_SCALAR: AtomicBool = AtomicBool::new(false);
 pub fn set_no_early_scalar(on: bool) { NO_EARLY_SCALAR.store(on, Ordering::Relaxed); }
 #[inline]
 pub(crate) fn no_early_scalar() -> bool { NO_EARLY_SCALAR.load(Ordering::Relaxed) }
+
+pub(crate) static NO_CAST_FOLD: AtomicBool = AtomicBool::new(false);
+/// Do not fold `CAST('literal' AS DATE)` in comma-join predicates (A/B tests).
+pub fn set_no_cast_fold(on: bool) { NO_CAST_FOLD.store(on, Ordering::Relaxed); }
+#[inline]
+pub(crate) fn no_cast_fold() -> bool { NO_CAST_FOLD.load(Ordering::Relaxed) }

@@ -1467,6 +1467,11 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
         if n_implicit > 0 && !crate::testing::no_early_scalar() {
             for c in conjuncts.iter_mut() { fold_scalar_conjunct(c, ctx); }
         }
+        // `cast('1999-04-02' AS date)` is a constant: as a plain string literal the date predicate runs column-at-a-time
+        // (and on the integer date encoding) instead of per row on the joined result
+        if !crate::testing::no_cast_fold() {
+            for c in conjuncts.iter_mut() { *c = fold_date_casts(c); }
+        }
         if n_implicit > 0 {
             // `a OR b` over bare column names: attribute every column to its table so the per-table parts of
             // each branch can be derived (and applied while loading the table) as well.
@@ -5399,6 +5404,20 @@ fn bare_col_name(expr: &Expr) -> Option<String> {
         Expr::QualCol(_, c) => Some(c.clone()),
         _                   => None,
     }
+}
+
+/// `CAST('literal' AS DATE)` -> the string literal the cast produces (dates are ISO strings in KORE).
+fn fold_date_casts(e: &Expr) -> Expr {
+    crate::ast_walk::map_expr(e, &mut |x| {
+        let Expr::FuncCall { name, args } = x else { return None };
+        if !name.eq_ignore_ascii_case("CAST") || args.len() != 2 || !matches!(args[0], Expr::Str(_)) { return None; }
+        let is_date = matches!(&args[1], Expr::Col(t) | Expr::Str(t) if t.eq_ignore_ascii_case("date"));
+        if !is_date { return None; }
+        match eval_expr(x, &DataBlock::empty(), 0) {
+            ExprVal::Str(s) if s.len() == 10 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-' => Some(Expr::Str(s)),
+            _ => None,
+        }
+    })
 }
 
 /// Replace an uncorrelated scalar subquery operand of a comparison by its single non-NULL value. Anything else

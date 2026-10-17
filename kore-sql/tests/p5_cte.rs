@@ -211,3 +211,34 @@ fn early_scalar_subquery_folding() {
         }
     }
 }
+
+#[test]
+fn union_distinct_typed_and_date_cast_fold() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for (seed, (nws, nwr, odom, wdom)) in SIZES.into_iter().enumerate() {
+        let mut r = Rng(0x4242 ^ (seed as u64 * 11 + 9));
+        let mut ctx = make_ctx(&mut r, nws, nwr, odom, wdom);
+        let nd = 50 + nws;
+        ctx.register("dd", DataBlock::new(vec![
+            Column::int64("dk", (0..nd as i64).map(Some).collect()),
+            Column::str_col("d", (0..nd).map(|i| if i % 13 == 7 { None } else { Some(format!("1999-0{}-{:02}", 1 + i % 5, 1 + i % 28)) }).collect()),
+        ]).unwrap());
+        for q in [
+            "select o, w from ws union select ro, ro from wr",
+            "select o, v from ws union select o, v from ws",
+            "select o, w from ws union select o, w from ws union select w, o from ws",
+            "select o, cast(v as double) from ws union select ro, rv from wr",
+            "select d from dd union select d from dd",
+            "select count(*) c from (select o, w from ws union select ro, ro from wr) u",
+            "select ws.id, d from ws, dd where ws.o = dd.dk and d between '1999-02-01' and cast('1999-04-02' as date) order by ws.id",
+            "select ws.id from ws, dd where ws.o = dd.dk and d >= cast('1999-03-01' as date) and ws.w in (select ro from wr) order by ws.id",
+            "select ws.id from ws, dd where ws.o = dd.dk and d < cast('bogus' as date) order by ws.id",
+        ] {
+            testing::set_no_union_cols(true); testing::set_no_cast_fold(true);
+            let w = ctx.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+            testing::set_no_union_cols(false); testing::set_no_cast_fold(false);
+            let g = ctx.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+            assert_eq!(w, g, "{q} (seed {seed})");
+        }
+    }
+}
