@@ -1356,6 +1356,10 @@ fn execute_select_inner(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock
             return execute_select(&r, ctx);
         }
     }
+    if let Some(r) = crate::semicte::push_union_keys(stmt, ctx) {
+        crate::testing::SEMI_CTE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return execute_select(&r, ctx);
+    }
     // shapes outside the specialised paths below (see general.rs) are run by the general tail
     let use_general = crate::general::needs_general(stmt);
     if !use_general {
@@ -5407,7 +5411,7 @@ fn bare_col_name(expr: &Expr) -> Option<String> {
 }
 
 /// `CAST('literal' AS DATE)` -> the string literal the cast produces (dates are ISO strings in KORE).
-fn fold_date_casts(e: &Expr) -> Expr {
+pub(crate) fn fold_date_casts(e: &Expr) -> Expr {
     crate::ast_walk::map_expr(e, &mut |x| {
         let Expr::FuncCall { name, args } = x else { return None };
         if !name.eq_ignore_ascii_case("CAST") || args.len() != 2 || !matches!(args[0], Expr::Str(_)) { return None; }

@@ -242,3 +242,33 @@ fn union_distinct_typed_and_date_cast_fold() {
         }
     }
 }
+
+#[test]
+fn union_all_derived_table_key_push() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for (seed, (nws, nwr, odom, wdom)) in SIZES.into_iter().enumerate() {
+        let mut r = Rng(0x5151 ^ (seed as u64 * 19 + 2));
+        let mut ctx = make_ctx(&mut r, nws, nwr, odom, wdom);
+        let nd = 30;
+        ctx.register("dd", DataBlock::new(vec![
+            Column::int64("dk", (0..nd as i64).map(Some).collect()),
+            Column::str_col("d", (0..nd).map(|i| if i % 11 == 7 { None } else { Some(format!("1999-0{}-{:02}", 1 + i % 5, 1 + i % 28)) }).collect()),
+            Column::int64("dyear", (0..nd as i64).map(|i| Some(1998 + i % 3)).collect()),
+        ]).unwrap());
+        for q in [
+            "select dyear, sum(x) s, count(*) c from (select o as k, v as x from ws union all select ro, rv from wr) u, dd where k = dk and dyear = 1999 group by dyear",
+            "select u.k, x from (select o as k, v as x from ws union all select ro, 0 from wr) u, dd where u.k = dd.dk and d between '1999-02-01' and cast('1999-04-02' as date) order by u.k, x",
+            "select k, x from (select o as k, v as x from ws union all select ro as k, rv as x from wr union all select w, id from ws) u, dd where k = dk and dyear <> 1998 order by k, x",
+            "select k from (select o as k from ws union all select ro from wr) u, dd where k = dk order by k",
+            "select k, w from (select o as k, w from ws union all select ro, o from wr) u, dd, ws z where k = dk and z.o = u.w and dyear = 2000 order by k, w",
+            "select k from (select o as k from ws where v > 3 union all select coalesce(ro, 1) from wr) u, dd where k = dk and dd.dk > 2 order by k",
+            "select k from (select o as k from ws union all select ro from wr) u left join dd on k = dk where dyear = 2000 order by k",
+        ] {
+            testing::set_no_union_push(true);
+            let w = ctx.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+            testing::set_no_union_push(false);
+            let g = ctx.query(q).map(|b| render(&b)).map_err(|e| format!("{e:?}"));
+            assert_eq!(w, g, "{q} (seed {seed})");
+        }
+    }
+}

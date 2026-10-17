@@ -443,3 +443,9 @@ pub(crate) static NO_CAST_FOLD: AtomicBool = AtomicBool::new(false);
 pub fn set_no_cast_fold(on: bool) { NO_CAST_FOLD.store(on, Ordering::Relaxed); }
 #[inline]
 pub(crate) fn no_cast_fold() -> bool { NO_CAST_FOLD.load(Ordering::Relaxed) }
+
+pub(crate) static NO_UNION_PUSH: AtomicBool = AtomicBool::new(false);
+/// Do not push join keys of a comma-joined dimension table into the arms of a UNION ALL derived table (A/B tests).
+pub fn set_no_union_push(on: bool) { NO_UNION_PUSH.store(on, Ordering::Relaxed); }
+#[inline]
+pub(crate) fn no_union_push() -> bool { NO_UNION_PUSH.load(Ordering::Relaxed) }

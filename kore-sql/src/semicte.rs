@@ -150,3 +150,137 @@ pub(crate) fn rewrite(query: &Query, ctx: &KqlContext) -> Option<Query> {
     }
     out
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// Join keys pushed into a UNION ALL derived table.
+//
+//   FROM (SELECT .. FROM a UNION ALL SELECT .. FROM b) u, d WHERE u.k = d.dk AND <filters on d only>
+//
+// Every arm row whose k-expression is not a `dk` of a qualifying `d` row is dropped by the inner join anyway, so each arm
+// may carry `<k-expression> IN (SELECT dk FROM d WHERE <filters>)` and shrink before the arms are concatenated.
+
+fn out_name(p: &Projection) -> Option<String> {
+    match p {
+        Projection::Expr { alias: Some(a), .. } => Some(a.clone()),
+        Projection::Expr { expr: Expr::Col(c), .. } => Some(c.rsplit('.').next().unwrap_or(c).to_string()),
+        Projection::Expr { expr: Expr::QualCol(_, c), .. } => Some(c.clone()),
+        _ => None,
+    }
+}
+
+fn plain_arm(s: &SelectStmt, ncols: usize) -> bool {
+    !s.distinct && s.group_by.is_empty() && s.group_exprs.is_empty() && s.having.is_none() && s.qualify.is_none()
+        && s.limit.is_none() && s.offset.is_none() && s.windows.is_empty() && s.pivot.is_none() && s.unpivot.is_none()
+        && s.lateral_views.is_empty() && s.grouping == Grouping::Plain && s.order_by.is_empty()
+        && s.projections.len() == ncols
+        && s.projections.iter().all(|p| match p {
+            Projection::Expr { expr, .. } => !crate::rewrite::contains_agg(expr) && !crate::ast_walk::any_node(expr, &|x| matches!(x, Expr::Window { .. } | Expr::AggX { .. })),
+            Projection::Star => false,
+        })
+}
+
+/// `col` as (qualifier, bare name).
+fn split_col(e: &Expr) -> Option<(Option<&str>, &str)> {
+    match e {
+        Expr::Col(c) => Some((None, c.as_str())),
+        Expr::QualCol(t, c) => Some((Some(t.as_str()), c.as_str())),
+        _ => None,
+    }
+}
+
+fn dbgp(s: String) { if crate::executor::prof_on() { eprintln!("[prof] {s}"); } }
+
+pub(crate) fn push_union_keys(stmt: &SelectStmt, ctx: &KqlContext) -> Option<SelectStmt> {
+    if crate::testing::no_union_push() || stmt.joins.is_empty() || stmt.where_clause.is_none() { return None; }
+    if !stmt.joins.iter().all(|j| matches!(j.join_type, JoinKind::Implicit)) || stmt.pivot.is_some() || stmt.unpivot.is_some() || !stmt.set_ops.is_empty() { return None; }
+    let tables: Vec<&TableExpr> = std::iter::once(&stmt.from).chain(stmt.joins.iter().map(|j| &j.table)).collect();
+    let alias_of = |t: &TableExpr| t.alias.clone().unwrap_or_else(|| t.name.clone());
+    // the derived UNION ALL table
+    let di = tables.iter().position(|t| t.subquery.as_ref().map_or(false, |q| !q.set_ops.is_empty()));
+    dbgp(format!("union push: derived idx {:?} of {}", di, tables.len()));
+    let di = di?;
+    let dt = tables[di];
+    let sq = dt.subquery.as_ref()?;
+    if !sq.set_ops.iter().all(|(k, a)| matches!(k, SetOpKind::UnionAll) && a.set_ops.is_empty()) || !sq.order_by.is_empty() || sq.limit.is_some() { return None; }
+    let ncols = sq.projections.len();
+    let names: Vec<Option<String>> = if dt.col_aliases.is_empty() { sq.projections.iter().map(out_name).collect() } else { dt.col_aliases.iter().cloned().map(Some).collect() };
+    if names.len() != ncols { return None; }
+    let mut first = (**sq).clone();
+    first.set_ops = Vec::new();
+    if !plain_arm(&first, ncols) || !sq.set_ops.iter().all(|(_, a)| plain_arm(a, ncols)) { return None; }
+    let da = alias_of(dt);
+    // the other tables must be plain catalog tables with known columns
+    let mut cols: Vec<(String, Vec<String>)> = Vec::new();
+    let mut others: Vec<&TableExpr> = Vec::new();
+    for (i, t) in tables.iter().enumerate() {
+        if i == di { continue; }
+        if t.subquery.is_some() || t.values.is_some() { return None; }
+        let b = ctx.get(&t.name)?;
+        cols.push((alias_of(t), b.columns.iter().map(|c| c.name.rsplit('.').next().unwrap_or(&c.name).to_string()).collect()));
+        others.push(t);
+    }
+    let derived_pos = |q: Option<&str>, c: &str| -> Option<usize> {
+        if let Some(q) = q { if !q.eq_ignore_ascii_case(&da) { return None; } }
+        else if cols.iter().any(|(_, cs)| cs.iter().any(|x| x == c)) { return None; }
+        names.iter().position(|n| n.as_deref().map_or(false, |n| n.eq_ignore_ascii_case(c)))
+    };
+    // the table a column belongs to
+    let owner = |q: Option<&str>, c: &str| -> Option<usize> {
+        let hits: Vec<usize> = cols.iter().enumerate().filter(|(_, (a, cs))| q.map_or(true, |q| q.eq_ignore_ascii_case(a)) && cs.iter().any(|x| x == c)).map(|(i, _)| i).collect();
+        if hits.len() == 1 && !(q.is_none() && names.iter().any(|n| n.as_deref() == Some(c))) { Some(hits[0]) } else { None }
+    };
+    dbgp(format!("union push: arms ok, cols={}", cols.len()));
+    let mut conj = Vec::new();
+    crate::rewrite::split_conjuncts(stmt.where_clause.as_ref()?, &mut conj);
+    if !crate::testing::no_cast_fold() { for c in conj.iter_mut() { *c = crate::executor::fold_date_casts(c); } }
+    // links: (derived column position, table index, table column)
+    let mut links: Vec<(usize, usize, String)> = Vec::new();
+    for c in &conj {
+        if let Expr::BinOp { op: BinOpKind::Eq, left, right } = c {
+            if let (Some((lq, lc)), Some((rq, rc))) = (split_col(left), split_col(right)) {
+                if let (Some(p), Some(t)) = (derived_pos(lq, lc), owner(rq, rc)) { links.push((p, t, rc.to_string())); }
+                else if let (Some(p), Some(t)) = (derived_pos(rq, rc), owner(lq, lc)) { links.push((p, t, lc.to_string())); }
+            }
+        }
+    }
+    let mut sets: Vec<(usize, SelectStmt)> = Vec::new();
+    for (pos, ti, tcol) in links {
+        // filters that read this table only
+        let mut fs = Vec::new();
+        for c in &conj {
+            let mut refs = Vec::new();
+            if !crate::rewrite::referenced_cols(c, &mut refs) || refs.is_empty() { continue; }
+            let all_t = refs.iter().all(|r| {
+                let (q, n) = match r.split_once('.') { Some((q, n)) => (Some(q), n), None => (None, r.as_str()) };
+                owner(q, n) == Some(ti)
+            });
+            if all_t { fs.push(c.clone()); }
+        }
+        let Some(w) = crate::rewrite::and_all(fs) else { continue };
+        let mut sub = SelectStmt::star_from(others[ti].clone());
+        sub.projections = vec![Projection::Expr { expr: Expr::Col(tcol), alias: None }];
+        sub.where_clause = Some(w);
+        sets.push((pos, sub));
+    }
+    dbgp(format!("union push: links sets={}", sets.len()));
+    if sets.is_empty() { return None; }
+    let mut out = stmt.clone();
+    let dsub = out.joins.iter_mut().map(|j| &mut j.table).chain(std::iter::once(&mut out.from)).find(|t| t.subquery.as_ref().map_or(false, |q| !q.set_ops.is_empty()) && alias_of(t) == da)?;
+    let q = dsub.subquery.as_mut()?;
+    let mut changed = false;
+    let mut apply = |arm: &mut SelectStmt| {
+        for (pos, sub) in &sets {
+            let Projection::Expr { expr, .. } = &arm.projections[*pos] else { continue };
+            let inn = Expr::InSubquery { expr: Box::new(expr.clone()), subquery: Box::new(sub.clone()), negated: false };
+            let mut have = Vec::new();
+            if let Some(w) = &arm.where_clause { crate::rewrite::split_conjuncts(w, &mut have); }
+            if have.contains(&inn) { continue; }
+            have.push(inn);
+            arm.where_clause = crate::rewrite::and_all(have);
+            changed = true;
+        }
+    };
+    apply(q.as_mut());
+    for (_, a) in q.set_ops.iter_mut() { apply(a); }
+    if changed { Some(out) } else { None }
+}
