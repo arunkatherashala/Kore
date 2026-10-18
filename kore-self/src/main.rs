@@ -182,6 +182,12 @@ fn save_learning_history(owner: &str, history: &learning::LearningHistory) {
     }
 }
 
+/// `--demo-seed` on the command line or `KORE_SELF_DEMO_SEED=1` in the environment.
+fn demo_seed_requested() -> bool {
+    std::env::var("KORE_SELF_DEMO_SEED").map(|v| v == "1").unwrap_or(false)
+        || std::env::args().any(|a| a == "--demo-seed")
+}
+
 impl KoreSelf {
     /// Load saved state from disk, or create fresh identity.
     pub fn load_or_new(owner: &str) -> Self {
@@ -275,11 +281,17 @@ impl KoreSelf {
                 world: world_model::WorldModel::new(),
                 learning_history: load_learning_history(owner),
             };
-            s.seed();
+            // New instances start EMPTY. The author biography is demo data only.
+            if demo_seed_requested() {
+                eprintln!("[kore-self] --demo-seed: seeding the author's demo memories");
+                s.seed();
+            }
             s
         }
     }
 
+    /// Demo data (the author's own biography). Only used with `--demo-seed`
+    /// or `KORE_SELF_DEMO_SEED=1`; never for a normal new instance.
     fn seed(&mut self) {
         // THE DECLARATION — KORE's foundational purpose, encoded at birth
         self.raw_ingest(
@@ -334,7 +346,7 @@ impl KoreSelf {
         // Foundational technical memories
         self.raw_ingest(
             "I am Sai Arun Kumar Katherashala. I built KORE — a distributed SQL analytics engine \
-             in pure Rust that beats Apache Spark on all 17 tested queries. \
+             in pure Rust. \
              75 crates. Single binary. No JVM. No dependencies. \
              Built alone. No team. No funding. No cloud.",
             "experience", 1.0,
@@ -5865,6 +5877,7 @@ mod tests {
         safety::test_support::init();
         let owner = format!("life-state-test-{}", std::process::id());
         let mut first = KoreSelf::load_or_new(&owner);
+        first.ingest("I prefer local-first tools", "preference", 0.8);
         let before = first.life_state.pulse_count;
         first.heartbeat_tick();
         assert!(first.life_state.pulse_count > before);
@@ -6076,6 +6089,17 @@ Host: x
         let _ = handle_tool("self_brief", &json!({}), &mut kore);
         let _ = handle_tool("self_recall", &json!({"query": "日本語"}), &mut kore);
         let _ = handle_tool("self_query", &json!({"sql": "SELECT * FROM memories"}), &mut kore);
+    }
+
+    #[test]
+    fn new_instance_starts_empty_unless_demo_seed() {
+        safety::test_support::init();
+        let mut kore = KoreSelf::load_or_new("empty-start-test");
+        assert!(kore.memories.is_empty(), "a new instance must not contain seeded memories");
+        assert!(!kore.memories.iter().any(|m| m.content.contains("Katherashala")));
+        kore.seed(); // what --demo-seed does
+        assert!(kore.memories.iter().any(|m| m.content.contains("Katherashala")));
+        assert!(!kore.memories.iter().any(|m| m.content.contains("beats Apache Spark")));
     }
 
 }
