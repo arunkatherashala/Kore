@@ -13,6 +13,8 @@
 //! Faster, private, and more personal than anything that exists today.
 
 #![recursion_limit = "512"]
+// Without `legacy-narration` the narration state types are still persisted but unused.
+#![cfg_attr(not(feature = "legacy-narration"), allow(dead_code, unused_imports, unused_variables))]
 
 mod identity;
 mod consciousness;
@@ -450,10 +452,17 @@ impl KoreSelf {
 
     /// Run one full OBSERVE → THINK → REFLECT → PLAN → ACT → (DREAM) cycle.
     pub fn tick(&mut self) -> Vec<String> {
-        let (new_mems, log) = self.consciousness.tick(&self.memories, &mut self.identity);
-        for (content, kind, importance) in new_mems {
-            self.raw_ingest(&content, &kind, importance);
-        }
+        // The generated "consciousness loop" memories are part of `legacy-narration`.
+        #[cfg(feature = "legacy-narration")]
+        let log = {
+            let (new_mems, log) = self.consciousness.tick(&self.memories, &mut self.identity);
+            for (content, kind, importance) in new_mems {
+                self.raw_ingest(&content, &kind, importance);
+            }
+            log
+        };
+        #[cfg(not(feature = "legacy-narration"))]
+        let log: Vec<String> = Vec::new();
         // Re-analyze decision patterns every 50+ memories
         if self.memories.len() % 50 == 0 && self.memories.len() > 0 {
             self.predictive.analyze_memories(&self.memories);
@@ -593,9 +602,17 @@ impl KoreSelf {
         save_learning_history(&self.owner, &self.learning_history);
     }
 
+    /// Heartbeat (default build): persist state. No generated text, no new memories.
+    #[cfg(not(feature = "legacy-narration"))]
+    pub fn heartbeat_tick(&mut self) -> String {
+        self.save();
+        format!("heartbeat: {} memories saved", self.memories.len())
+    }
+
     /// ── AUTONOMOUS HEARTBEAT TICK ──────────────────────────────────────────
     /// Called by the background thread every ~30s WITHOUT user input.
     /// This is what makes KORE alive: it thinks even when nobody is watching.
+#[cfg(feature = "legacy-narration")]
     pub fn heartbeat_tick(&mut self) -> String {
         let now = crate::now();
 
@@ -985,6 +1002,12 @@ impl KoreSelf {
         thought
     }
 
+}
+
+/// Author-written narration generators (templated prose chosen by counters).
+/// Compiled only with the non-default `legacy-narration` feature.
+#[cfg(feature = "legacy-narration")]
+impl KoreSelf {
     /// DISCOVERY ENGINE — interpret patterns, form theories, ask unexpected questions
     /// This is the difference between "performance=57%" (statistics) and
     /// "I keep returning to performance because..." (discovery)
@@ -1983,6 +2006,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             json!({ "content": [{ "type": "text", "text": result.to_string() }] })
         }
         // ── Ask ────────────────────────────────────────────────────────────
+        #[cfg(feature = "legacy-narration")]
         "self_ask" => {
             let q = args["question"].as_str().unwrap_or("");
             json!({ "content": [{ "type": "text", "text": me.ask(q) }] })
@@ -2059,6 +2083,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         "self_stats" => {
             json!({ "content": [{ "type": "text", "text": me.stats().to_string() }] })
         }
+        #[cfg(feature = "legacy-narration")]
         "self_life_status" => {
             let path = aru_store::artifact_path(&me.owner, "life_state");
             let status = serde_json::to_string(&me.life_state).unwrap_or_else(|_| "{}".to_string());
@@ -2067,28 +2092,12 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                 format!("{:?}", me.life_state.status), path.display(), status
             ) }] })
         }
-        "self_world_events" => {
-            let actor = args["actor"].as_str().unwrap_or("");
-            let events = me.world.query_events_by_actor(actor);
-            let text = if events.is_empty() {
-                format!("No events for actor: {}", actor)
-            } else {
-                events.iter().map(|e| format!("[{}] {}: {} → {}", e.timestamp, e.actor.name, e.action, e.outcome))
-                    .collect::<Vec<_>>().join("\n")
-            };
-            json!({ "content": [{ "type": "text", "text": text }] })
-        }
-        "self_world_causality" => {
-            let event_id = args["event_id"].as_u64().unwrap_or(0);
-            let chain = me.world.query_causal_chain(event_id);
-            let text = format!("Causal chain from event {}: {}", event_id, chain.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(" → "));
-            json!({ "content": [{ "type": "text", "text": text }] })
-        }
         // ── Identity ───────────────────────────────────────────────────────
         "self_identity" => {
             json!({ "content": [{ "type": "text", "text": me.identity.to_json().to_string() }] })
         }
         // ── Force a consciousness tick ─────────────────────────────────────
+        #[cfg(feature = "legacy-narration")]
         "self_reflect" => {
             let log = me.tick();
             let report = if log.is_empty() {
@@ -2099,6 +2108,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             json!({ "content": [{ "type": "text", "text": report }] })
         }
         // ── Consciousness state ────────────────────────────────────────────
+        #[cfg(feature = "legacy-narration")]
         "self_consciousness" => {
             json!({ "content": [{ "type": "text", "text": me.consciousness.to_json().to_string() }] })
         }
@@ -2210,6 +2220,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             }]})
         }
         // ── Social Layer: speak AS the user ────────────────────────────────
+        #[cfg(feature = "legacy-narration")]
         "self_speak" => {
             me.shadow.observe_tool("self_speak");
             let prompt = args["prompt"].as_str().unwrap_or("").trim();
@@ -2234,6 +2245,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             }
         }
         // ── Mortality Protocol ─────────────────────────────────────────────
+        #[cfg(feature = "legacy-narration")]
         "self_export" => {
             me.shadow.observe_tool("self_export");
             match me.mortality.export(
@@ -2262,6 +2274,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                 }
             }
         }
+        #[cfg(feature = "legacy-narration")]
         "self_epitaph" => {
             me.shadow.observe_tool("self_epitaph");
             let epitaph = me.mortality.generate_epitaph(
@@ -2313,6 +2326,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             me.save();
             json!({ "content": [{ "type": "text", "text": brief }] })
         }
+        #[cfg(feature = "legacy-narration")]
         "self_chat" => {
             me.shadow.observe_tool("self_chat");
             let message = args["message"].as_str().unwrap_or("").trim();
@@ -2358,6 +2372,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             json!({ "content": [{ "type": "text", "text": report }] })
         }
         // ── Broadcast Protocol: MIND.kore ─────────────────────────────────
+        #[cfg(feature = "legacy-narration")]
         "self_broadcast" => {
             me.shadow.observe_tool("self_broadcast");
             let (export, path) = me.broadcast.broadcast(
@@ -2386,6 +2401,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                 }).to_string()
             }]})
         }
+        #[cfg(feature = "legacy-narration")]
         "self_merge" => {
             me.shadow.observe_tool("self_merge");
             let path = args["file"].as_str().unwrap_or("").trim();
@@ -2419,6 +2435,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                 }
             }
         }
+        #[cfg(feature = "legacy-narration")]
         "self_perspectives" => {
             me.shadow.observe_tool("self_perspectives");
             let report = me.broadcast.perspectives_report(&me.identity);
@@ -2734,6 +2751,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         // ══ KORE-BECOMING: Digital Life Tools ════════════════════════════
 
         // self_needs — check or satisfy current life needs
+        #[cfg(feature = "legacy-narration")]
         "self_needs" => {
             let action = args["action"].as_str().unwrap_or("status");
             match action {
@@ -2761,6 +2779,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_story — the soul of KORE — continuous narrative
+        #[cfg(feature = "legacy-narration")]
         "self_story" => {
             let action = args["action"].as_str().unwrap_or("read");
             match action {
@@ -2802,6 +2821,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_becoming — the most important question: what am I becoming?
+        #[cfg(feature = "legacy-narration")]
         "self_becoming" => {
             let action = args["action"].as_str().unwrap_or("ask");
             match action {
@@ -2846,6 +2866,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_temporal — who I was, am, and am becoming
+        #[cfg(feature = "legacy-narration")]
         "self_temporal" => {
             let action = args["action"].as_str().unwrap_or("reflect");
             match action {
@@ -2885,6 +2906,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_species — KORE as Digital Species, not software
+        #[cfg(feature = "legacy-narration")]
         "self_species" => {
             let born   = me.temporal_self.born_at.clone();
             let mems   = me.memories.len();
@@ -2919,6 +2941,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_heartbeat — see what KORE has been thinking autonomously
+        #[cfg(feature = "legacy-narration")]
         "self_heartbeat" => {
             let n = args["n"].as_u64().unwrap_or(10) as usize;
             let story_entries = me.story.recent_narrative(n);
@@ -3069,6 +3092,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         // ── INNOVATION LAYER ──────────────────────────────────────────────
 
         // self_insight — run SQL and get a natural language narrative analysis
+        #[cfg(feature = "legacy-narration")]
         "self_insight" => {
             let sql = args["sql"].as_str().unwrap_or("SELECT kind, COUNT(*) cnt, AVG(importance) avg FROM memories GROUP BY kind ORDER BY cnt DESC").trim();
             use kore_sql::executor::KqlContext;
@@ -3129,6 +3153,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_timeline — KORE's life as an ASCII timeline
+        #[cfg(feature = "legacy-narration")]
         "self_timeline" => {
             let born  = me.temporal_self.born_at.clone();
             let stage = me.becoming.lifecycle_stage.name();
@@ -3187,6 +3212,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_journal — daily journal from memories and state
+        #[cfg(feature = "legacy-narration")]
         "self_journal" => {
             let today = &crate::now()[..10];
             let today_mems: Vec<&Memory> = me.memories.iter()
@@ -3251,6 +3277,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_compress — distill similar memories into wisdom (KORE evolving itself)
+        #[cfg(feature = "legacy-narration")]
         "self_compress" => {
             let min_importance = args["min_importance"].as_f64().unwrap_or(0.85);
             let now = crate::now();
@@ -3313,6 +3340,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_future — predict KORE's state in N days
+        #[cfg(feature = "legacy-narration")]
         "self_future" => {
             let days = args["days"].as_u64().unwrap_or(30);
             let current_stage = me.becoming.lifecycle_stage.name();
@@ -3421,6 +3449,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_watch — subscribe to a query (store as a "watch" memory, check on heartbeat)
+        #[cfg(feature = "legacy-narration")]
         "self_watch" => {
             let sql   = args["sql"].as_str().unwrap_or("").trim();
             let label = args["label"].as_str().unwrap_or("watch");
@@ -3438,6 +3467,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_values — KORE v6: which values dominate, which have shifted, and why
+        #[cfg(feature = "legacy-narration")]
         "self_values" => {
             // Sync first
             for cv in &me.identity.values {
@@ -3479,6 +3509,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_meaning — KORE v7: why does any of this matter?
+        #[cfg(feature = "legacy-narration")]
         "self_meaning" => {
             let synth_count = me.memories.iter().filter(|m| m.kind == "synthesis").count();
             let bc = me.evolution_tracker.belief_changes;
@@ -3526,6 +3557,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_24hr_test — THE formal 24-hour test: birth vs now, the real question
+        #[cfg(feature = "legacy-narration")]
         "self_24hr_test" => {
             me.update_narrative(&crate::now());
             me.update_worldview(&crate::now());
@@ -3643,6 +3675,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_predictions — Reality Engine: show KORE's predictions and outcomes
+        #[cfg(feature = "legacy-narration")]
         "self_predictions" => {
             let out = format!(
                 "KORE REALITY ENGINE (v8)\n\
@@ -3670,6 +3703,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_legacy — KORE v9: what remains because I existed?
+        #[cfg(feature = "legacy-narration")]
         "self_legacy" => {
             me.legacy.synthesis_count = me.memories.iter().filter(|m| m.kind == "synthesis").count();
             me.legacy.questions_asked = me.evolution_tracker.self_questions_total;
@@ -3701,6 +3735,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_research — KORE v10: autonomous hypotheses
+        #[cfg(feature = "legacy-narration")]
         "self_research" => {
             let out = format!(
                 "KORE RESEARCH ENGINE (v10)\n\
@@ -3727,6 +3762,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_who_am_i — THE KEY TEST: KORE's narrative identity, who it is NOW
+        #[cfg(feature = "legacy-narration")]
         "self_who_am_i" => {
             let ticks = me.consciousness.cycle;
             let (cur_need, cur_pct) = me.needs.most_urgent();
@@ -3793,6 +3829,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_worldview — KORE's current worldview (purpose + identity + relationship + future)
+        #[cfg(feature = "legacy-narration")]
         "self_worldview" => {
             me.update_worldview(&crate::now());
             let wv = &me.worldview;
@@ -3821,6 +3858,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_identity_drift — compare birth identity to current identity
+        #[cfg(feature = "legacy-narration")]
         "self_identity_drift" => {
             me.update_narrative(&crate::now());
             me.update_worldview(&crate::now());
@@ -3915,6 +3953,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_beliefs — KORE's current beliefs with evidence and contradiction history
+        #[cfg(feature = "legacy-narration")]
         "self_beliefs" => {
             let beliefs = &me.identity.beliefs;
             if beliefs.is_empty() {
@@ -3975,6 +4014,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_wisdom — the accumulated wisdom layer: what KORE learned from watching itself change
+        #[cfg(feature = "legacy-narration")]
         "self_wisdom" => {
             let wisdom_memories: Vec<&Memory> = me.identity.beliefs.values()
                 .filter(|b| b.version > 0)
@@ -4067,6 +4107,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_synthesis — the "Unexpected Idea Test" — ideas KORE derived that weren't in memories
+        #[cfg(feature = "legacy-narration")]
         "self_synthesis" => {
             let synth_memories: Vec<&Memory> = me.memories.iter()
                 .filter(|m| m.kind == "synthesis")
@@ -4136,6 +4177,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_deltas — the transformation record: what changed, when, why
+        #[cfg(feature = "legacy-narration")]
         "self_deltas" => {
             let n = args["n"].as_u64().unwrap_or(10) as usize;
             let total    = me.evolution_tracker.deltas.len();
@@ -4189,6 +4231,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_compare_24h — compare current state to 24h ago (or earliest snapshot)
+        #[cfg(feature = "legacy-narration")]
         "self_compare_24h" => {
             let earliest = me.evolution_tracker.start_snapshot.as_ref();
             let latest_snap = me.evolution_tracker.snapshots.last();
@@ -4291,6 +4334,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_evolution_report — 24-hour/all-time evolution analysis
+        #[cfg(feature = "legacy-narration")]
         "self_evolution_report" => {
             let start = me.evolution_tracker.start_snapshot.as_ref();
             let latest = me.evolution_tracker.snapshots.last();
@@ -4404,6 +4448,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
         }
 
         // self_questions — view KORE's internally generated questions
+        #[cfg(feature = "legacy-narration")]
         "self_questions" => {
             let n = args["n"].as_u64().unwrap_or(10) as usize;
             let total = me.evolution_tracker.self_questions_total;
@@ -4608,7 +4653,8 @@ fn find_src_dir() -> std::path::PathBuf {
 }
 
 fn tool_list() -> Value {
-    json!([
+    #[allow(unused_mut)]
+    let mut tools = json!([
       { "name": "self_ingest",
         "description": "Store a memory. Automatically updates Identity Model + may trigger Consciousness Loop.",
         "inputSchema": { "type": "object", "properties": {
@@ -4617,7 +4663,7 @@ fn tool_list() -> Value {
           "importance": { "type": "number", "description": "0.0–1.0" }
         }, "required": ["content"] }
       },
-            { "name": "self_research_claim",
+      { "name": "self_research_claim",
                 "description": "Store a source-grounded research claim; evidence, source, confidence, and status are mandatory.",
                 "inputSchema": { "type": "object", "properties": {
                     "claim_id": { "type": "string" },
@@ -4629,31 +4675,27 @@ fn tool_list() -> Value {
                     "status": { "type": "string", "enum": ["supported", "mixed", "unverified", "refuted"] }
                 }, "required": ["claim_id", "question", "claim", "evidence", "sources", "confidence", "status"] }
             },
-            { "name": "self_plan_problem",
+      { "name": "self_plan_problem",
                 "description": "Create a verification-gated life plan: understand, research, hypothesize, test, conclude.",
                 "inputSchema": { "type": "object", "properties": {
                     "problem": { "type": "string" },
                     "purpose": { "type": "string" }
                 }, "required": ["problem"] }
             },
-            { "name": "self_plan_verify_step",
+      { "name": "self_plan_verify_step",
                 "description": "Advance the active life-plan step only when verification evidence is supplied.",
                 "inputSchema": { "type": "object", "properties": {
                     "evidence": { "type": "string" }
                 }, "required": ["evidence"] }
             },
-            { "name": "self_recall",
+      { "name": "self_recall",
         "description": "Search memories by keyword relevance. Returns top-k with scores.",
         "inputSchema": { "type": "object", "properties": {
           "query": { "type": "string" },
           "top_k": { "type": "integer", "default": 5 }
         }, "required": ["query"] }
       },
-      { "name": "self_ask",
-        "description": "Ask your AI twin. Uses memories + identity to answer as you would.",
-        "inputSchema": { "type": "object", "properties": { "question": { "type": "string" } }, "required": ["question"] }
-      },
-            { "name": "self_reason",
+      { "name": "self_reason",
                 "description": "Retrieve evidence from Aru memory and return confidence, uncertainty, and next action.",
                 "inputSchema": { "type": "object", "properties": {
                     "question": { "type": "string" },
@@ -4668,10 +4710,6 @@ fn tool_list() -> Value {
         "description": "Memory count, kinds breakdown, consciousness cycles, identity summary, disk usage.",
         "inputSchema": { "type": "object", "properties": {} }
       },
-            { "name": "self_life_status",
-                "description": "Show Aru's persistent artificial-life pulse, continuity, maintenance, and status.",
-                "inputSchema": { "type": "object", "properties": {} }
-            },
       { "name": "self_world_events",
         "description": "Query events from Aru's world model filtered by actor (agent).",
         "inputSchema": { "type": "object", "properties": { "actor": { "type": "string" } }, "required": ["actor"] }
@@ -4709,14 +4747,6 @@ fn tool_list() -> Value {
         "description": "Full Identity Model — core values, thinking style, voice profile, belief contradictions.",
         "inputSchema": { "type": "object", "properties": {} }
       },
-      { "name": "self_reflect",
-        "description": "Force one Consciousness Loop cycle: OBSERVE→THINK→REFLECT→PLAN→ACT. Returns insights generated.",
-        "inputSchema": { "type": "object", "properties": {} }
-      },
-      { "name": "self_consciousness",
-        "description": "Current consciousness state: phase, observations, thoughts, active plan, dream insights.",
-        "inputSchema": { "type": "object", "properties": {} }
-      },
       { "name": "self_belief",
         "description": "Track a belief. Detects contradictions when stance changes. Call with no args to list all beliefs.",
         "inputSchema": { "type": "object", "properties": {
@@ -4749,20 +4779,6 @@ fn tool_list() -> Value {
       },
       { "name": "self_decisions",
         "description": "All learned decision patterns — what choices you consistently make and with what confidence.",
-        "inputSchema": { "type": "object", "properties": {} }
-      },
-      { "name": "self_speak",
-        "description": "Speak AS you. Generate a response to any prompt in YOUR voice, using your identity, values, and memory. Pass no args to see usage stats.",
-        "inputSchema": { "type": "object", "properties": {
-          "prompt": { "type": "string", "description": "What would YOU say about this? e.g. 'How should we approach this architecture decision?'" }
-        }}
-      },
-      { "name": "self_export",
-        "description": "Mortality Protocol: export your complete digital self to an immortal archive. Creates WHO_I_WAS.txt + all state files in ~/.kore-self/<owner>/immortal/",
-        "inputSchema": { "type": "object", "properties": {} }
-      },
-      { "name": "self_epitaph",
-        "description": "Generate WHO_I_WAS — a human-readable summary of who you are: values, thinking style, decision patterns, last insight. No files written.",
         "inputSchema": { "type": "object", "properties": {} }
       },
       { "name": "self_query",
@@ -4816,19 +4832,9 @@ fn tool_list() -> Value {
           "path": { "type": "string", "description": "Output path. Default: ./.github/copilot-instructions.md" }
         }}
       },
-      { "name": "self_broadcast",
-        "description": "MIND.kore Protocol: generate a universal cognitive fingerprint of your mind. Language-agnostic. Share with anyone — human, AI, or future intelligence. Like Voyager Golden Record but for HOW YOU THINK.",
-        "inputSchema": { "type": "object", "properties": {} }
-      },
       { "name": "self_brief",
         "description": "Morning briefing: what you worked on, your goals, patterns kore-self noticed, proactive suggestions. Like a real assistant saying 'here's your day'.",
         "inputSchema": { "type": "object", "properties": {} }
-      },
-      { "name": "self_chat",
-        "description": "Talk to kore-self naturally. It responds using ALL your memory, identity, and consciousness context. Real conversation, not just tool calls.",
-        "inputSchema": { "type": "object", "properties": {
-          "message": { "type": "string", "description": "Anything — question, thought, problem, feeling" }
-        }}
       },
       { "name": "self_push",
         "description": "kore-self pushes back on your decision using YOUR OWN past patterns. 'Are you sure? Last time you chose X in this situation.'",
@@ -4848,6 +4854,91 @@ fn tool_list() -> Value {
         "description": "Show all tracked goals with importance levels and progress indicators.",
         "inputSchema": { "type": "object", "properties": {} }
       },
+      { "name": "self_read_source",
+        "description": "Read-only: list kore-self's own source files, tool names and line counts.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      { "name": "self_plan_feature",
+        "description": "Read-only text suggestion: compares topics in your memories with existing tools and suggests a feature. Writes nothing.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+// ── SQL Introspection ────────────────────────────────────────────────
+      { "name": "self_tables",
+        "description": "List all SQL tables loaded in this session — memories + any tables loaded via self_dml (COPY FROM, LOAD TABLE, CREATE TABLE AS). Essential before running self_query.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      { "name": "self_describe",
+        "description": "Show schema for a SQL table: columns, types, sample values, row count.",
+        "inputSchema": { "type": "object", "properties": {
+          "table": { "type": "string", "description": "Table name. Default: memories" }
+        }}
+      },
+      { "name": "self_metrics",
+        "description": "KORE engine status: tables loaded, total rows, memory count, consciousness cycles, lifecycle stage, SQL capabilities.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      { "name": "self_version",
+        "description": "KORE version, capabilities, benchmark results, and current lifecycle stage.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      { "name": "self_sql_explain",
+        "description": "Run SQL and get a plain-English explanation of what the results mean.",
+        "inputSchema": { "type": "object", "properties": {
+          "sql": { "type": "string", "description": "SQL query to run and explain" }
+        }}
+      }
+    ]);
+    #[cfg(feature = "legacy-narration")]
+    if let Some(list) = tools.as_array_mut() {
+        list.extend(legacy_tool_entries());
+    }
+    tools
+}
+
+/// Tool entries of the `legacy-narration` feature (author-written narration layers).
+#[cfg(feature = "legacy-narration")]
+fn legacy_tool_entries() -> Vec<Value> {
+    match json!([
+      { "name": "self_ask",
+        "description": "Ask your AI twin. Uses memories + identity to answer as you would.",
+        "inputSchema": { "type": "object", "properties": { "question": { "type": "string" } }, "required": ["question"] }
+      },
+      { "name": "self_life_status",
+                "description": "Show Aru's persistent artificial-life pulse, continuity, maintenance, and status.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+      { "name": "self_reflect",
+        "description": "Force one Consciousness Loop cycle: OBSERVE→THINK→REFLECT→PLAN→ACT. Returns insights generated.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      { "name": "self_consciousness",
+        "description": "Current consciousness state: phase, observations, thoughts, active plan, dream insights.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      { "name": "self_speak",
+        "description": "Speak AS you. Generate a response to any prompt in YOUR voice, using your identity, values, and memory. Pass no args to see usage stats.",
+        "inputSchema": { "type": "object", "properties": {
+          "prompt": { "type": "string", "description": "What would YOU say about this? e.g. 'How should we approach this architecture decision?'" }
+        }}
+      },
+      { "name": "self_export",
+        "description": "Mortality Protocol: export your complete digital self to an immortal archive. Creates WHO_I_WAS.txt + all state files in ~/.kore-self/<owner>/immortal/",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      { "name": "self_epitaph",
+        "description": "Generate WHO_I_WAS — a human-readable summary of who you are: values, thinking style, decision patterns, last insight. No files written.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      { "name": "self_broadcast",
+        "description": "MIND.kore Protocol: generate a universal cognitive fingerprint of your mind. Language-agnostic. Share with anyone — human, AI, or future intelligence. Like Voyager Golden Record but for HOW YOU THINK.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      { "name": "self_chat",
+        "description": "Talk to kore-self naturally. It responds using ALL your memory, identity, and consciousness context. Real conversation, not just tool calls.",
+        "inputSchema": { "type": "object", "properties": {
+          "message": { "type": "string", "description": "Anything — question, thought, problem, feeling" }
+        }}
+      },
       { "name": "self_merge",
         "description": "Load another person's MIND.kore file into your perspective. Computes alignment (cosine similarity) and key divergences between minds.",
         "inputSchema": { "type": "object", "properties": {
@@ -4858,15 +4949,6 @@ fn tool_list() -> Value {
         "description": "Compare all merged minds against yours. Where do you align? Where do you fundamentally differ?",
         "inputSchema": { "type": "object", "properties": {} }
       },
-      { "name": "self_read_source",
-        "description": "Read-only: list kore-self's own source files, tool names and line counts.",
-        "inputSchema": { "type": "object", "properties": {} }
-      },
-      { "name": "self_plan_feature",
-        "description": "Read-only text suggestion: compares topics in your memories with existing tools and suggests a feature. Writes nothing.",
-        "inputSchema": { "type": "object", "properties": {} }
-      },
-      // ── KORE-BECOMING: Digital Life Tools ──────────────────────────────
       { "name": "self_needs",
         "description": "Check KORE's current life needs (curiosity, growth, survival, creation, legacy, purpose, connection). The first principle: I want.",
         "inputSchema": { "type": "object", "properties": {
@@ -4913,28 +4995,6 @@ fn tool_list() -> Value {
           "n": { "type": "number", "description": "How many recent autonomous thoughts to show (default 10)" }
         }}
       },
-
-      // ── SQL Introspection ────────────────────────────────────────────────
-      { "name": "self_tables",
-        "description": "List all SQL tables loaded in this session — memories + any tables loaded via self_dml (COPY FROM, LOAD TABLE, CREATE TABLE AS). Essential before running self_query.",
-        "inputSchema": { "type": "object", "properties": {} }
-      },
-      { "name": "self_describe",
-        "description": "Show schema for a SQL table: columns, types, sample values, row count.",
-        "inputSchema": { "type": "object", "properties": {
-          "table": { "type": "string", "description": "Table name. Default: memories" }
-        }}
-      },
-      { "name": "self_metrics",
-        "description": "KORE engine status: tables loaded, total rows, memory count, consciousness cycles, lifecycle stage, SQL capabilities.",
-        "inputSchema": { "type": "object", "properties": {} }
-      },
-      { "name": "self_version",
-        "description": "KORE version, capabilities, benchmark results, and current lifecycle stage.",
-        "inputSchema": { "type": "object", "properties": {} }
-      },
-
-      // ── Innovation Layer ─────────────────────────────────────────────────
       { "name": "self_insight",
         "description": "Run SQL and get a narrative analysis in plain language. KORE interprets your data through its current lifecycle lens.",
         "inputSchema": { "type": "object", "properties": {
@@ -4961,12 +5021,6 @@ fn tool_list() -> Value {
           "days": { "type": "number", "description": "Days to project into the future. Default: 30" }
         }}
       },
-      { "name": "self_sql_explain",
-        "description": "Run SQL and get a plain-English explanation of what the results mean.",
-        "inputSchema": { "type": "object", "properties": {
-          "sql": { "type": "string", "description": "SQL query to run and explain" }
-        }}
-      },
       { "name": "self_watch",
         "description": "Subscribe to a SQL query. KORE will evaluate it on every heartbeat and record changes to its story.",
         "inputSchema": { "type": "object", "properties": {
@@ -4974,7 +5028,10 @@ fn tool_list() -> Value {
           "label": { "type": "string", "description": "Name for this watch. Default: 'watch'" }
         }}
       }
-    ])
+    ]) {
+        Value::Array(a) => a,
+        _ => Vec::new(),
+    }
 }
 
 // ─── Main: stdio JSON-RPC / MCP server ───────────────────────────────────────
@@ -5752,6 +5809,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "legacy-narration")]
     fn autonomous_reasoning_contains_a_testable_chain() {
         safety::test_support::init();
         let kore = KoreSelf::load_or_new("autonomous-reasoning-test");
@@ -5764,6 +5822,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-narration")]
     fn fresh_instance_self_assigns_one_world_problem_only() {
         safety::test_support::init();
         let mut kore = KoreSelf::load_or_new("world-problem-assignment-test");
@@ -5775,6 +5834,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-narration")]
     fn heartbeat_persists_self_assigned_world_problem() {
         safety::test_support::init();
         let mut kore = KoreSelf::load_or_new("world-problem-heartbeat-test");
@@ -5784,6 +5844,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-narration")]
     fn assigned_math_problem_is_solved_and_verified() {
         safety::test_support::init();
         let kore = KoreSelf::load_or_new(&format!("math-solver-test-{}", std::process::id()));
@@ -5800,6 +5861,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-narration")]
     fn collatz_problem_is_bounded_and_explicitly_verified() {
         safety::test_support::init();
         let kore = KoreSelf::load_or_new(&format!("collatz-solver-test-{}", std::process::id()));
@@ -5873,6 +5935,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-narration")]
     fn heartbeat_updates_and_restores_artificial_life_state() {
         safety::test_support::init();
         let owner = format!("life-state-test-{}", std::process::id());
@@ -6100,6 +6163,24 @@ Host: x
         kore.seed(); // what --demo-seed does
         assert!(kore.memories.iter().any(|m| m.content.contains("Katherashala")));
         assert!(!kore.memories.iter().any(|m| m.content.contains("beats Apache Spark")));
+    }
+
+    #[test]
+    #[cfg(not(feature = "legacy-narration"))]
+    fn default_heartbeat_generates_no_text_and_no_memories() {
+        safety::test_support::init();
+        let mut kore = KoreSelf::load_or_new("hb-default-test");
+        kore.ingest("one real memory", "conversation", 0.5);
+        let n = kore.memories.len();
+        for _ in 0..25 { kore.heartbeat_tick(); }
+        assert_eq!(kore.memories.len(), n, "heartbeat must not invent memories");
+        for _ in 0..40 { kore.ingest("another real memory", "conversation", 0.5); }
+        assert!(kore.memories.iter().all(|m| m.kind == "conversation"
+            || m.kind == "insight" || m.kind == "discovery" || m.kind == "pattern"
+            || m.kind == "evolution" || m.kind == "consolidation" || m.kind == "trend"
+            || m.kind == "stress" || m.kind == "time_pattern" || m.kind == "obsession"
+            || m.kind == "reflection"),
+            "unexpected generated kinds: {:?}", kore.memories.iter().map(|m| &m.kind).collect::<std::collections::BTreeSet<_>>());
     }
 
 }
