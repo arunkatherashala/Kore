@@ -38,6 +38,7 @@ mod rlm;
 mod world_model;
 mod learning;
 mod safety;
+mod versioned;
 
 use std::io::{BufRead, Write};
 use kore_distributed;
