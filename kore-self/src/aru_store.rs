@@ -11,16 +11,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub fn artifact_path(owner: &str, artifact: &str) -> PathBuf {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."));
-    home.join(".kore-self").join(owner).join(format!("{artifact}.kore"))
+    crate::safety::owner_dir(owner).join(format!("{artifact}.kore"))
 }
 
 pub fn write_payload(path: &Path, payload: &str) -> io::Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::safety::create_private_dir(parent)?;
     }
     let block = DataBlock::new(vec![Column::str_col(
         "payload",
@@ -28,6 +24,7 @@ pub fn write_payload(path: &Path, payload: &str) -> io::Result<()> {
     )]).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
     let tmp = path.with_extension("kore.tmp");
     KoreWriter::write_file(&tmp, &block)?;
+    crate::safety::set_private(&tmp);
     std::fs::rename(tmp, path)
 }
 
@@ -41,7 +38,7 @@ pub fn read_payload(path: &Path) -> io::Result<Option<String>> {
 }
 
 pub fn write_plan(path: &Path, plan: &LifePlan) -> io::Result<()> {
-    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+    if let Some(parent) = path.parent() { crate::safety::create_private_dir(parent)?; }
     let rows = plan.steps.len().max(1);
     let repeated = |value: String| vec![Some(value); rows];
     let steps = if plan.steps.is_empty() {
@@ -61,6 +58,7 @@ pub fn write_plan(path: &Path, plan: &LifePlan) -> io::Result<()> {
     ]).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
     let tmp = path.with_extension("kore.tmp");
     KoreWriter::write_file(&tmp, &block)?;
+    crate::safety::set_private(&tmp);
     std::fs::rename(tmp, path)
 }
 
@@ -82,7 +80,7 @@ pub fn read_plan(path: &Path) -> io::Result<Option<LifePlan>> {
 }
 
 pub fn write_learning_history(path: &Path, history: &LearningHistory) -> io::Result<()> {
-    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+    if let Some(parent) = path.parent() { crate::safety::create_private_dir(parent)?; }
     let rows = history.belief_updates.len() + history.outcome_observations.len();
     let mut kind = Vec::with_capacity(rows);
     let mut action_id = Vec::with_capacity(rows);
@@ -126,6 +124,7 @@ pub fn write_learning_history(path: &Path, history: &LearningHistory) -> io::Res
     ]).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
     let tmp = path.with_extension("kore.tmp");
     KoreWriter::write_file(&tmp, &block)?;
+    crate::safety::set_private(&tmp);
     std::fs::rename(tmp, path)
 }
 
@@ -167,7 +166,8 @@ mod tests {
 
     #[test]
     fn native_kore_payload_round_trips() {
-        let path = std::env::temp_dir().join(format!("aru-store-{}.kore", std::process::id()));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aru-store.kore");
         write_payload(&path, "{\"kind\":\"plan\",\"version\":1}").unwrap();
         assert_eq!(read_payload(&path).unwrap().as_deref(), Some("{\"kind\":\"plan\",\"version\":1}"));
         let _ = std::fs::remove_file(path);
@@ -175,7 +175,8 @@ mod tests {
 
     #[test]
     fn typed_plan_round_trips_without_payload_json() {
-        let path = std::env::temp_dir().join(format!("aru-plan-{}.kore", std::process::id()));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aru-plan.kore");
         let plan = LifePlan::for_problem("p1", "typed plan", "continue");
         write_plan(&path, &plan).unwrap();
         let restored = read_plan(&path).unwrap().unwrap();
@@ -186,7 +187,8 @@ mod tests {
 
     #[test]
     fn typed_learning_history_round_trips_without_payload_json() {
-        let path = std::env::temp_dir().join(format!("aru-learning-{}.kore", std::process::id()));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aru-learning.kore");
         let mut history = LearningHistory::new();
         history.observe_outcome(7, "test_action", "goal", "done", 0.9, "t1");
         history.update_belief("b1", "topic", 0.4, 0.8, "evidence", "reason", "t2");

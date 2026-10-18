@@ -59,22 +59,11 @@ struct SaveFile {
 
 /// Full path to the save file for this owner.
 pub fn data_path(owner: &str) -> PathBuf {
-    home_dir()
-        .join(".kore-self")
-        .join(owner)
-        .join("memories.kore")
+    crate::safety::owner_dir(owner).join("memories.kore")
 }
 
 fn legacy_data_path(owner: &str) -> PathBuf {
-    home_dir().join(".kore-self").join(owner).join("memories.kore.json")
-}
-
-fn home_dir() -> PathBuf {
-    // Windows: USERPROFILE. Linux/macOS: HOME.
-    std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
+    crate::safety::owner_dir(owner).join("memories.kore.json")
 }
 
 /// Save full state atomically.

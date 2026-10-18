@@ -36,6 +36,7 @@ mod life_state;
 mod rlm;
 mod world_model;
 mod learning;
+mod safety;
 
 use std::io::{BufRead, Write};
 use kore_distributed;
@@ -5709,6 +5710,7 @@ mod tests {
 
     #[test]
     fn autonomous_reasoning_contains_a_testable_chain() {
+        safety::test_support::init();
         let kore = KoreSelf::load_or_new("autonomous-reasoning-test");
         let reasoning = kore.generate_autonomous_reasoning();
 
@@ -5720,6 +5722,7 @@ mod tests {
 
     #[test]
     fn fresh_instance_self_assigns_one_world_problem_only() {
+        safety::test_support::init();
         let mut kore = KoreSelf::load_or_new("world-problem-assignment-test");
         let assignment = kore.generate_world_research_problem();
         assert!(assignment.is_some());
@@ -5730,6 +5733,7 @@ mod tests {
 
     #[test]
     fn heartbeat_persists_self_assigned_world_problem() {
+        safety::test_support::init();
         let mut kore = KoreSelf::load_or_new("world-problem-heartbeat-test");
         kore.heartbeat_tick();
         assert!(kore.memories.iter().any(|m| m.kind == "world_problem"));
@@ -5738,6 +5742,7 @@ mod tests {
 
     #[test]
     fn assigned_math_problem_is_solved_and_verified() {
+        safety::test_support::init();
         let kore = KoreSelf::load_or_new(&format!("math-solver-test-{}", std::process::id()));
         let solution = kore.solve_assigned_math_problem(
             "Find all positive integer pairs satisfying x^2 - 2*y^2 = 1 with 0 < x,y <= 10000",
@@ -5753,6 +5758,7 @@ mod tests {
 
     #[test]
     fn collatz_problem_is_bounded_and_explicitly_verified() {
+        safety::test_support::init();
         let kore = KoreSelf::load_or_new(&format!("collatz-solver-test-{}", std::process::id()));
         let solution = kore.solve_assigned_math_problem("SELF-SOLVING MATH TASK #2: Collatz bounded verification")
             .expect("Collatz problem should be supported");
@@ -5764,6 +5770,7 @@ mod tests {
 
     #[test]
     fn plan_tool_writes_native_kore_artifact() {
+        safety::test_support::init();
         let owner = format!("native-plan-test-{}", std::process::id());
         let mut kore = KoreSelf::load_or_new(&owner);
         let response = handle_tool(
@@ -5780,6 +5787,7 @@ mod tests {
 
     #[test]
     fn plan_is_restored_from_native_kore_after_restart() {
+        safety::test_support::init();
         let owner = format!("plan-restart-test-{}", std::process::id());
         let mut first = KoreSelf::load_or_new(&owner);
         handle_tool(
@@ -5798,6 +5806,7 @@ mod tests {
 
     #[test]
     fn plan_step_requires_evidence_before_advancing() {
+        safety::test_support::init();
         let owner = format!("plan-evidence-test-{}", std::process::id());
         let mut kore = KoreSelf::load_or_new(&owner);
         handle_tool(
@@ -5822,6 +5831,7 @@ mod tests {
 
     #[test]
     fn heartbeat_updates_and_restores_artificial_life_state() {
+        safety::test_support::init();
         let owner = format!("life-state-test-{}", std::process::id());
         let mut first = KoreSelf::load_or_new(&owner);
         let before = first.life_state.pulse_count;
@@ -5837,6 +5847,7 @@ mod tests {
 
     #[test]
     fn world_model_tracks_events_and_causality() {
+        safety::test_support::init();
         let mut kore = KoreSelf::load_or_new("world-model-test");
         kore.world.add_entity("Alice", "person");
         kore.world.add_entity("Bob", "person");
@@ -5854,6 +5865,7 @@ mod tests {
 
     #[test]
     fn world_queries_return_correctly_via_tools() {
+        safety::test_support::init();
         let mut kore = KoreSelf::load_or_new("world-tool-test");
         kore.world.add_event(101, "2026-09-21T14:00:00Z", "Aru", "learned", Some("reasoning"), "success", 0.95);
         
@@ -5866,6 +5878,7 @@ mod tests {
 
     #[test]
     fn learning_observes_and_computes_accuracy() {
+        safety::test_support::init();
         let artifact = aru_store::artifact_path("learning-test", "learning_history");
         let _ = std::fs::remove_file(&artifact);
         let mut kore = KoreSelf::load_or_new("learning-test");
@@ -5884,6 +5897,7 @@ mod tests {
 
     #[test]
     fn learning_updates_beliefs_with_evidence() {
+        safety::test_support::init();
         let artifact = aru_store::artifact_path("belief-update-test", "learning_history");
         let _ = std::fs::remove_file(&artifact);
         let mut kore = KoreSelf::load_or_new("belief-update-test");

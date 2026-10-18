@@ -53,7 +53,7 @@ impl AutonomyPolicy {
     pub fn load() -> Self {
         let candidates = [
             std::env::var("KORE_AUTONOMY_POLICY_FILE").ok(),
-            Some("kore-self/autonomy_policy.kore".to_string()),
+            Some(crate::safety::data_root().join("autonomy_policy.kore").to_string_lossy().to_string()),
         ];
 
         for candidate in candidates.into_iter().flatten() {
@@ -132,7 +132,8 @@ mod tests {
 
     #[test]
     fn native_policy_artifact_round_trips() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("autonomy_policy.kore");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("autonomy_policy.kore");
         let payload = serde_json::to_string(&AutonomyPolicy::default()).unwrap();
         crate::aru_store::write_payload(&path, &payload).unwrap();
         let loaded = crate::aru_store::read_payload(&path).unwrap().unwrap();

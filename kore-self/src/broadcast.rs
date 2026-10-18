@@ -151,7 +151,7 @@ impl BroadcastEngine {
         fs::create_dir_all(path.parent().unwrap()).ok();
 
         let json = serde_json::to_string_pretty(&export).unwrap_or_default();
-        if let Err(e) = fs::write(&path, json.as_bytes()) {
+        if let Err(e) = crate::safety::write_private(&path, json.as_bytes()) {
             eprintln!("[kore-self:broadcast] Write failed: {e}");
         }
 
@@ -397,9 +397,7 @@ impl Default for BroadcastEngine {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn broadcast_dir(owner: &str) -> PathBuf {
-    std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME"))
-        .map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."))
-        .join(".kore-self").join(owner).join("broadcast")
+    crate::safety::owner_dir(owner).join("broadcast")
 }
 
 /// Compute a stable fingerprint hash from values + thinking.

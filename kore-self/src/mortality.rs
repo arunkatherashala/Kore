@@ -63,32 +63,32 @@ impl MortalityEngine {
         let mems_path = dir.join("memories.json");
         let mems_json = serde_json::to_string_pretty(memories)
             .unwrap_or_else(|_| "[]".to_string());
-        fs::write(&mems_path, mems_json.as_bytes())?;
+        crate::safety::write_private(&mems_path, mems_json.as_bytes())?;
 
         // 2. Identity snapshot
         let id_path = dir.join("identity.json");
         let id_json = identity.to_json().to_string();
-        fs::write(&id_path, id_json.as_bytes())?;
+        crate::safety::write_private(&id_path, id_json.as_bytes())?;
 
         // 3. Consciousness state
         let cs_path = dir.join("consciousness.json");
         let cs_json = consciousness.to_json().to_string();
-        fs::write(&cs_path, cs_json.as_bytes())?;
+        crate::safety::write_private(&cs_path, cs_json.as_bytes())?;
 
         // 4. Dream patterns
         let dream_path = dir.join("dream_patterns.json");
         let dream_json = dream.to_json().to_string();
-        fs::write(&dream_path, dream_json.as_bytes())?;
+        crate::safety::write_private(&dream_path, dream_json.as_bytes())?;
 
         // 5. Decision patterns
         let pred_path = dir.join("decision_patterns.json");
         let pred_json = predictive.to_json().to_string();
-        fs::write(&pred_path, pred_json.as_bytes())?;
+        crate::safety::write_private(&pred_path, pred_json.as_bytes())?;
 
         // 6. Human-readable epitaph (the most important file)
         let epitaph = self.generate_epitaph(owner, memories, identity, consciousness, dream, predictive);
         let epitaph_path = dir.join("WHO_I_WAS.txt");
-        fs::write(&epitaph_path, epitaph.as_bytes())?;
+        crate::safety::write_private(&epitaph_path, epitaph.as_bytes())?;
 
         // 7. Manifest (machine-readable index)
         let manifest = serde_json::json!({
@@ -104,7 +104,7 @@ impl MortalityEngine {
                       "dream_patterns.json", "decision_patterns.json", "WHO_I_WAS.txt", "MANIFEST.json"],
         });
         let manifest_path = dir.join("MANIFEST.json");
-        fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap_or_default().as_bytes())?;
+        crate::safety::write_private(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap_or_default().as_bytes())?;
 
         let export_path = dir.to_string_lossy().to_string();
         self.total_exports   += 1;
@@ -242,17 +242,8 @@ impl Default for MortalityEngine {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-fn home_dir() -> PathBuf {
-    std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
-}
-
 fn export_dir(owner: &str, timestamp: &str) -> PathBuf {
-    home_dir()
-        .join(".kore-self")
-        .join(owner)
+    crate::safety::owner_dir(owner)
         .join("immortal")
         .join(timestamp)
 }
