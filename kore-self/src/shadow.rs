@@ -81,14 +81,6 @@ impl ShadowObserver {
         self.total_observed += 1;
     }
 
-    /// Passive content feed — observe without adding to memory.
-    /// Use for: clipboard content, terminal output, code being written.
-    pub fn observe_feed(&mut self, content: &str, source: &str) {
-        let preview = crate::safety::trunc(&content, 80);
-        self.push_event(&format!("passive_{}", source), preview);
-        self.total_observed += 1;
-    }
-
     // ── Inference ─────────────────────────────────────────────────────────────
 
     /// Update implicit interests based on all observations so far.

@@ -179,50 +179,6 @@ impl PredictiveEngine {
         Some(pred)
     }
 
-    // ── Contradiction detection ───────────────────────────────────────────────
-
-    /// Compare a new stance against all patterns related to a topic.
-    /// Returns a contradiction record if a reversal is detected.
-    pub fn check_contradiction(&mut self, topic: &str, new_stance: &str) -> Option<Contradiction> {
-        let keywords = extract_keywords(topic);
-
-        // Find the dominant historical stance on this topic
-        let related: Vec<&DecisionPattern> = self.patterns.iter()
-            .filter(|p| keywords.iter().any(|k| p.context.contains(k.as_str())))
-            .collect();
-
-        if related.is_empty() { return None; }
-
-        // Dominant past choice
-        let mut votes: HashMap<&str, f64> = HashMap::new();
-        for p in &related {
-            *votes.entry(&p.choice).or_insert(0.0) += p.confidence * p.count as f64;
-        }
-        let past_choice = votes.iter().max_by(|a, b| a.1.partial_cmp(b.1).unwrap())?.0;
-
-        // Detect contradiction: new stance is opposite to past pattern
-        if is_opposite(past_choice, new_stance) {
-            let c = Contradiction {
-                id:          self.next_id,
-                topic:       topic.to_string(),
-                old_stance:  past_choice.to_string(),
-                new_stance:  new_stance.to_string(),
-                detected_at: crate::now(),
-                resolved:    false,
-            };
-            self.contradictions.push(c.clone());
-            self.next_id += 1;
-
-            // Keep last 100
-            if self.contradictions.len() > 100 {
-                self.contradictions.remove(0);
-            }
-
-            return Some(c);
-        }
-
-        None
-    }
 
     // ── Summary ───────────────────────────────────────────────────────────────
 
@@ -287,30 +243,6 @@ fn extract_choice(text: &str) -> String {
     }
     // Fallback: first significant word
     extract_keywords(text).into_iter().next().unwrap_or_default()
-}
-
-/// Detect if two stances are semantically opposite.
-fn is_opposite(a: &str, b: &str) -> bool {
-    let opposites = [
-        ("performance", "readability"),
-        ("readability", "performance"),
-        ("fast", "slow"),
-        ("simple", "complex"),
-        ("complex", "simple"),
-        ("safe", "unsafe"),
-        ("unsafe", "safe"),
-        ("sync", "async"),
-        ("async", "sync"),
-        ("monolith", "microservices"),
-        ("microservices", "monolith"),
-        ("yes", "no"),
-        ("no", "yes"),
-        ("approve", "reject"),
-        ("reject", "approve"),
-    ];
-    let al = a.to_lowercase();
-    let bl = b.to_lowercase();
-    opposites.iter().any(|(x, y)| al.contains(x) && bl.contains(y))
 }
 
 const PRED_STOPS: &[&str] = &[
