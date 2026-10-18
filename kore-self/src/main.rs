@@ -36,6 +36,7 @@ mod life_state;
 mod rlm;
 mod world_model;
 mod learning;
+mod versioned;
 
 use std::io::{BufRead, Write};
 use kore_distributed;
