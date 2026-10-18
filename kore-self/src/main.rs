@@ -4998,6 +4998,10 @@ fn main() {
     // kore-self <owner> repl       → interactive SQL REPL
     // kore-self <owner> status     → print lifecycle status and exit
     let owner = cli_args.get(1).cloned().unwrap_or_else(|| "arun".to_string());
+    if let Err(e) = safety::validate_owner(&owner) {
+        eprintln!("[kore-self] invalid owner name: {e}");
+        std::process::exit(2);
+    }
     let mode  = cli_args.get(2).map(|s| s.as_str()).unwrap_or("arun");
 
     if mode == "status" {
@@ -5020,13 +5024,23 @@ fn main() {
 
     if mode == "api" {
         let port: u16 = cli_args.get(3).and_then(|s| s.parse().ok()).unwrap_or(8080);
-        run_http_api(owner, port);
+        let token = safety::env_token();
+        let addr = match safety::resolve_bind(safety::bind_arg(&cli_args).as_deref(), port, token.as_deref()) {
+            Ok(a) => a,
+            Err(e) => { eprintln!("[kore-self] {e}"); std::process::exit(2); }
+        };
+        run_http_api(owner, addr, token);
         return;
     }
 
     if mode == "live" {
         let port: u16 = cli_args.get(3).and_then(|s| s.parse().ok()).unwrap_or(7979);
-        run_live_daemon(owner, port);
+        let token = safety::env_token();
+        let addr = match safety::resolve_bind(safety::bind_arg(&cli_args).as_deref(), port, token.as_deref()) {
+            Ok(a) => a,
+            Err(e) => { eprintln!("[kore-self] {e}"); std::process::exit(2); }
+        };
+        run_live_daemon(owner, addr, token);
         return;
     }
 
@@ -5180,7 +5194,8 @@ fn run_repl(owner: String) {
 //   GET  /tables         → [{"name":"t","rows":N,"cols":M}]
 //   GET  /status         → {"lifecycle":"Dreams","memories":15,...}
 //   GET  /               → web UI (HTML)
-fn run_http_api(owner: String, port: u16) {
+fn run_http_api(owner: String, addr: std::net::SocketAddr, token: Option<String>) {
+    let port = addr.port();
     use std::io::{Read, Write, BufRead, BufReader};
     use std::net::{TcpListener, TcpStream};
     use kore_sql::executor::KqlContext;
@@ -5220,14 +5235,17 @@ fn run_http_api(owner: String, port: u16) {
         });
     }
 
-    let listener = TcpListener::bind(("0.0.0.0", port)).expect("cannot bind port");
-    println!("[kore-api] Listening on http://0.0.0.0:{port}");
+    let listener = TcpListener::bind(addr).expect("cannot bind port");
+    println!("[kore-api] Listening on http://{addr}  (auth: {})",
+        if token.is_some() { "bearer token required" } else { "none, loopback only" });
+    let token = std::sync::Arc::new(token);
 
     for stream in listener.incoming() {
         if let Ok(s) = stream {
             let ctx_arc = std::sync::Arc::clone(&shared_ctx);
             let me_arc  = std::sync::Arc::clone(&shared_me);
-            std::thread::spawn(move || http_handle(s, ctx_arc, me_arc));
+            let tok     = std::sync::Arc::clone(&token);
+            std::thread::spawn(move || http_handle(s, ctx_arc, me_arc, tok));
         }
     }
 }
@@ -5236,6 +5254,7 @@ fn http_handle(
     mut stream: std::net::TcpStream,
     ctx: std::sync::Arc<std::sync::Mutex<kore_sql::executor::KqlContext>>,
     me:  std::sync::Arc<std::sync::Mutex<KoreSelf>>,
+    token: std::sync::Arc<Option<String>>,
 ) {
     use std::io::{Read, Write};
     let mut buf = vec![0u8; 16384];
@@ -5251,10 +5270,19 @@ fn http_handle(
         req[pos+4..].trim().to_string()
     } else { String::new() };
 
-    let cors = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n";
+    // No CORS headers are sent: pages from other origins cannot read responses.
+    if let Some(t) = token.as_ref() {
+        if !safety::bearer_ok(safety::http_header(&req, "Authorization"), t) {
+            let body = r#"{"error":"unauthorized: send 'Authorization: Bearer <token>'"}"#;
+            let _ = stream.write_all(format!(
+                "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()).as_bytes());
+            return;
+        }
+    }
 
     if method == "OPTIONS" {
-        let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\n{cors}\r\n").as_bytes());
+        let _ = stream.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         return;
     }
 
@@ -5294,7 +5322,9 @@ fn http_handle(
                 .and_then(|v| v["sql"].as_str().map(|s| s.to_string()))
                 .unwrap_or(body.clone());
             let t0 = std::time::Instant::now();
-            let result = if let Ok(mut c) = ctx.lock() {
+            let result = if safety::sql_reads_files(&sql) {
+                serde_json::json!({"error": "COPY and LOAD TABLE read arbitrary files and are disabled here; use POST /load (confined to the owner data directory)"})
+            } else if let Ok(mut c) = ctx.lock() {
                 let upper = sql.trim().to_ascii_uppercase();
                 if upper.starts_with("COPY ") || upper.starts_with("INSERT ") ||
                    upper.starts_with("UPDATE ") || upper.starts_with("DELETE ") ||
@@ -5331,19 +5361,25 @@ fn http_handle(
         }
         ("POST", "/load") => {
             let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-            let path  = v["path"].as_str().unwrap_or("").trim_matches('\'').trim_matches('"');
+            let raw_path = v["path"].as_str().unwrap_or("").trim_matches('\'').trim_matches('"');
+            let owner_name = me.lock().map(|k| k.owner.clone()).unwrap_or_default();
+            let safe = safety::safe_path_or_err(&owner_name, raw_path);
+            let path_buf = safe.clone().unwrap_or_default();
+            let path = path_buf.to_str().unwrap_or("");
             let table = v["table"].as_str().unwrap_or_else(||
                 path.rsplit('/').next().unwrap_or("t").split('.').next().unwrap_or("t"));
             let t0 = std::time::Instant::now();
             let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
-            let load_result = match ext.as_str() {
+            let load_result = if let Err(e) = &safe {
+                Err(kore_core::KoreError::InvalidArgument(e.clone()))
+            } else { match ext.as_str() {
                 "parquet" => kore_parquet::ParquetReader::new(path).read()
                     .map_err(|e| kore_core::KoreError::InvalidArgument(e.to_string())),
                 "kore"    => kore_store::KoreReader::read_file(std::path::Path::new(path))
                     .map_err(|e| kore_core::KoreError::InvalidArgument(e.to_string())),
                 _         => kore_io::CsvReader::new(path).read()
                     .map_err(|e| kore_core::KoreError::InvalidArgument(e.to_string())),
-            };
+            } };
             let resp = match load_result {
                 Ok(block) => {
                     let rows = block.num_rows; let cols = block.columns.len();
@@ -5359,7 +5395,7 @@ fn http_handle(
 
     let body_bytes = response_body.as_bytes();
     let header = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n{cors}Content-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body_bytes.len()
     );
     let _ = stream.write_all(header.as_bytes());
@@ -5563,7 +5599,8 @@ setInterval(loadStatus, 15000);
 // kore-self arun live [port]
 // Runs as a persistent TCP server. KORE never dies.
 // Connect: nc localhost 7979 or use any MCP-over-TCP client.
-fn run_live_daemon(owner: String, port: u16) {
+fn run_live_daemon(owner: String, addr: std::net::SocketAddr, token: Option<String>) {
+    let port = addr.port();
     use std::io::{BufRead, BufReader, Write};
     use std::net::{TcpListener, TcpStream};
 
@@ -5618,14 +5655,17 @@ fn run_live_daemon(owner: String, port: u16) {
     }
 
     // ── TCP listener — one thread per client ─────────────────────────────────
-    let listener = TcpListener::bind(("0.0.0.0", port)).expect("cannot bind TCP port");
-    eprintln!("[kore-self:live] Listening on 0.0.0.0:{port} — KORE is permanently alive");
+    let listener = TcpListener::bind(addr).expect("cannot bind TCP port");
+    eprintln!("[kore-self:live] Listening on {addr} (auth: {})",
+        if token.is_some() { "token required in every request" } else { "none, loopback only" });
+    let token = std::sync::Arc::new(token);
 
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
                 let conn = std::sync::Arc::clone(&shared);
-                std::thread::spawn(move || handle_tcp_client(s, conn));
+                let tok  = std::sync::Arc::clone(&token);
+                std::thread::spawn(move || handle_tcp_client(s, conn, tok));
             }
             Err(e) => eprintln!("[kore-self:live] accept error: {e}"),
         }
@@ -5635,6 +5675,7 @@ fn run_live_daemon(owner: String, port: u16) {
 fn handle_tcp_client(
     stream: std::net::TcpStream,
     shared: std::sync::Arc<std::sync::Mutex<KoreSelf>>,
+    token: std::sync::Arc<Option<String>>,
 ) {
     use std::io::{BufRead, BufReader, Write};
     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "?".to_string());
@@ -5665,6 +5706,16 @@ fn handle_tcp_client(
         let id     = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
         let method = req["method"].as_str().unwrap_or("");
 
+        // Every request must carry the bearer token when one is configured.
+        if let Some(t) = token.as_ref() {
+            if !safety::bearer_ok(req["authorization"].as_str(), t) {
+                let err = serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"code":-32001,
+                    "message":"unauthorized: add \"authorization\": \"Bearer <token>\" to every request"}});
+                if writeln!(writer, "{err}").is_err() { break; }
+                continue;
+            }
+        }
+
         let response = match method {
             "initialize" => serde_json::json!({
                 "jsonrpc":"2.0","id":id,
@@ -5673,8 +5724,8 @@ fn handle_tcp_client(
                     "capabilities":{"tools":{}},
                     "serverInfo":{
                         "name":"kore-self","version":"2026.07",
-                        "mode":"TCP_LIVE — permanently alive",
-                        "status":"ALIVE — heartbeat ticking every 30s"
+                        "mode":"TCP_LIVE",
+                        "status":"running, heartbeat every 30s"
                     }
                 }
             }),
@@ -5914,6 +5965,77 @@ mod tests {
         assert_eq!(update.new_confidence, 0.85);
         let _ = std::fs::remove_file(artifact);
     }
+    #[test]
+    fn http_requires_bearer_token_when_set() {
+        safety::test_support::init();
+        use std::io::{Read, Write};
+        fn roundtrip(token: Option<&str>, auth: Option<&str>) -> String {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let me = std::sync::Arc::new(std::sync::Mutex::new(KoreSelf::load_or_new("http-auth-test")));
+            let ctx = std::sync::Arc::new(std::sync::Mutex::new(kore_sql::executor::KqlContext::new()));
+            let tok = std::sync::Arc::new(token.map(|t| t.to_string()));
+            let h = std::thread::spawn(move || {
+                let (s, _) = listener.accept().unwrap();
+                http_handle(s, ctx, me, tok);
+            });
+            let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let hdr = auth.map(|a| format!("Authorization: {a}
+")).unwrap_or_default();
+            c.write_all(format!("GET /tables HTTP/1.1
+Host: x
+{hdr}
+").as_bytes()).unwrap();
+            let mut out = String::new();
+            c.read_to_string(&mut out).unwrap();
+            h.join().unwrap();
+            out
+        }
+        assert!(roundtrip(Some("sekret-token-1234"), None).starts_with("HTTP/1.1 401"));
+        assert!(roundtrip(Some("sekret-token-1234"), Some("Bearer wrong")).starts_with("HTTP/1.1 401"));
+        let ok = roundtrip(Some("sekret-token-1234"), Some("Bearer sekret-token-1234"));
+        assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
+        assert!(!ok.to_ascii_lowercase().contains("access-control-allow-origin"));
+        // no token configured (loopback-only mode): still no CORS header
+        let open = roundtrip(None, None);
+        assert!(open.starts_with("HTTP/1.1 200"));
+        assert!(!open.to_ascii_lowercase().contains("access-control"));
+    }
+
+    #[test]
+    fn tcp_daemon_requires_token_on_every_request() {
+        safety::test_support::init();
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let me = std::sync::Arc::new(std::sync::Mutex::new(KoreSelf::load_or_new("tcp-auth-test")));
+        let tok = std::sync::Arc::new(Some("sekret-token-1234".to_string()));
+        let h = std::thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            handle_tcp_client(s, me, tok);
+        });
+        let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let mut r = BufReader::new(c.try_clone().unwrap());
+        let mut ask = |line: &str| -> serde_json::Value {
+            writeln!(c, "{line}").unwrap();
+            let mut resp = String::new();
+            r.read_line(&mut resp).unwrap();
+            serde_json::from_str(&resp).unwrap()
+        };
+        let no_auth = ask(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
+        assert_eq!(no_auth["error"]["code"], -32001);
+        let bad = ask(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","authorization":"Bearer nope"}"#);
+        assert_eq!(bad["error"]["code"], -32001);
+        let good = ask(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list","authorization":"Bearer sekret-token-1234"}"#);
+        assert!(good["result"]["tools"].is_array());
+        // a later request without the token is rejected again (checked every time)
+        let again = ask(r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"self_stats"}}"#);
+        assert_eq!(again["error"]["code"], -32001);
+        drop(ask);
+        c.shutdown(std::net::Shutdown::Both).unwrap();
+        h.join().unwrap();
+    }
+
 }
 
 // ─── Stdin/stdout MCP (arun mode) ────────────────────────────────────────────

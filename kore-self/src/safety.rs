@@ -165,6 +165,14 @@ pub fn sql_lit(s: &str) -> String {
     out
 }
 
+/// True if the SQL statement reads files from disk (`COPY ...`, `LOAD TABLE ...`).
+/// Such statements are refused over the network and in tools; file loading goes
+/// through `safe_path` instead.
+pub fn sql_reads_files(sql: &str) -> bool {
+    let upper = sql.trim_start().to_ascii_uppercase();
+    upper.starts_with("COPY") || upper.starts_with("LOAD")
+}
+
 // ─── Network policy ──────────────────────────────────────────────────────────
 
 /// Constant-time byte comparison (length is not hidden, content is).
