@@ -17,7 +17,7 @@ All tables are typed `.kore` files (KORE columnar format).
 | table | columns |
 |---|---|
 | `events` | event_id, occurred_at, recorded_at, source, kind (note/action/decision/outcome/statement), text, tags (comma-joined), redacted |
-| `revisions` | rev_id, entity_type (belief/habit/decision), key, stance, confidence (0..1), rationale, supersedes (nullable), valid_from, author (`user` or `rule:<id>`), recorded_at |
+| `revisions` | rev_id, entity_type (belief/habit/decision), key, stance, confidence (0..1), rationale, supersedes (nullable), valid_from, author (`user`, `legacy` (imported from the old state, never cited) or `rule:<id>`), recorded_at |
 | `revision_causes` | rev_id, event_id (link table; every event_id must exist) |
 | `predictions` | pred_id, made_at, question_id, target, options (JSON), probs (JSON), model_id, model_version, features_cite (JSON event ids), resolves_by |
 | `outcomes` | pred_id, resolved_at, actual (one of the options), outcome_event_id (nullable) |

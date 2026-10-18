@@ -53,8 +53,6 @@ This table is generated from the tool registry (`kore-self --tool-table`); a tes
 | `self_save` | Save memories to a native .kore file inside your data directory ([data root]/[owner]/) |
 | `self_load` | Load a .kore file from your data directory ([data root]/[owner]/) into a named table for self_query |
 | `self_distributed_query` | Run SQL with the Rayon-parallel engine |
-| `self_delta_save` | Save a table to a Delta log inside your data directory |
-| `self_delta_history` | Show the version history of a Delta table inside your data directory |
 | `self_context_sync` | Write a generated copilot-instructions.md (from your memories and profile) into your data directory (default context/copilot-instructions.md) |
 | `self_brief` | Template-based briefing: recent work, tracked goals, observed patterns, suggestions |
 | `self_pushback` | Decision pushback (does NOT push to GitHub or any remote): compares a decision you describe with your own recorded past decisions, beliefs and keyword-choice counts and lists matches |
@@ -67,6 +65,14 @@ This table is generated from the tool registry (`kore-self --tool-table`); a tes
 | `self_metrics` | Engine status: tables loaded, total rows, memory count, SQL capabilities |
 | `self_version` | Version, tool count and pointer to the engine benchmark documentation |
 | `self_sql_explain` | Run SQL and get a short template-based description of the result shape |
+| `self_event_add` | Append a dated event to the versioned log (idempotent: the same source, time and text is stored once) |
+| `self_belief_revise` | Record a new revision of a belief, habit or decision, citing the events that caused it (caused_by) |
+| `self_belief_history` | Show every revision of a key in order, with the cited events expanded (time, source, text) and the supersedes chain |
+| `self_sql` | Run one read-only SELECT/WITH over a snapshot of your versioned log (latest, or as_of_version / as_of_time) |
+| `self_versions` | List the commits of the versioned log: version, recorded_at, cumulative row counts, short hash |
+| `self_diff` | Show the rows added between two versions of the versioned log (v1 exclusive, v2 inclusive) |
+| `self_verify` | Recompute every checksum and the hash chain of the versioned log from disk; reports OK or the exact failure and file |
+| `self_migrate_v1` | Import beliefs from the pre-log identity state as author=legacy revisions marked unsupported (no causes are invented) |
 <!-- tools:end -->
 
 ### What this does NOT do
@@ -85,7 +91,7 @@ This table is generated from the tool registry (`kore-self --tool-table`); a tes
 - Data root: `$KORE_SELF_HOME`, otherwise `~/.kore-self`. Each owner has its own folder `<root>/<owner>/`.
 - Files are **unencrypted at rest**. On Unix they are created with mode 0600 (directories 0700). On Windows they inherit the permissions of your profile folder. Encryption is planned (milestone M4). Do not commit the data folder.
 - Owner names accept only letters, digits, `_`, `-` and `.` (max 64 characters).
-- Every path argument (`self_save`, `self_load`, `self_delta_save`, `self_delta_history`, `self_context_sync`, `/load` in the HTTP API) is resolved inside `<root>/<owner>/`. `..`, absolute paths elsewhere and symlink escapes are rejected.
+- Every path argument (`self_save`, `self_load`, `self_context_sync`, `/load` in the HTTP API) is resolved inside `<root>/<owner>/`. `..`, absolute paths elsewhere and symlink escapes are rejected.
 - SQL `COPY` and `LOAD TABLE` (which read arbitrary files) are disabled in the tools and the HTTP API.
 
 ### Network safety

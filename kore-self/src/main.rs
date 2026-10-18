@@ -39,6 +39,7 @@ mod world_model;
 mod learning;
 mod safety;
 mod versioned;
+mod log_tools;
 
 use std::io::{BufRead, Write};
 use kore_distributed;
@@ -1916,7 +1917,15 @@ impl KoreSelf {
 fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
     // ── Signal needs emergence from tool use ──────────────────────────────────
     me.needs.signal_tool_called(name);
+    if let Some(r) = log_tools::handle(name, args, &me.owner) { return r; }
     match name {
+        // ── Versioned log: import of the old identity beliefs ─────────────
+        "self_migrate_v1" => {
+            let beliefs: Vec<_> = me.identity.beliefs.values()
+                .map(|b| (b.topic.clone(), b.stance.clone(), b.confidence, b.formed_at.clone(), b.history.clone()))
+                .collect();
+            log_tools::migrate_v1(&me.owner, &beliefs)
+        }
         // ── Ingest ─────────────────────────────────────────────────────────
         "self_ingest" => {
             let content    = args["content"].as_str().unwrap_or("");
@@ -1924,8 +1933,13 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             let importance = args["importance"].as_f64().unwrap_or(0.7);
             me.shadow.observe_tool("self_ingest");
             let id = me.ingest(content, kind, importance);
+            // Also append to the versioned log (kind note, occurred_at = now; duplicates are no-ops).
+            let logged = match log_tools::record_ingest(&me.owner, content, kind) {
+                Ok((eid, dup)) => format!("Logged as event {}{}.", safety::trunc(&eid, 12), if dup { " (already in the log)" } else { "" }),
+                Err(e) => format!("Not added to the versioned log: {e}"),
+            };
             json!({ "content": [{ "type": "text", "text": format!(
-                "Memory #{id} stored [{kind}]. Total: {}. Identity: {}",
+                "Memory #{id} stored [{kind}]. Total: {}. Identity: {}. {logged}",
                 me.memories.len(), me.identity.summary()
             )}]})
         }
@@ -2615,86 +2629,6 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                         }]})
                     }
                     Err(e) => json!({ "content": [{ "type": "text", "text": format!("Distributed error: {e}") }], "isError": true }),
-                }
-            }
-        }
-        // ── ACID via kore-delta ────────────────────────────────────────────────
-        "self_delta_save" => {
-            me.shadow.observe_tool("self_delta_save");
-            let table = args["table"].as_str().unwrap_or("memories");
-            let path  = args["path"].as_str().unwrap_or("").trim();
-            if path.is_empty() {
-                json!({ "content": [{ "type": "text", "text": "Pass 'path'. e.g. self_delta_save({table:'memories', path:'C:/data/memories.delta'})" }]})
-            } else {
-                let block = if table == "memories" {
-                    kore_query::memories_to_block(&me.memories)
-                } else {
-                    me.dml_tables.get(table).cloned().unwrap_or_else(kore_core::DataBlock::empty)
-                };
-                let rows = block.num_rows;
-                // Build schema from block
-                let schema: Vec<kore_delta::SchemaField> = block.columns.iter().map(|c| {
-                    kore_delta::SchemaField {
-                        name:  c.name.clone(),
-                        dtype: match &c.data {
-                            kore_core::ColumnData::Int64(_)   => "INT64".to_string(),
-                            kore_core::ColumnData::Float64(_) => "FLOAT64".to_string(),
-                            kore_core::ColumnData::Bool(_)    => "BOOL".to_string(),
-                            _ => "STR".to_string(),
-                        },
-                        nullable: true,
-                    }
-                }).collect();
-                let delta_buf = match safety::safe_path_or_err(&me.owner, path) {
-                    Ok(p) => p,
-                    Err(e) => return json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
-                };
-                let delta_path = delta_buf.as_path();
-                let result = if delta_path.exists() {
-                    // Append to existing delta table
-                    let mut dt = kore_delta::DeltaTable::open(delta_path);
-                    dt.and_then(|mut t| t.insert(block).map(|v| (v, rows)))
-                } else {
-                    // Create new delta table
-                    kore_delta::DeltaTable::create(delta_path, schema)
-                        .and_then(|mut dt| dt.insert(block).map(|v| (v, rows)))
-                };
-                match result {
-                    Ok((version, rows_written)) => json!({ "content": [{ "type": "text", "text":
-                        json!({
-                            "status":  "saved (ACID)",
-                            "path":    path,
-                            "rows":    rows_written,
-                            "version": version,
-                            "features": ["time-travel", "versioning", "rollback"],
-                        }).to_string()
-                    }]}),
-                    Err(e) => json!({ "content": [{ "type": "text", "text": format!("Delta error: {e}") }], "isError": true }),
-                }
-            }
-        }
-        "self_delta_history" => {
-            me.shadow.observe_tool("self_delta_history");
-            let path = args["path"].as_str().unwrap_or("").trim();
-            if path.is_empty() {
-                json!({ "content": [{ "type": "text", "text": "Pass 'path' to a .delta directory." }]})
-            } else {
-                let safe = match safety::safe_path_or_err(&me.owner, path) {
-                    Ok(p) => p,
-                    Err(e) => return json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
-                };
-                match kore_delta::DeltaTable::open(&safe) {
-                    Ok(dt) => {
-                        let history = dt.history();
-                        json!({ "content": [{ "type": "text", "text":
-                            json!({
-                                "path":    path,
-                                "current_version": dt.version(),
-                                "history": history.iter().map(|(v,op,rows)| json!({"version":v,"operation":op,"rows":rows})).collect::<Vec<_>>(),
-                            }).to_string()
-                        }]})
-                    }
-                    Err(e) => json!({ "content": [{ "type": "text", "text": format!("Delta error: {e}") }], "isError": true }),
                 }
             }
         }
@@ -4789,19 +4723,6 @@ fn tool_list() -> Value {
           "cluster": { "type": "boolean", "description": "true = TCP cluster mode (multi-machine ready). Default: false (Rayon parallel)" }
         }}
       },
-      { "name": "self_delta_save",
-        "description": "Save a table to a Delta log inside your data directory. Each save is a new version.",
-        "inputSchema": { "type": "object", "properties": {
-          "table": { "type": "string", "description": "Table name to save. Default: memories" },
-          "path":  { "type": "string", "description": "Delta directory path inside [data root]/[owner]/, e.g. tables/memories.delta" }
-        }}
-      },
-      { "name": "self_delta_history",
-        "description": "Show the version history of a Delta table inside your data directory.",
-        "inputSchema": { "type": "object", "properties": {
-          "path": { "type": "string" }
-        }}
-      },
       { "name": "self_context_sync",
         "description": "Write a generated copilot-instructions.md (from your memories and profile) into your data directory (default context/copilot-instructions.md). Paths outside the data directory are rejected.",
         "inputSchema": { "type": "object", "properties": {
@@ -4864,6 +4785,9 @@ fn tool_list() -> Value {
         }}
       }
     ]);
+    if let Some(list) = tools.as_array_mut() {
+        list.extend(log_tools::tool_defs());
+    }
     #[cfg(feature = "legacy-narration")]
     if let Some(list) = tools.as_array_mut() {
         list.extend(legacy_tool_entries());
@@ -6088,7 +6012,7 @@ Host: x
         kore.ingest("hello path test", "conversation", 0.5);
         let outside = std::env::temp_dir().join("kore-self-escape-probe.kore");
         let _ = std::fs::remove_file(&outside);
-        for tool in ["self_save", "self_load", "self_delta_save", "self_delta_history", "self_context_sync"] {
+        for tool in ["self_save", "self_load", "self_context_sync"] {
             for bad in ["../escape.kore", "a/../../escape.kore", &outside.to_string_lossy().to_string()] {
                 let r = handle_tool(tool, &json!({"path": bad}), &mut kore);
                 assert!(is_err(&r), "{tool} accepted {bad}: {r}");
@@ -6325,7 +6249,10 @@ fn run_arun_mode(owner: String) {
                     let tool_args = req["params"].get("arguments")
                         .cloned()
                         .unwrap_or_else(|| json!({}));
-                    let result = if let Ok(mut me) = shared.lock() {
+                    // Log tools only need the owner: run them without the global state lock.
+                    let result = if let Some(r) = log_tools::handle(tool_name, &tool_args, &owner) {
+                        r
+                    } else if let Ok(mut me) = shared.lock() {
                         handle_tool(tool_name, &tool_args, &mut me)
                     } else {
                         json!({ "content": [{ "type": "text", "text": "KORE is mid-heartbeat. Retry in a moment." }] })

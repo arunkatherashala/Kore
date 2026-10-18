@@ -720,8 +720,8 @@ fn validate_revision(r: &NewRevision, ix: &Index, now: &str) -> Result<(Revision
     }
     let valid_from = normalize_ts(&r.valid_from).map_err(LogError::Invalid)?;
     let rule_ok = r.author.strip_prefix("rule:").map(|id| !id.trim().is_empty()).unwrap_or(false);
-    if r.author != "user" && !rule_ok {
-        return inv("author must be 'user' or 'rule:<id>'");
+    if r.author != "user" && r.author != "legacy" && !rule_ok {
+        return inv("author must be 'user', 'legacy' or 'rule:<id>'");
     }
     let mut causes: Vec<String> = r.caused_by.clone();
     causes.sort();
