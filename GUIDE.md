@@ -662,7 +662,7 @@ l_shipdate          VARCHAR     6000000
 
 **Target positioning (the only claim):** A local, deterministic, append-only journal of how your recorded beliefs, habits and decisions change. Every change cites the events that caused it. You can query any past version with SQL. Its explanations can be ablation-tested, and its predictions are scored against outcomes.
 
-**Status (milestone M0):** the versioned, evidence-linked journal is not built yet (milestone M1). Today it is a memory store with SQL, simple word-frequency counters and an unvalidated keyword-to-choice predictor. No accuracy number is claimed.
+**Status (milestone M0):** the versioned log is built (milestone M1; see README, "Versioned self: quick start"), without automatic learning or prediction. Today it is a memory store with SQL, simple word-frequency counters and an unvalidated keyword-to-choice predictor. No accuracy number is claimed.
 
 **`mcp.json` / `claude_desktop_config.json`:**
 ```json

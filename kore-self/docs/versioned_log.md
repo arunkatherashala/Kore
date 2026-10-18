@@ -93,6 +93,42 @@ anything that is not a single SELECT/WITH (comments stripped, quotes respected,
 outside string literals). The engine is the older KORE engine; joins are plain
 equi-joins, which is why causes live in the `revision_causes` link table.
 
+## MCP tool surface (M1b)
+
+All tools use the owner of the running instance and operate on `<root>/<owner>/log`
+(the owner and path are validated with `safety::validate_owner`/`safe_path`; nothing
+is written outside the data root). Each call opens the log from disk and closes it
+again; a process-wide mutex serialises log access between the MCP loop, the HTTP/TCP
+servers and the heartbeat thread, and the MCP loop runs these tools without holding
+the global state lock. A second process writing the same log is detected at commit
+and reported as `Conflict` (nothing is written; retry). A damaged log makes every
+tool except `self_verify` fail with the verification error.
+
+| tool | arguments | result |
+|---|---|---|
+| `self_event_add` | `text`, `occurred_at` (required, ISO-8601 UTC), `source?` (default `mcp`), `kind?` (default `note`), `tags?` | `event_id`, `duplicate`, `version` |
+| `self_belief_revise` | `key`, `stance`, `confidence` 0..1, `caused_by` (event ids, each must exist), `rationale?`, `valid_from?` (default: newest cited event's `occurred_at`, else now), `entity_type?` | `rev_id`, `version`, `duplicate`, `valid_from`, and a `note` when nothing is cited (stored as unsupported). Author is always `user`. |
+| `self_belief_history` | `key`, `entity_type?` | revisions in order with cited events expanded and `supersedes` |
+| `self_sql` | `sql`, `as_of_version?` or `as_of_time?` | text table; `as_of_time` picks the latest version recorded by then and also sets the `beliefs_asof` cut-off |
+| `self_versions` | none | version, recorded_at, cumulative rows per table, short hash |
+| `self_diff` | `v1`, `v2` | rows added in `(v1, v2]` |
+| `self_verify` | none | `OK: ...` or `VERIFY FAILED: <exact error naming the file>` |
+| `self_migrate_v1` | none | imports the old identity beliefs as `author=legacy` revisions with no causes (`unsupported=1`); topics that already have a belief revision are skipped, so it is safe to repeat |
+
+`self_ingest` additionally appends the memory as an event (`kind=note`,
+`occurred_at` = now, `source=self_ingest`, tag = the memory kind); duplicates inside
+the same second are no-ops. `self_observe_outcome` is unchanged (it still writes the
+old learning history; mapping it to `outcomes` needs a prediction id, which does not
+exist yet). The former `self_delta_save` and `self_delta_history` tools were removed:
+use `self_versions` and `self_sql` with `as_of_version`.
+
+`author=legacy` is accepted by the library only for imports; tools cannot write
+`rule:<id>` or `legacy` revisions.
+
+Query notes for the older KORE SQL engine: single-table SELECTs name their columns
+`<table>.<col>`, joins keep alias prefixes (`r.key`), `count(*)` is named `Count(*)`,
+joins are equi-joins.
+
 ## What is and is not guaranteed
 
 Guaranteed (when the files are only changed through this module): the properties
@@ -114,6 +150,7 @@ Not guaranteed:
 * Durability against hardware or OS faults beyond what fsync gives.
 * Whole log is loaded in memory when opened; fine for personal-scale data, not
   tuned for large volumes.
+* No automatic learning yet, no prediction yet, no encryption yet, no forget yet.
 * `forget` (deleting or redacting stored content) is not implemented. When it is
   added it will be the only documented exception to append-only.
 * Content is whatever the caller supplies; the log stores it, it does not judge
