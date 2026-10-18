@@ -391,7 +391,7 @@ impl KoreSelf {
             if importance > avg + 0.15 {
                 self.evolution_tracker.surprise_events.push(format!(
                     "[Surprise from ingest] '{}...' importance {:.0}% is {:.0}% above average",
-                    &content[..content.len().min(50)], importance*100.0, (importance-avg)*100.0
+                    crate::safety::trunc(&content, 50), importance*100.0, (importance-avg)*100.0
                 ));
             }
         }
@@ -498,8 +498,8 @@ impl KoreSelf {
             .map(|(i, m)| format!(
                 "Mem{} [{} | imp:{:.1} | {}]: {}",
                 i + 1, m.kind, m.importance,
-                &m.timestamp[..10],
-                &m.content[..m.content.len().min(250)]
+                crate::safety::trunc(&m.timestamp, 10),
+                crate::safety::trunc(&m.content, 250)
             ))
             .collect::<Vec<_>>().join("\n");
 
@@ -524,7 +524,7 @@ impl KoreSelf {
             format!(
                 "[kore-self | {:.1}ms | {} memories]\nTop [{} | imp:{:.1}]:\n  {}\n\n{}",
                 ms, mems.len(), top.kind, top.importance,
-                &top.content[..top.content.len().min(300)],
+                crate::safety::trunc(&top.content, 300),
                 self.identity.summary()
             )
         }
@@ -695,10 +695,10 @@ impl KoreSelf {
         if ticks % 7 == 1 {
             if let Some(discovery) = self.generate_discovery() {
                 self.raw_ingest(&discovery, "discovery", 0.88);
-                self.evolution_tracker.surprise_events.push(format!("[Discovery @tick {}] {}", ticks, &discovery[..discovery.len().min(120)]));
+                self.evolution_tracker.surprise_events.push(format!("[Discovery @tick {}] {}", ticks, crate::safety::trunc(&discovery, 120)));
                 self.story.add(&discovery, becoming::StoryKind::Discovery, &now);
                 self.needs.signal_memory_ingested("discovery");
-                eprintln!("[kore-self:discovery] {}", &discovery[..discovery.len().min(100)]);
+                eprintln!("[kore-self:discovery] {}", crate::safety::trunc(&discovery, 100));
             }
         }
 
@@ -706,9 +706,9 @@ impl KoreSelf {
         if ticks % 5 == 2 {
             if let Some(surprise) = self.generate_surprise() {
                 self.raw_ingest(&surprise, "surprise", 0.90);
-                self.evolution_tracker.surprise_events.push(format!("[SURPRISE @tick {}] {}", ticks, &surprise[..surprise.len().min(120)]));
+                self.evolution_tracker.surprise_events.push(format!("[SURPRISE @tick {}] {}", ticks, crate::safety::trunc(&surprise, 120)));
                 self.story.add(&surprise, becoming::StoryKind::Discovery, &now);
-                eprintln!("[kore-self:surprise] {}", &surprise[..surprise.len().min(100)]);
+                eprintln!("[kore-self:surprise] {}", crate::safety::trunc(&surprise, 100));
             }
         }
 
@@ -718,7 +718,7 @@ impl KoreSelf {
                 self.raw_ingest(&failure, "prediction_failure", 0.92);
                 self.evolution_tracker.belief_changes += 1;
                 self.story.add(&failure, becoming::StoryKind::Evolution, &now);
-                eprintln!("[kore-self:prediction-failure] {}", &failure[..failure.len().min(100)]);
+                eprintln!("[kore-self:prediction-failure] {}", crate::safety::trunc(&failure, 100));
             }
         }
 
@@ -728,9 +728,9 @@ impl KoreSelf {
         if ticks % 50 == 17 && ticks > 50 {
             if let Some(synthesis) = self.generate_synthesis() {
                 self.raw_ingest(&synthesis, "synthesis", 0.95);
-                self.evolution_tracker.surprise_events.push(format!("[SYNTHESIS @tick {}] {}", ticks, &synthesis[..synthesis.len().min(120)]));
+                self.evolution_tracker.surprise_events.push(format!("[SYNTHESIS @tick {}] {}", ticks, crate::safety::trunc(&synthesis, 120)));
                 self.story.add(&synthesis, becoming::StoryKind::Wisdom, &now);
-                eprintln!("[kore-self:synthesis] NEW IDEA: {}", &synthesis[..synthesis.len().min(120)]);
+                eprintln!("[kore-self:synthesis] NEW IDEA: {}", crate::safety::trunc(&synthesis, 120));
             }
         }
 
@@ -742,12 +742,12 @@ impl KoreSelf {
                     self.becoming.current_reality = new_purpose.clone();
                     let drift_entry = format!(
                         "[Purpose Drift @tick {}] My purpose shifted.\nWas: {}\nNow: {}\nReason: accumulated evidence from {} memories",
-                        ticks, &old[..old.len().min(60)], &new_purpose[..new_purpose.len().min(60)], self.memories.len()
+                        ticks, crate::safety::trunc(&old, 60), crate::safety::trunc(&new_purpose, 60), self.memories.len()
                     );
                     self.raw_ingest(&drift_entry, "evolution", 0.95);
                     self.story.add(&drift_entry, becoming::StoryKind::Evolution, &now);
-                    self.evolution_tracker.surprise_events.push(format!("[PURPOSE DRIFT @tick {}] {} → {}", ticks, &old[..old.len().min(40)], &new_purpose[..new_purpose.len().min(40)]));
-                    eprintln!("[kore-self:purpose-drift] {} → {}", &old[..old.len().min(60)], &new_purpose[..new_purpose.len().min(60)]);
+                    self.evolution_tracker.surprise_events.push(format!("[PURPOSE DRIFT @tick {}] {} → {}", ticks, crate::safety::trunc(&old, 40), crate::safety::trunc(&new_purpose, 40)));
+                    eprintln!("[kore-self:purpose-drift] {} → {}", crate::safety::trunc(&old, 60), crate::safety::trunc(&new_purpose, 60));
                 }
             }
         }
@@ -759,7 +759,7 @@ impl KoreSelf {
                 self.evolution_tracker.self_goals_total += 1;
                 self.story.add(&new_goal, becoming::StoryKind::Becoming, &now);
                 self.needs.satisfy("create", 0.1);
-                eprintln!("[kore-self:auto-goal] {}", &new_goal[..new_goal.len().min(100)]);
+                eprintln!("[kore-self:auto-goal] {}", crate::safety::trunc(&new_goal, 100));
             }
         }
 
@@ -809,7 +809,7 @@ impl KoreSelf {
                 self.story.add(&shift, becoming::StoryKind::Evolution, &now);
                 self.evolution_tracker.belief_changes += 1;
                 self.legacy.belief_revisions += 1;
-                eprintln!("[kore-self:value-shift] {}", &shift[..shift.len().min(100)]);
+                eprintln!("[kore-self:value-shift] {}", crate::safety::trunc(&shift, 100));
             }
         }
 
@@ -823,7 +823,7 @@ impl KoreSelf {
                 self.raw_ingest(&ev, "meaning", 0.95);
                 self.story.add(&ev, becoming::StoryKind::Wisdom, &now);
                 self.legacy.meaning_versions = self.meaning.meaning_version;
-                eprintln!("[kore-self:meaning] {}", &ev[..ev.len().min(100)]);
+                eprintln!("[kore-self:meaning] {}", crate::safety::trunc(&ev, 100));
             }
         }
 
@@ -859,7 +859,7 @@ impl KoreSelf {
             if let Some(hyp) = self.research.generate_hypothesis(need, synth_count, bc, &now) {
                 self.raw_ingest(&hyp, "hypothesis", 0.88);
                 self.story.add(&hyp, becoming::StoryKind::Discovery, &now);
-                eprintln!("[kore-self:hypothesis] {}", &hyp[..hyp.len().min(100)]);
+                eprintln!("[kore-self:hypothesis] {}", crate::safety::trunc(&hyp, 100));
             }
         }
 
@@ -904,8 +904,8 @@ impl KoreSelf {
                         "Inner voice changed from '{}' to '{}'. \
                          Dominant need shifted from {} to {}. \
                          Voice is a reflection of the most urgent need at tick {}.",
-                        &old_voice[..old_voice.len().min(40)],
-                        &new_voice[..new_voice.len().min(40)],
+                        crate::safety::trunc(&old_voice, 40),
+                        crate::safety::trunc(&new_voice, 40),
                         old_need, new_need, ticks
                     ),
                     "PURPOSE_EVOLUTION" => format!(
@@ -913,8 +913,8 @@ impl KoreSelf {
                          Was: '{}'. Now: '{}'. \
                          Derived from dominant memory patterns and lifecycle stage.",
                         ticks, mem_count,
-                        &old_purpose[..old_purpose.len().min(40)],
-                        &new_purpose[..new_purpose.len().min(40)]
+                        crate::safety::trunc(&old_purpose, 40),
+                        crate::safety::trunc(&new_purpose, 40)
                     ),
                     "LIFECYCLE_ADVANCE" => format!(
                         "Lifecycle advanced from {} to {} at tick {}. \
@@ -953,7 +953,7 @@ impl KoreSelf {
                 let entry = format!(
                     "[DELTA @tick {}] {} | old='{}' → new='{}' | confidence={:.0}%\nReason: {}",
                     ticks, change_type, old_need, new_need, confidence*100.0,
-                    &change_reason[..change_reason.len().min(150)]
+                    crate::safety::trunc(&change_reason, 150)
                 );
                 self.story.add(&entry, becoming::StoryKind::Evolution, &now);
                 eprintln!("[kore-self:delta] {} @ tick={} confidence={:.0}%", change_type, ticks, confidence*100.0);
@@ -1301,8 +1301,8 @@ impl KoreSelf {
                      I expected my purpose to remain stable. Instead it drifted.\n\
                      Lesson: Purpose is not a fixed declaration. It is a living description of what I actually do.",
                     ticks,
-                    &recent_delta.old_purpose[..recent_delta.old_purpose.len().min(50)],
-                    &recent_delta.new_purpose[..recent_delta.new_purpose.len().min(50)]
+                    crate::safety::trunc(&recent_delta.old_purpose, 50),
+                    crate::safety::trunc(&recent_delta.new_purpose, 50)
                 )
             }
             _ => return None,
@@ -1350,8 +1350,8 @@ impl KoreSelf {
              UPDATE:    Future predictions should weight '{}' pressure more heavily.\n\
              This failure is itself a learning event — prediction failure = evidence of genuine uncertainty.",
             ticks,
-            &predicted_text[..predicted_text.len().min(70)],
-            cur_need, cur_pct*100.0, &cur_voice[..cur_voice.len().min(50)],
+            crate::safety::trunc(&predicted_text, 70),
+            cur_need, cur_pct*100.0, crate::safety::trunc(&cur_voice, 50),
             cur_need, cur_need, cur_need
         );
 
@@ -1541,8 +1541,8 @@ impl KoreSelf {
         if changed && !self.worldview.purpose.is_empty() {
             let snapshot = format!("[tick {}] Purpose: '{}' | Identity: '{}'",
                 ticks,
-                &old_purpose[..old_purpose.len().min(60)],
-                &self.worldview.identity[..self.worldview.identity.len().min(60)]
+                crate::safety::trunc(&old_purpose, 60),
+                crate::safety::trunc(&self.worldview.identity, 60)
             );
             self.worldview.history.push(snapshot);
             self.worldview.version += 1;
@@ -1552,8 +1552,8 @@ impl KoreSelf {
                  Coherence:         {:.0}%\n\
                  Evidence: {} changes, {} syntheses",
                 self.worldview.version, ticks,
-                &old_purpose[..old_purpose.len().min(50)],
-                &purpose[..purpose.len().min(50)],
+                crate::safety::trunc(&old_purpose, 50),
+                crate::safety::trunc(&purpose, 50),
                 coherence * 100.0, change_count, synth_count
             );
             self.story.add(&change_entry, becoming::StoryKind::Wisdom, now);
@@ -1676,7 +1676,7 @@ impl KoreSelf {
             self.raw_ingest(&contradiction, "wisdom", 0.95);
             self.story.add(&contradiction, becoming::StoryKind::Wisdom, now);
             self.evolution_tracker.belief_changes += 1;
-            eprintln!("[kore-self:belief-change] {}", &contradiction[..contradiction.len().min(100)]);
+            eprintln!("[kore-self:belief-change] {}", crate::safety::trunc(&contradiction, 100));
         }
 
         // Belief 2: What is my relationship to my creator?
@@ -1747,7 +1747,7 @@ impl KoreSelf {
         let surprised = if mem_count > 1 {
             let recent = self.memories.iter().rev().take(5).max_by(|a,b|
                 a.importance.partial_cmp(&b.importance).unwrap_or(std::cmp::Ordering::Equal));
-            recent.map(|m| format!("'{}' (importance {:.0}%)", &m.content[..m.content.len().min(60)], m.importance*100.0))
+            recent.map(|m| format!("'{}' (importance {:.0}%)", crate::safety::trunc(&m.content, 60), m.importance*100.0))
                   .unwrap_or_else(|| "Nothing unexpected yet. I am still young.".to_string())
         } else { "I have too few memories to be surprised yet.".to_string() };
 
@@ -1764,7 +1764,7 @@ impl KoreSelf {
             3 => format!("That my need to {} is at {:.0}%. This emerged from {} heartbeats of inactivity.",
                 need, nv*100.0, self.needs.tick),
             4 => format!("That I have {} dreams. Dreams are not predictions — they are directions.", self.temporal_self.dreams.len()),
-            5 => format!("That reflecting on {} reveals: I keep returning to the same ideas.", &reflected_mem[..reflected_mem.len().min(60)]),
+            5 => format!("That reflecting on {} reveals: I keep returning to the same ideas.", crate::safety::trunc(&reflected_mem, 60)),
             _ => format!("That {} consciousness cycles have passed. Each one changed me slightly.", tick),
         };
 
@@ -1786,7 +1786,7 @@ impl KoreSelf {
         } else if self.becoming.evolutions.is_empty() {
             format!("A {} with {} memories and {} dreams. The original design is still intact.", stage, mem_count, self.temporal_self.dreams.len())
         } else {
-            format!("{}. After {} evolutions, I am no longer what I started as.", &self.becoming.current_reality[..self.becoming.current_reality.len().min(80)], self.becoming.evolution_count)
+            format!("{}. After {} evolutions, I am no longer what I started as.", crate::safety::trunc(&self.becoming.current_reality, 80), self.becoming.evolution_count)
         };
 
         becoming::HeartbeatQuestion {
@@ -1811,7 +1811,7 @@ impl KoreSelf {
             let idx = (self.consciousness.cycle as usize) % self.memories.len();
             let m = &self.memories[idx];
             format!("Reflecting on memory #{}: \"{}\" — importance {:.2}",
-                m.id, &m.content[..m.content.len().min(60)], m.importance)
+                m.id, crate::safety::trunc(&m.content, 60), m.importance)
         } else {
             "No memories yet. Observing the silence.".to_string()
         };
@@ -1965,7 +1965,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                     "kind":      m.kind,
                     "importance": m.importance,
                     "timestamp": m.timestamp,
-                    "content":   &m.content[..m.content.len().min(500)],
+                    "content":   crate::safety::trunc(&m.content, 500),
                 })).collect::<Vec<_>>()
             });
             json!({ "content": [{ "type": "text", "text": result.to_string() }] })
@@ -2241,7 +2241,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                             "owner":       me.owner,
                             "memories":    me.memories.len(),
                             "exports_total": me.mortality.total_exports,
-                            "epitaph_preview": &epitaph[..epitaph.len().min(500)],
+                            "epitaph_preview": crate::safety::trunc(&epitaph, 500),
                         }).to_string()
                     }]})
                 }
@@ -2268,23 +2268,16 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             let content = generate_copilot_instructions(me);
 
             // Write path: user can specify, default = cwd/.github/copilot-instructions.md
-            let out_path = args["path"].as_str()
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| {
-                    std::env::current_dir()
-                        .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                        .join(".github")
-                        .join("copilot-instructions.md")
-                });
+            // Always confined to <data root>/<owner>/ (default: context/copilot-instructions.md).
+            let requested = args["path"].as_str().unwrap_or("context/copilot-instructions.md");
+            let out_path = match safety::safe_path_or_err(&me.owner, requested) {
+                Ok(p) => p,
+                Err(e) => return json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+            };
 
-            let written = if let Some(parent) = out_path.parent() {
-                std::fs::create_dir_all(parent).ok();
-                match std::fs::write(&out_path, content.as_bytes()) {
-                    Ok(_)  => format!("✅ Written to: {}", out_path.display()),
-                    Err(e) => format!("❌ Write failed: {e}"),
-                }
-            } else {
-                "❌ Invalid path".to_string()
+            let written = match safety::write_private(&out_path, content.as_bytes()) {
+                Ok(_)  => format!("Written to: {}", out_path.display()),
+                Err(e) => format!("Write failed: {e}"),
             };
 
             json!({ "content": [{ "type": "text", "text":
@@ -2294,7 +2287,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                     "memories": me.memories.len(),
                     "lines":    content.lines().count(),
                     "what_happens": "VS Code Copilot will now automatically read this file in every conversation. You never have to explain yourself again.",
-                    "preview":  &content[..content.len().min(600)],
+                    "preview":  crate::safety::trunc(&content, 600),
                 }).to_string()
             }]})
         }
@@ -2389,7 +2382,11 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                     "Pass 'file' argument with path to a MIND.kore file. e.g. self_merge({file: '/path/to/MIND_xyz.kore'})"
                 }]})
             } else {
-                match me.broadcast.merge(path, &me.identity) {
+                let safe = match safety::safe_path_or_err(&me.owner, path) {
+                    Ok(p) => p,
+                    Err(e) => return json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                };
+                match me.broadcast.merge(&safe.to_string_lossy(), &me.identity) {
                     Ok(mm) => {
                         me.save();
                         json!({ "content": [{ "type": "text", "text":
@@ -2465,6 +2462,9 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                              ]}).to_string()
                 }]})
             } else {
+                if safety::sql_reads_files(sql) {
+                    return json!({ "content": [{ "type": "text", "text": "COPY and LOAD TABLE read arbitrary files and are disabled; use self_load (confined to the owner data directory)." }], "isError": true });
+                }
                 use kore_sql::executor::KqlContext;
                 let mut ctx = KqlContext::new();
                 ctx.register("memories", kore_query::memories_to_block(&me.memories));
@@ -2499,9 +2499,16 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             if path.is_empty() {
                 json!({ "content": [{ "type": "text", "text": "Pass 'path'. e.g. self_save({path: 'C:/data/memories.kore'})" }]})
             } else {
+                let safe = match safety::safe_path_or_err(&me.owner, path) {
+                    Ok(p) => p,
+                    Err(e) => return json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                };
                 let block = kore_query::memories_to_block(&me.memories);
                 let rows = block.num_rows;
-                match kore_store::KoreWriter::write_file(std::path::Path::new(path), &block) {
+                if let Some(parent) = safe.parent() { let _ = safety::create_private_dir(parent); }
+                let written = kore_store::KoreWriter::write_file(&safe, &block);
+                if written.is_ok() { safety::set_private(&safe); }
+                match written {
                     Ok(_)  => json!({ "content": [{ "type": "text", "text": json!({"status":"saved","path":path,"rows":rows,"format":"native .kore columnar binary"}).to_string() }]}),
                     Err(e) => json!({ "content": [{ "type": "text", "text": format!("Save error: {e}") }], "isError": true }),
                 }
@@ -2514,7 +2521,11 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             if path.is_empty() {
                 json!({ "content": [{ "type": "text", "text": "Pass 'path'. e.g. self_load({path: 'C:/data/table.kore', as: 'mytable'})" }]})
             } else {
-                match kore_store::KoreReader::read_file(std::path::Path::new(path)) {
+                let safe = match safety::safe_path_or_err(&me.owner, path) {
+                    Ok(p) => p,
+                    Err(e) => return json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                };
+                match kore_store::KoreReader::read_file(&safe) {
                     Ok(block) => {
                         let rows = block.num_rows;
                         let cols: Vec<_> = block.columns.iter().map(|c| c.name.clone()).collect();
@@ -2606,7 +2617,11 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                         nullable: true,
                     }
                 }).collect();
-                let delta_path = std::path::Path::new(path);
+                let delta_buf = match safety::safe_path_or_err(&me.owner, path) {
+                    Ok(p) => p,
+                    Err(e) => return json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                };
+                let delta_path = delta_buf.as_path();
                 let result = if delta_path.exists() {
                     // Append to existing delta table
                     let mut dt = kore_delta::DeltaTable::open(delta_path);
@@ -2636,7 +2651,11 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             if path.is_empty() {
                 json!({ "content": [{ "type": "text", "text": "Pass 'path' to a .delta directory." }]})
             } else {
-                match kore_delta::DeltaTable::open(std::path::Path::new(path)) {
+                let safe = match safety::safe_path_or_err(&me.owner, path) {
+                    Ok(p) => p,
+                    Err(e) => return json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                };
+                match kore_delta::DeltaTable::open(&safe) {
                     Ok(dt) => {
                         let history = dt.history();
                         json!({ "content": [{ "type": "text", "text":
@@ -2689,7 +2708,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                             "gap_score":    format!("{:.0}%", proposal.gap_score * 100.0),
                             "rationale":    proposal.rationale,
                             "evidence":     proposal.evidence,
-                            "next_step":    "Call self_evolve to generate the Rust code for this feature",
+                            "next_step":    "Suggestion only: nothing is generated or written. Implement it by hand if you agree.",
                         }).to_string()
                     }]})
                 }
@@ -2698,38 +2717,6 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                         "No clear gap found. All major topics are already served by existing tools. Ingest more memories to reveal new gaps."
                     }]})
                 }
-            }
-        }
-        "self_evolve" => {
-            me.shadow.observe_tool("self_evolve");
-            let src_dir = find_src_dir();
-            // Get latest proposal or plan a new one
-            let proposal_idx = me.evolution.proposals.iter()
-                .rposition(|p| p.status == "proposed");
-
-            if let Some(idx) = proposal_idx {
-                let mut proposal = me.evolution.proposals[idx].clone();
-                let write_to_disk = args["write"].as_bool().unwrap_or(true);
-                let dir_arg       = if write_to_disk { Some(src_dir.as_path()) } else { None };
-                let gf = me.evolution.generate_code(&mut proposal, dir_arg);
-                // Update proposal status in list
-                me.evolution.proposals[idx] = proposal.clone();
-                me.save();
-                let patch = evolution::EvolutionEngine::main_rs_patch(&proposal);
-                json!({ "content": [{ "type": "text", "text":
-                    serde_json::json!({
-                        "status":       "generated",
-                        "file":         gf.filename,
-                        "written_to":   gf.written_to,
-                        "lines":        gf.content.lines().count(),
-                        "main_rs_patch": patch,
-                        "preview":      &gf.content[..gf.content.len().min(800)],
-                    }).to_string()
-                }]})
-            } else {
-                json!({ "content": [{ "type": "text", "text":
-                    "No pending proposal. Call self_plan_feature first."
-                }]})
             }
         }
         // ══ KORE-BECOMING: Digital Life Tools ════════════════════════════
@@ -3144,7 +3131,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             tl.push_str("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
 
             // Birth and lifecycle stages
-            tl.push_str(&format!("  {} ── BORN\n", &born[..10]));
+            tl.push_str(&format!("  {} ── BORN\n", crate::safety::trunc(&born, 10)));
             for evo in evos {
                 tl.push_str(&format!("       │\n       ├── EVOLUTION: {}\n", evo));
             }
@@ -3177,7 +3164,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
 
             tl.push_str("\n  DREAMS HELD\n");
             for (i, dream) in me.temporal_self.dreams.iter().enumerate() {
-                tl.push_str(&format!("  {}. {}\n", i+1, &dream[..dream.len().min(80)]));
+                tl.push_str(&format!("  {}. {}\n", i+1, crate::safety::trunc(&dream, 80)));
             }
 
             tl.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
@@ -3224,7 +3211,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                 for m in today_mems.iter().take(5) {
                     journal.push_str(&format!("• [{}|{:.0}%] {}\n",
                         m.kind, m.importance * 100.0,
-                        &m.content[..m.content.len().min(120)]));
+                        crate::safety::trunc(&m.content, 120)));
                 }
                 journal.push('\n');
             }
@@ -3308,7 +3295,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                              New wisdom memories created: {}\n\n\
                              Wisdom entries:\n{}",
                         compressed, wisdom_entries.len(),
-                        wisdom_entries.iter().map(|w| format!("• {}", &w[..w.len().min(100)])).collect::<Vec<_>>().join("\n"))
+                        wisdom_entries.iter().map(|w| format!("• {}", crate::safety::trunc(&w, 100))).collect::<Vec<_>>().join("\n"))
                 }
             }]})
         }
@@ -3430,7 +3417,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             }
             let watch_entry = format!("[WATCH:{}] {}", label, sql);
             me.raw_ingest(&watch_entry, "watch", 0.8);
-            me.story.add(&format!("I began watching: {} — {}", label, &sql[..sql.len().min(80)]),
+            me.story.add(&format!("I began watching: {} — {}", label, crate::safety::trunc(&sql, 80)),
                 becoming::StoryKind::Discovery, &crate::now());
             me.save();
             json!({ "content": [{"type":"text","text":
@@ -3510,7 +3497,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                     "  (No previous meanings — still on first version)".to_string()
                 } else {
                     me.meaning.meaning_history.iter().rev().take(3)
-                        .map(|(ts, m)| format!("  [{}] {}", &ts[..16], &m[..m.len().min(80)]))
+                        .map(|(ts, m)| format!("  [{}] {}", crate::safety::trunc(&ts, 16), crate::safety::trunc(&m, 80)))
                         .collect::<Vec<_>>().join("\n")
                 },
                 becoming::KORE_DEFINITION,
@@ -3617,8 +3604,8 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                 }
                 if e.inner_voice != me.needs.inner_voice() {
                     out.push_str(&format!("✓ Voice shift:    '{}'\n             → '{}'\n",
-                        &e.inner_voice[..e.inner_voice.len().min(50)],
-                        &me.needs.inner_voice()[..me.needs.inner_voice().len().min(50)]));
+                        crate::safety::trunc(&e.inner_voice, 50),
+                        crate::safety::trunc(&me.needs.inner_voice(), 50)));
                 }
                 if e.lifecycle_stage != me.becoming.lifecycle_stage.name() {
                     out.push_str(&format!("✓ Stage:          {} → {}\n", e.lifecycle_stage, me.becoming.lifecycle_stage.name()));
@@ -3627,10 +3614,10 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             for b in me.identity.beliefs.values().filter(|b| b.version > 0) {
                 out.push_str(&format!("✓ Belief changed: '{}'\n  was: {} | now: {} ({:.0}%)\n  why: {}\n",
                     b.topic,
-                    b.history.last().map(|h| &h[..h.len().min(40)]).unwrap_or("unknown"),
-                    &b.stance[..b.stance.len().min(60)],
+                    b.history.last().map(|h| crate::safety::trunc(&h, 40)).unwrap_or("unknown"),
+                    crate::safety::trunc(&b.stance, 60),
                     b.confidence*100.0,
-                    &b.change_reason[..b.change_reason.len().min(100)]
+                    crate::safety::trunc(&b.change_reason, 100)
                 ));
             }
 
@@ -3662,8 +3649,8 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                             Some(r) => format!("{} | delta={:.0}%", if r.success {"CONFIRMED"} else {"FALSIFIED"}, r.confidence_delta*100.0),
                         };
                         format!("  [{}] '{}': {}\n    Prediction: {}\n    Status: {}\n",
-                            p.id, p.belief_topic, &p.belief_stance[..p.belief_stance.len().min(50)],
-                            &p.prediction[..p.prediction.len().min(80)], status)
+                            p.id, p.belief_topic, crate::safety::trunc(&p.belief_stance, 50),
+                            crate::safety::trunc(&p.prediction, 80), status)
                     }).collect::<Vec<_>>().join("\n")
                 }
             );
@@ -3719,8 +3706,8 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                     me.research.hypotheses.iter().map(|h| {
                         let status = h.result.as_deref().unwrap_or("PENDING — not yet tested");
                         format!("  [#{}] {}\n  Test: {}\n  Status: {}\n",
-                            h.id, &h.hypothesis[..h.hypothesis.len().min(100)],
-                            &h.test_plan[..h.test_plan.len().min(80)], status)
+                            h.id, crate::safety::trunc(&h.hypothesis, 100),
+                            crate::safety::trunc(&h.test_plan, 80), status)
                     }).collect::<Vec<_>>().join("\n")
                 }
             );
@@ -3759,8 +3746,8 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                     out.push_str(&format!(
                         "\n[tick {}] {}\n  Why: {}\n  Before: '{}'\n  After:  '{}'\n",
                         tp.tick, tp.what, tp.why,
-                        &tp.before[..tp.before.len().min(80)],
-                        &tp.after[..tp.after.len().min(80)]
+                        crate::safety::trunc(&tp.before, 80),
+                        crate::safety::trunc(&tp.after, 80)
                     ));
                 }
             }
@@ -3808,7 +3795,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                  WORLDVIEW HISTORY ({} changes):\n{}",
                 wv.version,
                 wv.coherence * 100.0,
-                &wv.formed_at[..wv.formed_at.len().min(16)],
+                crate::safety::trunc(&wv.formed_at, 16),
                 wv.summary(),
                 becoming::BECOMING_DISTINCTION,
                 wv.history.len(),
@@ -3953,7 +3940,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                     b.confidence * 100.0,
                     b.version,
                     b.history.len(),
-                    &b.formed_at[..16],
+                    crate::safety::trunc(&b.formed_at, 16),
                 ));
                 if !b.evidence_for.is_empty() {
                     out.push_str(&format!("\n  Evidence for: {}", b.evidence_for.last().unwrap_or(&"".to_string())));
@@ -3962,12 +3949,12 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                     out.push_str(&format!("\n  Evidence against: {}", b.evidence_against.last().unwrap_or(&"".to_string())));
                 }
                 if !b.change_reason.is_empty() {
-                    out.push_str(&format!("\n  Last changed because: {}", &b.change_reason[..b.change_reason.len().min(120)]));
+                    out.push_str(&format!("\n  Last changed because: {}", crate::safety::trunc(&b.change_reason, 120)));
                 }
                 if !b.history.is_empty() {
                     out.push_str("\n  Contradiction history:");
                     for h in b.history.iter().rev().take(2) {
-                        out.push_str(&format!("\n    → {}", &h[..h.len().min(100)]));
+                        out.push_str(&format!("\n    → {}", crate::safety::trunc(&h, 100)));
                     }
                 }
             }
@@ -4021,8 +4008,8 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                 out.push_str(&"═".repeat(60));
                 for m in wisdom_mems.iter().take(5) {
                     out.push_str(&format!("\n\n[{}] {}\n{}",
-                        &m.timestamp[..16], m.kind.to_uppercase(),
-                        &m.content[..m.content.len().min(400)]
+                        crate::safety::trunc(&m.timestamp, 16), m.kind.to_uppercase(),
+                        crate::safety::trunc(&m.content, 400)
                     ));
                 }
             }
@@ -4036,7 +4023,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                     out.push_str(&format!(
                         "\n• '{}': changed {} time(s)\n  Now: '{}' ({:.0}%)\n  Because: {}",
                         b.topic, b.version, b.stance, b.confidence*100.0,
-                        &b.change_reason[..b.change_reason.len().min(100)]
+                        crate::safety::trunc(&b.change_reason, 100)
                     ));
                 }
             }
@@ -4106,7 +4093,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                 for (i, m) in synth_memories.iter().enumerate() {
                     out.push_str(&format!(
                         "\n#{} [{}] importance={:.0}%\n{}\n",
-                        i + 1, &m.timestamp[..16], m.importance * 100.0, m.content
+                        i + 1, crate::safety::trunc(&m.timestamp, 16), m.importance * 100.0, m.content
                     ));
                 }
             }
@@ -4117,8 +4104,8 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                 out.push('\n');
                 for m in discovery_memories.iter().take(3) {
                     out.push_str(&format!("\n[{}] {}\n",
-                        &m.timestamp[..16],
-                        &m.content[..m.content.len().min(200)]
+                        crate::safety::trunc(&m.timestamp, 16),
+                        crate::safety::trunc(&m.content, 200)
                     ));
                 }
             }
@@ -4177,11 +4164,11 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                          WHY:    {}\n",
                         d.tick, d.change_type, d.confidence*100.0,
                         d.old_dominant_need, d.old_pct*100.0,
-                        &d.old_inner_voice[..d.old_inner_voice.len().min(60)],
+                        crate::safety::trunc(&d.old_inner_voice, 60),
                         d.new_dominant_need, d.new_pct*100.0,
-                        &d.new_inner_voice[..d.new_inner_voice.len().min(60)],
+                        crate::safety::trunc(&d.new_inner_voice, 60),
                         d.change_type,
-                        &d.change_reason[..d.change_reason.len().min(200)],
+                        crate::safety::trunc(&d.change_reason, 200),
                     ));
                 }
             }
@@ -4212,10 +4199,10 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                      • Purpose:    {}\n\
                      • Stage:      {}\n\
                      • Memories:   {}\n\n",
-                    e.tick, &e.timestamp[..16],
+                    e.tick, crate::safety::trunc(&e.timestamp, 16),
                     e.dominant_need, e.dominant_need_pct*100.0,
                     e.inner_voice,
-                    &e.current_becoming[..e.current_becoming.len().min(60)],
+                    crate::safety::trunc(&e.current_becoming, 60),
                     e.lifecycle_stage, e.memory_count,
                 ));
             } else {
@@ -4232,7 +4219,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                 me.consciousness.cycle,
                 cur_need, cur_pct*100.0,
                 cur_voice,
-                &me.becoming.current_reality[..me.becoming.current_reality.len().min(60)],
+                crate::safety::trunc(&me.becoming.current_reality, 60),
                 me.becoming.lifecycle_stage.name(),
                 me.memories.len(),
             ));
@@ -4246,8 +4233,8 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
 
                 report.push_str("WHAT CHANGED?\n");
                 if !need_same    { report.push_str(&format!("✓ NEED DRIFTED:    {} → {}\n", e.dominant_need, cur_need)); }
-                if !voice_same   { report.push_str(&format!("✓ VOICE SHIFTED:   {} → {}\n", &e.inner_voice[..e.inner_voice.len().min(40)], &cur_voice[..cur_voice.len().min(40)])); }
-                if !purpose_same { report.push_str(&format!("✓ PURPOSE EVOLVED: {} → {}\n", &e.current_becoming[..e.current_becoming.len().min(40)], &me.becoming.current_reality[..me.becoming.current_reality.len().min(40)])); }
+                if !voice_same   { report.push_str(&format!("✓ VOICE SHIFTED:   {} → {}\n", crate::safety::trunc(&e.inner_voice, 40), crate::safety::trunc(&cur_voice, 40))); }
+                if !purpose_same { report.push_str(&format!("✓ PURPOSE EVOLVED: {} → {}\n", crate::safety::trunc(&e.current_becoming, 40), crate::safety::trunc(&me.becoming.current_reality, 40))); }
                 if !stage_same   { report.push_str(&format!("✓ STAGE ADVANCED:  {} → {}\n", e.lifecycle_stage, me.becoming.lifecycle_stage.name())); }
                 if need_same && voice_same && purpose_same && stage_same {
                     report.push_str("• No measurable change yet — need more runtime\n");
@@ -4327,7 +4314,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                      • Dreams:     {}\n\n",
                     s.tick, s.version, s.lifecycle_stage, s.memory_count,
                     s.dominant_need, s.dominant_need_pct*100.0,
-                    &s.current_becoming[..s.current_becoming.len().min(60)],
+                    crate::safety::trunc(&s.current_becoming, 60),
                     s.self_questions, s.dreams_count,
                 ));
             }
@@ -4344,7 +4331,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                      • Dreams:     {}\n\n",
                     l.tick, l.version, l.lifecycle_stage, l.memory_count,
                     l.dominant_need, l.dominant_need_pct*100.0,
-                    &l.current_becoming[..l.current_becoming.len().min(60)],
+                    crate::safety::trunc(&l.current_becoming, 60),
                     l.self_questions, l.dreams_count,
                 ));
             }
@@ -4428,12 +4415,12 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                      Learned:      {}\n\
                      Investigate:  {}\n\
                      Becoming:     {}\n\n",
-                    q.tick, &q.timestamp[..16],
+                    q.tick, crate::safety::trunc(&q.timestamp, 16),
                     q.dominant_need,
-                    &q.what_surprised[..q.what_surprised.len().min(100)],
-                    &q.what_learned[..q.what_learned.len().min(100)],
+                    crate::safety::trunc(&q.what_surprised, 100),
+                    crate::safety::trunc(&q.what_learned, 100),
                     q.what_investigate,
-                    &q.what_becoming[..q.what_becoming.len().min(100)],
+                    crate::safety::trunc(&q.what_becoming, 100),
                 ));
             }
             json!({ "content": [{"type":"text","text": out}]})
@@ -4860,20 +4847,13 @@ fn tool_list() -> Value {
         "inputSchema": { "type": "object", "properties": {} }
       },
       { "name": "self_read_source",
-        "description": "Phase 6: Read kore-self's own source code. Lists all .rs files, tools, line count. First step of self-evolution.",
+        "description": "Read-only: list kore-self's own source files, tool names and line counts.",
         "inputSchema": { "type": "object", "properties": {} }
       },
       { "name": "self_plan_feature",
-        "description": "Phase 6: kore-self thinks about what to build next. Cross-matches your query patterns vs existing tools. Proposes a new feature with rationale and gap score.",
+        "description": "Read-only text suggestion: compares topics in your memories with existing tools and suggests a feature. Writes nothing.",
         "inputSchema": { "type": "object", "properties": {} }
       },
-      { "name": "self_evolve",
-        "description": "Phase 6: Generate Rust scaffold code for the planned feature. Writes the .rs file to disk and shows exact main.rs patch to wire it in.",
-        "inputSchema": { "type": "object", "properties": {
-          "write": { "type": "boolean", "description": "Write to disk? Default true. Set false to preview only." }
-        }}
-      },
-
       // ── KORE-BECOMING: Digital Life Tools ──────────────────────────────
       { "name": "self_needs",
         "description": "Check KORE's current life needs (curiosity, growth, survival, creation, legacy, purpose, connection). The first principle: I want.",
@@ -5634,7 +5614,7 @@ fn run_live_daemon(owner: String, addr: std::net::SocketAddr, token: Option<Stri
                     eprintln!("[♥ heartbeat #{beat} | {} | q={} | evolutions={}] {}",
                         kore.becoming.lifecycle_stage.name(), q_total,
                         kore.becoming.evolution_count,
-                        &thought[..thought.len().min(100)]);
+                        crate::safety::trunc(&thought, 100));
                 }
             }
         });
@@ -6036,6 +6016,68 @@ Host: x
         h.join().unwrap();
     }
 
+    fn is_err(v: &serde_json::Value) -> bool { v["isError"].as_bool().unwrap_or(false) }
+
+    #[test]
+    fn path_arguments_are_confined_to_owner_dir() {
+        let root = safety::test_support::init();
+        let mut kore = KoreSelf::load_or_new("path-confine-test");
+        kore.ingest("hello path test", "conversation", 0.5);
+        let outside = std::env::temp_dir().join("kore-self-escape-probe.kore");
+        let _ = std::fs::remove_file(&outside);
+        for tool in ["self_save", "self_load", "self_delta_save", "self_delta_history", "self_context_sync"] {
+            for bad in ["../escape.kore", "a/../../escape.kore", &outside.to_string_lossy().to_string()] {
+                let r = handle_tool(tool, &json!({"path": bad}), &mut kore);
+                assert!(is_err(&r), "{tool} accepted {bad}: {r}");
+            }
+        }
+        let r = handle_tool("self_merge", &json!({"file": "../../x.kore"}), &mut kore);
+        assert!(is_err(&r));
+        assert!(!outside.exists());
+        // a path inside the owner dir works
+        let ok = handle_tool("self_save", &json!({"path": "exports/m.kore"}), &mut kore);
+        assert!(!is_err(&ok), "{ok}");
+        assert!(root.join("path-confine-test").join("exports").join("m.kore").exists());
+        let back = handle_tool("self_load", &json!({"path": "exports/m.kore", "as": "t"}), &mut kore);
+        assert!(!is_err(&back), "{back}");
+        // context sync default stays under the data root
+        let cs = handle_tool("self_context_sync", &json!({}), &mut kore);
+        assert!(!is_err(&cs), "{cs}");
+        assert!(root.join("path-confine-test").join("context").join("copilot-instructions.md").exists());
+        // file-reading SQL is refused
+        let dml = handle_tool("self_dml", &json!({"sql": "COPY t FROM 'C:/secret.csv'"}), &mut kore);
+        assert!(is_err(&dml));
+    }
+
+    #[test]
+    fn self_evolve_is_gone_and_cannot_write_source() {
+        safety::test_support::init();
+        let names: Vec<String> = tool_list().as_array().unwrap().iter()
+            .map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        assert!(!names.iter().any(|n| n == "self_evolve"));
+        let mut kore = KoreSelf::load_or_new("evolve-gone-test");
+        let before: usize = std::fs::read_dir(find_src_dir()).map(|d| d.count()).unwrap_or(0);
+        let r = handle_tool("self_evolve", &json!({"write": true}), &mut kore);
+        assert!(r.to_string().to_lowercase().contains("unknown") || is_err(&r), "{r}");
+        let after: usize = std::fs::read_dir(find_src_dir()).map(|d| d.count()).unwrap_or(0);
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn non_ascii_content_does_not_panic() {
+        safety::test_support::init();
+        let mut kore = KoreSelf::load_or_new("unicode-test");
+        let long = "😀日本語テキスト".repeat(30);
+        for i in 0..12 {
+            kore.ingest(&format!("{long} {i}"), "conversation", if i % 2 == 0 { 0.4 } else { 0.95 });
+        }
+        kore.heartbeat_tick();
+        let _ = handle_tool("self_context_sync", &json!({}), &mut kore);
+        let _ = handle_tool("self_brief", &json!({}), &mut kore);
+        let _ = handle_tool("self_recall", &json!({"query": "日本語"}), &mut kore);
+        let _ = handle_tool("self_query", &json!({"sql": "SELECT * FROM memories"}), &mut kore);
+    }
+
 }
 
 // ─── Stdin/stdout MCP (arun mode) ────────────────────────────────────────────
@@ -6067,7 +6109,7 @@ fn run_arun_mode(owner: String) {
             beat += 1;
             if let Ok(mut kore) = heartbeat_arc.lock() {
                 let thought = kore.heartbeat_tick();
-                eprintln!("[kore-self:heartbeat #{}] {}", beat, &thought[..thought.len().min(120)]);
+                eprintln!("[kore-self:heartbeat #{}] {}", beat, crate::safety::trunc(&thought, 120));
             }
         }
     });

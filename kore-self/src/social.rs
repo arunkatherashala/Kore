@@ -129,8 +129,8 @@ impl VoiceEngine {
             "total_spoken":    self.total_spoken,
             "style_cache_size": self.style_cache.len(),
             "recent": self.style_cache.iter().rev().take(3).map(|s| serde_json::json!({
-                "prompt":   &s.prompt[..s.prompt.len().min(80)],
-                "response": &s.response[..s.response.len().min(120)],
+                "prompt":   crate::safety::trunc(&s.prompt, 80),
+                "response": crate::safety::trunc(&s.response, 120),
                 "when":     s.generated_at,
             })).collect::<Vec<_>>(),
         })
@@ -234,7 +234,7 @@ fn summarize_memory(content: &str) -> String {
     if content.len() <= max {
         return content.trim().to_string();
     }
-    let trimmed = &content[..max];
+    let trimmed = crate::safety::trunc(content, max);
     match trimmed.rfind(' ') {
         Some(pos) => format!("{}...", &trimmed[..pos]),
         None      => format!("{}...", trimmed),

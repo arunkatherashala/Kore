@@ -167,11 +167,11 @@ impl IdentityModel {
                 let old_conf = b.confidence;
                 b.history.push(format!("[{}] was: '{}' ({:.0}%)", b.updated_at, old, old_conf*100.0));
                 // Move old stance to evidence_against (it was believed but is now rejected)
-                b.evidence_against.push(format!("[{}] old belief: '{}' ({:.0}% confidence)", &b.updated_at[..10], &old[..old.len().min(60)], old_conf*100.0));
+                b.evidence_against.push(format!("[{}] old belief: '{}' ({:.0}% confidence)", crate::safety::trunc(&b.updated_at, 10), crate::safety::trunc(&old, 60), old_conf*100.0));
                 b.stance       = stance.to_string();
                 b.confidence   = confidence;
                 b.updated_at   = ts;
-                b.change_reason = if reason.is_empty() { format!("Stance reversed from '{}'", &old[..old.len().min(40)]) } else { reason.to_string() };
+                b.change_reason = if reason.is_empty() { format!("Stance reversed from '{}'", crate::safety::trunc(&old, 40)) } else { reason.to_string() };
                 b.version     += 1;
                 return Some(format!(
                     "BELIEF CHANGED [v{}]: '{}'\n\
@@ -190,12 +190,12 @@ impl IdentityModel {
             b.confidence = lerp(b.confidence, confidence, 0.1);
             b.updated_at = ts;
             if !reason.is_empty() {
-                b.evidence_for.push(format!("[{}] {}", &b.updated_at[..10], &reason[..reason.len().min(80)]));
+                b.evidence_for.push(format!("[{}] {}", crate::safety::trunc(&b.updated_at, 10), crate::safety::trunc(&reason, 80)));
                 if b.evidence_for.len() > 10 { b.evidence_for.drain(0..5); }
             }
         } else {
             let mut initial_evidence = vec![];
-            if !reason.is_empty() { initial_evidence.push(format!("[formed] {}", &reason[..reason.len().min(80)])); }
+            if !reason.is_empty() { initial_evidence.push(format!("[formed] {}", crate::safety::trunc(&reason, 80))); }
             self.beliefs.insert(topic.to_string(), Belief {
                 topic:          topic.to_string(),
                 stance:         stance.to_string(),
@@ -215,7 +215,7 @@ impl IdentityModel {
     /// Add evidence for or against a belief without changing the stance.
     pub fn add_evidence(&mut self, topic: &str, evidence: &str, supports: bool) {
         if let Some(b) = self.beliefs.get_mut(topic) {
-            let entry = format!("[{}] {}", &crate::now()[..10], &evidence[..evidence.len().min(100)]);
+            let entry = format!("[{}] {}", &crate::now()[..10], crate::safety::trunc(&evidence, 100));
             if supports {
                 b.evidence_for.push(entry);
                 b.confidence = (b.confidence + 0.02).min(1.0);

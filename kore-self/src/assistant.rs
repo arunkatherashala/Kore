@@ -78,7 +78,7 @@ impl AssistantEngine {
         let mut lines: Vec<String> = vec![];
 
         // ── Header ────────────────────────────────────────────────────────────
-        lines.push(format!("━━━ kore-self briefing for {} | {} ━━━", owner, &now[..10]));
+        lines.push(format!("━━━ kore-self briefing for {} | {} ━━━", owner, crate::safety::trunc(&now, 10)));
 
         // ── Yesterday: what you worked on ─────────────────────────────────────
         let recent = kore_query::recent(memories, 20);
@@ -318,7 +318,7 @@ impl AssistantEngine {
 
         // Check against predictive patterns
         for p in &predictive.patterns {
-            if dec_lower.contains(&p.context) || p.context.len() >= 4 && dec_lower.contains(&p.context[..4.min(p.context.len())]) {
+            if dec_lower.contains(&p.context) || p.context.len() >= 4 && dec_lower.contains(crate::safety::trunc(&p.context, 4)) {
                 pushback.push(format!(
                     "Pattern alert: when you face '{}' situations, you've chosen '{}' {:.0}% of the time ({} times).",
                     p.context, p.choice, p.confidence * 100.0, p.count

@@ -59,7 +59,7 @@ pub fn block_to_display(block: &DataBlock) -> String {
     let mut out = vec![sep.clone(), hdr, sep.clone()];
     for row in rows.iter().take(100) {
         let line: String = row.iter().zip(&widths).map(|(c,&w)| {
-            let s = if c.len()>w { format!("{}…",&c[..w.saturating_sub(1)]) } else { c.clone() };
+            let s = if c.len()>w { format!("{}…", crate::safety::trunc(c, w.saturating_sub(1))) } else { c.clone() };
             format!(" {:w$} ", s)
         }).collect::<Vec<_>>().join("|");
         out.push(line);
@@ -104,7 +104,8 @@ pub fn top_by_importance(memories: &[Memory], k: usize) -> Vec<(String, String, 
 pub fn by_kind(memories: &[Memory], kind: &str) -> Vec<(u64, String, f64)> {
     let sql = format!(
         "SELECT id, content, importance FROM memories \
-         WHERE kind = '{kind}' ORDER BY importance DESC"
+         WHERE kind = {} ORDER BY importance DESC",
+        crate::safety::sql_lit(kind)
     );
     let Ok(block) = query(memories, &sql) else { return vec![]; };
     (0..block.num_rows).map(|i| {
@@ -183,7 +184,7 @@ pub fn run_user_query(memories: &[Memory], sql: &str) -> String {
             for row in rows.iter().take(100) {
                 let line: String = row.iter().zip(&widths)
                     .map(|(cell, &w)| {
-                        let s = if cell.len() > w { format!("{}…", &cell[..w.saturating_sub(1)]) } else { cell.clone() };
+                        let s = if cell.len() > w { format!("{}…", crate::safety::trunc(cell, w.saturating_sub(1))) } else { cell.clone() };
                         format!(" {:w$} ", s)
                     })
                     .collect::<Vec<_>>().join("|");
@@ -329,5 +330,36 @@ impl ValueDisplay for Value {
             Value::Bool(_) => "bool",
             Value::Str(_)  => "str",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem(id: u64, kind: &str, content: &str) -> Memory {
+        Memory { id, timestamp: "2026-01-01T00:00:00Z".into(), kind: kind.into(), content: content.into(), tags: vec![], importance: 0.5 }
+    }
+
+    #[test]
+    fn by_kind_is_not_injectable() {
+        let mems = vec![mem(1, "decision", "a"), mem(2, "it's", "b"), mem(3, "other", "c")];
+        assert_eq!(by_kind(&mems, "decision").len(), 1);
+        // The KORE lexer has no '' escape, so a quote in the value fails closed
+        // (parse error -> no rows) instead of altering the query.
+        assert!(by_kind(&mems, "it's").len() <= 1);
+        // classic injection returns nothing instead of everything
+        assert!(by_kind(&mems, "x' OR '1'='1").is_empty());
+        assert!(by_kind(&mems, "x' OR 1=1 --").is_empty());
+        assert!(by_kind(&mems, "'; DROP TABLE memories; --").is_empty());
+        assert_eq!(by_kind(&mems, "other").len(), 1);
+    }
+
+    #[test]
+    fn table_rendering_truncates_unicode_safely() {
+        let mems = vec![mem(1, "conversation", &"😀日本語".repeat(40))];
+        let blk = memories_to_block(&mems);
+        let _ = block_to_display(&blk);
+        let _ = run_user_query(&mems, "SELECT content FROM memories");
     }
 }

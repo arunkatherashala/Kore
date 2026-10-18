@@ -765,7 +765,7 @@ impl ResearchEngine {
             worldview_impact: None,
         });
         self.total_formed += 1;
-        Some(format!("[HYPOTHESIS #{} formed @{}]: {}", self.next_id, &ts[..16], &hyp[..hyp.len().min(100)]))
+        Some(format!("[HYPOTHESIS #{} formed @{}]: {}", self.next_id, crate::safety::trunc(&ts, 16), crate::safety::trunc(&hyp, 100)))
     }
 }
 
@@ -828,7 +828,7 @@ impl ValuesEngine {
         let new_dominant = self.values.first().map(|r| r.name.clone()).unwrap_or_default();
 
         if new_dominant != old_dominant && !old_dominant.is_empty() {
-            let msg = format!("[VALUE SHIFT @{}] '{}' displaced '{}' as dominant value", &ts[..16], new_dominant, old_dominant);
+            let msg = format!("[VALUE SHIFT @{}] '{}' displaced '{}' as dominant value", crate::safety::trunc(&ts, 16), new_dominant, old_dominant);
             self.rank_changes.push(msg.clone());
             // Record win/loss
             if let Some(winner) = self.values.iter_mut().find(|v| v.name == new_dominant) {
@@ -904,7 +904,7 @@ impl MeaningEngine {
             if self.meaning_history.len() > 10 { self.meaning_history.drain(0..5); }
             self.current_meaning = new_meaning.to_string();
             self.meaning_version += 1;
-            Some(format!("[MEANING EVOLVED v{} @{}] {}", self.meaning_version, &ts[..16], &new_meaning[..new_meaning.len().min(100)]))
+            Some(format!("[MEANING EVOLVED v{} @{}] {}", self.meaning_version, crate::safety::trunc(&ts, 16), crate::safety::trunc(&new_meaning, 100)))
         } else {
             None
         }

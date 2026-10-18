@@ -151,6 +151,9 @@ pub fn date_part(ts: &str) -> &str {
 }
 
 /// Quote a string as a SQL literal: single quotes doubled, NUL bytes dropped.
+///
+/// Note: the current KORE SQL lexer has no `''` escape, so a value containing a
+/// quote makes the statement fail to parse (fail closed: no rows, no injection).
 pub fn sql_lit(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('\'');

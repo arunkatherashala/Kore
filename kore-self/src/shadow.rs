@@ -63,7 +63,7 @@ impl ShadowObserver {
                 *self.query_topics.entry(w).or_insert(0) += 1;
             }
         }
-        self.push_event("query_signal", &format!("recall: '{}'", &query[..query.len().min(60)]));
+        self.push_event("query_signal", &format!("recall: '{}'", crate::safety::trunc(&query, 60)));
         self.total_observed += 1;
     }
 
@@ -84,7 +84,7 @@ impl ShadowObserver {
     /// Passive content feed — observe without adding to memory.
     /// Use for: clipboard content, terminal output, code being written.
     pub fn observe_feed(&mut self, content: &str, source: &str) {
-        let preview = &content[..content.len().min(80)];
+        let preview = crate::safety::trunc(&content, 80);
         self.push_event(&format!("passive_{}", source), preview);
         self.total_observed += 1;
     }
