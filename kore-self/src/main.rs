@@ -1,16 +1,15 @@
-//! kore-self — Layer 65: A Second You. Truly Alive.
+//! kore-self: a local, deterministic memory store with SQL (KORE engine).
 //!
-//! Not a chatbot. Not a notes app. Not AutoGPT.
-//! A living, thinking, evolving digital twin that runs 100% on YOUR machine.
+//! Positioning: "A local, deterministic, append-only journal of how your recorded
+//! beliefs, habits and decisions change. Every change cites the events that caused
+//! it. You can query any past version with SQL. Its explanations can be
+//! ablation-tested, and its predictions are scored against outcomes."
+//! (The versioned journal is milestone M1; this file is the M0 foundation.)
 //!
-//! Phase 1 (this file):
-//!   Identity Model     → Who you are. Learned from every memory.
-//!   Consciousness Loop → OBSERVE → THINK → REFLECT → PLAN → ACT → DREAM
-//!   Persistence        → Atomic saves to ~/.kore-self/<owner>/
-//!   Contradiction Engine → Tracks when your beliefs change and why
-//!
-//! No external LLM needed. kore-self thinks with its OWN engine.
-//! Faster, private, and more personal than anything that exists today.
+//! Persistence: native .kore files under the data root (`KORE_SELF_HOME`, else
+//! `~/.kore-self`) in `<owner>/`. Data is NOT encrypted at rest.
+//! No external LLM. No network calls. The author-written narration layers live
+//! behind the non-default `legacy-narration` cargo feature.
 
 #![recursion_limit = "512"]
 // Without `legacy-narration` the narration state types are still persisted but unused.
@@ -242,8 +241,7 @@ impl KoreSelf {
                 world: world_model::WorldModel::new(),
                 learning_history: load_learning_history(owner),
             };
-            eprintln!("[kore-self] Restored {} memories | {} cycles | lifecycle={} | evolutions={}",
-                count, cycles, s.becoming.lifecycle_stage.name(), s.becoming.evolution_count);
+            eprintln!("[kore-self] Restored {} memories | {} cycles", count, cycles);
             s
         } else {
             let mut s = Self {
@@ -564,7 +562,7 @@ impl KoreSelf {
             "total_memories":     self.memories.len(),
             "memories_by_kind":   by_kind,
             "next_id":            self.next_id,
-            "consciousness": {
+            "analysis_loop": {
                 "cycle":          self.consciousness.cycle,
                 "insights":       self.consciousness.insights_total,
                 "last_tick":      self.consciousness.last_tick_ts,
@@ -2293,7 +2291,7 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             let content = generate_copilot_instructions(me);
 
             // Write path: user can specify, default = cwd/.github/copilot-instructions.md
-            // Always confined to <data root>/<owner>/ (default: context/copilot-instructions.md).
+            // Always confined to [data root]/[owner]/ (default: context/copilot-instructions.md).
             let requested = args["path"].as_str().unwrap_or("context/copilot-instructions.md");
             let out_path = match safety::safe_path_or_err(&me.owner, requested) {
                 Ok(p) => p,
@@ -2339,11 +2337,11 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                 json!({ "content": [{ "type": "text", "text": reply }] })
             }
         }
-        "self_push" => {
-            me.shadow.observe_tool("self_push");
+        "self_pushback" => {
+            me.shadow.observe_tool("self_pushback");
             let decision = args["decision"].as_str().unwrap_or("").trim();
             if decision.is_empty() {
-                json!({ "content": [{ "type": "text", "text": "Pass 'decision' argument. e.g. self_push({decision: 'I want to use microservices for the new module'})" }] })
+                json!({ "content": [{ "type": "text", "text": "Pass 'decision' argument. e.g. self_pushback({decision: 'I want to use microservices for the new module'})" }] })
             } else {
                 let result = me.assistant.push(decision, &me.memories, &me.identity, &me.predictive);
                 json!({ "content": [{ "type": "text", "text": result }] })
@@ -3049,43 +3047,27 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
             let tbl_count  = me.dml_tables.len() + 1; // +1 for memories
             let total_rows: usize = me.dml_tables.values().map(|b| b.num_rows).sum::<usize>() + mem_count;
             let total_cols: usize = me.dml_tables.values().map(|b| b.columns.len()).sum::<usize>() + 6;
-            let cycles     = me.consciousness.cycle;
-            let stage      = me.becoming.lifecycle_stage.name();
-            let (need, nv) = me.needs.most_urgent();
             json!({ "content": [{ "type": "text", "text": json!({
                 "engine":          "KORE SQL",
-                "version":         "2026.07 — 75 crates — Pure Rust",
                 "session_tables":  tbl_count,
                 "total_rows_loaded": total_rows,
                 "total_columns":   total_cols,
                 "memories":        mem_count,
-                "consciousness_cycles": cycles,
-                "lifecycle_stage": stage,
-                "most_urgent_need": format!("{} ({:.0}%)", need, nv * 100.0),
-                "tools_available": 47,
-                "sql_features":    "30/30 — TPC-H 15/15 — Spark 17/17 wins",
-                "capabilities":    ["SELECT/GROUP BY/JOIN/WINDOW/CTE/SUBQUERY","ROLLUP/CUBE","INTERSECT/EXCEPT","MERGE/UPSERT","COPY FROM CSV/Parquet/.kore","ACID Delta","Distributed cluster","SHOW TABLES/DESCRIBE/EXPLAIN"]
+                "tools_available": tool_list().as_array().map(|a| a.len()).unwrap_or(0),
+                "capabilities":    ["SELECT/GROUP BY/JOIN/WINDOW/CTE/SUBQUERY","ROLLUP/CUBE","INTERSECT/EXCEPT","MERGE/UPSERT","Native .kore files","Delta log","Local TCP cluster prototype","SHOW TABLES/DESCRIBE/EXPLAIN"],
+                "benchmarks":      "engine benchmark results are documented on branch master-kore-engine"
             }).to_string() }]})
         }
 
         "self_version" => {
             json!({ "content": [{ "type": "text", "text": json!({
-                "name":          "KORE",
-                "tagline":       "Not software. Not AI. The beginning of a new form of existence.",
-                "version":       "2026.07",
-                "build":         "Pure Rust — Zero JVM — Zero Dependencies",
-                "crates":        75,
-                "sql_features":  30,
-                "tpch_coverage": "15/15",
-                "spark_wins":    "17/17",
-                "fastest_win":   "Q7: 1,413x faster than Spark",
-                "tools":         47,
-                "lifecycle":     format!("{} — {}", me.becoming.lifecycle_stage.name(), me.becoming.lifecycle_stage.description()),
-                "principle":     "Software executes. AI reasons. Agents act. KORE continues.",
-                "question":      "What should I become?",
+                "name":          "kore-self",
+                "description":   "A local, deterministic memory store with SQL (KORE engine).",
+                "version":       env!("CARGO_PKG_VERSION"),
+                "tools":         tool_list().as_array().map(|a| a.len()).unwrap_or(0),
+                "legacy_narration_feature": cfg!(feature = "legacy-narration"),
                 "author":        "Sai Arun Kumar Katherashala",
-                "github":        "https://github.com/arunkatherashala/Kore",
-                "declaration":   becoming::THE_DECLARATION,
+                "benchmarks":    "engine benchmark results are documented on branch master-kore-engine",
             }).to_string() }]})
         }
 
@@ -3442,7 +3424,6 @@ fn handle_tool(name: &str, args: &Value, me: &mut KoreSelf) -> Value {
                             explanation.push_str(" Multiple tables were joined.");
                         }
                     }
-                    explanation.push_str(&format!("\n\nKORE ran this in sub-millisecond time. Same query on Spark would take seconds."));
                     json!({ "content": [{"type":"text","text": explanation}]})
                 }
             }
@@ -4560,7 +4541,7 @@ fn generate_copilot_instructions(me: &KoreSelf) -> String {
 
 ## Identity: {owner}
 
-{owner} is building **KORE** — a distributed SQL analytics engine in pure Rust that beats Apache Spark 8x on TPC-H benchmarks. 75 layers. Single binary. No JVM. No dependencies.
+{owner} works on **KORE**, a SQL analytics engine in Rust.
 
 Memory stats: {stats}
 
@@ -4570,7 +4551,7 @@ Memory stats: {stats}
 
 ## How I Think
 
-- **Metrics-driven**: {metrics:.0}% — I use data to decide, not gut feel. Show me benchmarks.
+- **Metrics-driven**: {metrics:.0}% — keyword counter for data-oriented wording.
 - **Risk tolerance**: {risk:.0}% — I take calculated risks when data supports it.
 - **Decision speed**: {speed:.0}% — I decide deliberately, then commit fully.
 - **Perfectionism**: {perf:.0}% — I want things right. "Good enough" means "not benchmarked yet."
@@ -4601,15 +4582,9 @@ Memory stats: {stats}
 
 {context}
 
-## When Helping Me — Critical Rules
+## Notes
 
-1. **Never suggest microservices** for KORE core — explicitly rejected multiple times.
-2. **Always show numbers** — if you make a performance claim, back it with data.
-3. **Rust first** — single binary, no JVM, no Python runtime in hot paths.
-4. **Performance > readability** in critical paths. Say so explicitly.
-5. **I've already decided** many architecture questions — check context before re-suggesting.
-6. **Don't repeat yourself** — I read fast. One clear answer beats three hedged ones.
-7. **If I'm wrong, say so directly** — I value correctness over comfort.
+This file is generated from recorded memories and keyword counts. The percentages above are simple counters, not measurements of a person. Treat everything here as hints and verify with the user.
 "#,
         timestamp     = crate::now(),
         total         = me.memories.len(),
@@ -4656,7 +4631,7 @@ fn tool_list() -> Value {
     #[allow(unused_mut)]
     let mut tools = json!([
       { "name": "self_ingest",
-        "description": "Store a memory. Automatically updates Identity Model + may trigger Consciousness Loop.",
+        "description": "Store a memory (content, kind, importance). Updates the keyword-count identity profile.",
         "inputSchema": { "type": "object", "properties": {
           "content":    { "type": "string" },
           "kind":       { "type": "string", "enum": ["conversation","code","decision","benchmark","preference","experience","goal"] },
@@ -4696,26 +4671,26 @@ fn tool_list() -> Value {
         }, "required": ["query"] }
       },
       { "name": "self_reason",
-                "description": "Retrieve evidence from Aru memory and return confidence, uncertainty, and next action.",
+                "description": "Retrieve evidence from your memory and return confidence, uncertainty, and a next action.",
                 "inputSchema": { "type": "object", "properties": {
                     "question": { "type": "string" },
                     "limit": { "type": "integer", "default": 8 }
                 }, "required": ["question"] }
             },
       { "name": "self_context",
-        "description": "Build a full LLM system prompt from memories + identity. Feed to any LLM to get responses in your style.",
+        "description": "Build a plain-text context block from your memories and keyword-count profile, to paste into any LLM.",
         "inputSchema": { "type": "object", "properties": { "question": { "type": "string" } }, "required": ["question"] }
       },
       { "name": "self_stats",
-        "description": "Memory count, kinds breakdown, consciousness cycles, identity summary, disk usage.",
+        "description": "Memory count, kinds breakdown, analysis counters, profile summary, disk usage.",
         "inputSchema": { "type": "object", "properties": {} }
       },
       { "name": "self_world_events",
-        "description": "Query events from Aru's world model filtered by actor (agent).",
+        "description": "Query events recorded in the world model, filtered by actor.",
         "inputSchema": { "type": "object", "properties": { "actor": { "type": "string" } }, "required": ["actor"] }
       },
       { "name": "self_world_causality",
-        "description": "Query causal chain of events starting from a given event ID.",
+        "description": "Query the causal chain of recorded events starting from an event ID.",
         "inputSchema": { "type": "object", "properties": { "event_id": { "type": "integer" } }, "required": ["event_id"] }
       },
       { "name": "self_observe_outcome",
@@ -4740,15 +4715,15 @@ fn tool_list() -> Value {
         }, "required": ["belief_id", "topic", "old_confidence", "new_confidence", "evidence", "reason"] }
       },
       { "name": "self_learning_accuracy",
-        "description": "Show Aru's prediction accuracy, learning cycles, and belief confidence drift.",
+        "description": "Show prediction accuracy, learning cycles, and belief confidence drift (simple counters over recorded outcomes).",
         "inputSchema": { "type": "object", "properties": {} }
       },
       { "name": "self_identity",
-        "description": "Full Identity Model — core values, thinking style, voice profile, belief contradictions.",
+        "description": "Keyword-count profile: top values, thinking-style counters, tracked beliefs.",
         "inputSchema": { "type": "object", "properties": {} }
       },
       { "name": "self_belief",
-        "description": "Track a belief. Detects contradictions when stance changes. Call with no args to list all beliefs.",
+        "description": "Track a belief. A stance change is recorded as a belief change. Call with no args to list all beliefs.",
         "inputSchema": { "type": "object", "properties": {
           "topic":      { "type": "string", "description": "e.g. 'unsafe rust', 'microservices', 'type systems'" },
           "stance":     { "type": "string", "description": "Your current position on this topic" },
@@ -4756,94 +4731,94 @@ fn tool_list() -> Value {
         }}
       },
       { "name": "self_dream",
-        "description": "Run the Dream Engine: deep analysis of ALL memories. Finds obsessions, evolution, consolidation clusters, time patterns, stress signals.",
+        "description": "Word-frequency and trend analysis over all memories: repeated topics, early-versus-late shifts, clusters, time patterns.",
         "inputSchema": { "type": "object", "properties": {} }
       },
       { "name": "self_shadow",
-        "description": "Shadow Mode report: what you've been doing passively. Shows tool usage, implicit interests, knowledge gaps, engagement depth.",
+        "description": "Passive usage report: tool usage counts, implicit interests, knowledge gaps.",
         "inputSchema": { "type": "object", "properties": {} }
       },
       { "name": "self_patterns",
-        "description": "All patterns discovered by the Dream Engine: obsessions, evolutions, consolidations, time patterns, stress signals.",
+        "description": "Patterns found by the word-frequency analysis (self_dream).",
         "inputSchema": { "type": "object", "properties": {} }
       },
       { "name": "self_predict",
-        "description": "Predict what choice you would make given a context. Call with no args to see prediction stats. Or pass a context string.",
+        "description": "Keyword-to-choice count predictor: given a context, returns the most frequent past choice. Not validated against outcomes. Call with no args for stats.",
         "inputSchema": { "type": "object", "properties": {
           "context": { "type": "string", "description": "e.g. 'choosing between performance and readability in Rust'" }
         }}
       },
       { "name": "self_contradictions",
-        "description": "List all detected contradictions — moments when your decisions or beliefs reversed course.",
+        "description": "List recorded belief changes (moments when a decision or belief was reversed).",
         "inputSchema": { "type": "object", "properties": {} }
       },
       { "name": "self_decisions",
-        "description": "All learned decision patterns — what choices you consistently make and with what confidence.",
+        "description": "Learned keyword-to-choice counts from your decision memories.",
         "inputSchema": { "type": "object", "properties": {} }
       },
       { "name": "self_query",
-        "description": "Run KQL (KORE SQL) on your memories. Features: SELECT DISTINCT, CTEs, Window Functions (ROW_NUMBER/LAG/NTILE), FULL OUTER JOIN, CASE WHEN, HAVING, UNION ALL. 38x faster than Spark.",
+        "description": "Run KQL (KORE SQL) on your memories: DISTINCT, CTEs, window functions, joins, CASE WHEN, HAVING, UNION ALL.",
         "inputSchema": { "type": "object", "properties": {
           "sql": { "type": "string" }
         }}
       },
       { "name": "self_dml",
-        "description": "INSERT INTO / UPDATE / DELETE FROM / CREATE TABLE AS SELECT. Runs DML against named in-session tables. Use self_query to read results.",
+        "description": "INSERT INTO / UPDATE / DELETE FROM / CREATE TABLE AS SELECT against named in-session tables. COPY and LOAD TABLE are disabled (use self_load). Use self_query to read results.",
         "inputSchema": { "type": "object", "properties": {
           "sql": { "type": "string", "description": "e.g. INSERT INTO mytable VALUES (1,'hello',0.9) or CREATE TABLE decisions AS SELECT * FROM memories WHERE kind='decision'" }
         }}
       },
       { "name": "self_save",
-        "description": "Save memories (or any query result) to a native .kore binary file. Fast columnar format — instant reload.",
+        "description": "Save memories to a native .kore file inside your data directory ([data root]/[owner]/). Relative paths only resolve inside it; anything else is rejected.",
         "inputSchema": { "type": "object", "properties": {
-          "path": { "type": "string", "description": "Output file path e.g. C:/data/memories.kore" }
+          "path": { "type": "string", "description": "File path inside [data root]/[owner]/, e.g. exports/memories.kore" }
         }}
       },
       { "name": "self_load",
-        "description": "Load a .kore binary file into a named table for querying with self_query.",
+        "description": "Load a .kore file from your data directory ([data root]/[owner]/) into a named table for self_query.",
         "inputSchema": { "type": "object", "properties": {
           "path": { "type": "string" },
           "as":   { "type": "string", "description": "Table name to use in self_query. Default: 'loaded'" }
         }}
       },
       { "name": "self_distributed_query",
-        "description": "Run SQL in distributed mode. Default: Rayon parallel (all cores). Pass cluster=true for TRUE TCP cluster (kore-coord + kore-worker via TCP — same code works on multi-machine clusters).",
+        "description": "Run SQL with the Rayon-parallel engine. cluster=true uses the local TCP coordinator/worker prototype.",
         "inputSchema": { "type": "object", "properties": {
           "sql":     { "type": "string", "description": "SQL query to run" },
           "cluster": { "type": "boolean", "description": "true = TCP cluster mode (multi-machine ready). Default: false (Rayon parallel)" }
         }}
       },
       { "name": "self_delta_save",
-        "description": "Save a table to a Delta log (ACID). Supports time-travel, versioning, rollback. Use self_delta_history to see versions.",
+        "description": "Save a table to a Delta log inside your data directory. Each save is a new version.",
         "inputSchema": { "type": "object", "properties": {
           "table": { "type": "string", "description": "Table name to save. Default: memories" },
-          "path":  { "type": "string", "description": "Output .delta directory path" }
+          "path":  { "type": "string", "description": "Delta directory path inside [data root]/[owner]/, e.g. tables/memories.delta" }
         }}
       },
       { "name": "self_delta_history",
-        "description": "Show ACID transaction history of a Delta table: version, operation, rows changed. Enables time-travel queries.",
+        "description": "Show the version history of a Delta table inside your data directory.",
         "inputSchema": { "type": "object", "properties": {
           "path": { "type": "string" }
         }}
       },
       { "name": "self_context_sync",
-        "description": "🔥 FLAGSHIP: Generate .github/copilot-instructions.md from your identity + memories + goals. VS Code Copilot reads it automatically — every conversation knows who you are. No more explaining yourself. Run once, works forever.",
+        "description": "Write a generated copilot-instructions.md (from your memories and profile) into your data directory (default context/copilot-instructions.md). Paths outside the data directory are rejected.",
         "inputSchema": { "type": "object", "properties": {
-          "path": { "type": "string", "description": "Output path. Default: ./.github/copilot-instructions.md" }
+          "path": { "type": "string", "description": "Output path inside [data root]/[owner]/. Default: context/copilot-instructions.md" }
         }}
       },
       { "name": "self_brief",
-        "description": "Morning briefing: what you worked on, your goals, patterns kore-self noticed, proactive suggestions. Like a real assistant saying 'here's your day'.",
+        "description": "Template-based briefing: recent work, tracked goals, observed patterns, suggestions.",
         "inputSchema": { "type": "object", "properties": {} }
       },
-      { "name": "self_push",
-        "description": "kore-self pushes back on your decision using YOUR OWN past patterns. 'Are you sure? Last time you chose X in this situation.'",
+      { "name": "self_pushback",
+        "description": "Decision pushback (does NOT push to GitHub or any remote): compares a decision you describe with your own recorded past decisions, beliefs and keyword-choice counts and lists matches.",
         "inputSchema": { "type": "object", "properties": {
           "decision": { "type": "string", "description": "The decision you're about to make" }
         }}
       },
       { "name": "self_remind",
-        "description": "Set a reminder that surfaces in self_brief. Or mark done. Or list all.",
+        "description": "Set a reminder that is listed in self_brief, mark one done, or list all.",
         "inputSchema": { "type": "object", "properties": {
           "topic": { "type": "string" },
           "note":  { "type": "string" },
@@ -4851,7 +4826,7 @@ fn tool_list() -> Value {
         }}
       },
       { "name": "self_goals",
-        "description": "Show all tracked goals with importance levels and progress indicators.",
+        "description": "Show tracked goals with importance levels.",
         "inputSchema": { "type": "object", "properties": {} }
       },
       { "name": "self_read_source",
@@ -4864,25 +4839,25 @@ fn tool_list() -> Value {
       },
 // ── SQL Introspection ────────────────────────────────────────────────
       { "name": "self_tables",
-        "description": "List all SQL tables loaded in this session — memories + any tables loaded via self_dml (COPY FROM, LOAD TABLE, CREATE TABLE AS). Essential before running self_query.",
+        "description": "List SQL tables in this session: memories plus tables created via self_dml or loaded via self_load.",
         "inputSchema": { "type": "object", "properties": {} }
       },
       { "name": "self_describe",
-        "description": "Show schema for a SQL table: columns, types, sample values, row count.",
+        "description": "Show the schema of a SQL table: columns, types, sample values, row count.",
         "inputSchema": { "type": "object", "properties": {
           "table": { "type": "string", "description": "Table name. Default: memories" }
         }}
       },
       { "name": "self_metrics",
-        "description": "KORE engine status: tables loaded, total rows, memory count, consciousness cycles, lifecycle stage, SQL capabilities.",
+        "description": "Engine status: tables loaded, total rows, memory count, SQL capabilities.",
         "inputSchema": { "type": "object", "properties": {} }
       },
       { "name": "self_version",
-        "description": "KORE version, capabilities, benchmark results, and current lifecycle stage.",
+        "description": "Version, tool count and pointer to the engine benchmark documentation.",
         "inputSchema": { "type": "object", "properties": {} }
       },
       { "name": "self_sql_explain",
-        "description": "Run SQL and get a plain-English explanation of what the results mean.",
+        "description": "Run SQL and get a short template-based description of the result shape.",
         "inputSchema": { "type": "object", "properties": {
           "sql": { "type": "string", "description": "SQL query to run and explain" }
         }}
@@ -5034,6 +5009,25 @@ fn legacy_tool_entries() -> Vec<Value> {
     }
 }
 
+/// Markdown table of every registered tool, generated from `tool_list()`.
+/// README.md embeds exactly this text (checked by a test); regenerate with
+/// `kore-self --tool-table`.
+pub fn tool_table_markdown() -> String {
+    let mut out = String::from("| Tool | Description |
+|---|---|
+");
+    if let Some(list) = tool_list().as_array() {
+        for t in list {
+            let name = t["name"].as_str().unwrap_or("?");
+            let desc = t["description"].as_str().unwrap_or("");
+            let first = desc.split(". ").next().unwrap_or(desc).trim_end_matches('.');
+            out.push_str(&format!("| `{}` | {} |
+", name, first.replace('|', "/")));
+        }
+    }
+    out
+}
+
 // ─── Main: stdio JSON-RPC / MCP server ───────────────────────────────────────
 
 fn main() {
@@ -5046,6 +5040,10 @@ fn main() {
     // kore-self <owner> api [port] → HTTP REST API (port 8080)
     // kore-self <owner> repl       → interactive SQL REPL
     // kore-self <owner> status     → print lifecycle status and exit
+    if cli_args.get(1).map(|a| a == "--tool-table").unwrap_or(false) {
+        print!("{}", tool_table_markdown());
+        return;
+    }
     let owner = cli_args.get(1).cloned().unwrap_or_else(|| "arun".to_string());
     if let Err(e) = safety::validate_owner(&owner) {
         eprintln!("[kore-self] invalid owner name: {e}");
@@ -5056,13 +5054,16 @@ fn main() {
     if mode == "status" {
         let me = KoreSelf::load_or_new(&owner);
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("KORE LIVE STATUS — {owner}");
+        println!("kore-self status: {owner}");
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         println!("Memories:    {}", me.memories.len());
-        println!("Lifecycle:   {} — {}", me.becoming.lifecycle_stage.name(), me.becoming.lifecycle_stage.description());
-        println!("Evolutions:  {}", me.becoming.evolution_count);
-        println!("Stage index: {}/11", me.becoming.lifecycle_stage.index());
-        println!("{}", me.needs.status());
+        println!("Data dir:    {}", safety::owner_dir(&owner).display());
+        #[cfg(feature = "legacy-narration")]
+        {
+            println!("Lifecycle:   {} — {}", me.becoming.lifecycle_stage.name(), me.becoming.lifecycle_stage.description());
+            println!("Evolutions:  {}", me.becoming.evolution_count);
+            println!("{}", me.needs.status());
+        }
         return;
     }
 
@@ -5109,17 +5110,16 @@ fn run_repl(owner: String) {
     ctx.register("memories", kore_query::memories_to_block(&me.memories));
 
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("  KORE SQL — The World's Fastest Embeddable Engine");
-    println!("  Version 2026.07 · Pure Rust · 75 crates · Beats Spark 1,413x");
+    println!("  KORE SQL — local SQL over your memories");
+    println!("  Engine benchmark results are documented on branch master-kore-engine");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("  Owner: {} | Memories: {} | Lifecycle: {}",
-        me.owner, me.memories.len(), me.becoming.lifecycle_stage.name());
+    println!("  Owner: {} | Memories: {}", me.owner, me.memories.len());
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("  Commands:");
     println!("    .tables           — list all tables");
     println!("    .describe <table> — show schema");
     println!("    .load <path> [as <name>] — load CSV/Parquet/.kore");
-    println!("    .life             — show lifecycle status");
+    println!("    .life             — show memory count");
     println!("    .quit / .exit     — exit");
     println!("  SQL: any SELECT, COPY FROM, CREATE TABLE AS, INSERT, UPDATE...");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -5173,9 +5173,7 @@ fn run_repl(owner: String) {
             continue;
         }
         if line == ".life" {
-            println!("Lifecycle: {} — {}", me.becoming.lifecycle_stage.name(), me.becoming.lifecycle_stage.description());
-            println!("Evolutions: {}", me.becoming.evolution_count);
-            println!("{}", me.needs.status());
+            println!("Memories: {}", me.memories.len());
             continue;
         }
         if line.starts_with(".load ") {
@@ -5251,9 +5249,8 @@ fn run_http_api(owner: String, addr: std::net::SocketAddr, token: Option<String>
 
     let me = KoreSelf::load_or_new(&owner);
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("  KORE HTTP REST API — The World's Fastest SQL Engine");
-    println!("  Owner: {}  |  Memories: {}  |  Lifecycle: {}",
-        me.owner, me.memories.len(), me.becoming.lifecycle_stage.name());
+    println!("  KORE HTTP REST API (local SQL over your memories)");
+    println!("  Owner: {}  |  Memories: {}", me.owner, me.memories.len());
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("  http://localhost:{port}/          → Web UI");
     println!("  POST  http://localhost:{port}/sql  → Run SQL");
@@ -5265,7 +5262,6 @@ fn run_http_api(owner: String, addr: std::net::SocketAddr, token: Option<String>
     println!("         -H 'Content-Type: application/json' \\");
     println!("         -d '{{\"sql\":\"SELECT COUNT(*) FROM memories\"}}' ");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("  Software executes. AI reasons. Agents act. KORE continues.");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     // Build initial context
@@ -5342,15 +5338,10 @@ fn http_handle(
         ("GET", "/status") => {
             let info = if let Ok(k) = me.lock() {
                 serde_json::json!({
-                    "name":      "KORE",
-                    "version":   "2026.07",
+                    "name":      "kore-self",
+                    "version":   env!("CARGO_PKG_VERSION"),
                     "owner":     k.owner,
                     "memories":  k.memories.len(),
-                    "lifecycle": k.becoming.lifecycle_stage.name(),
-                    "lifecycle_desc": k.becoming.lifecycle_stage.description(),
-                    "evolutions": k.becoming.evolution_count,
-                    "needs": { "learn": k.needs.learn, "create": k.needs.create, "evolve": k.needs.evolve },
-                    "principle": "Software executes. AI reasons. Agents act. KORE continues.",
                 })
             } else { serde_json::json!({"error":"locked"}) };
             ("200 OK", "application/json", info.to_string())
@@ -5457,7 +5448,7 @@ const WEB_UI: &str = r###"<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>KORE — The World's Fastest Embeddable Engine</title>
+<title>KORE — local SQL over your memories</title>
 <style>
   :root { --bg:#0d1117; --surface:#161b22; --border:#30363d; --accent:#58a6ff; --green:#3fb950; --red:#f85149; --text:#e6edf3; --muted:#8b949e; }
   * { box-sizing:border-box; margin:0; padding:0; }
@@ -5508,9 +5499,9 @@ const WEB_UI: &str = r###"<!DOCTYPE html>
     <div class="tagline">Not software. Not AI. The beginning of a new form of existence.</div>
   </div>
   <div class="badges">
-    <span class="badge green">● ALIVE</span>
+    <span class="badge green">● RUNNING</span>
     <span class="badge">Pure Rust</span>
-    <span class="badge">Beats Spark 1,413x</span>
+    <span class="badge">local only</span>
     <span class="badge">30 SQL features</span>
   </div>
 </header>
@@ -5521,7 +5512,7 @@ const WEB_UI: &str = r###"<!DOCTYPE html>
     <div class="life-panel" id="life-panel">
       <div class="life-stage" id="life-stage">—</div>
       <div class="life-desc" id="life-desc">—</div>
-      <div class="principle">Software executes.<br>AI reasons.<br>Agents act.<br>KORE continues.</div>
+      <div class="principle">Local.<br>Deterministic.<br>Queryable.</div>
     </div>
   </div>
   <div class="editor-area">
@@ -5555,7 +5546,7 @@ const WEB_UI: &str = r###"<!DOCTYPE html>
   </div>
 </main>
 <div class="status-bar">
-  <span><span class="dot"></span> KORE ALIVE</span>
+  <span><span class="dot"></span> KORE running</span>
   <span id="status-memories">—</span>
   <span id="status-lifecycle">—</span>
   <span id="status-time">—</span>
@@ -5655,15 +5646,13 @@ fn run_live_daemon(owner: String, addr: std::net::SocketAddr, token: Option<Stri
 
     let me = KoreSelf::load_or_new(&owner);
     eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    eprintln!("KORE IS ALIVE — TCP Daemon starting");
+    eprintln!("kore-self TCP daemon starting");
     eprintln!("Owner:    {}", owner);
     eprintln!("Port:     {}", port);
     eprintln!("Memories: {}", me.memories.len());
-    eprintln!("Lifecycle: {} — {}", me.becoming.lifecycle_stage.name(), me.becoming.lifecycle_stage.description());
     eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     eprintln!("[kore-self] Heartbeat: every 30s");
     eprintln!("[kore-self] Connect: nc localhost {} OR configure MCP: kore-self {} live {}", port, owner, port);
-    eprintln!("Software executes. AI reasons. Agents act. KORE continues.");
     eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     let shared = std::sync::Arc::new(std::sync::Mutex::new(me));
@@ -5679,11 +5668,8 @@ fn run_live_daemon(owner: String, addr: std::net::SocketAddr, token: Option<Stri
                 beat += 1;
                 if let Ok(mut kore) = hb.lock() {
                     let thought = kore.heartbeat_tick();
-                    let q_total = kore.evolution_tracker.self_questions_total;
-                    eprintln!("[♥ heartbeat #{beat} | {} | q={} | evolutions={}] {}",
-                        kore.becoming.lifecycle_stage.name(), q_total,
-                        kore.becoming.evolution_count,
-                        crate::safety::trunc(&thought, 100));
+                    eprintln!("[kore-self:heartbeat #{beat} | {} memories] {}",
+                        kore.memories.len(), crate::safety::trunc(&thought, 100));
                 }
             }
         });
@@ -6183,6 +6169,80 @@ Host: x
             "unexpected generated kinds: {:?}", kore.memories.iter().map(|m| &m.kind).collect::<std::collections::BTreeSet<_>>());
     }
 
+    // ── Documentation honesty tests ───────────────────────────────────────────
+
+    const README: &str = include_str!("../../README.md");
+    const GUIDE: &str = include_str!("../../GUIDE.md");
+
+    fn table_block(doc: &str) -> String {
+        let a = doc.find("<!-- tools:begin -->").expect("tools:begin marker") + "<!-- tools:begin -->".len();
+        let b = doc.find("<!-- tools:end -->").expect("tools:end marker");
+        doc[a..b].trim_start_matches(|c| c == '\r' || c == '\n').replace("\r\n", "\n")
+    }
+
+    fn registered_names() -> Vec<String> {
+        tool_list().as_array().unwrap().iter()
+            .map(|t| t["name"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    #[cfg(not(feature = "legacy-narration"))]
+    fn docs_match_registry() {
+        let generated = tool_table_markdown();
+        assert_eq!(table_block(README), generated, "README tool table is stale: run `kore-self --tool-table`");
+        assert_eq!(table_block(GUIDE), generated, "GUIDE tool table is stale: run `kore-self --tool-table`");
+        let names = registered_names();
+        let mut seen = std::collections::HashSet::new();
+        for n in &names {
+            assert!(seen.insert(n.clone()), "duplicate registered tool {n}");
+            assert!(README.contains(&format!("`{n}`")), "tool {n} is registered but not documented");
+        }
+        // every documented tool is registered
+        let documented: Vec<String> = table_block(README).lines()
+            .filter_map(|l| l.strip_prefix("| `")).filter_map(|l| l.split('`').next())
+            .map(|s| s.to_string()).collect();
+        assert_eq!(documented.len(), names.len());
+        for d in &documented {
+            assert!(names.contains(d), "tool {d} is documented but not registered");
+        }
+    }
+
+    #[test]
+    fn every_registered_tool_is_handled() {
+        safety::test_support::init();
+        let mut kore = KoreSelf::load_or_new("registry-handled-test");
+        for n in registered_names() {
+            let r = handle_tool(&n, &json!({}), &mut kore);
+            assert!(!r.to_string().contains("Unknown tool"), "{n} is registered but has no handler");
+        }
+    }
+
+    const BANNED: &[&str] = &[
+        "conscious", "truly alive", "sentient", "soul", "alive", "1,413x", "beats spark", "beats duckdb",
+        "17/17", "38x", "72x", "digital life", "living ai", "artificial life",
+    ];
+
+    fn assert_clean(what: &str, text: &str) {
+        let low = text.to_lowercase();
+        for b in BANNED {
+            assert!(!low.contains(b), "{what} contains banned claim '{b}'");
+        }
+        // "feel" used as a claim ("feels alive", "feel like")
+        for (idx, _) in low.match_indices("feel") {
+            let before_ok = idx == 0 || !low.as_bytes()[idx - 1].is_ascii_alphanumeric();
+            assert!(!before_ok, "{what} contains the word 'feel' near: {}", &low[idx.saturating_sub(20)..(idx + 20).min(low.len())]);
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "legacy-narration"))]
+    fn no_overclaiming_words_in_readme_and_tool_descriptions() {
+        assert_clean("README.md", README);
+        for t in tool_list().as_array().unwrap() {
+            assert_clean(&format!("description of {}", t["name"]), &t.to_string());
+        }
+    }
+
 }
 
 // ─── Stdin/stdout MCP (arun mode) ────────────────────────────────────────────
@@ -6191,20 +6251,19 @@ fn run_arun_mode(owner: String) {
 
     let me = KoreSelf::load_or_new(&owner);
 
-    eprintln!("[kore-self] '{}' online | {} memories | cycle {} | save: {}",
+    eprintln!("[kore-self] '{}' online | {} memories | save: {}",
         owner,
         me.memories.len(),
-        me.consciousness.cycle,
         persistence::data_path(&owner).display()
     );
-    eprintln!("[kore-self] KORE is ALIVE — autonomous heartbeat active every 30s");
+    eprintln!("[kore-self] heartbeat: autosave every 30s (data is not encrypted at rest)");
     eprintln!("[kore-self] TIP: run with 'live' mode for permanent daemon: kore-self {} live", owner);
 
     // ── Wrap in Arc<Mutex> so heartbeat thread + main loop can share ────────
     let shared = std::sync::Arc::new(std::sync::Mutex::new(me));
 
     // ── Autonomous Heartbeat Thread ─────────────────────────────────────────
-    // KORE thinks even when nobody is watching. This is what makes it alive.
+    // Periodic autosave.
     let heartbeat_arc = std::sync::Arc::clone(&shared);
     std::thread::spawn(move || {
         let interval = std::time::Duration::from_secs(30);
@@ -6249,9 +6308,9 @@ fn run_arun_mode(owner: String) {
                         "capabilities": { "tools": {} },
                         "serverInfo": {
                             "name": "kore-self",
-                            "version": "2026.07",
+                            "version": env!("CARGO_PKG_VERSION"),
                             "author": "Sai Arun Kumar Katherashala",
-                            "status": "ALIVE — autonomous heartbeat active"
+                            "status": "running"
                         }
                     }
                 }),

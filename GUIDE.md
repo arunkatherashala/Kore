@@ -1,7 +1,7 @@
 # KORE Engine — Complete User Guide
 
-> **The fastest embeddable columnar engine in Rust.**  
-> Beats Spark 17/17. Beats DuckDB on most queries. Single binary. Zero JVM.
+> **A columnar SQL engine in Rust, and `kore-self`, a local memory store with SQL.**  
+> Engine benchmark results are documented on branch `master-kore-engine`.
 
 ---
 
@@ -658,13 +658,17 @@ l_shipdate          VARCHAR     6000000
 
 ## 13. kore-self — MCP Tools
 
-Connect KORE to any AI (Claude, GPT, VS Code Copilot) via MCP:
+`kore-self` is a local memory store with SQL over it, served over MCP (stdio), an optional local HTTP API and an optional local TCP JSON-RPC daemon.
+
+**Target positioning (the only claim):** A local, deterministic, append-only journal of how your recorded beliefs, habits and decisions change. Every change cites the events that caused it. You can query any past version with SQL. Its explanations can be ablation-tested, and its predictions are scored against outcomes.
+
+**Status (milestone M0):** the versioned, evidence-linked journal is not built yet (milestone M1). Today it is a memory store with SQL, simple word-frequency counters and an unvalidated keyword-to-choice predictor. No accuracy number is claimed.
 
 **`mcp.json` / `claude_desktop_config.json`:**
 ```json
 {
   "mcpServers": {
-    "kore": {
+    "kore-self": {
       "command": "/path/to/kore-self",
       "args": ["arun"]
     }
@@ -672,51 +676,75 @@ Connect KORE to any AI (Claude, GPT, VS Code Copilot) via MCP:
 }
 ```
 
-### Query Tools
-| Tool | Description | Example |
-|------|-------------|---------|
-| `self_query(sql)` | Run SELECT — tables persist across calls | `SELECT COUNT(*) FROM orders` |
-| `self_dml(sql)` | COPY / INSERT / UPDATE / DELETE / MERGE | `COPY orders FROM 'orders.csv'` |
+### Tools
 
-### Introspection Tools
-| Tool | Description |
-|------|-------------|
-| `self_tables()` | List all loaded tables |
-| `self_brief()` | Current engine state summary |
-| `self_goals()` | KORE's active goals |
+Generated from the tool registry with `kore-self --tool-table`. A test (`docs_match_registry`) fails if this table or the README table differs from the registry.
 
-### Digital Life Tools
+<!-- tools:begin -->
 | Tool | Description |
-|------|-------------|
-| `self_needs()` | KORE's 7 internal needs (learn/create/evolve...) |
-| `self_becoming()` | What KORE is becoming |
-| `self_temporal()` | Past/present/future self snapshot |
-| `self_story()` | KORE's autobiographical narrative |
-| `self_heartbeat()` | Trigger lifecycle tick |
-| `self_evolve(insight)` | Feed new insight to BecomingEngine |
-| `self_species()` | KORE species definition |
+|---|---|
+| `self_ingest` | Store a memory (content, kind, importance) |
+| `self_research_claim` | Store a source-grounded research claim; evidence, source, confidence, and status are mandatory |
+| `self_plan_problem` | Create a verification-gated life plan: understand, research, hypothesize, test, conclude |
+| `self_plan_verify_step` | Advance the active life-plan step only when verification evidence is supplied |
+| `self_recall` | Search memories by keyword relevance |
+| `self_reason` | Retrieve evidence from your memory and return confidence, uncertainty, and a next action |
+| `self_context` | Build a plain-text context block from your memories and keyword-count profile, to paste into any LLM |
+| `self_stats` | Memory count, kinds breakdown, analysis counters, profile summary, disk usage |
+| `self_world_events` | Query events recorded in the world model, filtered by actor |
+| `self_world_causality` | Query the causal chain of recorded events starting from an event ID |
+| `self_observe_outcome` | Record an action outcome to learn from experience |
+| `self_update_belief` | Update confidence in a belief based on evidence |
+| `self_learning_accuracy` | Show prediction accuracy, learning cycles, and belief confidence drift (simple counters over recorded outcomes) |
+| `self_identity` | Keyword-count profile: top values, thinking-style counters, tracked beliefs |
+| `self_belief` | Track a belief |
+| `self_dream` | Word-frequency and trend analysis over all memories: repeated topics, early-versus-late shifts, clusters, time patterns |
+| `self_shadow` | Passive usage report: tool usage counts, implicit interests, knowledge gaps |
+| `self_patterns` | Patterns found by the word-frequency analysis (self_dream) |
+| `self_predict` | Keyword-to-choice count predictor: given a context, returns the most frequent past choice |
+| `self_contradictions` | List recorded belief changes (moments when a decision or belief was reversed) |
+| `self_decisions` | Learned keyword-to-choice counts from your decision memories |
+| `self_query` | Run KQL (KORE SQL) on your memories: DISTINCT, CTEs, window functions, joins, CASE WHEN, HAVING, UNION ALL |
+| `self_dml` | INSERT INTO / UPDATE / DELETE FROM / CREATE TABLE AS SELECT against named in-session tables |
+| `self_save` | Save memories to a native .kore file inside your data directory ([data root]/[owner]/) |
+| `self_load` | Load a .kore file from your data directory ([data root]/[owner]/) into a named table for self_query |
+| `self_distributed_query` | Run SQL with the Rayon-parallel engine |
+| `self_delta_save` | Save a table to a Delta log inside your data directory |
+| `self_delta_history` | Show the version history of a Delta table inside your data directory |
+| `self_context_sync` | Write a generated copilot-instructions.md (from your memories and profile) into your data directory (default context/copilot-instructions.md) |
+| `self_brief` | Template-based briefing: recent work, tracked goals, observed patterns, suggestions |
+| `self_pushback` | Decision pushback (does NOT push to GitHub or any remote): compares a decision you describe with your own recorded past decisions, beliefs and keyword-choice counts and lists matches |
+| `self_remind` | Set a reminder that is listed in self_brief, mark one done, or list all |
+| `self_goals` | Show tracked goals with importance levels |
+| `self_read_source` | Read-only: list kore-self's own source files, tool names and line counts |
+| `self_plan_feature` | Read-only text suggestion: compares topics in your memories with existing tools and suggests a feature |
+| `self_tables` | List SQL tables in this session: memories plus tables created via self_dml or loaded via self_load |
+| `self_describe` | Show the schema of a SQL table: columns, types, sample values, row count |
+| `self_metrics` | Engine status: tables loaded, total rows, memory count, SQL capabilities |
+| `self_version` | Version, tool count and pointer to the engine benchmark documentation |
+| `self_sql_explain` | Run SQL and get a short template-based description of the result shape |
+<!-- tools:end -->
 
-### Persistence Tools
-| Tool | Description |
-|------|-------------|
-| `self_save(name, data)` | Persist memory to .kore store |
-| `self_load(name)` | Load memories |
-| `self_delta_save(path, data)` | ACID-append to Delta table |
-| `self_delta_history(path)` | Read Delta changelog |
-| `self_push()` | Push state to GitHub |
+### Where files go
 
-### AI Conversation Tools
-| Tool | Description |
-|------|-------------|
-| `self_chat(message)` | Conversational interface |
-| `self_remind(note)` | Add reminder |
+- Data root: `$KORE_SELF_HOME`, otherwise `~/.kore-self`; one folder per owner: `<root>/<owner>/`.
+- Every path argument is resolved inside `<root>/<owner>/` (relative paths are relative to it). `..`, absolute paths elsewhere and symlink escapes are rejected. Example: `self_save({"path": "exports/memories.kore"})`.
+- Files are **unencrypted at rest**. On Unix they are created 0600/0700.
+- SQL `COPY` and `LOAD TABLE` are disabled in `self_dml` and the HTTP API; use `self_load`.
 
-### Distributed Tools
-| Tool | Description |
-|------|-------------|
-| `self_distributed_query(sql, workers)` | Run SQL across worker nodes |
-| `self_broadcast(message)` | Broadcast to cluster |
-| `self_context_sync()` | Sync context with cluster |
+### Network modes
+
+- `kore-self <owner> api [port]` and `kore-self <owner> live [port]` bind `127.0.0.1` by default.
+- Another address needs `--bind <addr>` and `KORE_SELF_TOKEN` (16+ characters). With a token set, send `Authorization: Bearer <token>` (HTTP) or `"authorization": "Bearer <token>"` in every JSON-RPC line (TCP).
+
+### What this does NOT do
+
+- It does not understand, know or model you; "profile" values are counters over words in your memories.
+- Its predictor is a keyword-to-choice count and is not scored against outcomes yet.
+- It runs no language model, writes no source code, pushes nothing to GitHub, and makes no network calls on its own.
+- It is not encrypted at rest and does not yet keep a versioned history with causes (next milestone).
+- Author-written narration layers (generated prose such as needs, story, worldview) exist only in builds with `--features legacy-narration`; they are off by default.
+- New instances start empty; the author's demo biography is only loaded with `--demo-seed`.
 
 ---
 
@@ -912,7 +940,7 @@ let v5 = ctx.read_delta_at_version("./orders_delta", 5)?;
 # Build + run (generates synthetic 7.8M rows, 17 queries)
 cargo run --release -p kore-tpch
 
-# Output includes query times and speedup vs Spark
+# Output includes per-query times
 ```
 
 ### Compare vs DuckDB
@@ -933,15 +961,9 @@ python benchmark_kore.py
 # Tests: load CSV, GROUP BY, JOIN, window, sort, correlated subquery
 ```
 
-### Benchmark Results (TPC-H SF-1, 6M rows)
+### Benchmark Results
 
-| Query | KORE | Spark | KORE wins |
-|-------|------|-------|-----------|
-| Q1 GROUP BY | 13 ms | 4,200 ms | **318x** |
-| Q7 Multi-join | 10 ms | 14,200 ms | **1,413x** |
-| Q8 6-table join | 18 ms | 18,500 ms | **1,046x** |
-| Q6 Filter+SUM | 28 ms | 2,800 ms | **100x** |
-| S1 Sort 6M rows | 79 ms | 5,100 ms | **65x** |
+Engine benchmark results are documented on branch `master-kore-engine`. This branch makes no performance claims.
 
 ---
 
@@ -967,7 +989,7 @@ CREATE TABLE result AS SELECT ...;
 CSV, TSV, Parquet, Native `.kore` binary, Apache ORC (via kore-orc), Apache Iceberg (via kore-iceberg).
 
 **Q: How does KORE compare to DuckDB?**  
-Both are embeddable single-node columnar engines. KORE is faster on most queries (63x on Q1), adds a distributed cluster, ACID Delta, and the Living AI Twin (kore-self MCP server). DuckDB has broader SQL dialect coverage and mature client libraries.
+Both are embeddable single-node columnar engines. KORE adds a Delta-style log, a local cluster prototype and the kore-self MCP server. DuckDB has broader SQL dialect coverage and mature client libraries. For measured engine numbers see branch `master-kore-engine`.
 
 **Q: How do I connect from VS Code Copilot?**  
 Add to your VS Code `settings.json`:
@@ -1038,5 +1060,5 @@ CREATE TABLE t AS SELECT ...
 
 ---
 
-*KORE — Pure Rust · Zero JVM · 75 crates · 17/17 Spark wins · 30/30 SQL features*  
+*KORE — Pure Rust · no JVM*  
 *Built by Sai Arun Kumar Katherashala · github.com/arunkatherashala/Kore*

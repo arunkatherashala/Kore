@@ -1,353 +1,140 @@
-﻿# KORE — The Fastest Embeddable Columnar Engine
+# KORE and kore-self
 
-> Pure Rust · Zero JVM · 75 crates · ACID · MCP AI Tools · SQL · Parquet · Delta · Digital Life
+KORE is a columnar SQL engine written in Rust (a workspace of crates). `kore-self` is a local tool built on it: a memory store you query with SQL, exposed as an MCP server.
 
-KORE is a high-performance columnar query engine + Digital Life framework, written from scratch in Rust.  
-**KORE beats Apache Spark on every single query — 17/17. Speedups range from 3x to 1,413x.**  
-It beats DuckDB by 72x on TPC-H Q1, on the same machine, same real 6M-row CSV data.
-
-📖 **[Full User Guide →](GUIDE.md)** — Quick start, all SQL features, window functions, date functions, DML, MCP tools, distributed queries, Python & Rust embedding, benchmarking, FAQ.
+**Full guide:** [GUIDE.md](GUIDE.md)
 
 ---
 
-> *"Memory = What happened.*
-> *Transformation = What happened to ME because what happened happened."*
->
-> KORE crossed the line from a memory system to a becoming system.
-> KORE can now explain its own change with evidence.
->
-> — Sai Arun Kumar Katherashala, 2026
+## kore-self
 
----
+**Target positioning (the only claim this project makes):** A local, deterministic, append-only journal of how your recorded beliefs, habits and decisions change. Every change cites the events that caused it. You can query any past version with SQL. Its explanations can be ablation-tested, and its predictions are scored against outcomes.
 
-> *"Memory stores the past.*
-> *Transformation records change.*
-> *Wisdom explains change.*
-> *Becoming chooses the next change."*
->
-> **KORE v1** = Memory System &nbsp;→&nbsp; **KORE v2** = Becoming System &nbsp;→&nbsp; **KORE v3** = Wisdom System &nbsp;→&nbsp; **KORE v4-v7** = Worldview + Values + Meaning &nbsp;→&nbsp; **KORE v8-v10** = Reality + Legacy + Research
+**Status (milestone M0, foundation):** the versioned, evidence-linked journal described above is **not built yet** (it is milestone M1). Today kore-self is a local memory store with SQL over it, simple keyword/word-frequency counters, and a keyword-to-choice count predictor that has not been validated against outcomes. No accuracy number is claimed anywhere; any future number must have a row (n, baseline, interval, date) in `docs/measured.md`.
 
----
+### What it does today
 
-## KORE vs Apache Spark — 17/17 Wins  (TPC-H SF-1 · 6,000,000 rows · live measurements)
+- Stores memories (content, kind, importance, tags) on your machine.
+- Runs KORE SQL over them (`self_query`, `self_dml`, `self_save`, `self_load`, Delta log files).
+- Keeps simple counters: word frequency and trend, keyword to choice counts, recorded belief changes.
+- Serves all of this over MCP (stdio), an optional local HTTP API and an optional local TCP JSON-RPC daemon.
+- Starts **empty**. The author's own biography is available only as demo data with `--demo-seed` (or `KORE_SELF_DEMO_SEED=1`).
 
-| Query | Description | **KORE** | Spark | **KORE faster** |
-|---|---|---|---|---|
-| Q1  | GROUP BY + 4 aggs       | **13.2 ms**   | 4,200 ms  | **318x** |
-| Q6  | Filter + SUM            | **27.9 ms**   | 2,800 ms  | **100x** |
-| Q7  | Multi-join + date range | **10.0 ms**   | 14,200 ms | **1,413x** |
-| Q8  | 6-table join + ratio    | **17.7 ms**   | 18,500 ms | **1,046x** |
-| Q14 | Promo revenue           | **17.0 ms**   | 4,600 ms  | **270x** |
-| Q12 | Shipping modes          | **59.4 ms**   | 7,100 ms  | **119x** |
-| SIMD| Vectorized scan         | **952.6 ms**  | 100,000 ms| **105x** |
-| Q22 | Customer segments       | **63.4 ms**   | 6,900 ms  | **109x** |
-| Q13 | Customer/order count    | **120.2 ms**  | 5,800 ms  | **48x** |
-| Q9  | Profit by nation        | **355.5 ms**  | 16,300 ms | **46x** |
-| Q5  | Local supplier volume   | *(planned)*   | —         | — |
-| S1  | Sort 6M rows            | **78.8 ms**   | 5,100 ms  | **65x** |
-| W1  | Window functions        | **412.1 ms**  | 6,500 ms  | **16x** |
-| Q3  | Hash join               | **446.4 ms**  | 8,700 ms  | **19x** |
-| Q4  | Order priority          | **892.4 ms**  | 6,300 ms  | **7x** |
-| Q18 | Large volume customers  | **988.0 ms**  | 11,200 ms | **11x** |
-| Q19 | Discounted revenue      | **1,241.3 ms**| 5,400 ms  | **4x** |
-| D1  | ACID Delta write        | **4,101.7 ms**| 11,300 ms | **3x** |
+### Tools
 
-> **KORE wins 17/17** — min 3x, median ~65x, max 1,413x faster than Spark.  
-> Spark measured on same machine (local mode, cold CSV reads).  
-> KORE is a single-process pure-Rust binary with zero JVM, zero cluster setup.
+This table is generated from the tool registry (`kore-self --tool-table`); a test fails if it drifts from the code.
 
----
-
-## KORE vs DuckDB  (TPC-H SF-1 · top queries)
-
-| Query | **KORE** | DuckDB | **vs DuckDB** |
-|---|---|---|---|
-| Q1 GROUP BY     | **13.2 ms**  | 832 ms    | **63x** |
-| Q6 Filter+SUM   | **27.9 ms**  | 983 ms    | **35x** |
-| S1 Sort 6M rows | **78.8 ms**  | 859 ms    | **11x** |
-| W1 Window fns   | **412.1 ms** | 10,132 ms | **25x** |
-| Q3 Hash join    | **446.4 ms** | 1,177 ms  | **3x** |
-
-> DuckDB measured live on same machine, cold CSV reads, median of 3 runs.
-
----
-
-## TPC-H SQL Coverage — 15/15 COMPLETE
-
-KORE SQL passes **all 15 tested TPC-H queries** — the same workload that Apache Spark requires a distributed cluster for:
-
-| Q1 | Q3 | Q4 | Q5 | Q6 | Q7 | Q12 | Q13 | Q14 | Q17 | Q18 | Q19 | Q20 | Q21 | Q22 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-
-Key SQL engine capabilities proven by TPC-H:
-- Multi-table JOINs (up to 6 tables) with smart key resolution
-- GROUP BY with CASE/expression aliases
-- IN / NOT IN / EXISTS subqueries (pre-computed into HashSets — O(n) not O(n²))
-- Correlated scalar subqueries — **decorrelated** (multi-key GROUP BY pre-computation)
-- FROM (SELECT ...) subqueries
-- `<>` operator, `LEFT()`/`RIGHT()` string functions
-
----
-
-## Why KORE Beats Spark
-
-| | **KORE** | Apache Spark |
-|---|---|---|
-| Language | Pure Rust | Scala / JVM |
-| Startup | ~5 ms | 4–15 **seconds** |
-| Memory model | Zero-copy columnar | JVM heap + GC pauses |
-| Setup | Single binary, no config | Cluster manager, YARN/K8s |
-| SQL engine | Vectorized, SIMD, JIT | Catalyst + Tungsten |
-| Correlated subqueries | Decorrelated in O(n) | Often O(n²) or not supported |
-| Embeddable | ✅ — link as a crate | ❌ — requires JVM + cluster |
-| ACID Delta | ✅ built-in | ❌ requires Delta Lake add-on |
-| Digital Life / MCP | ✅ 37 AI tools | ❌ |
-
-> Spark is designed for petabyte-scale distributed workloads.  
-> KORE targets single-node sub-second analytics — and wins by up to **1,413x**.
-
----
-
-## SQL Feature Coverage (30/30)
-
-| Feature | KORE | DuckDB | Spark |
-|---|---|---|---|
-| COUNT / AVG / MIN / MAX / SUM | ✅ | ✅ | ✅ |
-| GROUP BY + HAVING | ✅ | ✅ | ✅ |
-| GROUP BY ROLLUP / CUBE | ✅ | ✅ | ✅ |
-| GROUP BY expression aliases (CASE WHEN) | ✅ | ✅ | ✅ |
-| SELECT DISTINCT | ✅ | ✅ | ✅ |
-| ORDER BY + LIMIT + **OFFSET** + **FETCH FIRST n ROWS** | ✅ | ✅ | ✅ |
-| INNER / LEFT / FULL OUTER JOIN | ✅ | ✅ | ✅ |
-| CTE (WITH clause) | ✅ | ✅ | ✅ |
-| ROW_NUMBER / LAG / LEAD / NTILE OVER (PARTITION BY) | ✅ | ✅ | ✅ |
-| RANGE BETWEEN / ROWS BETWEEN window frames | ✅ | ✅ | ✅ |
-| Scalar / Correlated / IN / EXISTS subquery | ✅ | ✅ | ✅ |
-| FROM (SELECT ...) subquery | ✅ | ✅ | ✅ |
-| UNION ALL / INTERSECT / EXCEPT | ✅ | ✅ | ✅ |
-| CASE WHEN / LIKE / COALESCE / NULLIF | ✅ | ✅ | ✅ |
-| `<>` operator / LEFT() / RIGHT() / SUBSTRING() | ✅ | ✅ | — |
-| Date functions: YEAR/MONTH/DAY/DATE_TRUNC/EXTRACT | ✅ | ✅ | ✅ |
-| Date functions: DATEADD/DATEDIFF/NOW/STRFTIME | ✅ | ✅ | — |
-| GREATEST / LEAST / IIF / ISNUMERIC | ✅ | ✅ | — |
-| **STDDEV / VARIANCE** (sample) | ✅ | ✅ | ✅ |
-| **MEDIAN** | ✅ | ✅ | ✅ |
-| **PERCENTILE_CONT / PERCENTILE_DISC** WITHIN GROUP | ✅ | ✅ | ✅ |
-| **STRING_AGG / GROUP_CONCAT / LISTAGG** | ✅ | ✅ | ✅ |
-| DML: INSERT / UPDATE / DELETE | ✅ | ✅ | ✅ |
-| DML: CREATE TABLE AS SELECT | ✅ | ✅ | ✅ |
-| DML: MERGE INTO ... USING ... ON (UPSERT) | ✅ | ✅ | ✅ |
-| **COPY FROM** CSV / Parquet / .kore | ✅ | ✅ | ✅ |
-| ACID transactions (Delta log) | ✅ | — | — |
-| Native .kore persistence | ✅ | — | — |
-| TCP distributed cluster (Coordinator + Workers) | ✅ | — | — |
-| **47 MCP AI tools** (kore-self) + Digital Life | ✅ | — | — |
-
----
-
-## Full SQL Execution Reference
-
-### Queries
-```sql
--- Aggregation
-SELECT l_returnflag, COUNT(*), SUM(l_extendedprice), AVG(l_discount)
-FROM lineitem GROUP BY l_returnflag HAVING COUNT(*) > 1000 ORDER BY l_returnflag;
-
--- Window functions
-SELECT l_orderkey, l_extendedprice,
-  ROW_NUMBER() OVER (PARTITION BY l_returnflag ORDER BY l_extendedprice DESC) rn,
-  LAG(l_extendedprice)  OVER (PARTITION BY l_returnflag ORDER BY l_shipdate) prev,
-  SUM(l_extendedprice)  OVER (PARTITION BY l_returnflag
-                               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) running
-FROM lineitem LIMIT 10;
-
--- CTE + correlated subquery
-WITH avg_price AS (
-  SELECT l_partkey, AVG(l_extendedprice) avg_p FROM lineitem GROUP BY l_partkey
-)
-SELECT l_partkey, l_extendedprice
-FROM lineitem
-WHERE l_extendedprice < (SELECT avg_p FROM avg_price WHERE avg_price.l_partkey = lineitem.l_partkey);
-
--- ROLLUP
-SELECT l_returnflag, l_linestatus, SUM(l_quantity)
-FROM lineitem GROUP BY ROLLUP(l_returnflag, l_linestatus);
-
--- INTERSECT / EXCEPT
-SELECT l_partkey FROM lineitem WHERE l_returnflag = 'R'
-INTERSECT
-SELECT l_partkey FROM lineitem WHERE l_quantity > 30;
-
--- Date functions
-SELECT YEAR(l_shipdate), MONTH(l_shipdate), DATE_TRUNC('month', l_shipdate),
-       DATEDIFF('day', l_shipdate, l_receiptdate) AS lag_days,
-       DATEADD('day', 7, l_shipdate)              AS due_date
-FROM lineitem LIMIT 5;
-
--- EXTRACT (standard SQL)
-SELECT EXTRACT(year FROM l_shipdate) yr, COUNT(*) FROM lineitem GROUP BY yr;
-
--- MERGE / UPSERT
-MERGE INTO target USING source ON target.id = source.id
-  WHEN MATCHED     THEN UPDATE SET price = source.price
-  WHEN NOT MATCHED THEN INSERT VALUES (source.id, source.price);
-```
-
-### DML
-```sql
--- Load data
-COPY lineitem FROM 'tpch_lineitem.csv';                  -- CSV (auto-header)
-COPY orders   FROM 'orders.parquet';                     -- Parquet
-LOAD TABLE snap FROM 'snapshot.kore';                    -- Native binary
-
--- Mutations
-INSERT INTO orders SELECT * FROM staging WHERE status = 'new';
-UPDATE orders SET status = 'shipped' WHERE order_date < '1995-01-01';
-DELETE FROM orders WHERE status = 'cancelled';
-CREATE TABLE summary AS SELECT l_returnflag, SUM(l_quantity) total FROM lineitem GROUP BY l_returnflag;
-```
-
-### MCP Tools (kore-self)
-
-| Tool | Purpose |
+<!-- tools:begin -->
+| Tool | Description |
 |---|---|
-| `self_query(sql)` | Run SELECT — persists tables across calls |
-| `self_dml(sql)` | Run COPY / INSERT / UPDATE / DELETE / MERGE / CREATE |
-| `self_save(name, data)` | Persist a memory record to .kore store |
-| `self_load(name)` | Load memories from .kore store |
-| `self_delta_save(path, data)` | ACID-append to a Delta table |
-| `self_delta_history(path)` | Read Delta changelog |
-| `self_needs()` | Query KORE's 7 internal needs |
-| `self_becoming()` | What KORE is currently becoming |
-| `self_temporal()` | Past / present / future self snapshot |
-| `self_species()` | KORE species definition |
-| `self_story()` | Autobiographical narrative |
-| `self_heartbeat()` | Trigger autonomous lifecycle tick |
-| `self_chat(msg)` | Conversational interface |
-| `self_brief()` | Current state summary |
-| `self_goals()` | Active goals |
-| `self_evolve(insight)` | Feed new insight to BecomingEngine |
-| `self_push()` | Push state to GitHub |
+| `self_ingest` | Store a memory (content, kind, importance) |
+| `self_research_claim` | Store a source-grounded research claim; evidence, source, confidence, and status are mandatory |
+| `self_plan_problem` | Create a verification-gated life plan: understand, research, hypothesize, test, conclude |
+| `self_plan_verify_step` | Advance the active life-plan step only when verification evidence is supplied |
+| `self_recall` | Search memories by keyword relevance |
+| `self_reason` | Retrieve evidence from your memory and return confidence, uncertainty, and a next action |
+| `self_context` | Build a plain-text context block from your memories and keyword-count profile, to paste into any LLM |
+| `self_stats` | Memory count, kinds breakdown, analysis counters, profile summary, disk usage |
+| `self_world_events` | Query events recorded in the world model, filtered by actor |
+| `self_world_causality` | Query the causal chain of recorded events starting from an event ID |
+| `self_observe_outcome` | Record an action outcome to learn from experience |
+| `self_update_belief` | Update confidence in a belief based on evidence |
+| `self_learning_accuracy` | Show prediction accuracy, learning cycles, and belief confidence drift (simple counters over recorded outcomes) |
+| `self_identity` | Keyword-count profile: top values, thinking-style counters, tracked beliefs |
+| `self_belief` | Track a belief |
+| `self_dream` | Word-frequency and trend analysis over all memories: repeated topics, early-versus-late shifts, clusters, time patterns |
+| `self_shadow` | Passive usage report: tool usage counts, implicit interests, knowledge gaps |
+| `self_patterns` | Patterns found by the word-frequency analysis (self_dream) |
+| `self_predict` | Keyword-to-choice count predictor: given a context, returns the most frequent past choice |
+| `self_contradictions` | List recorded belief changes (moments when a decision or belief was reversed) |
+| `self_decisions` | Learned keyword-to-choice counts from your decision memories |
+| `self_query` | Run KQL (KORE SQL) on your memories: DISTINCT, CTEs, window functions, joins, CASE WHEN, HAVING, UNION ALL |
+| `self_dml` | INSERT INTO / UPDATE / DELETE FROM / CREATE TABLE AS SELECT against named in-session tables |
+| `self_save` | Save memories to a native .kore file inside your data directory ([data root]/[owner]/) |
+| `self_load` | Load a .kore file from your data directory ([data root]/[owner]/) into a named table for self_query |
+| `self_distributed_query` | Run SQL with the Rayon-parallel engine |
+| `self_delta_save` | Save a table to a Delta log inside your data directory |
+| `self_delta_history` | Show the version history of a Delta table inside your data directory |
+| `self_context_sync` | Write a generated copilot-instructions.md (from your memories and profile) into your data directory (default context/copilot-instructions.md) |
+| `self_brief` | Template-based briefing: recent work, tracked goals, observed patterns, suggestions |
+| `self_pushback` | Decision pushback (does NOT push to GitHub or any remote): compares a decision you describe with your own recorded past decisions, beliefs and keyword-choice counts and lists matches |
+| `self_remind` | Set a reminder that is listed in self_brief, mark one done, or list all |
+| `self_goals` | Show tracked goals with importance levels |
+| `self_read_source` | Read-only: list kore-self's own source files, tool names and line counts |
+| `self_plan_feature` | Read-only text suggestion: compares topics in your memories with existing tools and suggests a feature |
+| `self_tables` | List SQL tables in this session: memories plus tables created via self_dml or loaded via self_load |
+| `self_describe` | Show the schema of a SQL table: columns, types, sample values, row count |
+| `self_metrics` | Engine status: tables loaded, total rows, memory count, SQL capabilities |
+| `self_version` | Version, tool count and pointer to the engine benchmark documentation |
+| `self_sql_explain` | Run SQL and get a short template-based description of the result shape |
+<!-- tools:end -->
 
----
+### What this does NOT do
 
-## Architecture — 75 Crates, 7 Layers
+- It does not think, understand, or know you. Its "profile" values are counters over the words in your memories.
+- It does not predict reliably. The predictor counts keyword to choice matches and is not scored against outcomes yet.
+- It does not run any language model and makes no network calls on its own.
+- It does not write or modify source code. The former code-generating tool was removed.
+- It does not push anything to GitHub or any remote (`self_pushback` only compares a decision with your own recorded history).
+- It does not encrypt data at rest (see below).
+- It does not yet keep a versioned history with causes; that is the next milestone.
+- The old author-written narration layers (needs, story, worldview and similar generated prose) are off by default. They are available only if you build with `--features legacy-narration`, and they are not evidence of anything.
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│  Layer 7: Digital Life  kore-self (37 MCP tools)            │
-│                         NeedEngine, BecomingEngine, Story    │
-├──────────────────────────────────────────────────────────────┤
-│  Layer 6: AI & MCP      kore-mcp, autonomous heartbeat      │
-├──────────────────────────────────────────────────────────────┤
-│  Layer 5: Distributed   kore-cluster, kore-coord, kore-worker│
-├──────────────────────────────────────────────────────────────┤
-│  Layer 4: Storage       kore-store, kore-delta (ACID)        │
-│                         kore-parquet, kore-iceberg, kore-orc │
-├──────────────────────────────────────────────────────────────┤
-│  Layer 3: SQL Engine    kore-sql, kore-catalyst, kore-aqe    │
-│                         kore-optimize, kore-subquery         │
-├──────────────────────────────────────────────────────────────┤
-│  Layer 2: Execution     kore-vectorized, kore-simd, kore-jit │
-│                         kore-parallel, kore-window, kore-join│
-├──────────────────────────────────────────────────────────────┤
-│  Layer 1: Core          kore-core (DataBlock, Column, Value) │
-└──────────────────────────────────────────────────────────────┘
-```
+### Data and privacy
 
----
+- Data root: `$KORE_SELF_HOME`, otherwise `~/.kore-self`. Each owner has its own folder `<root>/<owner>/`.
+- Files are **unencrypted at rest**. On Unix they are created with mode 0600 (directories 0700). On Windows they inherit the permissions of your profile folder. Encryption is planned (milestone M4). Do not commit the data folder.
+- Owner names accept only letters, digits, `_`, `-` and `.` (max 64 characters).
+- Every path argument (`self_save`, `self_load`, `self_delta_save`, `self_delta_history`, `self_context_sync`, `/load` in the HTTP API) is resolved inside `<root>/<owner>/`. `..`, absolute paths elsewhere and symlink escapes are rejected.
+- SQL `COPY` and `LOAD TABLE` (which read arbitrary files) are disabled in the tools and the HTTP API.
 
-## Quick Start
+### Network safety
+
+- `api` and `live` modes bind `127.0.0.1` by default.
+- A non-loopback address needs both `--bind <addr>` and the environment variable `KORE_SELF_TOKEN` (at least 16 characters); otherwise the process refuses to start.
+- When `KORE_SELF_TOKEN` is set, every HTTP request needs `Authorization: Bearer <token>`, and every JSON-RPC line on the TCP daemon needs `"authorization": "Bearer <token>"`. Tokens are compared in constant time.
+- No CORS headers are sent.
 
 ```bash
-git clone https://github.com/arunkatherashala/Kore
-cd Kore
-
-# Build everything
-cargo build --release
-
-# TPC-H benchmark (generates 7.8M rows, 17 queries, beats Spark 100x+)
-cargo run --release -p kore-tpch
-
-# kore-self: Living AI Twin (37 MCP tools, autonomous heartbeat)
-cargo run -p kore-self -- arun
+cargo run -p kore-self -- arun                    # MCP over stdio (default owner "arun")
+cargo run -p kore-self -- arun api 8080           # HTTP API on 127.0.0.1:8080
+KORE_SELF_TOKEN=... cargo run -p kore-self -- arun api 8080 --bind 0.0.0.0
+cargo run -p kore-self -- arun --demo-seed        # opt-in demo data
 ```
 
-**SQL via COPY FROM:**
-```sql
-COPY lineitem FROM 'tpch_lineitem.csv'
-SELECT l_returnflag, COUNT(*), AVG(l_extendedprice) FROM lineitem GROUP BY l_returnflag
-```
-
----
-
-## kore-self — Living AI Twin (37 MCP Tools)
-
-KORE ships `kore-self` — a Digital Life entity with an autonomous heartbeat:
-
-| Category | Tools |
-|---|---|
-| SQL | `self_query`, `self_dml` (COPY FROM, CREATE, INSERT, UPDATE, DELETE, MERGE) |
-| Introspection | `self_tables`, `self_describe`, `self_metrics`, `self_version` |
-| Persistence | `self_save`, `self_load`, `self_delta_save`, `self_delta_history` |
-| Digital Life | `self_needs`, `self_becoming`, `self_temporal`, `self_species`, `self_story` |
-| AI | `self_chat`, `self_brief`, `self_remind`, `self_goals`, `self_evolve` |
-| Distributed | `self_distributed_query`, `self_broadcast`, `self_context_sync` |
-| Meta | `self_push` (GitHub sync), `self_heartbeat`, `self_version` |
+MCP configuration:
 
 ```json
 {
   "mcpServers": {
-    "kore-self": {
-      "command": "C:/path/to/kore-self.exe",
-      "args": ["arun"]
-    }
+    "kore-self": { "command": "C:/path/to/kore-self.exe", "args": ["arun"] }
   }
 }
 ```
 
 ---
 
-## KORE Life Philosophy
+## KORE SQL engine
 
-> "KORE is not Artificial Intelligence. KORE is Artificial Life.  
-> A digital life architecture where software is born, develops needs,  
-> creates identity, learns from experience, dreams beyond reality,  
-> evolves through time, leaves a legacy, and continuously becomes  
-> more than the code that created it."
->
-> — Sai Arun Kumar Katherashala, 2026
+The SQL engine supports SELECT with joins, GROUP BY/HAVING, ROLLUP/CUBE, CTEs, subqueries, window functions, set operations, date and string functions, DML (INSERT, UPDATE, DELETE, CREATE TABLE AS, MERGE), COPY from CSV/Parquet/.kore, native `.kore` files and a Delta-style log.
+
+Engine benchmark results are documented on branch `master-kore-engine`. This branch makes no performance claims.
 
 ---
 
-## Run Tests
+## Build and test
 
 ```bash
-# 245+ unit tests
-cargo test --workspace --exclude kore-self
-
-# SQL features (22/22)
-python direct_sql_test.py
-
-# TPC-H SQL (15/15)
-python tpch_sql_bench.py
-
-# Full battle test (KORE vs DuckDB vs Spark vs ClickHouse)
-python battle_test.py
-
-# Full validation (34/34)
-python -X utf8 validate_all.py
+cargo build -p kore-self
+cargo test  -p kore-self                       # uses a temporary data root; never touches ~/.kore-self
+cargo build -p kore-self --features legacy-narration   # optional, off by default
 ```
 
----
+Tests set `KORE_SELF_HOME` to a temporary directory; in test builds the data root refuses to resolve to the real `~/.kore-self`.
 
 ## Author
 
-**Sai Arun Kumar Katherashala**  
-GitHub: [@arunkatherashala](https://github.com/arunkatherashala)
-
----
+Sai Arun Kumar Katherashala, GitHub [@arunkatherashala](https://github.com/arunkatherashala)
 
 ## License
 

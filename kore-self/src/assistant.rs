@@ -3,8 +3,8 @@
 // Moves kore-self from REACTIVE (tool-responder) to PROACTIVE (human partner).
 //
 // self_brief    → morning situational briefing: yesterday, today, patterns, alerts
-// self_chat     → free-form conversation using ALL memory + identity + consciousness context
-// self_push     → intentional pushback on a decision using your own past patterns
+// self_chat     → templated conversation over memory + identity counters
+// self_pushback → intentional pushback on a decision using your own past patterns
 // self_remind   → set + surface reminders in daily brief
 // self_goals    → track all goals, show progress, detect missed deadlines
 
@@ -106,8 +106,8 @@ impl AssistantEngine {
             identity.thinking.decision_speed*100.0));
 
         // ── Consciousness state ────────────────────────────────────────────────
-        lines.push("\n⚡ CONSCIOUSNESS:".to_string());
-        lines.push(format!("  Cycle {} | {} total ticks | {} insights generated",
+        lines.push("\nANALYSIS COUNTERS:".to_string());
+        lines.push(format!("  Cycle {} | {} total ticks | {} derived notes",
             consciousness.cycle, consciousness.total_ticks, consciousness.insights_total));
         if !consciousness.active_plan.is_empty() {
             lines.push("  Active plan:".to_string());
@@ -223,7 +223,7 @@ impl AssistantEngine {
         // Detect intent
         let reply = if msg_lower.contains("how") && msg_lower.contains("you") {
             // "how are you" type
-            format!("I'm kore-self — your digital twin. {} memories, {} consciousness cycles. \
+            format!("I'm kore-self, a local memory store. {} memories, {} analysis cycles. \
                      Currently tracking: {}. What's on your mind?",
                 memories.len(), 0,
                 shadow.implicit_interests.iter().take(2).cloned().collect::<Vec<_>>().join(", "))
@@ -294,7 +294,7 @@ impl AssistantEngine {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // self_push
+    // self_pushback
     // ─────────────────────────────────────────────────────────────────────────
 
     /// Pushback on a decision using past patterns.
@@ -311,7 +311,7 @@ impl AssistantEngine {
         let related: Vec<&Memory> = memories.iter()
             .filter(|m| m.kind == "decision" &&
                 m.content.split_whitespace()
-                    .any(|w| dec_lower.contains(&w.to_lowercase()) || w.len() >= 5))
+                    .any(|w| { let w = w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase(); w.chars().count() >= 5 && dec_lower.contains(&w) }))
             .collect();
 
         let mut pushback: Vec<String> = vec![];
