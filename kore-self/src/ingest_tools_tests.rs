@@ -165,8 +165,8 @@ fn folder_ingest_counts_dedupe_undated_redaction() {
     assert!(t.contains("[REDACTED:email]") && t.contains("[REDACTED:phone]"), "{t}");
     assert!(!t.contains("jane.doe") && !t.contains("555-123-4567"), "{t}");
     assert!(!t.contains("undated") && !t.contains("hidden folders"));
-    let flagged = ok(o, "self_sql", json!({"sql": "SELECT count(*) FROM events WHERE redacted = true"}));
-    assert!(flagged["text"].as_str().unwrap().contains('1'), "{flagged}");
+    let flagged = ok(o, "self_sql", json!({"sql": "SELECT source FROM events WHERE redacted"}));
+    assert!(flagged["text"].as_str().unwrap().contains("(1 rows)") && flagged["text"].as_str().unwrap().contains("email"), "{flagged}");
 
     let r2 = ok(o, "self_ingest_folder", json!({"path": p}));
     assert_eq!((r2["added"].as_u64(), r2["duplicate"].as_u64(), r2["skipped_undated"].as_u64()), (Some(0), Some(13), Some(2)), "{r2}");
@@ -360,7 +360,7 @@ fn csv_to_import_to_export_to_compare_round_trip() {
     let e = ok(a, "self_export", json!({"path": "events.csv", "format": "csv"}));
     assert_eq!(e["events"], 3);
     let exported = PathBuf::from(e["path"].as_str().unwrap());
-    assert!(exported.starts_with(owner_dir(a).canonicalize().unwrap().join("exports")), "{exported:?}");
+    assert!(exported.canonicalize().unwrap().starts_with(owner_dir(a).canonicalize().unwrap().join("exports")), "{exported:?}");
     let text = std::fs::read_to_string(&exported).unwrap();
     let recs = crate::csvio::parse(&text).unwrap();
     assert_eq!(recs[0], EXPORT_CSV_HEADER.iter().map(|s| s.to_string()).collect::<Vec<_>>());
@@ -399,8 +399,8 @@ fn kore_export_import_round_trip_and_validation() {
     let r = ok(b, "self_ingest_kore", json!({"path": path}));
     assert_eq!((r["added"].as_u64(), r["errors"].as_u64()), (Some(3), Some(0)), "{r}");
     assert_eq!(sorted_event_rows(b), sorted_event_rows(a));
-    let q = ok(b, "self_sql", json!({"sql": "SELECT count(*) FROM events WHERE redacted = true"}));
-    assert!(q["text"].as_str().unwrap().contains('1'), "{q}");
+    let q = ok(b, "self_sql", json!({"sql": "SELECT text FROM events WHERE redacted"}));
+    assert!(q["text"].as_str().unwrap().contains("(1 rows)") && q["text"].as_str().unwrap().contains("[REDACTED:email]"), "{q}");
     let r = ok(b, "self_ingest_kore", json!({"path": path}));
     assert_eq!((r["added"].as_u64(), r["duplicate"].as_u64()), (Some(0), Some(3)), "{r}");
     // an edited row (id no longer matches the content) is rejected

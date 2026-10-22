@@ -31,6 +31,12 @@ const MAX_KORE_ROWS: usize = 200_000;
 const MAX_LISTED: usize = 20;
 const MAX_LISTED_PATHS: usize = 50;
 
+/// Path for messages: drop the Windows verbatim prefix that canonicalisation adds.
+fn disp(p: &Path) -> String {
+    let s = p.display().to_string();
+    s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
+}
+
 // ─── allow-list ──────────────────────────────────────────────────────────────
 
 fn owner_canon(owner: &str) -> Result<PathBuf, Value> {
@@ -76,12 +82,12 @@ fn resolve_input(owner: &str, arg: &str) -> Result<(PathBuf, PathBuf, Vec<String
     let joined = if raw.is_absolute() { raw.to_path_buf() } else { oc.join(raw) };
     let canon = joined.canonicalize().map_err(|e| err(format!("cannot read '{}': {e}", safety::trunc(p, 120))))?;
     if !roots.iter().any(|r| canon.starts_with(r)) {
-        let listed: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
+        let listed: Vec<String> = roots.iter().map(|r| disp(r)).collect();
         return Err(err(format!(
             "Rejected path '{}': it is not inside an allowed ingest root. Allowed: {}. To allow another folder, add its absolute path as a line in {} (edit that file by hand; no tool can change it).",
             safety::trunc(p, 120),
             listed.join(" | "),
-            oc.join(ROOTS_FILE).display()
+            disp(&oc.join(ROOTS_FILE))
         )));
     }
     for reserved in [ROOTS_FILE, PATTERN_FILE] {
@@ -364,7 +370,7 @@ pub fn ingest_folder(args: &Value, owner: &str) -> Result<Value, Value> {
     let version = commit_events(&mut log, &mut tally, events, dry_run)?;
     let mut out = json!({
         "dry_run": dry_run,
-        "folder": start.display().to_string(),
+        "folder": disp(&start),
         "files_scanned": scanned,
         "added": tally.added,
         "duplicate": tally.duplicate,
@@ -628,7 +634,7 @@ fn export_target(owner: &str, arg: &str) -> Result<(PathBuf, PathBuf), Value> {
     };
     let resolved = safety::safe_path(owner, &joined.to_string_lossy()).map_err(|e| err(format!("Rejected path '{}': {e}", safety::trunc(p, 120))))?;
     if !resolved.starts_with(&exports) || resolved == exports {
-        return Err(err(format!("Rejected path '{}': exports are written only under {}", safety::trunc(p, 120), exports.display())));
+        return Err(err(format!("Rejected path '{}': exports are written only under {}", safety::trunc(p, 120), disp(&exports))));
     }
     Ok((resolved, exports))
 }
@@ -672,7 +678,7 @@ pub fn export(args: &Value, owner: &str) -> Result<Value, Value> {
         err(format!("write failed: {e}"))
     })?;
     Ok(text(json!({
-        "path": target.display().to_string(),
+        "path": disp(&target),
         "relative": rel_of(&exports, &target),
         "format": format,
         "events": rows.len(),
@@ -712,7 +718,7 @@ pub fn forget(args: &Value, owner: &str) -> Result<Value, Value> {
         )));
     }
     let r = log.forget_events(&ids).map_err(log_err)?;
-    Ok(text(json!({
+    let mut out = json!({
         "forgotten": r.forgotten,
         "already_forgotten": r.already_forgotten,
         "causes_dropped": r.causes_dropped,
@@ -723,7 +729,11 @@ pub fn forget(args: &Value, owner: &str) -> Result<Value, Value> {
         "outcomes_edited": r.outcomes_edited,
         "version": r.version,
         "note": "removed from all versions (older versions no longer contain it); manifest hashes of rewritten versions changed and a forget record (event-id hashes only) was added. Copies outside the log (backups, exports, other disks) are not touched.",
-    })))
+    });
+    if !r.created {
+        out["note"] = json!("nothing was removed: every id was already forgotten");
+    }
+    Ok(text(out))
 }
 
 // ─── tool definitions ────────────────────────────────────────────────────────
