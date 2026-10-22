@@ -729,6 +729,11 @@ Generated from the tool registry with `kore-self --tool-table`. A test (`docs_ma
 | `self_diff` | Show the rows added between two versions of the versioned log (v1 exclusive, v2 inclusive) |
 | `self_verify` | Recompute every checksum and the hash chain of the versioned log from disk; reports OK or the exact failure and file |
 | `self_migrate_v1` | Import beliefs from the pre-log identity state as author=legacy revisions marked unsupported (no causes are invented) |
+| `self_ingest_folder` | Read .md and .txt files under an allow-listed folder and store one dated note event per file (idempotent, redacted before storing) |
+| `self_ingest_csv` | Import events from a CSV file inside an allow-listed folder; rows without a parseable occurred_at are rejected and counted, never dated now |
+| `self_ingest_kore` | Import events from a .kore file written by self_export (idempotent, validated, redacted again before storing) |
+| `self_forget` | Permanently remove events from every version of the log, the one documented exception to append-only; requires confirm true |
+| `self_export` | Write all events to a CSV or .kore file under the exports folder of your data directory |
 <!-- tools:end -->
 
 ### Where files go

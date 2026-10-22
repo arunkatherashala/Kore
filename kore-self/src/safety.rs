@@ -123,6 +123,14 @@ pub fn safe_path(owner: &str, user_path: &str) -> Result<PathBuf, String> {
     if !resolved.starts_with(&base) {
         return Err(format!("path escapes the data directory of owner '{owner}'"));
     }
+    // Files the user edits by hand (ingest allow-list, redaction patterns) are
+    // never reachable through tool paths, for reading or for writing.
+    if resolved.parent() == Some(base.as_path()) {
+        let n = resolved.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if n.starts_with("ingest_roots") || n.starts_with("redact_patterns") {
+            return Err("that file is reserved: edit it by hand, tools may not read or write it".into());
+        }
+    }
     Ok(resolved)
 }
 

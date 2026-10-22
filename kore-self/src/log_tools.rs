@@ -19,7 +19,7 @@ use std::sync::Mutex;
 static LOG_LOCK: Mutex<()> = Mutex::new(());
 
 /// Tools that only need the owner name (no `KoreSelf` state).
-pub const STATELESS_TOOLS: [&str; 7] = [
+pub const STATELESS_TOOLS: [&str; 12] = [
     "self_event_add",
     "self_belief_revise",
     "self_belief_history",
@@ -27,22 +27,27 @@ pub const STATELESS_TOOLS: [&str; 7] = [
     "self_versions",
     "self_diff",
     "self_verify",
+    "self_ingest_folder",
+    "self_ingest_csv",
+    "self_ingest_kore",
+    "self_forget",
+    "self_export",
 ];
 
 pub fn is_log_tool(name: &str) -> bool {
     STATELESS_TOOLS.contains(&name) || name == "self_migrate_v1"
 }
 
-fn text(v: Value) -> Value {
+pub(crate) fn text(v: Value) -> Value {
     json!({ "content": [{ "type": "text", "text": v.to_string() }] })
 }
-fn plain(s: String) -> Value {
+pub(crate) fn plain(s: String) -> Value {
     json!({ "content": [{ "type": "text", "text": s }] })
 }
-fn err(s: impl Into<String>) -> Value {
+pub(crate) fn err(s: impl Into<String>) -> Value {
     json!({ "content": [{ "type": "text", "text": s.into() }], "isError": true })
 }
-fn log_err(e: LogError) -> Value {
+pub(crate) fn log_err(e: LogError) -> Value {
     match e {
         LogError::Conflict(d) => err(format!(
             "Conflict: the log changed underneath this call ({d}). Another kore-self process may be using this owner. Nothing was written; retry."
@@ -51,7 +56,7 @@ fn log_err(e: LogError) -> Value {
     }
 }
 
-fn open(owner: &str) -> Result<VersionedLog, Value> {
+pub(crate) fn open(owner: &str) -> Result<VersionedLog, Value> {
     safety::validate_owner(owner).map_err(|e| err(format!("invalid owner: {e}")))?;
     // Routes through safe_path: the owner dir must resolve inside the data root.
     let base = safety::safe_path(owner, "log").map_err(|e| err(format!("log path rejected: {e}")))?;
@@ -60,7 +65,7 @@ fn open(owner: &str) -> Result<VersionedLog, Value> {
     VersionedLog::open_or_create(&root, owner).map_err(log_err)
 }
 
-fn req_str<'a>(args: &'a Value, k: &str) -> Result<&'a str, Value> {
+pub(crate) fn req_str<'a>(args: &'a Value, k: &str) -> Result<&'a str, Value> {
     match args.get(k).and_then(|v| v.as_str()) {
         Some(s) if !s.trim().is_empty() => Ok(s),
         Some(_) => Err(err(format!("'{k}' must not be empty"))),
@@ -68,7 +73,7 @@ fn req_str<'a>(args: &'a Value, k: &str) -> Result<&'a str, Value> {
     }
 }
 
-fn str_list(args: &Value, k: &str) -> Result<Vec<String>, Value> {
+pub(crate) fn str_list(args: &Value, k: &str) -> Result<Vec<String>, Value> {
     match args.get(k) {
         None | Some(Value::Null) => Ok(vec![]),
         Some(Value::Array(a)) => a
@@ -93,6 +98,11 @@ pub fn handle(name: &str, args: &Value, owner: &str) -> Option<Value> {
         "self_versions" => versions(owner),
         "self_diff" => diff(args, owner),
         "self_verify" => verify(owner),
+        "self_ingest_folder" => crate::ingest_tools::ingest_folder(args, owner),
+        "self_ingest_csv" => crate::ingest_tools::ingest_csv(args, owner),
+        "self_ingest_kore" => crate::ingest_tools::ingest_kore(args, owner),
+        "self_forget" => crate::ingest_tools::forget(args, owner),
+        "self_export" => crate::ingest_tools::export(args, owner),
         _ => unreachable!(),
     };
     Some(r.unwrap_or_else(|e| e))
@@ -109,13 +119,22 @@ fn event_add(args: &Value, owner: &str) -> Result<Value, Value> {
     let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("note");
     let tags = str_list(args, "tags")?;
     let mut log = open(owner)?;
-    let ev = NewEvent { source: source.into(), occurred_at: occurred, kind: kind.into(), text: t.into(), tags, redacted: false };
+    let red = crate::redact::Redactor::load(&safety::owner_dir(owner)).redact(t);
+    let ev = NewEvent { source: source.into(), occurred_at: occurred, kind: kind.into(), text: red.text.clone(), tags, redacted: red.changed() };
     let info = log.append_events(&[ev]).map_err(log_err)?;
-    Ok(text(json!({
+    let mut out = json!({
         "event_id": info.event_ids.first(),
         "duplicate": !info.created,
         "version": info.version,
-    })))
+    });
+    if info.suppressed > 0 {
+        out["note"] = json!("not stored: this event was forgotten earlier (self_forget) and is not re-added");
+    }
+    if red.changed() {
+        out["redacted"] = json!(red.kinds);
+        out["redaction_note"] = json!("best-effort redaction replaced matches with [REDACTED:kind] before storing");
+    }
+    Ok(text(out))
 }
 
 fn belief_revise(args: &Value, owner: &str) -> Result<Value, Value> {
@@ -270,6 +289,8 @@ fn diff(args: &Value, owner: &str) -> Result<Value, Value> {
 fn verify(owner: &str) -> Result<Value, Value> {
     safety::validate_owner(owner).map_err(|e| err(format!("invalid owner: {e}")))?;
     let base = safety::safe_path(owner, "log").map_err(|e| err(format!("log path rejected: {e}")))?;
+    // Finish a forget that was interrupted by a crash before checking anything.
+    vl::recover_pending(&base).map_err(log_err)?;
     // Verify straight from disk, before opening (opening a damaged log would fail first).
     match vl::verify_dir(&base) {
         Ok(()) => {
@@ -401,6 +422,9 @@ Example 2: SELECT r.key, r.stance, e.occurred_at, e.text FROM revisions r JOIN r
           "description": "Import beliefs from the pre-log identity state as author=legacy revisions marked unsupported (no causes are invented). Safe to repeat: topics already in the log are skipped.",
           "inputSchema": { "type": "object", "properties": {} } }),
     ]
+    .into_iter()
+    .chain(crate::ingest_tools::tool_defs())
+    .collect()
 }
 
 /// Used by `self_ingest`: append the memory as a `note` event stamped now.
@@ -408,13 +432,14 @@ Example 2: SELECT r.key, r.stance, e.occurred_at, e.text FROM revisions r JOIN r
 pub fn record_ingest(owner: &str, content: &str, kind: &str) -> Result<(String, bool), String> {
     let _g = LOG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let mut log = open(owner).map_err(|v| v["content"][0]["text"].as_str().unwrap_or("log error").to_string())?;
+    let red = crate::redact::Redactor::load(&safety::owner_dir(owner)).redact(content);
     let ev = NewEvent {
         source: "self_ingest".into(),
         occurred_at: vl::now_iso(),
         kind: "note".into(),
-        text: content.to_string(),
+        text: red.text.clone(),
         tags: vec![kind.to_string()],
-        redacted: false,
+        redacted: red.changed(),
     };
     let info = log.append_events(&[ev]).map_err(|e| e.to_string())?;
     Ok((info.event_ids.first().cloned().unwrap_or_default(), !info.created))

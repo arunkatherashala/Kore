@@ -415,6 +415,11 @@ impl VersionedLog {
         self.clock = Box::new(f);
     }
 
+    /// Check an event against the same rules a commit applies (without writing).
+    pub fn check_new_event(e: &NewEvent) -> Result<(), LogError> {
+        validate_event(e, "1970-01-01T00:00:00Z").map(|_| ())
+    }
+
     /// True if an event with this id is stored (latest version).
     pub fn has_event(&self, id: &str) -> bool {
         self.index.events.contains(id)
