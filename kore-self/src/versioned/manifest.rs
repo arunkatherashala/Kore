@@ -19,6 +19,17 @@ pub struct SegRef {
     pub rows: u64,
 }
 
+/// Written by `forget`: what was removed, by event-id hash only (never content).
+/// `removed` holds `sha256("forget1|" || event_id)` per forgotten event.
+/// `prior_head` is the head hash before the affected entries were re-sealed;
+/// `resealed_from` is the first version whose segments were rewritten.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ForgetRecord {
+    pub removed: Vec<String>,
+    pub prior_head: String,
+    pub resealed_from: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Entry {
     pub v: u64,
@@ -26,6 +37,9 @@ pub struct Entry {
     pub segments: Vec<SegRef>,
     pub prev: String,
     pub hash: String,
+    /// Present only on the commit created by `forget`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forget: Option<ForgetRecord>,
 }
 
 impl Entry {
@@ -37,13 +51,22 @@ impl Entry {
         s
     }
     pub fn compute_hash(&self) -> String {
-        let c = Self::canonical(self.v, &self.recorded_at, &self.segments);
+        let mut c = Self::canonical(self.v, &self.recorded_at, &self.segments);
+        if let Some(f) = &self.forget {
+            c.push_str(&format!("forget	{}	{}	{}
+", f.removed.join(","), f.prior_head, f.resealed_from));
+        }
         sha256_hex(&[self.prev.as_bytes(), c.as_bytes()])
     }
     pub fn new(v: u64, recorded_at: String, segments: Vec<SegRef>, prev: &str) -> Entry {
-        let mut e = Entry { v, recorded_at, segments, prev: prev.to_string(), hash: String::new() };
+        let mut e = Entry { v, recorded_at, segments, prev: prev.to_string(), hash: String::new(), forget: None };
         e.hash = e.compute_hash();
         e
+    }
+    /// Recompute `prev` and `hash` (used when `forget` re-seals the chain).
+    pub fn reseal(&mut self, prev: &str) {
+        self.prev = prev.to_string();
+        self.hash = self.compute_hash();
     }
 }
 

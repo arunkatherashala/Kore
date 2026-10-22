@@ -12,9 +12,11 @@
 //! rows into a single atomic version.
 #![allow(dead_code)]
 
+pub mod forget;
 pub mod manifest;
 pub mod model;
 pub mod sql;
+pub use forget::{forget_hash, recover_pending, ForgetReport};
 pub use sql::{register_into, run_readonly_sql};
 #[cfg(test)]
 mod tests;
@@ -121,6 +123,8 @@ pub struct CommitInfo {
     pub event_ids: Vec<String>,
     pub rev_ids: Vec<String>,
     pub pred_ids: Vec<String>,
+    /// Events skipped because they were forgotten earlier (re-ingest guard).
+    pub suppressed: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -187,6 +191,8 @@ struct Index {
     heads: HashMap<(String, String), (String, String)>,
     preds: HashMap<String, Vec<String>>,
     outcomes: HashSet<String>,
+    /// `forget_hash` of every event id removed by `forget`.
+    forgotten: HashSet<String>,
 }
 
 impl Index {
@@ -390,13 +396,16 @@ impl VersionedLog {
     }
 
     fn open_existing(dir: PathBuf) -> Result<VersionedLog, LogError> {
+        // Finish (or discard) a forget that was interrupted by a crash.
+        recover_pending(&dir)?;
         let entries = read_manifest(&dir)?;
         check_chain(&entries)?;
         if entries.is_empty() {
             return Err(VerifyError::ManifestCorrupt("no entries".into()).into());
         }
         let head = snapshot_from(&dir, &entries, entries.len() - 1)?;
-        let index = Index::build(&head.tables);
+        let mut index = Index::build(&head.tables);
+        index.forgotten = forget::forgotten_set(&entries);
         Ok(VersionedLog { dir, entries, head, index, clock: Box::new(now_iso) })
     }
 
@@ -404,6 +413,16 @@ impl VersionedLog {
     /// to be non-decreasing.
     pub fn set_clock(&mut self, f: impl Fn() -> String + Send + 'static) {
         self.clock = Box::new(f);
+    }
+
+    /// True if an event with this id is stored (latest version).
+    pub fn has_event(&self, id: &str) -> bool {
+        self.index.events.contains(id)
+    }
+
+    /// True if this event id was removed by `forget` (ingest of it is refused).
+    pub fn is_forgotten(&self, id: &str) -> bool {
+        self.index.forgotten.contains(&forget_hash(id))
     }
 
     pub fn dir(&self) -> &Path {
@@ -544,9 +563,14 @@ impl VersionedLog {
         let mut new: Vec<(Table, Vec<Vec<Cell>>)> = Vec::new();
         let (mut ev, mut rv, mut ca, mut pr, mut oc) = (vec![], vec![], vec![], vec![], vec![]);
         let (mut event_ids, mut rev_ids, mut pred_ids) = (vec![], vec![], vec![]);
+        let mut suppressed = 0usize;
 
         for e in &batch.events {
             let row = validate_event(e, &now)?;
+            if ix.forgotten.contains(&forget_hash(&row.event_id)) {
+                suppressed += 1;
+                continue;
+            }
             event_ids.push(row.event_id.clone());
             if ix.events.insert(row.event_id.clone()) {
                 ev.push(row.to_cells());
@@ -593,13 +617,14 @@ impl VersionedLog {
                 event_ids,
                 rev_ids,
                 pred_ids,
+                suppressed,
             });
         }
         let new_rows: BTreeMap<String, usize> = new.iter().map(|(t, r)| (t.name().to_string(), r.len())).collect();
         // Stamp recorded_at into rows that carry it (done in validate_*), then write.
         self.write_commit(new, now.clone())?;
         self.index = ix;
-        Ok(CommitInfo { version: self.latest_version(), created: true, recorded_at: now, new_rows, event_ids, rev_ids, pred_ids })
+        Ok(CommitInfo { version: self.latest_version(), created: true, recorded_at: now, new_rows, event_ids, rev_ids, pred_ids, suppressed })
     }
 
     /// Write segments, then atomically replace the MANIFEST. The commit exists

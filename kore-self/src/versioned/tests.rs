@@ -650,3 +650,6 @@ fn readonly_enforcement() {
     assert_eq!(manifest_bytes(&l), manifest_before);
     l.verify().unwrap();
 }
+
+#[path = "forget_tests.rs"]
+mod forget_tests;
