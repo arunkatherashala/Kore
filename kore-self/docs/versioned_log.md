@@ -70,7 +70,7 @@ re-reads the manifest and fails with `Conflict` if another writer changed it.
 * Time travel: `snapshot_hash(v)` and the row content of version `v` are
   identical right after the commit, after later commits, and after reopening.
 * Append-only: `manifest(v)` is a byte prefix of `manifest(v+1)`; segment files
-  are never rewritten (checksum and mtime unchanged).
+  are never rewritten (checksum and mtime unchanged). The one exception is `forget` (below).
 * Idempotent ingest: repeating a batch changes neither version count nor hashes.
 * `verify()` recomputes every checksum and the whole chain from disk and reports
   a flipped byte, missing or unlisted segment, reordered or edited entries, and a
@@ -129,6 +129,69 @@ Query notes for the older KORE SQL engine: single-table SELECTs name their colum
 `<table>.<col>`, joins keep alias prefixes (`r.key`), `count(*)` is named `Count(*)`,
 joins are equi-joins.
 
+## Ingestion, redaction and forget (M2a)
+
+Tools `self_ingest_folder`, `self_ingest_csv`, `self_ingest_kore`, `self_export`
+and `self_forget` live in `src/ingest_tools.rs`; redaction in `src/redact.rs`;
+the CSV reader and writer in `src/csvio.rs`. See the README section "Ingestion
+quick start" for real output.
+
+* Allowed input: the owner directory plus folders listed in the hand-edited
+  `<owner dir>/ingest_roots`. Paths are canonicalised before the check. The
+  file, and `redact_patterns.txt`, are refused by `safety::safe_path`, so no
+  tool can read or write them.
+* Every event passes through `Redactor` before it reaches `NewEvent`, so the
+  redacted text is what the event id is computed from (idempotent as long as the
+  patterns do not change). The `redacted` column is set when anything was replaced.
+* Dates come from the source (front-matter, heading, file name, CSV column);
+  nothing is stamped with the current time. Undated files are skipped and listed;
+  CSV rows without a parseable `occurred_at` are rejected and counted.
+* `self_ingest_kore` imports an `events` table written by `self_export` (same
+  columns as the log); a row whose `event_id` no longer matches its content is
+  rejected.
+
+### forget: the one exception to append-only
+
+`VersionedLog::forget_events(ids)` (`versioned/forget.rs`):
+
+1. Every segment of any version holding a row for a forgotten event is rewritten:
+   `events` rows are removed; `revision_causes` rows citing the event are dropped
+   (the revisions stay; one that lost its last citation reads `unsupported = 1`);
+   the id is removed from `predictions.features_cite`; `outcomes.outcome_event_id`
+   becomes null. A segment left empty is deleted and its manifest reference dropped.
+2. Because the rewrite covers all versions, time travel to an older version no
+   longer contains the forgotten text. Nothing can be resurrected from an old
+   version, since the old segments are gone.
+3. The manifest is re-sealed from the first rewritten version onward (their
+   hashes change; the head hash before the re-seal is kept in the forget record),
+   and one new commit is appended whose entry carries
+   `forget: {removed: [sha256("forget1|" + event_id)], prior_head, resealed_from}`.
+   The record is part of the entry hash, so editing it breaks the chain. No
+   content and no plain event ids are recorded.
+4. The hashes are also a tombstone: `append_events` refuses (counts as
+   `suppressed`) an event whose id hash is in a forget record, so re-running an
+   ingest does not bring the text back.
+5. Semantics: unknown ids are an error and change nothing (all or nothing);
+   ids already forgotten are counted and ignored (no new version); the tool
+   needs `confirm: true`.
+
+Crash safety: new segments and the new MANIFEST are written and fsynced under
+`forget.staging/`, then a `FORGET_PENDING` marker (list of renames and deletes) is
+created by temp file plus rename, then the renames, deletes and finally the
+MANIFEST rename are applied (each step is idempotent). Opening the log rolls a
+marked forget forward and discards an unmarked staging directory, so after a crash
+the log is either exactly the old state or the completed new one. This is tested by
+stopping at every step (before the marker, after it, and after each apply
+operation); it is not tested against real power loss or disk faults. `verify_dir`
+alone does not repair a half-applied forget (it reports the mismatch); opening the
+log or calling `self_verify` does the recovery first.
+
+What forget does not do: it cannot remove copies outside the log (backups,
+filesystem snapshots, earlier exports, text still in unallocated disk blocks, or
+anything an LLM client already received), and the manifest hashes of the affected
+versions change, so a head hash you recorded elsewhere before the forget no longer
+matches (use the new head hash afterwards).
+
 ## What is and is not guaranteed
 
 Guaranteed (when the files are only changed through this module): the properties
@@ -150,8 +213,7 @@ Not guaranteed:
 * Durability against hardware or OS faults beyond what fsync gives.
 * Whole log is loaded in memory when opened; fine for personal-scale data, not
   tuned for large volumes.
-* No automatic learning yet, no prediction yet, no encryption yet, no forget yet.
-* `forget` (deleting or redacting stored content) is not implemented. When it is
-  added it will be the only documented exception to append-only.
+* No automatic learning yet, no prediction yet, no encryption yet. `forget` exists (see below) but only
+  inside this log; redaction before storage is best-effort.
 * Content is whatever the caller supplies; the log stores it, it does not judge
   whether it is true. No accuracy claim is made about anything derived from it.
