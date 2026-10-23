@@ -10,7 +10,7 @@ KORE is a columnar SQL engine written in Rust (a workspace of crates). `kore-sel
 
 **Target positioning (the only claim this project makes):** A local, deterministic, append-only journal of how your recorded beliefs, habits and decisions change. Every change cites the events that caused it. You can query any past version with SQL. Its explanations can be ablation-tested, and its predictions are scored against outcomes.
 
-**Status (milestone M2a):** the versioned log is built: events, cited belief revisions, time-travel SQL and tamper-evident verification (see "Versioned self: quick start"), plus opt-in ingestion of journal folders, CSV and .kore files with best-effort redaction, export, and a documented forget (see "Ingestion quick start"). Nothing derives beliefs automatically yet, there is no predictor in the log yet, and no accuracy is claimed. Besides that log, kore-self is a local memory store with SQL over it, simple keyword/word-frequency counters, and a keyword-to-choice count predictor that has not been validated against outcomes. No accuracy number is claimed anywhere; any future number must have a row (n, baseline, interval, date) in `docs/measured.md`.
+**Status (milestone M2b/M2c):** deterministic rule-based learning (habits, topic change points, explicit stance statements), a rule-parameter evolution loop and the start of a prediction ledger are built (see "Learning quick start"), measured only on synthetic data. The versioned log is built: events, cited belief revisions, time-travel SQL and tamper-evident verification (see "Versioned self: quick start"), plus opt-in ingestion of journal folders, CSV and .kore files with best-effort redaction, export, and a documented forget (see "Ingestion quick start"). Besides that log, kore-self is a local memory store with SQL over it, simple keyword/word-frequency counters, and a keyword-to-choice count predictor that has not been validated against outcomes. No accuracy number is claimed anywhere; any future number must have a row (n, baseline, interval, date) in `docs/measured.md`.
 
 ### What it does today
 
@@ -214,6 +214,55 @@ self_ingest_csv of the CSV export (same content)        -> {"added":0,"duplicate
 
 Not tested or not done: very large folders or files beyond the caps, concurrent writers while a forget runs (a second process is detected as a conflict, not tested under load), crash safety of `self_forget` on real hardware faults (tested only with simulated crashes at each step), Unicode normalisation differences between file systems, and symlink handling on Windows without the privilege to create links (the escape test skips itself there).
 
+### Learning quick start
+
+`self_learn` derives habits, topic change points and explicit stance statements from the event log with fixed rules. No language model, no randomness, no network, no automatic scheduling: it runs only when you call it. Every derived row is a revision authored `rule:<id>` that cites the events it came from; tools cannot choose that author. All accuracy numbers (`docs/measured.md`) come from synthetic data only.
+
+Conventions the rules read: an event tagged `ctx:<context>` is one occasion of that context and its `act:<action>` tag is what was done (habits: Wilson 95% lower bound of the action's share, refused below `min_n` occasions); `topic:<name>` tags are counted per day and scanned for rate changes (Poisson likelihood ratio); sentences such as "I now prefer X for T", "I now think T is ...", "I changed my mind about T", "From now on I will ..." become candidate belief revisions (fixed confidence 0.6, not calibrated). Re-running changes nothing; new events add only the rows whose evidence changed.
+
+Real output of `kore-self/tests/e2e_learn.rs` (temp data root, a synthetic 150-day life with seed 11 and 20% noise written to a CSV and ingested through `self_ingest_csv`; long values shortened with `...`):
+
+```
+self_ingest_csv -> {"added":2837,"duplicate":0,"errors":0,"redacted":0,"rejected_no_date":0,"rows":2837,...}
+self_learn {"dry_run": true}
+  -> {"counts":{"changes":{"derived":3,"would_add":3},"habits":{"derived":2,"would_add":2},"stances":{"derived":6,"would_add":6}},"derived":[{"author":"rule:stances-v1","confidence":0.6,"key":"stance:remote-work","stance":"now prefers tea","detail":{"cue":"prefer","evidence":["87d25640e722..."],...},"new":true,"rev_id":null},...
+self_learn
+  -> counts {"changes":{"added":3,"derived":3},"habits":{"added":2,"derived":2},"stances":{"added":6,"derived":6}}
+     insufficient_data {"habit_contexts":[{"context":"conference","min_n":8,"occasions":3},{"context":"retreat","min_n":8,"occasions":4}],"topics":[]}
+self_learn (second run)
+  -> counts {"changes":{"added":0,"already_present":3},"habits":{"added":0,"already_present":2},"stances":{"added":0,"already_present":6}}
+self_explain {"rev_id": "<the morning/run habit revision>"}
+  -> {"author":"rule:habits-v1","cited_event_count":123,"cited_events":[{"event_id":"b0071742bc63...","occurred_at":"2024-01-01T06:00:00Z","tags":"ctx:morning,act:run","text":"context morning: did run"},...
+```
+
+Only 2 of the 3 planted habits were found in this run (the third falls under the 0.5 lower bound at 20% noise); that is the detector's measured behaviour, see `docs/measured.md`.
+
+**Evolving the rules (never the code).** The learner's thresholds (`habit_min_n`, `habit_lb`, `habit_window_days`, plus the fixed change-point settings) are a rule set stored as revisions with `entity_type = rule`, key `learner-params`; only the library writes them. `self_evolve_rules` proposes a neighbouring set (one parameter moved), backtests it with a rolling origin on the past of the log (events before the cut only choose the candidate; a test proves later events are invisible to that choice), and promotes it only if its next-period habit F1 beats both the current rules and a trivial most-frequent-action baseline by a margin of 0.02. Promotions and rejections are both recorded as a `decision` event plus a rule revision with the scores. Rollback is time travel: read an earlier rule set with `self_sql` `as_of_version` (the library function `rollback_rules` re-instates one as a new revision; no tool exposes it).
+
+```
+self_evolve_rules {"dry_run": true}
+  -> {"candidate":{"habit_lb":0.4,"habit_min_n":8,...},"candidates_tried":13,"cut_date":"2024-04-14","evaluation":{"baseline":{"f1":0.491,"fn":0,"fp":27,"tp":13},"candidate":{"f1":0.929,"fn":0,"fp":2,"tp":13},"incumbent":{"f1":0.87,"fn":3,"fp":0,"tp":10},"origins":5},"reason":"candidate F1 0.929 beats incumbent 0.870 and baseline 0.491 by at least 0.020","recorded":null,"selection":{"candidate":{"f1":0.917,...},"incumbent":{"f1":0.7,...},"origins":4},"verdict":"promoted"}
+self_evolve_rules   -> same decision, "recorded" now holds the event id, rule revision id and version
+self_sql {"sql": "SELECT key, author, confidence FROM beliefs_current WHERE entity_type = 'rule'"}
+beliefs_current.key | beliefs_current.author | beliefs_current.confidence
+learner-params      | rule:evolve-v1         | 0.9285714285714286
+```
+
+That is one run on one synthetic life, not evidence that the loop helps in general.
+
+**Prediction ledger (start only).** `self_ledger_snapshot` writes, for each habit with enough data, a frequency-baseline prediction "action X in context C within the next 7 days" (probability = Wilson-smoothed frequency), using only events before the window start, stamped with that cutoff and written once per habit and window. `self_ledger_outcome` attaches an outcome later. Nothing is scored and no accuracy is claimed.
+
+```
+self_ledger_snapshot
+  -> {"cutoff":"2024-05-29T06:14:48Z","model":"rule:habit-frequency wilson-smoothed-v1","resolves_by":"2024-06-06T00:00:00Z","window_start":"2024-05-30","written":[{"action":"podcast","context":"commute","k":89,"n":155,"pred_id":"de14cfa54c4c...","probability_yes":...},...],"version":4,...}
+self_ledger_snapshot (again)  -> {"already_present":3,"written":[],...}
+self_verify                   -> OK: 5 version(s), latest 4, head hash b41357224d367baf384f935f8a6f021f4be92a1ed6a3263abfaa474f6b239804
+(after flipping one byte in revisions/0000000002.kore)
+self_verify                   -> VERIFY FAILED: checksum mismatch in segment: revisions/0000000002.kore
+```
+
+Limits: the change-point test assumes Poisson counts; real writing is burstier, so the measured false-positive rate is a floor. A habit that stops meeting the bound is not retracted by a new revision (re-learning from a log without the evidence simply does not reproduce it). A late-arriving event dated earlier than existing revisions gets a correct `valid_from` but its `supersedes` link follows write order. The stance grammar is small and English only. Changing parameters writes new revisions (the rationale names the parameters).
+
 ### What this does NOT do
 
 - It does not think, understand, or know you. Its "profile" values are counters over the words in your memories.
@@ -222,8 +271,8 @@ Not tested or not done: very large folders or files beyond the caps, concurrent 
 - It does not write or modify source code. The former code-generating tool was removed.
 - It does not push anything to GitHub or any remote (`self_pushback` only compares a decision with your own recorded history).
 - It does not encrypt data at rest (see below).
-- It does not learn automatically: beliefs enter the log only when you (or a tool call) record them. No automatic learning yet.
-- It makes no predictions from the log yet (the tables exist; nothing writes them). No prediction yet.
+- It does not learn automatically: `self_learn` and `self_evolve_rules` run only when called; there is no scheduling. Learning is rule-based (counts, Wilson bounds, a likelihood-ratio scan, a small phrase grammar) and has been measured only on synthetic data, not on real lives.
+- It does not score predictions yet. The ledger only stores frequency-baseline predictions and lets you attach outcomes; no accuracy is claimed and no predictor is validated.
 - The log is not encrypted. No encryption yet.
 - Forgetting exists (`self_forget`) but only inside the log: copies in backups, earlier exports or disk snapshots are not removed. Redaction before storage is best-effort and will miss things.
 - It does not judge whether recorded events or stances are true, and a hash chain detects edits but is not a signature (someone who can write the folder can rewrite the whole log consistently).

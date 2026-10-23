@@ -17,7 +17,7 @@ All tables are typed `.kore` files (KORE columnar format).
 | table | columns |
 |---|---|
 | `events` | event_id, occurred_at, recorded_at, source, kind (note/action/decision/outcome/statement), text, tags (comma-joined), redacted |
-| `revisions` | rev_id, entity_type (belief/habit/decision), key, stance, confidence (0..1), rationale, supersedes (nullable), valid_from, author (`user`, `legacy` (imported from the old state, never cited) or `rule:<id>`), recorded_at |
+| `revisions` | rev_id, entity_type (belief/habit/decision, plus library-only `rule`), key, stance, confidence (0..1), rationale, supersedes (nullable), valid_from, author (`user`, `legacy` (imported from the old state, never cited) or `rule:<id>`), recorded_at |
 | `revision_causes` | rev_id, event_id (link table; every event_id must exist) |
 | `predictions` | pred_id, made_at, question_id, target, options (JSON), probs (JSON), model_id, model_version, features_cite (JSON event ids), resolves_by |
 | `outcomes` | pred_id, resolved_at, actual (one of the options), outcome_event_id (nullable) |
@@ -192,6 +192,39 @@ anything an LLM client already received), and the manifest hashes of the affecte
 versions change, so a head hash you recorded elsewhere before the forget no longer
 matches (use the new head hash afterwards).
 
+## Learning, rule evolution and the ledger (M2b/M2c)
+
+Code: `src/learn/` (pure detectors and writers), `src/learn_tools.rs` (tools),
+`src/synth.rs` and `src/measure.rs` (synthetic ground truth and scoring; tests and the
+`measure_learning` example only). Tools: `self_learn`, `self_explain`, `self_evolve_rules`,
+`self_ledger_snapshot`, `self_ledger_outcome`. See the README section "Learning quick start".
+
+* Rule-authored rows: `author` is `rule:habits-v1`, `rule:changes-v1`, `rule:stances-v1` or
+  `rule:evolve-v1`; each cites at least one event (`revision_causes`). Only this code
+  writes them; no tool argument selects an author.
+* Idempotence: a derived row is identified by the content signature (type, key, stance,
+  confidence, rationale, valid_from, author, cited events). A row whose signature already
+  exists is not written; new events produce only the rows whose evidence changed (a new
+  revision superseding the old head). Habit rows key `ctx:<C>|act:<A>`, topic change rows
+  `topic:<T>`, stance rows `stance:<topic>`.
+* Conventions: events tagged `ctx:`/`act:` (habits), `topic:` (change points); stance phrases
+  are matched in the event text. Events tagged `evolve` are the loop's own records and are
+  ignored by the learners.
+* `entity_type = rule` (library only; `self_belief_revise` refuses it): key `learner-params`
+  holds the current rule set as JSON in `stance`; the head is the current set, and
+  `rejected:<hash>` keys hold rejected candidates. Each promotion or rejection is also an
+  event (`source evolve`, `kind decision`, tags `evolve` and `promotion`/`rejection`/`rollback`)
+  whose text holds the scores; the rule revision cites it.
+* Rollback = time travel. `self_sql ... as_of_version N` shows the rule set as it was at version
+  N; `learn::evolve::rollback_rules(log, N)` (library only) writes it again as a new revision.
+  Nothing is deleted.
+* The evolution loop reads only the log and writes only log revisions and events. It
+  contains no file-system calls, and a test checks that the tool list has no code-writing tool.
+* Ledger: `predictions` rows with `model_id rule:habit-frequency`, `question_id
+  habit-window:ctx:<C>|act:<A>@<window start date>` (one per habit and window), options
+  `yes`/`no`, `made_at` = newest event used (events at or after the window start are
+  ignored). Outcomes are attached with the existing `outcomes` table; nothing is scored.
+
 ## What is and is not guaranteed
 
 Guaranteed (when the files are only changed through this module): the properties
@@ -213,7 +246,8 @@ Not guaranteed:
 * Durability against hardware or OS faults beyond what fsync gives.
 * Whole log is loaded in memory when opened; fine for personal-scale data, not
   tuned for large volumes.
-* No automatic learning yet, no prediction yet, no encryption yet. `forget` exists (see below) but only
-  inside this log; redaction before storage is best-effort.
+* No automatic scheduling of learning, no prediction scoring yet, no encryption yet. Learning
+  is rule-based and measured only on synthetic data (`docs/measured.md`). `forget` exists
+  (see above) but only inside this log; redaction before storage is best-effort.
 * Content is whatever the caller supplies; the log stores it, it does not judge
   whether it is true. No accuracy claim is made about anything derived from it.
