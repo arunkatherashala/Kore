@@ -477,7 +477,9 @@ pub struct Batch {
 }
 
 pub const EVENT_KINDS: [&str; 5] = ["note", "action", "decision", "outcome", "statement"];
-pub const ENTITY_TYPES: [&str; 3] = ["belief", "habit", "decision"];
+/// `rule` (learner parameter sets and evolution records) is library-only: the
+/// tools refuse it, see `log_tools::belief_revise`.
+pub const ENTITY_TYPES: [&str; 4] = ["belief", "habit", "decision", "rule"];
 
 /// Event id: hex sha256 of `source|occurred_at|normalised text`
 /// (text trimmed, internal whitespace runs collapsed to one space).

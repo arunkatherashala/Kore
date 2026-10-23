@@ -42,6 +42,8 @@ mod versioned;
 mod log_tools;
 mod csvio;
 mod ingest_tools;
+mod learn;
+mod learn_tools;
 mod redact;
 
 use std::io::{BufRead, Write};

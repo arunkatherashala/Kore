@@ -19,7 +19,7 @@ use std::sync::Mutex;
 static LOG_LOCK: Mutex<()> = Mutex::new(());
 
 /// Tools that only need the owner name (no `KoreSelf` state).
-pub const STATELESS_TOOLS: [&str; 12] = [
+pub const STATELESS_TOOLS: [&str; 17] = [
     "self_event_add",
     "self_belief_revise",
     "self_belief_history",
@@ -32,6 +32,11 @@ pub const STATELESS_TOOLS: [&str; 12] = [
     "self_ingest_kore",
     "self_forget",
     "self_export",
+    "self_learn",
+    "self_explain",
+    "self_evolve_rules",
+    "self_ledger_snapshot",
+    "self_ledger_outcome",
 ];
 
 pub fn is_log_tool(name: &str) -> bool {
@@ -103,6 +108,7 @@ pub fn handle(name: &str, args: &Value, owner: &str) -> Option<Value> {
         "self_ingest_kore" => crate::ingest_tools::ingest_kore(args, owner),
         "self_forget" => crate::ingest_tools::forget(args, owner),
         "self_export" => crate::ingest_tools::export(args, owner),
+        "self_learn" | "self_explain" | "self_evolve_rules" | "self_ledger_snapshot" | "self_ledger_outcome" => crate::learn_tools::handle(name, args, owner),
         _ => unreachable!(),
     };
     Some(r.unwrap_or_else(|e| e))
@@ -150,6 +156,9 @@ fn belief_revise(args: &Value, owner: &str) -> Result<Value, Value> {
     let rationale = args.get("rationale").and_then(|v| v.as_str()).unwrap_or("");
     let caused_by = str_list(args, "caused_by")?;
     let entity = args.get("entity_type").and_then(|v| v.as_str()).unwrap_or("belief");
+    if entity == "rule" {
+        return Err(err("entity_type 'rule' is written only by the learning and evolution code, not by tools"));
+    }
     let mut log = open(owner)?;
     let valid_from = match args.get("valid_from").and_then(|v| v.as_str()) {
         Some(v) => vl::normalize_ts(v).map_err(|e| err(e))?,
@@ -424,6 +433,7 @@ Example 2: SELECT r.key, r.stance, e.occurred_at, e.text FROM revisions r JOIN r
     ]
     .into_iter()
     .chain(crate::ingest_tools::tool_defs())
+    .chain(crate::learn_tools::tool_defs())
     .collect()
 }
 

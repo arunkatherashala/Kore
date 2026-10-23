@@ -78,6 +78,11 @@ This table is generated from the tool registry (`kore-self --tool-table`); a tes
 | `self_ingest_kore` | Import events from a .kore file written by self_export (idempotent, validated, redacted again before storing) |
 | `self_forget` | Permanently remove events from every version of the log, the one documented exception to append-only; requires confirm true |
 | `self_export` | Write all events to a CSV or .kore file under the exports folder of your data directory |
+| `self_learn` | Derive habits, topic change points and explicit stance statements from the event log with deterministic rules; each derived revision is authored by a rule and cites its events (idempotent, incremental) |
+| `self_explain` | Show one revision with the events it cites (the provenance); rev_id may be a unique prefix of at least 8 characters |
+| `self_evolve_rules` | Propose a neighbouring set of learner parameters, backtest it on the past of the log (rolling origin) against the current set and a trivial baseline, and promote it only if it wins; every promotion or rejection is logged with its scores |
+| `self_ledger_snapshot` | Record frequency-baseline predictions (action in context within the next 7 days) for each habit with enough data, using only events before the window start; one row per habit and window, never scored here |
+| `self_ledger_outcome` | Attach an outcome (yes or no) to a stored prediction, optionally citing the event that shows it; no score is computed |
 <!-- tools:end -->
 
 ### Versioned self: quick start
