@@ -44,6 +44,13 @@ mod csvio;
 mod ingest_tools;
 mod learn;
 mod learn_tools;
+#[cfg(test)]
+mod synth;
+#[cfg(test)]
+mod measure;
+#[cfg(test)]
+#[path = "learn_tests.rs"]
+mod learn_tests;
 mod redact;
 
 use std::io::{BufRead, Write};
