@@ -66,9 +66,10 @@ fn table(rows: &[Row], free: bool) {
 fn main() {
     let p = learn::Params::default();
     println!("params: {}", p.canonical());
-    println!("seeds: {:?}; each cell is median [min-max] over seeds\n", measure::SEEDS);
+    let seeds: Vec<u64> = if std::env::args().any(|a| a == "tune") { (101..=120).collect() } else { measure::SEEDS.to_vec() };
+    println!("seeds: {:?}; each cell is median [min-max] over seeds\n", seeds);
     println!("## tagged lives (ctx:/act:/topic: tags)\n");
-    table(&measure::sweep(&measure::SEEDS, &measure::NOISE, &p), false);
+    table(&measure::sweep(&seeds, &measure::NOISE, &p), false);
     println!("\n## free-text lives (no tags; keyword rules from synth::free_text_rules)\n");
-    table(&measure::sweep_free(&measure::SEEDS, &measure::NOISE, &p), true);
+    table(&measure::sweep_free(&seeds, &measure::NOISE, &p), true);
 }

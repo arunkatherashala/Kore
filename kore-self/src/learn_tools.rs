@@ -43,6 +43,13 @@ fn opt_u32(args: &Value, k: &str) -> Result<Option<u32>, Value> {
     }
 }
 
+fn opt_f64(args: &Value, k: &str) -> Result<Option<f64>, Value> {
+    match args.get(k) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v.as_f64().filter(|x| x.is_finite()).map(Some).ok_or_else(|| err(format!("'{k}' must be a number"))),
+    }
+}
+
 const MAX_LISTED: usize = 100;
 
 fn learn(args: &Value, owner: &str) -> Result<Value, Value> {
@@ -52,6 +59,12 @@ fn learn(args: &Value, owner: &str) -> Result<Value, Value> {
     let (mut params, rule_rev) = derive::current_params(&log);
     if let Some(n) = opt_u32(args, "min_n")? {
         params.habit_min_n = n;
+    }
+    if let Some(x) = opt_f64(args, "habit_lift")? {
+        params.habit_lift = x;
+    }
+    if let Some(x) = opt_f64(args, "habit_max_share")? {
+        params.habit_max_share = x;
     }
     params.validate().map_err(err)?;
     let rules = TagRules::load(&safety::owner_dir(owner));
@@ -93,6 +106,8 @@ fn learn(args: &Value, owner: &str) -> Result<Value, Value> {
         "derived_truncated": r.outcomes.len() > MAX_LISTED,
         "insufficient_data": {
             "habit_contexts": r.derivation.insufficient_habits.iter().map(|i| json!({"context": i.context, "occasions": i.n, "min_n": i.min_n})).collect::<Vec<_>>(),
+            "uninformative_contexts": r.derivation.uninformative.iter().map(|u| json!({"context": u.context, "share": (u.share * 1000.0).round() / 1000.0, "max_share": u.max_share})).collect::<Vec<_>>(),
+            "lift_rejected": r.derivation.lift_rejected.iter().map(|l| json!({"context": l.context, "action": l.action, "in_context": format!("{} of {}", l.k, l.n), "wilson_lower": (l.lower * 1000.0).round() / 1000.0, "out_of_context": format!("{} of {}", l.k_out, l.n_out), "wilson_upper_out": (l.upper_out * 1000.0).round() / 1000.0})).collect::<Vec<_>>(),
             "topics": r.derivation.insufficient_topics.iter().map(|i| json!({"topic": i.topic, "mentions": i.total, "min_mentions": i.min_total})).collect::<Vec<_>>(),
         },
         "note": "rule-based, deterministic; accuracy has been measured only on synthetic data (docs/measured.md)",
@@ -267,7 +282,9 @@ pub fn tool_defs() -> Vec<Value> {
           "inputSchema": { "type": "object", "properties": {
             "kinds": { "type": "array", "items": { "type": "string", "enum": ["habits", "changes", "stances"] }, "description": "Default: all three" },
             "dry_run": { "type": "boolean", "description": "Report what would be derived without writing" },
-            "min_n": { "type": "integer", "minimum": 1, "description": "Override the minimum number of occasions of a context for a habit (default: current rule set). Contexts below it are reported as insufficient data" }
+            "min_n": { "type": "integer", "minimum": 1, "description": "Override the minimum number of occasions of a context for a habit (default: current rule set). Contexts below it are reported as insufficient data" },
+            "habit_lift": { "type": "number", "minimum": -1, "maximum": 1, "description": "Override the lift margin: the in-context Wilson lower bound must exceed the out-of-context Wilson upper bound by more than this (default 0.0; negative switches the lift test off)" },
+            "habit_max_share": { "type": "number", "minimum": 0, "maximum": 1, "description": "Override the share above which a rule-derived context is dropped as uninformative (default 0.9; 1 switches it off)" }
           } } }),
         json!({ "name": "self_explain",
           "description": "Show one revision with the events it cites (the provenance); rev_id may be a unique prefix of at least 8 characters",

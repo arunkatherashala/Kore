@@ -262,7 +262,9 @@ fn evolve_needs_to_beat_the_baseline_too() {
     // A candidate that beats a useless incumbent but not a trivial baseline is rejected.
     let e = evs(3, 0.2);
     let none = Params { habit_lb: 0.95, ..Params::default() };
-    let weak = Params { habit_min_n: 1, habit_lb: 0.0, ..Params::default() };
+    // lift test off: this candidate stands for the old "every minority action" behaviour; with the lift test on
+    // it filters minority actions out and may legitimately beat the baseline
+    let weak = Params { habit_min_n: 1, habit_lb: 0.0, habit_lift: -1.0, ..Params::default() };
     let d = evolve::evolve(&e, &none, &[weak], &evolve::EvolveCfg::default());
     // weak behaves like the modal baseline plus every minority action, so it cannot win by a margin
     assert_ne!(d.verdict, evolve::Verdict::Promoted, "{}", d.reason);
@@ -695,8 +697,17 @@ fn negated_mentions_are_not_counted_as_the_action() {
     let r = derive::learn_with(&mut log, &Params::default(), &Kinds::ALL, true, Some(&rules)).unwrap();
     assert!(r.derivation.items.is_empty(), "3 of 10 mornings is not a habit");
     let off = TagRules::parse("negation = off\naction:gym = gym\nctx:morning = morning\nbuiltin_contexts = off\n");
+    // a context that holds on every event is dropped as uninformative (share 1.0 > 0.9)
+    let r = derive::learn_with(&mut log, &Params::default(), &Kinds::ALL, true, Some(&off)).unwrap();
+    assert!(r.derivation.items.is_empty());
+    assert_eq!(r.derivation.uninformative.len(), 1);
+    // add some evenings; then, with the guard off, the negations count as gym
+    let evenings: Vec<NewEvent> = (10..14).map(|i| text_event(start + i, "Evening: read a book.")).collect();
+    log.append_events(&evenings).unwrap();
     let r = derive::learn_with(&mut log, &Params::default(), &Kinds::ALL, true, Some(&off)).unwrap();
     assert!(r.derivation.items.iter().any(|i| i.key == "ctx:morning|act:gym"), "with the guard off the negations count as gym");
+    let r = derive::learn_with(&mut log, &Params::default(), &Kinds::ALL, true, Some(&rules)).unwrap();
+    assert!(r.derivation.items.is_empty(), "guard on: still not a habit");
 }
 
 #[test]
@@ -765,3 +776,57 @@ const FT_CHANGE_PRECISION: f64 = 0.3;
 const FT_CHANGE_RECALL: f64 = 0.3;
 const FT_HABIT_RECALL_0: f64 = 0.6;
 const FT_HABIT_RECALL_20: f64 = 0.5;
+
+// ── lift test and uninformative contexts ────────────────────────────────────
+
+#[test]
+fn lift_test_refuses_an_action_that_is_just_the_base_rate() {
+    // 'run' is done at 80% in both contexts: neither context explains it.
+    let mut evs = Vec::new();
+    for d in 0..40i64 {
+        for c in ["a", "b"] {
+            let act = if (d * 7 + (c == "b") as i64) % 5 != 0 { "run" } else { "nap" };
+            evs.push(ev(d, &[&format!("ctx:{c}"), &format!("act:{act}")], &format!("{c}{d}")));
+        }
+    }
+    let p = Params::default();
+    let det = habits::detect_full(&evs, &p, None);
+    assert!(det.habits.is_empty(), "{:?}", det.habits);
+    assert!(det.lift_rejected.iter().any(|l| l.action == "run"));
+    // with the lift test off both would be habits (the old behaviour)
+    let off = Params { habit_lift: -1.0, ..p.clone() };
+    assert_eq!(habits::detect(&evs, &off).0.iter().filter(|h| h.action == "run").count(), 2);
+    // a real difference passes, and the out-of-context numbers are recorded
+    let mut evs2 = Vec::new();
+    for d in 0..40i64 {
+        evs2.push(ev(d, &["ctx:a", "act:run"], &format!("a{d}")));
+        evs2.push(ev(d, &["ctx:b", if d % 4 == 0 { "act:run" } else { "act:nap" }], &format!("b{d}")));
+    }
+    let det2 = habits::detect_full(&evs2, &p, None);
+    let h = det2.habits.iter().find(|h| h.context == "a" && h.action == "run").expect("a/run");
+    assert!(h.lift.is_some());
+    // a single context has nothing to compare with: kept
+    let solo: Vec<Ev> = (0..20).map(|d| ev(d, &["ctx:a", "act:run"], &format!("s{d}"))).collect();
+    assert_eq!(habits::detect_full(&solo, &p, None).habits.len(), 1);
+}
+
+#[test]
+fn builtin_weekday_context_needs_a_difference_from_the_weekend() {
+    let rules = TagRules::parse("action:gym = gym\naction:read = read\n");
+    let start = dates::days_from_civil(2026, 7, 6); // Monday
+    let mut flat = Vec::new();
+    let mut weekday_only = Vec::new();
+    for i in 0..70 {
+        let d = start + i;
+        let weekday = crate::learn::tagrules::weekday_index(d) < 5;
+        flat.push(ev(d, &[], if i % 3 != 0 { "went to the gym" } else { "read a book" }));
+        weekday_only.push(ev(d, &[], if weekday && i % 8 != 0 { "went to the gym" } else { "read a book" }));
+    }
+    let p = Params::default();
+    let a = habits::detect_full(&flat, &p, Some(&rules));
+    assert!(!a.habits.iter().any(|h| h.context == "weekday" || h.context == "weekend"), "base rate is not a weekday habit: {:?}", a.habits);
+    assert!(a.lift_rejected.iter().any(|l| l.context == "weekday" && l.action == "gym"));
+    let b = habits::detect_full(&weekday_only, &p, Some(&rules));
+    assert!(b.habits.iter().any(|h| h.context == "weekday" && h.action == "gym"));
+    assert!(!b.habits.iter().any(|h| h.context == "weekend" && h.action == "gym"));
+}

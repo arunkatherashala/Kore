@@ -22,11 +22,17 @@ pub struct Params {
     pub change_min_ratio: f64,
     /// Topics with fewer events than this are reported as insufficient data.
     pub change_min_total: u32,
+    /// Lift test: the in-context Wilson lower bound must exceed the Wilson upper bound of the action's
+    /// rate in the other contexts of the same family by more than this margin. Negative switches it off.
+    pub habit_lift: f64,
+    /// A rule-derived context that holds on more than this share of its units (days for weekday/weekend,
+    /// events for keyword contexts) is dropped as uninformative. 1.0 switches it off.
+    pub habit_max_share: f64,
 }
 
 impl Default for Params {
     fn default() -> Self {
-        Params { habit_min_n: 8, habit_lb: 0.5, habit_window_days: 0, change_llr: 12.0, change_min_seg: 10, change_min_ratio: 1.8, change_min_total: 10 }
+        Params { habit_min_n: 8, habit_lb: 0.5, habit_window_days: 0, change_llr: 12.0, change_min_seg: 10, change_min_ratio: 1.8, change_min_total: 10, habit_lift: 0.0, habit_max_share: 0.9 }
     }
 }
 
@@ -35,7 +41,7 @@ impl Params {
         json!({
             "habit_min_n": self.habit_min_n, "habit_lb": self.habit_lb, "habit_window_days": self.habit_window_days,
             "change_llr": self.change_llr, "change_min_seg": self.change_min_seg, "change_min_ratio": self.change_min_ratio,
-            "change_min_total": self.change_min_total,
+            "change_min_total": self.change_min_total, "habit_lift": self.habit_lift, "habit_max_share": self.habit_max_share,
         })
     }
     /// Canonical single-line text (keys sorted), used as the revision stance.
@@ -64,6 +70,8 @@ impl Params {
             change_min_seg: u("change_min_seg", d.change_min_seg)?,
             change_min_ratio: f("change_min_ratio", d.change_min_ratio)?,
             change_min_total: u("change_min_total", d.change_min_total)?,
+            habit_lift: f("habit_lift", d.habit_lift)?,
+            habit_max_share: f("habit_max_share", d.habit_max_share)?,
         };
         p.validate().ok()?;
         Some(p)
@@ -80,6 +88,12 @@ impl Params {
         }
         if self.habit_window_days > 36_500 {
             return Err("habit_window_days too large".into());
+        }
+        if !(-1.0..=1.0).contains(&self.habit_lift) {
+            return Err("habit_lift must be within -1..=1 (negative = off)".into());
+        }
+        if !(0.0..=1.0).contains(&self.habit_max_share) {
+            return Err("habit_max_share must be within 0..=1".into());
         }
         if self.change_llr < 0.0 || self.change_min_seg < 2 || self.change_min_ratio < 1.0 || self.change_min_total < 2 {
             return Err("change parameters out of range".into());
@@ -103,6 +117,14 @@ pub fn wilson_lower(k: u32, n: u32) -> f64 {
     let centre = p + z2 / (2.0 * n);
     let margin = Z95 * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt();
     ((centre - margin) / (1.0 + z2 / n)).clamp(0.0, 1.0)
+}
+
+/// Wilson score interval upper bound for k successes in n trials (95%).
+pub fn wilson_upper(k: u32, n: u32) -> f64 {
+    if n == 0 {
+        return 1.0;
+    }
+    (1.0 - wilson_lower(n - k.min(n), n)).clamp(0.0, 1.0)
 }
 
 /// Wilson-adjusted proportion `(k + z^2/2) / (n + z^2)`: a frequency pulled

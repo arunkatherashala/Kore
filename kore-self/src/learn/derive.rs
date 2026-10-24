@@ -110,6 +110,10 @@ pub struct Derivation {
     pub items: Vec<Derived>,
     pub insufficient_habits: Vec<habits::Insufficient>,
     pub insufficient_topics: Vec<changes::InsufficientTopic>,
+    /// Contexts dropped for holding on more than `habit_max_share` of their units.
+    pub uninformative: Vec<habits::Uninformative>,
+    /// Candidates that passed the Wilson bound but not the lift test.
+    pub lift_rejected: Vec<habits::LiftRejected>,
 }
 
 /// Run the selected detectors over `events` (already filtered to what may be
@@ -125,17 +129,22 @@ pub fn derive_with(events: &[Ev], p: &Params, kinds: &Kinds, rules: Option<&TagR
     let mut d = Derivation::default();
     let fp = rules.map(|r| r.fingerprint.clone()).unwrap_or_default();
     if kinds.habits {
-        let (hs, insuff) = habits::detect_with(events, p, rules);
+        let det = habits::detect_full(events, p, rules);
+        let (hs, insuff) = (det.habits, det.insufficient);
         d.insufficient_habits = insuff;
+        d.uninformative = det.uninformative;
+        d.lift_rejected = det.lift_rejected;
         for h in hs {
             let (cited, total) = cap(h.cited.clone());
             let note = if total > cited.len() { format!("; cites the newest {} of {total}", cited.len()) } else { String::new() };
             let unit = "occasions";
             let rationale = if h.from_rules {
                 format!(
-                    "rule habits-v1 ({}): counts occasions of context {} found from the event date (weekday/weekend, per day) or keywords in tag_rules.txt (per event, same sentence as the action; rules {fp}){note}",
+                    "rule habits-v1 ({}): counts occasions of context {} found from the event date (weekday/weekend, per day) or keywords in tag_rules.txt (per event, same sentence as the action; rules {fp}; lift>={:.2}, max_share={:.2}){note}",
                     p.label(),
-                    h.context
+                    h.context,
+                    p.habit_lift,
+                    p.habit_max_share
                 )
             } else {
                 format!("rule habits-v1 ({}): counts occasions tagged ctx:{} and their act: tag{note}", p.label(), h.context)
@@ -154,6 +163,7 @@ pub fn derive_with(events: &[Ev], p: &Params, kinds: &Kinds, rules: Option<&TagR
                 author: AUTHOR_HABITS,
                 detail: json!({
                     "context": h.context, "action": h.action, "k": h.k, "n": h.n, "rate": round3(h.rate), "wilson_lower": round3(h.lower),
+                    "out_of_context": h.lift.map(|(k, n, up)| json!({"k": k, "n": n, "wilson_upper": round3(up)})),
                     "evidence_count": total, "evidence": evidence_sample(&cited),
                 }),
                 caused_by: cited,
