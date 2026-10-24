@@ -84,7 +84,72 @@ candidate 0.929, incumbent 0.870, trivial baseline 0.491; verdict promoted
 one synthetic life and says nothing about other data. Whether the loop helps across seeds has
 not been measured.
 
+## Free-text lives with keyword rules (synthetic, author-written templates)
+
+Same detectors, same 20 seeds, same noise levels and parameters, but the synthetic life is
+written as short journal sentences with no tags (`synth::free_text_config`) and read
+through the keyword rules `synth::free_text_rules()` (the same format as a user's
+`tag_rules.txt`). **The sentence templates, the distractors and the keyword rules were all written by
+the same author, in one sitting, knowing each other.** The numbers say how the rule layer behaves on text that was
+written to be mostly matchable, with these deliberate difficulties: varied phrasing
+(3-4 templates per context, action and topic); 40% of the occasions that did not take
+a planted habit mention it negated ("did not run at all", "skipped the podcast"), 15% of those
+as post-negations the guard cannot see ("the run was called off"); 10% of real actions and
+topic mentions use a synonym the rules do not list ("did laps around the track");
+keyword-bearing distractors in the noise ("The bus ran late again.", "My reading glasses broke.").
+They are not accuracy on anyone's real journal.
+
+How occasions are counted (code: `learn/habits.rs`, docs in `learn/tagrules.rs`): a keyword
+context is an occasion for each event with a sentence matching it, and the action counts if its
+keywords match in the same sentence; the built-in `weekday`/`weekend` contexts are day-level
+(every day with an event; the action counts if any event of the day matches). A first version
+that treated keyword contexts day-level too was measured: planted-context precision stayed
+fine but overall habit precision at 0% noise was 0.21 (mean), because in a dense log nearly every action
+appears on most days so every context "has" every action; it was replaced by the sentence-level rule.
+
+Real output of `cargo run -p kore-self --example measure_learning --offline --release` (code at commit 5d45ece3; 2026-10-24;
+median [min-max] over 20 seeds):
+
+```
+| noise | habit precision | habit recall | habit precision, planted contexts only | built-in-context habits per life | change precision | change recall | change abs error (days) | change delay (days) | change FP rate | stance precision | stance recall | stance key accuracy | min-n refused | would derive at min_n=1 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0% | 0.50 [0.40-0.75] | 1.00 [0.67-1.00] | 1.00 [1.00-1.00] | 2.00 [1.00-4.00] | 1.00 [0.50-1.00] | 1.00 [0.67-1.00] | 1.67 [0.33-5.00] | 7.67 [5.33-14.00] | 0.00 [0.00-0.20] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 0.50 [0.00-0.50] |
+| 20% | 0.29 [0.17-0.43] | 0.67 [0.33-1.00] | 1.00 [1.00-1.00] | 5.00 [4.00-7.00] | 1.00 [0.33-1.00] | 1.00 [0.33-1.00] | 2.00 [0.33-5.00] | 9.00 [5.33-14.67] | 0.00 [0.00-0.20] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 0.50 [0.00-0.50] |
+| 50% | 0.00 [0.00-0.11] | 0.00 [0.00-0.33] | 1.00 [1.00-1.00] | 9.00 [8.00-12.00] | 1.00 [0.50-1.00] | 1.00 [0.33-1.00] | 2.00 [0.00-5.00] | 10.00 [6.00-17.50] | 0.00 [0.00-0.20] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 0.50 [0.00-0.50] |
+
+noise 0%: means over 20 seeds: habit precision 0.532, habit recall 0.933, change precision 0.883, change FP rate 0.010 (5 unchanged topics per seed), change recall 0.917, change delay 8.2 days
+noise 20%: means over 20 seeds: habit precision 0.286, habit recall 0.700, change precision 0.879, change FP rate 0.020 (5 unchanged topics per seed), change recall 0.900, change delay 9.1 days
+noise 50%: means over 20 seeds: habit precision 0.021, habit recall 0.067, change precision 0.883, change FP rate 0.010 (5 unchanged topics per seed), change recall 0.883, change delay 10.1 days
+```
+
+Reading the table honestly:
+
+* **Habit precision is poor overall, and the reason is built in.** The synthetic life has no weekday
+  structure, but the built-in `weekday`/`weekend` contexts are on whenever an `action:` rule exists, and
+  in a log with about 15 events per day most actions occur on more than half the weekdays, so
+  `weekday x run` and similar pass the Wilson bound (1 to 12 such habits per life, column "built-in-context habits").
+  Those are all counted as false positives in "habit precision". Restricted to the contexts the life actually
+  plants, precision is 1.00 at every seed and noise level (caveat: at 50% noise no planted habit is detected
+  in most lives, and a precision of nothing detected is printed as 1.00 by the harness; read it together with recall).
+  The built-in contexts are only informative for sparse logs (about one entry per day, like the demo in the README);
+  `builtin_contexts = off` removes them.
+* Habit recall (planted habits found, 3 per life) falls with noise like the tagged table, plus loss from
+  unlisted synonyms and unseen post-negations: mean 0.93 / 0.70 / 0.07 at 0 / 20 / 50% noise versus
+  1.00 / 0.85 / 0.43 for tagged lives.
+* Topic change detection is slightly worse than with tags (mean recall 0.92 / 0.90 / 0.88 versus 0.97 / 0.93 / 0.90; delay 8.2 / 9.1 / 10.1 days
+  versus 7.7 / 7.8 / 9.1) because 10% of mentions use unlisted words. Its false-positive rate is 1 or 2 of 100 unchanged series.
+* Stances never used tags, so they are unchanged (the same-author caveat above applies).
+
+Test floors for this section (`free_text_measured_quality_stays_above_floor`, set slightly under the minima above):
+planted-context habit precision >= 0.95; stance precision and recall >= 0.95; min-n refusal >= 0.95;
+change precision >= 0.3 and recall >= 0.3 per seed; change false-positive rate <= 0.25; date error <= 6 days;
+habit recall >= 0.6 (0% noise, per-seed minimum) and median >= 0.5 (20%). There is deliberately no floor for overall
+habit precision (it measures the built-in contexts), nor for habit recall at 50% noise.
+
+Not measured for free text: any real journal; synonyms or sentences written by someone other than the rule author;
+the evolution loop and the ledger (they read stored tags only and do not use `tag_rules.txt`); rules with `negation = all`.
+
 ## Not measured
 
-Real-life data of any kind; the ledger's probabilities (nothing is scored yet); behaviour with
+Real-life data of any kind (the free-text section above is also synthetic); the ledger's probabilities (nothing is scored yet); behaviour with
 very large logs; sensitivity to the synthetic generator's choices (150 days, Poisson counts).

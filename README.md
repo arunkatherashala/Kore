@@ -264,6 +264,52 @@ self_verify                   -> VERIFY FAILED: checksum mismatch in segment: re
 
 Limits: the change-point test assumes Poisson counts; real writing is burstier, so the measured false-positive rate is a floor. A habit that stops meeting the bound is not retracted by a new revision (re-learning from a log without the evidence simply does not reproduce it). A late-arriving event dated earlier than existing revisions gets a correct `valid_from` but its `supersedes` link follows write order. The stance grammar is small and English only. Changing parameters writes new revisions (the rationale names the parameters).
 
+### Free-text journals: keyword rules (`tag_rules.txt`)
+
+Journal files ingested with `self_ingest_folder` are plain text with no `ctx:`/`act:`/`topic:` tags, so habits and topic changes find nothing in them (stances work, they read the text). To bridge that without a language model you can write keyword rules by hand in `<owner dir>/tag_rules.txt`. Like `ingest_roots` and `redact_patterns.txt`, no tool can read or write this file, and it is never ingested.
+
+```
+# <owner dir>/tag_rules.txt
+action:gym = gym, workout          # an action that can be taken
+ctx:morning = morning              # a context that holds (keywords)
+topic:cooking = cooking, recipes   # a mention of a topic
+negation = actions                 # actions (default) | all | off
+builtin_contexts = on              # on (default) | off
+```
+
+* Matching is case-insensitive and whole-word (hand-written, no regex; unicode letters and digits form words, `gym's` matches `gym`, a keyword may be several words). Rules are applied when `self_learn` reads the log; stored events and stored tags are never rewritten, so you can edit the file and run `self_learn` again. Derived rows carry a fingerprint of the rules in their rationale, so a changed rule set writes new rows (old ones stay, as always) and an unchanged one writes nothing. Without the file, or with no matching rule, `self_learn` behaves exactly as before (tested).
+* Topics: an event whose text matches a `topic:` rule counts as one mention that day; the change scan is unchanged.
+* Habits: `ctx:weekday` and `ctx:weekend` are built in (from the UTC date of the event; no keywords) and are on whenever an `action:` rule exists. Their occasion is a calendar day with at least one event (days without events are not counted as "did nothing"); the action counts if any event that day matches it. A keyword context `ctx:C` has one occasion per event with a sentence matching C; the action counts if its keywords match in the same sentence (`Morning: went to the gym.`). Sentences end at `. ! ? ;` or a line break.
+* Negation guard (best effort): a keyword is ignored if one of the 4 words before it in the same sentence is not, no, never, without, skipped, missed, cancelled, avoided or an `...n't` word. It catches "did not go to the gym" and "skipped gym", it misses "the gym was closed" or "gym was cancelled", and it wrongly suppresses "did not quit going to gym". Default: actions only.
+* `self_tag_rules_check` (read-only) shows, per rule, how many events and days matched, how many hits the guard dropped, the day-level occasions per context and action, and a sample of events no rule matched, so you can tune the file.
+* Cited evidence: a derived habit cites the events that matched the action, a topic change cites all events that matched the topic.
+* `self_evolve_rules` and `self_ledger_snapshot` do not use `tag_rules.txt` yet (they read stored tags only).
+
+Real output of a run of the demo (a fake, invented 90-day journal of 90 dated .md files written by a script: gym before work on about 85% of weekdays, never on weekends; "rust compiler work" in the evenings until day 45, then "cooking new recipes"; one sentence "I now prefer cooking over coding in the evenings."; fake data root and fake home in a temp folder; script at `kw/ab/demo_life_m2d.py` outside this repo). Before writing the rules file:
+
+```
+self_learn {"dry_run": true}
+  counts: changes derived 0, habits derived 0, stances derived 1
+  stances  stance:cooking | now prefers cooking over coding in the evenings | conf 0.6
+```
+
+After writing the three-line rules file `action:gym = gym, workout`, `topic:rust = rust, compiler`, `topic:cooking = cooking, recipes` by hand:
+
+```
+self_tag_rules_check -> action:gym matched 56 events on 56 days; weekday: 64 days, gym on 56 (0.875); weekend: 26 days, no gym;
+                        83 of 90 events matched by some rule, 7 unmatched
+self_learn
+  -> counts {"changes":{"added":2,"derived":2},"habits":{"added":1,"derived":1},"stances":{"added":1,"derived":1}}
+  changes topic:cooking | mentions of topic 'cooking' changed: 0.00/day to 0.76/day from 2026-08-15 (statistic 47.1) | conf 1.0
+  changes topic:rust    | mentions of topic 'rust' changed: 0.78/day to 0.00/day from 2026-08-15 (statistic 48.5) | conf 1.0
+  stances stance:cooking | now prefers cooking over coding in the evenings | conf 0.6
+  habits  ctx:weekday|act:gym | in context 'weekday' does 'gym' (56 of 64 occasions, rate 0.875, Wilson 95% lower bound 0.772) | conf 0.772
+self_learn (again) -> everything already_present, nothing added
+self_verify -> OK: 3 version(s), latest 2
+```
+
+The change date 2026-08-15 is day 45 of the script, the planted change. This is a script written by the same author as the rules, so it shows the mechanism works, not how well it works on your writing. What keyword rules cannot do: they do not know synonyms you did not list ("hit the weights" is not "gym"), they do not understand sarcasm or hypotheticals ("I should go to the gym" counts), they cannot tell a context from a keyword ("morning" in "good morning to the team" counts), they cannot see context beyond the sentence, and the negation guard is a short-window heuristic. On the synthetic free-text lives of `docs/measured.md` (templates and rules by the same author), planted-context habit precision was 1.00 but habit recall fell to a mean of 0.70 at 20% noise, and the built-in weekday/weekend contexts produced many false habits in dense logs (use `builtin_contexts = off` there).
+
 ### What this does NOT do
 
 - It does not think, understand, or know you. Its "profile" values are counters over the words in your memories.
@@ -272,7 +318,7 @@ Limits: the change-point test assumes Poisson counts; real writing is burstier, 
 - It does not write or modify source code. The former code-generating tool was removed.
 - It does not push anything to GitHub or any remote (`self_pushback` only compares a decision with your own recorded history).
 - It does not encrypt data at rest (see below).
-- It does not learn automatically: `self_learn` and `self_evolve_rules` run only when called; there is no scheduling. Learning is rule-based (counts, Wilson bounds, a likelihood-ratio scan, a small phrase grammar) and has been measured only on synthetic data, not on real lives.
+- It does not learn automatically: `self_learn` and `self_evolve_rules` run only when called; there is no scheduling. Learning is rule-based (counts, Wilson bounds, a likelihood-ratio scan, a small phrase grammar, hand-written keyword rules) and has been measured only on synthetic data, not on real lives.
 - It does not score predictions yet. The ledger only stores frequency-baseline predictions and lets you attach outcomes; no accuracy is claimed and no predictor is validated.
 - The log is not encrypted. No encryption yet.
 - Forgetting exists (`self_forget`) but only inside the log: copies in backups, earlier exports or disk snapshots are not removed. Redaction before storage is best-effort and will miss things.
