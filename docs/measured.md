@@ -176,7 +176,42 @@ Not measured for free text: any real journal; synonyms or sentences written by s
 `negation = all`; the evolution loop and ledger on free text beyond a functional test (they now read `tag_rules.txt`
 like `self_learn`, `evolve_and_ledger_use_the_same_virtual_tags_as_learn`; their scores on free-text lives are not measured).
 
+## Being loop: chooser in a simulated world (synthetic world, author-defined rewards)
+
+Everything here comes from `kore-self/src/being/` (a deterministic simulated world; no real data). The tasks (arithmetic, linear equations, physics formulas, sequences), the costs, the rewards and the scripted solvers were all written by the same author. The being's "preference" for a domain is produced by those defined rewards (reward points per energy unit spent); the numbers say how well the UCB1 chooser finds the best-paying domain in this world, not anything about general ability.
+
+Setup: 20 worlds (world seeds 1..20, the report seeds); each world has a hidden profile (reward scale, base cost, difficulty mix per domain) derived from its seed. Every policy gets the same budget of 600 energy units (about 99 steps) and the same tasks at the same step. "oracle" is told the domain with the best expected reward per energy (estimated by 3000 sampled tasks); it can still be beaten in a single world by luck. The exploration constant of the chooser (0.05) was chosen on separate tuning seeds 101..120 (c in 0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 1.5; 0.05 gave the highest mean reward per energy there, 1.93 against an oracle of 2.12). Intervals are 95% t-intervals of the mean over the 20 worlds. Run `cargo run -p kore-self --example measure_being --offline --release` (2026-10-24, commit 55dc05f7).
+
+| policy | mean reward per energy unit | 95% interval of the mean | per-world range |
+|---|---|---|---|
+| random domain | 1.295 | [1.167, 1.424] | 0.896-1.937 |
+| always arithmetic | 1.650 | [1.416, 1.883] | 0.849-2.399 |
+| always algebra | 1.467 | [1.302, 1.631] | 0.866-2.240 |
+| always physics | 0.627 | [0.467, 0.788] | 0.328-1.495 |
+| always pattern | 1.525 | [1.325, 1.725] | 0.761-2.472 |
+| oracle (hidden best domain) | 1.902 | [1.702, 2.102] | 1.102-2.472 |
+| learned chooser (UCB1) | 1.694 | [1.512, 1.876] | 1.050-2.370 |
+
+Hidden best domain over the 20 report worlds: arithmetic 10, algebra 3, physics 0, pattern 7.
+
+| quantity (report seeds 1..20) | mean | 95% interval of the mean | range |
+|---|---|---|---|
+| regret per energy, learned vs oracle | 0.208 | [0.087, 0.329] | -0.115 to 0.826 |
+| regret per energy, random vs oracle | 0.607 | [0.431, 0.783] | 0.087 to 1.300 |
+| total reward in the budget, learned (points) | 1013 | [904, 1122] | 627-1415 |
+| total reward in the budget, random (points) | 776 | [699, 854] | 537-1162 |
+| share of the learned picks on the best domain, steps 1-30 | 0.49 | [0.35, 0.64] | 0.03-0.87 |
+| steps 31-80 | 0.58 | [0.36, 0.79] | 0.00-1.00 |
+| step 81 on | 0.50 | [0.27, 0.73] | 0.00-1.00 |
+| share of random picks on the best domain | 0.25 | [0.23, 0.27] | 0.18-0.32 |
+
+Reading: the learned chooser earns about 31% more reward per energy than random choice (1.69 against 1.30; learned beat random in 18 of 20 worlds) and closes about two thirds of the gap between random and the oracle (regret 0.21 against 0.61). It is NOT better than the best fixed domain on average: always-arithmetic scored 1.65 and the learned chooser beat it in only 8 of 20 worlds (always-algebra 11, always-pattern 10, always-physics 20 of 20). It concentrates slowly: in 12 of 20 worlds the trailing 20 picks reached 60% on the best domain at some point (median first at step 20, which is mostly the initial exploration), and the share of picks on the best domain stays near 0.5, because several domains pay almost the same and the roughly 100-step budget leaves little time to separate them. On the tuning seeds the numbers were similar (learned 1.93, random 1.36, oracle 2.12, hidden best: arithmetic 6, algebra 11, pattern 3). The claim is only: under these defined rewards the learned chooser collects more reward per energy than random choice and than always-physics, and about the same as the best single fixed domain.
+
+Other tests (all in `kore-self/src/being/tests.rs`, `tests/e2e_being.rs`): two worlds with different hidden best domains give different preferences, and in each the preferred domain has about the best reward per energy in the being's own log (at least 0.85 of the best logged); the same seeds give a byte-identical log content hash and head hash (with a fixed clock; with the wall clock only `recorded_at` differs); every decision of a 130-step run is re-derived from the log alone and the next decision equals the replayed prediction; a run split over two calls equals one run; a flipped byte after a run fails `self_verify`.
+
+Test floors (set after the measurement, a margin below it): learned minus random mean reward per energy > 0.2 (measured 0.40), regret versus oracle < 0.45 (measured 0.21), learned beats random in at least 15 of 20 worlds (measured 18). Guards against regression, not accuracy claims.
+
 ## Not measured
 
 Real-life data of any kind (the free-text section above is also synthetic); the ledger's probabilities (nothing is scored yet); behaviour with
-very large logs; sensitivity to the synthetic generator's choices (150 days, Poisson counts).
+the being loop in any world other than the author-defined simulation (no real tasks, no language-model thinker); very large logs; sensitivity to the synthetic generator's choices (150 days, Poisson counts).

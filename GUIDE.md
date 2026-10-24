@@ -1,6 +1,6 @@
 # KORE Engine — Complete User Guide
 
-> **A columnar SQL engine in Rust, and `kore-self`, a local memory store with SQL.**  
+> **A columnar SQL engine in Rust, and `kore-self`, a local store with SQL over a being's own versioned log (the owner directory holds the being's log).**  
 > Engine benchmark results are documented on branch `master-kore-engine`.
 
 ---

@@ -10,7 +10,7 @@ KORE is a columnar SQL engine written in Rust (a workspace of crates). `kore-sel
 
 **Target positioning (the only claim this project makes):** A local, deterministic, append-only journal of how your recorded beliefs, habits and decisions change. Every change cites the events that caused it. You can query any past version with SQL. Its explanations can be ablation-tested, and its predictions are scored against outcomes.
 
-**Status (milestone M2b/M2c):** deterministic rule-based learning (habits, topic change points, explicit stance statements), a rule-parameter evolution loop and the start of a prediction ledger are built (see "Learning quick start"), measured only on synthetic data. The versioned log is built: events, cited belief revisions, time-travel SQL and tamper-evident verification (see "Versioned self: quick start"), plus opt-in ingestion of journal folders, CSV and .kore files with best-effort redaction, export, and a documented forget (see "Ingestion quick start"). Besides that log, kore-self is a local memory store with SQL over it, simple keyword/word-frequency counters, and a keyword-to-choice count predictor that has not been validated against outcomes. No accuracy number is claimed anywhere; any future number must have a row (n, baseline, interval, date) in `docs/measured.md`.
+**Status (milestone M2b/M2c, plus the being loop S1/S2):** a deterministic simulation loop with its own log (see "Being loop quick start");  deterministic rule-based learning (habits, topic change points, explicit stance statements), a rule-parameter evolution loop and the start of a prediction ledger are built (see "Learning quick start"), measured only on synthetic data. The versioned log is built: events, cited belief revisions, time-travel SQL and tamper-evident verification (see "Versioned self: quick start"), plus opt-in ingestion of journal folders, CSV and .kore files with best-effort redaction, export, and a documented forget (see "Ingestion quick start"). Besides that log, kore-self is a local memory store with SQL over it, simple keyword/word-frequency counters, and a keyword-to-choice count predictor that has not been validated against outcomes. No accuracy number is claimed anywhere; any future number must have a row (n, baseline, interval, date) in `docs/measured.md`.
 
 ### What it does today
 
@@ -315,6 +315,53 @@ self_verify -> OK: 3 version(s), latest 2
 
 The change date 2026-08-15 is day 45 of the script, the planted change. The output is the same with and without the lift test here, because the weekend rate (0 of 26) is far below the weekday rate; the lift test matters on dense logs, see below. This is a script written by the same author as the rules, so it shows the mechanism works, not how well it works on your writing. What keyword rules cannot do: they do not know synonyms you did not list ("hit the weights" is not "gym"), they do not understand sarcasm or hypotheticals ("I should go to the gym" counts), they cannot tell a context from a keyword ("morning" in "good morning to the team" counts), they cannot see context beyond the sentence, and the negation guard is a short-window heuristic. On the synthetic free-text lives of `docs/measured.md` (templates and rules by the same author), habit precision was 1.00 at every seed after the lift test (before it, built-in weekday/weekend contexts gave 2 to 9 false habits per life and overall precision 0.50 / 0.29 / 0.00 at 0 / 20 / 50% noise), but habit recall fell to a mean of 0.93 / 0.70 / 0.07 at 0 / 20 / 50% noise, and at 50% noise that precision is mostly "nothing detected". On separate tuning seeds a residual false habit still appeared in some lives (details in `docs/measured.md`).
 
+### Being loop quick start
+
+The owner directory (`<root>/<owner>/`) holds the log of one independent being: a deterministic simulation loop, not a person's journal. A seeded simulated world offers verifiable tasks in four domains (arithmetic, linear equations, physics formulas, next term of a sequence); each task has a difficulty, an energy cost, a reward and an exact checker. The loop observes its own log, picks a domain with a UCB1 chooser over the reward per energy it has been paid so far, has a scripted solver answer, checks the answer and appends a decision, an action and an outcome event (source `being:loop`, time from the world clock), a decision revision that cites its evidence events, and a prediction with its resolved outcome. Everything the being "prefers" is derived from the log alone (a replay re-derives every decision) and produced by the author-defined rewards. Rewards, costs and solvers were written by the same author; see `docs/measured.md` for the measured numbers and their limits.
+
+Real output of `kore-self/tests/e2e_being.rs` (real binary, temp data root; long values shortened with `...`):
+
+```
+being_run {steps:300, seed:1, world_seed:3, budget:3000}
+  steps_run 300, stopped "step limit reached", total_reward 2438, total_energy_spent 1592, budget_left 1408, version_after 13
+  arithmetic: selected 100, correct 79, reward 803, energy 526, reward_per_energy 1.527
+  algebra:    selected  35, correct 28, reward 354, energy 252, reward_per_energy 1.405
+  physics:    selected   5, correct  2, reward  21, energy  30, reward_per_energy 0.7
+  pattern:    selected 160, correct 126, reward 1260, energy 784, reward_per_energy 1.607
+
+being_status -> replay_check {"decisions": 300, "re_derived_from_log_and_equal": 300}
+
+being_explain {decision_event_id: "9341509dcad0cdbf..."}
+  decision: "step 299: chose pattern by ucb1 (highest score (mean + exploration bonus) among affordable domains); n=159 mean=1.602 reward/energy bonus=0.013 score=0.174; task 299-pattern difficulty 3 cost 5 reward 12; cites 21 events"
+  alternatives (mean reward per energy, bonus, score):
+    arithmetic n=100 1.527 0.0169 0.1695
+    algebra    n=35  1.405 0.0285 0.1690
+    physics    n=5   0.700 0.0755 0.1455
+    pattern    n=159 1.602 0.0134 0.1736   <- chosen
+  evidence_events_cited: genesis event; "step 2: task 2-physics answer 2 is correct (expected 2); reward 15 cost 8 budget left 2983"; "step 7: task 7-physics answer 29 is wrong (expected 28); reward 0 cost 4 budget left 2954"; ... (21 events)
+  outcome_of_this_step: "step 299: task 299-pattern answer 118 is correct (expected 118); reward 12 cost 5 budget left 1408"
+  replay_check {"re_derived_domain": "pattern", "equal_to_recorded": true}
+
+self_sql: SELECT kind, COUNT(*) AS n FROM events WHERE source = 'being:loop' GROUP BY kind ORDER BY kind
+  action 300 | decision 300 | note 1 | outcome 300
+
+self_sql: SELECT r.stance, COUNT(*) AS decisions FROM revisions r WHERE r.entity_type = 'decision' GROUP BY r.stance ORDER BY decisions DESC
+  choose pattern 160 | choose arithmetic 100 | choose algebra 35 | choose physics 5
+
+being_run {steps:5, world_seed:4}  (the being already has world_seed 3)
+  invalid: this being already has world_seed 3; the request says 4. A being keeps one world and one seed
+
+self_verify
+  OK: 14 version(s), latest 13, head hash f17b94384116dd8725e9c26c5fdb0c43a1da28a5736e506f56d188003b25aee5
+
+self_verify after flipping one byte of events/0000000013.kore
+  VERIFY FAILED: checksum mismatch in segment: events/0000000013.kore
+```
+
+Notes. A decision cites the genesis event and the latest 5 outcome events per domain; the counts it used come from all earlier outcomes. `being_run` with `stop_after_budget: false` lets the world refill the budget at the next world day (logged as a `refill` event). The loop can touch only the simulated world and this owner's log (no files, network or processes; a source-scan test checks this); it stops at the step limit, a stop flag, or when no task is affordable. The `Thinker` trait (`being/solver.rs`) is the seam where a language-model thinker could be plugged in later; only the scripted baseline exists. Under the defined rewards the learned chooser collected about 31% more reward per energy than random choice over 20 simulated worlds and about the same as the best single fixed domain (`docs/measured.md`).
+
+Does NOT do: there is no language-model thinker yet (the solvers are fixed scripts); no access to the real world (no files, web or tools); no open-ended goals (the only goal is reward per energy in the simulation); its preferences are produced by the rewards the author defined, they are not discovered values; it is not shown to beat always choosing the best single domain; it does not run by itself between calls (no scheduler); no claim is made about understanding or intelligence.
+
 ### What this does NOT do
 
 - It does not think, understand, or know you. Its "profile" values are counters over the words in your memories.
@@ -332,7 +379,7 @@ The change date 2026-08-15 is day 45 of the script, the planted change. The outp
 
 ### Data and privacy
 
-- Data root: `$KORE_SELF_HOME`, otherwise `~/.kore-self`. Each owner has its own folder `<root>/<owner>/`.
+- Data root: `$KORE_SELF_HOME`, otherwise `~/.kore-self`. Each owner has its own folder `<root>/<owner>/`, which holds that being's log (the owner is the being, not a person's journal).
 - Files are **unencrypted at rest**. On Unix they are created with mode 0600 (directories 0700). On Windows they inherit the permissions of your profile folder. Encryption is planned (milestone M4). Do not commit the data folder.
 - Owner names accept only letters, digits, `_`, `-` and `.` (max 64 characters).
 - Ingestion reads only from your owner directory and the folders you list by hand in `ingest_roots`; exports are written only under `<root>/<owner>/exports/`. `ingest_roots` and `redact_patterns.txt` cannot be read or written by any tool.
