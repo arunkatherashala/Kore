@@ -806,6 +806,22 @@ fn validate_revision(r: &NewRevision, ix: &Index, now: &str) -> Result<(Revision
 }
 
 fn validate_prediction(p: &NewPrediction, ix: &Index) -> Result<PredictionRow, LogError> {
+    for c in &p.features_cite {
+        if !ix.events.contains(c) {
+            return Err(LogError::NotFound(format!("features_cite event {c}")));
+        }
+    }
+    build_prediction(p)
+}
+
+/// The id a prediction will get, so a caller can attach an outcome to it in
+/// the same batch. Same checks as a commit except the cited events are not
+/// looked up.
+pub fn prediction_id(p: &NewPrediction) -> Result<String, LogError> {
+    build_prediction(p).map(|r| r.pred_id)
+}
+
+fn build_prediction(p: &NewPrediction) -> Result<PredictionRow, LogError> {
     let made_at = normalize_ts(&p.made_at).map_err(LogError::Invalid)?;
     check_text("question_id", &p.question_id, 256)?;
     check_text("target", &p.target, 512)?;
@@ -820,11 +836,6 @@ fn validate_prediction(p: &NewPrediction, ix: &Index) -> Result<PredictionRow, L
     }
     if p.probs.iter().any(|x| !x.is_finite() || !(0.0..=1.0).contains(x)) || (p.probs.iter().sum::<f64>() - 1.0).abs() > 1e-6 {
         return inv("probs must each be within 0..=1 and sum to 1");
-    }
-    for c in &p.features_cite {
-        if !ix.events.contains(c) {
-            return Err(LogError::NotFound(format!("features_cite event {c}")));
-        }
     }
     let resolves_by = match &p.resolves_by {
         Some(s) => Some(normalize_ts(s).map_err(LogError::Invalid)?),
