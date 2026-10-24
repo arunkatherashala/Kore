@@ -9,6 +9,7 @@
 //! Nothing here reads the clock; `valid_from` is the newest cited event's time.
 
 use super::params::Params;
+use super::tagrules::TagRules;
 use super::{changes, habits, stances, Ev};
 use crate::versioned::{sha256_hex, Batch, CauseRow, LogError, NewRevision, RevisionRow, VersionedLog};
 use serde_json::{json, Value};
@@ -114,23 +115,41 @@ pub struct Derivation {
 /// Run the selected detectors over `events` (already filtered to what may be
 /// seen) and describe the revisions they imply. Pure: no log access.
 pub fn derive(events: &[Ev], p: &Params, kinds: &Kinds) -> Derivation {
+    derive_with(events, p, kinds, None)
+}
+
+/// `derive` with optional keyword rules (`tag_rules.txt`) applied at read
+/// time: virtual `topic:` tags for the change scan and day-level occasions for
+/// habits. Stored events are untouched. `None` is exactly `derive`.
+pub fn derive_with(events: &[Ev], p: &Params, kinds: &Kinds, rules: Option<&TagRules>) -> Derivation {
     let mut d = Derivation::default();
+    let fp = rules.map(|r| r.fingerprint.clone()).unwrap_or_default();
     if kinds.habits {
-        let (hs, insuff) = habits::detect(events, p);
+        let (hs, insuff) = habits::detect_with(events, p, rules);
         d.insufficient_habits = insuff;
         for h in hs {
             let (cited, total) = cap(h.cited.clone());
             let note = if total > cited.len() { format!("; cites the newest {} of {total}", cited.len()) } else { String::new() };
+            let unit = "occasions";
+            let rationale = if h.from_rules {
+                format!(
+                    "rule habits-v1 ({}): counts occasions of context {} found from the event date (weekday/weekend, per day) or keywords in tag_rules.txt (per event, same sentence as the action; rules {fp}){note}",
+                    p.label(),
+                    h.context
+                )
+            } else {
+                format!("rule habits-v1 ({}): counts occasions tagged ctx:{} and their act: tag{note}", p.label(), h.context)
+            };
             d.items.push(Derived {
                 kind: "habits",
                 entity_type: "habit",
                 key: format!("ctx:{}|act:{}", h.context, h.action),
                 stance: format!(
-                    "in context '{}' does '{}' ({} of {} occasions, rate {:.3}, Wilson 95% lower bound {:.3})",
+                    "in context '{}' does '{}' ({} of {} {unit}, rate {:.3}, Wilson 95% lower bound {:.3})",
                     h.context, h.action, h.k, h.n, h.rate, h.lower
                 ),
                 confidence: h.lower,
-                rationale: format!("rule habits-v1 ({}): counts occasions tagged ctx:{} and their act: tag{note}", p.label(), h.context),
+                rationale,
                 valid_from: h.last_ts.clone(),
                 author: AUTHOR_HABITS,
                 detail: json!({
@@ -142,7 +161,12 @@ pub fn derive(events: &[Ev], p: &Params, kinds: &Kinds) -> Derivation {
         }
     }
     if kinds.changes {
-        let (tcs, insuff) = changes::detect(events, p);
+        let (annotated, virt) = match rules {
+            Some(r) => r.annotate_topics(events),
+            None => (Vec::new(), Default::default()),
+        };
+        let seen: &[Ev] = if rules.is_some() { &annotated } else { events };
+        let (tcs, insuff) = changes::detect(seen, p);
         d.insufficient_topics = insuff;
         for t in tcs {
             let parts: Vec<String> = t
@@ -160,8 +184,12 @@ pub fn derive(events: &[Ev], p: &Params, kinds: &Kinds) -> Derivation {
                 stance: format!("mentions of topic '{}' changed: {}", t.topic, parts.join("; ")),
                 confidence: (1.0 - (-(last.stat) / 2.0).exp()).clamp(0.0, 1.0),
                 rationale: format!(
-                    "rule changes-v1 (statistic>={:.1}, min_seg={}d, ratio>={:.1}): Poisson likelihood-ratio scan over daily mention counts; cites all {} mentions of the topic",
-                    p.change_llr, p.change_min_seg, p.change_min_ratio, total
+                    "rule changes-v1 (statistic>={:.1}, min_seg={}d, ratio>={:.1}): Poisson likelihood-ratio scan over daily mention counts; cites all {} mentions of the topic{}",
+                    p.change_llr,
+                    p.change_min_seg,
+                    p.change_min_ratio,
+                    total,
+                    if virt.contains(&t.topic) { format!("; mentions found by keywords in tag_rules.txt (rules {fp})") } else { String::new() }
                 ),
                 valid_from,
                 author: AUTHOR_CHANGES,
@@ -232,9 +260,14 @@ pub struct LearnResult {
 
 /// Derive from the whole log and (unless `dry_run`) write the new rows in one commit.
 pub fn learn(log: &mut VersionedLog, p: &Params, kinds: &Kinds, dry_run: bool) -> Result<LearnResult, LogError> {
+    learn_with(log, p, kinds, dry_run, None)
+}
+
+/// `learn` with optional keyword rules applied at read time (see `derive_with`).
+pub fn learn_with(log: &mut VersionedLog, p: &Params, kinds: &Kinds, dry_run: bool, rules: Option<&TagRules>) -> Result<LearnResult, LogError> {
     let version_before = log.latest_version();
     let events = super::learnable(&log.open_latest().rows());
-    let derivation = derive(&events, p, kinds);
+    let derivation = derive_with(&events, p, kinds, rules);
     let existing = existing_signatures(log);
     let mut outcomes = Vec::new();
     let mut batch = Batch::default();

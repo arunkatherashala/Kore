@@ -514,7 +514,7 @@ fn no_tool_can_write_code() {
             assert!(!n.contains(bad), "tool {n} looks like a code-writing tool");
         }
     }
-    for n in ["self_learn", "self_explain", "self_evolve_rules", "self_ledger_snapshot", "self_ledger_outcome"] {
+    for n in ["self_learn", "self_explain", "self_evolve_rules", "self_ledger_snapshot", "self_ledger_outcome", "self_tag_rules_check"] {
         assert!(names.contains(&n.to_string()), "{n} not registered");
     }
     // the evolution loop's output surface: only log revisions (entity_type rule)
@@ -549,3 +549,219 @@ fn measured_detector_quality_on_synthetic_data_stays_above_floor() {
         }
     }
 }
+
+// ── free-text journals: keyword rules (tag_rules.txt) ───────────────────────
+
+use crate::learn::TagRules;
+
+const DEMO_RULES: &str = "action:gym = gym, workout\nctx:morning = morning\ntopic:rust = rust, compiler\ntopic:cooking = cooking, recipes\n";
+
+fn text_event(day: i64, text: &str) -> NewEvent {
+    NewEvent { source: "journal".into(), occurred_at: dates::midnight_of(day), kind: "note".into(), text: text.into(), tags: vec![], redacted: false }
+}
+
+/// 2026-07-01 (a Wednesday) onward: weekday gym ~85%, never on weekends, topic shift at day 45.
+fn free_journal(days: i64) -> Vec<NewEvent> {
+    let start = dates::days_from_civil(2026, 7, 1);
+    let mut rng = synth::Rng::new(7);
+    let mut out = Vec::new();
+    for i in 0..days {
+        let d = start + i;
+        let mut lines: Vec<String> = Vec::new();
+        let weekday = crate::learn::tagrules::weekday_index(d) < 5;
+        if weekday {
+            if rng.f64() < 0.85 {
+                lines.push("Morning: went to the gym before work.".into());
+            } else if rng.f64() < 0.5 {
+                lines.push("Morning: did not go to the gym, skipped it.".into());
+            }
+        }
+        if rng.f64() < 0.7 {
+            lines.push(if i < 45 { "Evening: spent time on the rust compiler.".into() } else { "Evening: tried new cooking recipes.".into() });
+        }
+        if lines.is_empty() {
+            lines.push("Quiet day.".into());
+        }
+        out.push(text_event(d, &format!("# day {i}\n{}", lines.join("\n"))));
+    }
+    out
+}
+
+fn derived_keys(r: &derive::LearnResult) -> BTreeSet<String> {
+    r.derivation.items.iter().map(|i| format!("{}|{}|{}", i.key, i.stance, i.rationale)).collect()
+}
+
+#[test]
+fn without_rules_behaviour_is_unchanged() {
+    let (_d, log, _t, _e) = filled(2, 0.2);
+    let evs = crate::learn::learnable(&log.open_latest().rows());
+    let p = Params::default();
+    let base = derive::derive(&evs, &p, &Kinds::ALL);
+    let sig = |d: &derive::Derivation| d.items.iter().map(|i| i.signature()).collect::<Vec<_>>();
+    assert_eq!(sig(&base), sig(&derive::derive_with(&evs, &p, &Kinds::ALL, None)));
+    // an empty rule set, or rules with no action rule and nothing matching, change nothing either
+    assert_eq!(sig(&base), sig(&derive::derive_with(&evs, &p, &Kinds::ALL, Some(&TagRules::default()))));
+    let inert = TagRules::parse("topic:zzzzqq = zzzzqq\nctx:qqzz = qqzz\n");
+    assert_eq!(sig(&base), sig(&derive::derive_with(&evs, &p, &Kinds::ALL, Some(&inert))));
+    // tool level: no file, no tag_rules key in the reply, nothing about rules written
+    crate::safety::test_support::init();
+    let owner = "lt-norules";
+    let (events, _) = synth::generate(&synth::default_config(2, 0.0));
+    crate::log_tools::open(owner).unwrap_or_else(|e| panic!("{e}")).append_events(&events).unwrap();
+    let r = ok("self_learn", owner, json!({"dry_run": true}));
+    assert!(r.get("tag_rules").is_none(), "{r}");
+    let c = ok("self_tag_rules_check", owner, json!({}));
+    assert_eq!(c["file_present"], false);
+}
+
+#[test]
+fn free_text_weekday_gym_habit_and_topic_change_are_derived() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = fresh(dir.path());
+    let events = free_journal(90);
+    log.append_events(&events).unwrap();
+    let before: Vec<EventRow> = log.open_latest().rows();
+    let p = Params::default();
+    // without rules: nothing (the free text has no tags)
+    let none = derive::learn_with(&mut log, &p, &Kinds { habits: true, changes: true, stances: false }, true, None).unwrap();
+    assert!(none.derivation.items.is_empty());
+    let rules = TagRules::parse(DEMO_RULES);
+    assert!(rules.warnings.is_empty(), "{:?}", rules.warnings);
+    let r1 = derive::learn_with(&mut log, &p, &Kinds::ALL, false, Some(&rules)).unwrap();
+    let items = &r1.derivation.items;
+    let h = items.iter().find(|i| i.key == "ctx:weekday|act:gym").expect("weekday gym habit");
+    assert_eq!(h.author, "rule:habits-v1");
+    assert!(h.rationale.contains(&rules.fingerprint));
+    assert!(items.iter().any(|i| i.key == "ctx:morning|act:gym"), "keyword context habit");
+    assert!(!items.iter().any(|i| i.key == "ctx:weekend|act:gym"), "no gym on weekends");
+    // cited events are exactly the events whose text matches gym without negation
+    let snap = log.open_latest();
+    let rows: Vec<EventRow> = snap.rows();
+    let causes: Vec<CauseRow> = snap.rows();
+    let revs: Vec<RevisionRow> = snap.rows();
+    let rev = revs.iter().find(|r| r.key == "ctx:weekday|act:gym").unwrap();
+    let cited: Vec<&CauseRow> = causes.iter().filter(|c| c.rev_id == rev.rev_id).collect();
+    assert!(!cited.is_empty());
+    for c in &cited {
+        let e = rows.iter().find(|e| e.event_id == c.event_id).unwrap();
+        assert!(e.text.contains("went to the gym"), "{}", e.text);
+    }
+    let k = h.detail["k"].as_u64().unwrap() as usize;
+    assert_eq!(cited.len(), k, "one citing event per day here");
+    // topic change: rust -> cooking, mentions found through keywords, cited
+    let rust = items.iter().find(|i| i.key == "topic:rust").expect("rust change");
+    let cook = items.iter().find(|i| i.key == "topic:cooking").expect("cooking change");
+    assert!(rust.rationale.contains("tag_rules.txt") && cook.rationale.contains("tag_rules.txt"));
+    assert!(rust.stance.contains("2026-08-1") || rust.stance.contains("2026-08-2"), "{}", rust.stance);
+    for c in causes.iter().filter(|c| revs.iter().any(|r| r.rev_id == c.rev_id && r.key == "topic:rust")) {
+        assert!(rows.iter().find(|e| e.event_id == c.event_id).unwrap().text.contains("rust"));
+    }
+    // idempotent
+    let (v, hash) = (log.latest_version(), log.snapshot_hash(log.latest_version()).unwrap());
+    let r2 = derive::learn_with(&mut log, &p, &Kinds::ALL, false, Some(&rules)).unwrap();
+    assert!(r2.outcomes.iter().all(|o| !o.is_new));
+    assert_eq!(log.snapshot_hash(v).unwrap(), hash);
+    assert_eq!(log.latest_version(), v);
+    // stored events are never rewritten by learning
+    assert_eq!(before, log.open_latest().rows::<EventRow>());
+    // incremental: new days add rows only for changed evidence
+    let start = dates::days_from_civil(2026, 7, 1);
+    let more: Vec<NewEvent> = (90..100).map(|i| text_event(start + i, &format!("# day {i}\nMorning: went to the gym before work."))).collect();
+    log.append_events(&more).unwrap();
+    let r3 = derive::learn_with(&mut log, &p, &Kinds::ALL, false, Some(&rules)).unwrap();
+    assert!(r3.outcomes.iter().any(|o| o.is_new));
+    let r4 = derive::learn_with(&mut log, &p, &Kinds::ALL, false, Some(&rules)).unwrap();
+    assert!(r4.outcomes.iter().all(|o| !o.is_new));
+    // changing the rules re-derives: new fingerprint, new rows, old rows stay
+    let rules2 = TagRules::parse(&format!("{DEMO_RULES}action:gym = lifted\n"));
+    assert_ne!(rules.fingerprint, rules2.fingerprint);
+    let r5 = derive::learn_with(&mut log, &p, &Kinds::ALL, false, Some(&rules2)).unwrap();
+    assert!(r5.outcomes.iter().any(|o| o.is_new));
+    assert!(derived_keys(&r5) != derived_keys(&r4));
+    log.verify().unwrap();
+}
+
+#[test]
+fn negated_mentions_are_not_counted_as_the_action() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = fresh(dir.path());
+    let start = dates::days_from_civil(2026, 7, 6); // a Monday
+    let mut ev = Vec::new();
+    for i in 0..10 {
+        ev.push(text_event(start + i, &if i < 3 { "Morning: gym session.".to_string() } else { "Morning: did not go to the gym today.".to_string() }));
+    }
+    log.append_events(&ev).unwrap();
+    let rules = TagRules::parse("action:gym = gym\nctx:morning = morning\nbuiltin_contexts = off\n");
+    let r = derive::learn_with(&mut log, &Params::default(), &Kinds::ALL, true, Some(&rules)).unwrap();
+    assert!(r.derivation.items.is_empty(), "3 of 10 mornings is not a habit");
+    let off = TagRules::parse("negation = off\naction:gym = gym\nctx:morning = morning\nbuiltin_contexts = off\n");
+    let r = derive::learn_with(&mut log, &Params::default(), &Kinds::ALL, true, Some(&off)).unwrap();
+    assert!(r.derivation.items.iter().any(|i| i.key == "ctx:morning|act:gym"), "with the guard off the negations count as gym");
+}
+
+#[test]
+fn tools_use_tag_rules_and_check_reports_matches() {
+    crate::safety::test_support::init();
+    let owner = "lt-tagrules";
+    crate::log_tools::open(owner).unwrap_or_else(|e| panic!("{e}")).append_events(&free_journal(90)).unwrap();
+    let dir = crate::safety::owner_dir(owner);
+    std::fs::create_dir_all(&dir).unwrap();
+    // a tool cannot read the rules file
+    std::fs::write(dir.join("tag_rules.txt"), format!("{DEMO_RULES}bogus line\n")).unwrap();
+    assert!(crate::safety::safe_path(owner, "tag_rules.txt").is_err());
+    let chk = ok("self_tag_rules_check", owner, json!({}));
+    assert_eq!(chk["file_present"], true);
+    assert_eq!(chk["warnings"].as_array().unwrap().len(), 1);
+    let gym = chk["rules"].as_array().unwrap().iter().find(|r| r["rule"] == "action:gym").unwrap();
+    assert!(gym["events_matched"].as_u64().unwrap() > 40, "{gym}");
+    assert!(gym["events_dropped_by_negation_guard"].as_u64().unwrap() > 0, "{gym}");
+    assert!(chk["events_unmatched"].as_u64().unwrap() > 0);
+    assert!(chk["unmatched_sample"].as_array().unwrap().iter().any(|e| e["text"].as_str().unwrap().contains("Quiet day")));
+    let wd = chk["day_occasions"].as_array().unwrap().iter().find(|c| c["context"] == "weekday").unwrap();
+    assert!(wd["days"].as_u64().unwrap() > 50);
+    // read-only: no new version
+    let v0 = ok("self_learn", owner, json!({"dry_run": true}));
+    assert_eq!(v0["version_before"], v0["version_after"]);
+    assert_eq!(v0["tag_rules"]["rules"], 4);
+    assert!(v0["derived"].as_array().unwrap().iter().any(|d| d["key"] == "ctx:weekday|act:gym"));
+    let real = ok("self_learn", owner, json!({}));
+    let again = ok("self_learn", owner, json!({}));
+    assert_eq!(again["counts"]["habits"]["added"], 0);
+    assert_eq!(again["counts"]["changes"]["added"], 0);
+    assert!(real["counts"]["changes"]["added"].as_u64().unwrap() >= 2, "{real}");
+    // explain cites the matching events
+    let h = real["derived"].as_array().unwrap().iter().find(|d| d["key"] == "ctx:weekday|act:gym").unwrap();
+    let ex = ok("self_explain", owner, json!({"rev_id": &h["rev_id"].as_str().unwrap()[..12]}));
+    assert!(ex["cited_events"][0]["text"].as_str().unwrap().contains("gym"));
+    std::fs::remove_file(dir.join("tag_rules.txt")).unwrap();
+}
+
+#[test]
+fn free_text_measured_quality_stays_above_floor() {
+    let rows = crate::measure::sweep_free(&crate::measure::SEEDS, &crate::measure::NOISE, &Params::default());
+    for r in &rows {
+        let n = r.noise;
+        let min = |f: fn(&crate::measure::RunMetrics) -> f64| r.col(|m| Some(f(m))).unwrap().min;
+        let med = |f: fn(&crate::measure::RunMetrics) -> f64| r.col(|m| Some(f(m))).unwrap().median;
+        let max = |f: fn(&crate::measure::RunMetrics) -> f64| r.col(|m| Some(f(m))).unwrap().max;
+        assert!(min(|m| m.habit_precision_planted) >= FT_PLANTED_PRECISION, "planted-context habit precision at noise {n}");
+        assert!(min(|m| m.stance_precision) >= 0.95 && min(|m| m.stance_recall) >= 0.95, "stances at noise {n}");
+        assert!(min(|m| m.minn_refused) >= 0.95, "min-n refusal at noise {n}");
+        assert!(min(|m| m.change_precision) >= FT_CHANGE_PRECISION, "change precision at noise {n}");
+        assert!(min(|m| m.change_recall) >= FT_CHANGE_RECALL, "change recall at noise {n}");
+        assert!(max(|m| m.change_fp_rate) <= 0.25, "change FP rate at noise {n}");
+        assert!(max(|m| m.change_abs_error) <= 6.0, "change error at noise {n}");
+        if n == 0.0 {
+            assert!(min(|m| m.habit_recall) >= FT_HABIT_RECALL_0, "habit recall at 0% noise");
+        } else if n == 0.2 {
+            assert!(med(|m| m.habit_recall) >= FT_HABIT_RECALL_20, "habit recall median at 20% noise");
+        }
+    }
+}
+
+// Floors for the free-text sweep, set slightly under the measured minima (docs/measured.md).
+const FT_PLANTED_PRECISION: f64 = 0.95;
+const FT_CHANGE_PRECISION: f64 = 0.3;
+const FT_CHANGE_RECALL: f64 = 0.3;
+const FT_HABIT_RECALL_0: f64 = 0.6;
+const FT_HABIT_RECALL_20: f64 = 0.5;

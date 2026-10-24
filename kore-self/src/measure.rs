@@ -21,7 +21,7 @@
 //!   habit; with min n = 1 the same contexts would have produced habits.
 #![allow(dead_code)]
 
-use crate::learn::{changes, habits, stances, Params};
+use crate::learn::{changes, habits, stances, Params, TagRules};
 use crate::synth::{self, SynthConfig, Truth};
 use std::collections::BTreeSet;
 
@@ -32,6 +32,10 @@ pub struct RunMetrics {
     pub habit_precision: f64,
     pub habit_recall: f64,
     pub habit_detected: usize,
+    /// Detected habits in the built-in weekday/weekend contexts (never planted, so all count against precision).
+    pub habit_builtin_detected: usize,
+    /// Precision over detections in planted contexts only (free-text runs; equals habit_precision otherwise).
+    pub habit_precision_planted: f64,
     pub change_precision: f64,
     pub change_recall: f64,
     pub change_abs_error: f64,
@@ -56,24 +60,45 @@ fn ratio(a: usize, b: usize) -> f64 {
 pub fn run_one(cfg: &SynthConfig, p: &Params) -> RunMetrics {
     let (events, truth) = synth::generate(cfg);
     let evs = synth::to_evs(&events);
+    if cfg.free_text {
+        let rules = TagRules::parse(&synth::free_text_rules());
+        return score_with(&evs, &truth, p, Some(&rules));
+    }
     score(&evs, &truth, p)
 }
 
 pub fn score(evs: &[crate::learn::Ev], truth: &Truth, p: &Params) -> RunMetrics {
+    score_with(evs, truth, p, None)
+}
+
+/// Score with optional keyword rules applied at read time (free-text lives).
+pub fn score_with(raw: &[crate::learn::Ev], truth: &Truth, p: &Params, rules: Option<&TagRules>) -> RunMetrics {
+    let annotated;
+    let evs: &[crate::learn::Ev] = match rules {
+        Some(r) => {
+            annotated = r.annotate_topics(raw).0;
+            &annotated
+        }
+        None => raw,
+    };
     let mut m = RunMetrics::default();
     // habits
-    let (hs, insufficient) = habits::detect(evs, p);
+    let (hs, insufficient) = habits::detect_with(raw, p, rules);
     let det: BTreeSet<(String, String)> = hs.iter().map(|h| (h.context.clone(), h.action.clone())).collect();
     let tru: BTreeSet<(String, String)> = truth.habits.iter().map(|h| (h.0.clone(), h.1.clone())).collect();
     let tp = det.intersection(&tru).count();
     m.habit_detected = det.len();
     m.habit_precision = ratio(tp, det.len());
     m.habit_recall = ratio(tp, tru.len());
+    let builtin = |c: &str| c == crate::learn::tagrules::WEEKDAY || c == crate::learn::tagrules::WEEKEND;
+    m.habit_builtin_detected = det.iter().filter(|d| builtin(&d.0)).count();
+    let non_builtin = det.iter().filter(|d| !builtin(&d.0)).count();
+    m.habit_precision_planted = ratio(tp, non_builtin);
     // min-n refusal
     let refused = truth.rare_contexts.iter().filter(|c| insufficient.iter().any(|i| &i.context == *c) && !det.iter().any(|d| &d.0 == *c)).count();
     m.minn_refused = ratio(refused, truth.rare_contexts.len());
     let p1 = Params { habit_min_n: 1, ..p.clone() };
-    let (h1, _) = habits::detect(evs, &p1);
+    let (h1, _) = habits::detect_with(raw, &p1, rules);
     let would = truth.rare_contexts.iter().filter(|c| h1.iter().any(|h| &h.context == *c)).count();
     m.minn1_would_derive = ratio(would, truth.rare_contexts.len());
     // change points
@@ -163,5 +188,13 @@ pub fn sweep(seeds: &[u64], noise: &[f64], p: &Params) -> Vec<Row> {
     noise
         .iter()
         .map(|&n| Row { noise: n, seeds: seeds.to_vec(), runs: seeds.iter().map(|&s| run_one(&synth::default_config(s, n), p)).collect() })
+        .collect()
+}
+
+/// The same sweep over free-text lives (keyword rules, no tags).
+pub fn sweep_free(seeds: &[u64], noise: &[f64], p: &Params) -> Vec<Row> {
+    noise
+        .iter()
+        .map(|&n| Row { noise: n, seeds: seeds.to_vec(), runs: seeds.iter().map(|&s| run_one(&synth::free_text_config(s, n), p)).collect() })
         .collect()
 }

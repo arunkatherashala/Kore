@@ -1,6 +1,7 @@
 //! Scores the deterministic learners against synthetic ground truth and prints
-//! the table recorded in docs/measured.md. Synthetic-data numbers only.
+//! the tables recorded in docs/measured.md. Synthetic-data numbers only.
 //!   cargo run -p kore-self --example measure_learning --offline --release
+//! Tagged lives first, then free-text lives read through keyword rules.
 
 #![allow(dead_code)]
 #[path = "../src/versioned/mod.rs"]
@@ -21,17 +22,15 @@ fn fmt(a: Option<Agg>) -> String {
     }
 }
 
-fn main() {
-    let p = learn::Params::default();
-    let rows = measure::sweep(&measure::SEEDS, &measure::NOISE, &p);
-    println!("params: {}", p.canonical());
-    println!("seeds: {:?}; each cell is median [min-max] over seeds\n", measure::SEEDS);
-    println!("| noise | habit precision | habit recall | change precision | change recall | change abs error (days) | change delay (days) | change FP rate | stance precision | stance recall | stance key accuracy | min-n refused | would derive at min_n=1 |");
-    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
-    for r in &rows {
+fn table(rows: &[Row], free: bool) {
+    let extra = if free { " habit precision, planted contexts only | built-in-context habits per life |" } else { "" };
+    println!("| noise | habit precision | habit recall |{extra} change precision | change recall | change abs error (days) | change delay (days) | change FP rate | stance precision | stance recall | stance key accuracy | min-n refused | would derive at min_n=1 |");
+    println!("|---|---|---|{}---|---|---|---|---|---|---|---|---|---|", if free { "---|---|" } else { "" });
+    for r in rows {
         let Row { noise, .. } = r;
+        let x = if free { format!(" {} | {} |", fmt(r.col(|m| Some(m.habit_precision_planted))), fmt(r.col(|m| Some(m.habit_builtin_detected as f64)))) } else { String::new() };
         println!(
-            "| {:.0}% | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {:.0}% | {} | {} |{x} {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             noise * 100.0,
             fmt(r.col(|m| Some(m.habit_precision))),
             fmt(r.col(|m| Some(m.habit_recall))),
@@ -48,16 +47,28 @@ fn main() {
         );
     }
     println!();
-    for r in &rows {
+    for r in rows {
         let g = |f: fn(&measure::RunMetrics) -> Option<f64>| r.col(f).map(|a| a.mean).unwrap_or(f64::NAN);
         println!(
-            "noise {:.0}%: means over {} seeds: habit recall {:.3}, change FP rate {:.3} (5 unchanged topics per seed), change recall {:.3}, change delay {:.1} days",
+            "noise {:.0}%: means over {} seeds: habit precision {:.3}, habit recall {:.3}, change precision {:.3}, change FP rate {:.3} (5 unchanged topics per seed), change recall {:.3}, change delay {:.1} days",
             r.noise * 100.0,
             r.runs.len(),
+            g(|m| Some(m.habit_precision)),
             g(|m| Some(m.habit_recall)),
+            g(|m| Some(m.change_precision)),
             g(|m| Some(m.change_fp_rate)),
             g(|m| Some(m.change_recall)),
             g(|m| m.change_delay),
         );
     }
+}
+
+fn main() {
+    let p = learn::Params::default();
+    println!("params: {}", p.canonical());
+    println!("seeds: {:?}; each cell is median [min-max] over seeds\n", measure::SEEDS);
+    println!("## tagged lives (ctx:/act:/topic: tags)\n");
+    table(&measure::sweep(&measure::SEEDS, &measure::NOISE, &p), false);
+    println!("\n## free-text lives (no tags; keyword rules from synth::free_text_rules)\n");
+    table(&measure::sweep_free(&measure::SEEDS, &measure::NOISE, &p), true);
 }

@@ -90,7 +90,7 @@ fn resolve_input(owner: &str, arg: &str) -> Result<(PathBuf, PathBuf, Vec<String
             disp(&oc.join(ROOTS_FILE))
         )));
     }
-    for reserved in [ROOTS_FILE, PATTERN_FILE] {
+    for reserved in [ROOTS_FILE, PATTERN_FILE, crate::learn::tagrules::RULES_FILE] {
         if canon == oc.join(reserved) {
             return Err(err(format!("'{reserved}' is reserved and cannot be ingested")));
         }
@@ -309,7 +309,7 @@ pub fn ingest_folder(args: &Value, owner: &str) -> Result<Value, Value> {
     }
     let red = Redactor::load(&oc);
     let w = walk(&start);
-    let reserved = [oc.join(ROOTS_FILE), oc.join(PATTERN_FILE)];
+    let reserved = [oc.join(ROOTS_FILE), oc.join(PATTERN_FILE), oc.join(crate::learn::tagrules::RULES_FILE)];
     let mut tally = Tally::default();
     let mut events: Vec<NewEvent> = Vec::new();
     let mut undated: Vec<String> = Vec::new();

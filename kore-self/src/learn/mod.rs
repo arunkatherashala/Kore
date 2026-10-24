@@ -21,8 +21,10 @@ pub mod habits;
 pub mod ledger;
 pub mod params;
 pub mod stances;
+pub mod tagrules;
 
 pub use params::Params;
+pub use tagrules::TagRules;
 
 use crate::versioned::EventRow;
 
@@ -83,4 +85,16 @@ pub fn learnable(rows: &[EventRow]) -> Vec<Ev> {
 /// later event cannot reach a decision made at `day`.
 pub fn visible_before(events: &[Ev], day: i64) -> Vec<Ev> {
     events.iter().filter(|e| e.day < day).cloned().collect()
+}
+
+/// At most `max` bytes of `s` (never splitting a character), with `...` appended when cut.
+pub fn clip(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &s[..end])
 }

@@ -95,6 +95,9 @@ pub struct SynthConfig {
     pub stances: Vec<StanceSpec>,
     /// Noise events added, as a fraction of signal events (0.0, 0.2, 0.5, ...).
     pub noise: f64,
+    /// Free-text mode: events carry no tags and read like short journal sentences
+    /// (see `free_text_rules`). Default false: output is unchanged.
+    pub free_text: bool,
 }
 
 /// A planted habit counts as a true habit at or above this probability.
@@ -165,7 +168,15 @@ pub fn default_config(seed: u64, noise: f64) -> SynthConfig {
             StanceSpec { day: 135, topic: s("cycling"), template: 0, detail: s("bikes") },
         ],
         noise,
+        free_text: false,
     }
+}
+
+/// The default life written as free text instead of tags (tests and measurement).
+pub fn free_text_config(seed: u64, noise: f64) -> SynthConfig {
+    let mut c = default_config(seed, noise);
+    c.free_text = true;
+    c
 }
 
 fn stamp(day: i64, counter: u32) -> String {
@@ -193,6 +204,147 @@ const NEAR_MISS: [&str; 6] = [
     "I changed my plans about lunch.",
     "Had lunch and read the news.",
 ];
+
+// ── free-text mode ──────────────────────────────────────────────────────────
+// Sentence templates written by the same author as the keyword rules below.
+// They contain varied phrasing, negations the guard can and cannot see,
+// keyword-bearing distractors, and synonyms that the rules do NOT list (so
+// some real occasions are invisible by construction).
+
+const UNLISTED_SHARE: f64 = 0.10;
+
+fn pick<'a>(rng: &mut Rng, v: &[&'a str]) -> &'a str {
+    v[rng.below(v.len())]
+}
+
+fn ctx_phrase(rng: &mut Rng, ctx: &str) -> &'static str {
+    match ctx {
+        "morning" => pick(rng, &["This morning", "Morning:", "Early morning,", "First thing in the morning,"]),
+        "evening" => pick(rng, &["In the evening", "Evening:", "Tonight", "After dinner this evening,"]),
+        "commute" => pick(rng, &["On the commute", "Commute:", "Train ride in,", "During the commute"]),
+        "afternoon" => pick(rng, &["This afternoon", "Afternoon:", "Mid afternoon,"]),
+        "lunch" => pick(rng, &["At lunch", "Lunch:", "Over lunch"]),
+        "night" => pick(rng, &["Late at night", "Night:", "Before bed at night,"]),
+        "retreat" => pick(rng, &["At the retreat", "Retreat day:"]),
+        "conference" => pick(rng, &["At the conference", "Conference day:"]),
+        _ => "Today",
+    }
+}
+
+fn action_clause(rng: &mut Rng, act: &str, unlisted: bool) -> &'static str {
+    match (act, unlisted) {
+        ("run", false) => pick(rng, &["went for a run", "ran 5k", "jogged around the park", "did a quick run before work"]),
+        ("run", true) => "did laps around the track",
+        ("read", false) => pick(rng, &["read a few chapters", "spent an hour reading", "finished a book I read slowly"]),
+        ("read", true) => "got through a few chapters of the novel",
+        ("podcast", false) => pick(rng, &["listened to a podcast", "caught up on a podcast episode", "two podcasts back to back"]),
+        ("podcast", true) => "listened to an audio show",
+        ("hike", false) => pick(rng, &["hiked up the ridge", "went on a long hike", "hiked the loop trail"]),
+        ("hike", true) => "walked the mountain trail",
+        ("cook", false) => pick(rng, &["cooked dinner for friends", "cook night, tried something new", "made dinner from scratch"]),
+        ("cook", true) => "put together a big pot of stew",
+        ("nap", false) => pick(rng, &["took a nap", "napped for an hour", "a short nap on the sofa"]),
+        ("nap", true) => "dozed off on the sofa",
+        _ => "did something",
+    }
+}
+
+/// Negated mentions of an action. The last form of each is a post-negation
+/// ("... was called off") that the guard does not see by design.
+fn negated_clause(rng: &mut Rng, act: &str) -> &'static str {
+    let (a, b, c, post) = match act {
+        "run" => ("did not run at all", "skipped the run", "no run today", "the run was called off"),
+        "read" => ("did not read anything", "skipped reading", "no reading at all", "the reading was put off"),
+        "podcast" => ("no podcast today", "skipped the podcast", "never put a podcast on", "the podcast went unplayed"),
+        "hike" => ("didn't go for a hike", "skipped the hike", "no hike this time", "the hike was cancelled by rain"),
+        "cook" => ("did not cook", "skipped cook night", "no cook night, ordered in", "cook night got postponed"),
+        "nap" => ("did not nap", "skipped the nap", "no nap, too busy", "the nap never happened"),
+        _ => ("did not do it", "skipped it", "no luck", "it was off"),
+    };
+    // 15% post-negations
+    if rng.f64() < 0.15 {
+        post
+    } else {
+        pick(rng, &[a, b, c])
+    }
+}
+
+/// One occasion as a sentence. `planted` is the habit's own action when the
+/// occasion did not take it: 40% of those mention it negated instead of doing
+/// something else.
+fn free_action(rng: &mut Rng, ctx: &str, act: &str, planted: Option<&str>) -> String {
+    let c = ctx_phrase(rng, ctx);
+    if let Some(pl) = planted {
+        if rng.f64() < 0.4 {
+            return format!("{c} {}.", negated_clause(rng, pl));
+        }
+    }
+    let unlisted = rng.f64() < UNLISTED_SHARE;
+    format!("{c} {}.", action_clause(rng, act, unlisted))
+}
+
+fn free_topic(rng: &mut Rng, topic: &str, noise: bool) -> String {
+    let unlisted = rng.f64() < UNLISTED_SHARE;
+    let (listed, other): (&[&str], &str) = match topic {
+        "gardening" => (&["Spent a while gardening", "Worked in the garden", "Planted tomatoes", "Gardening notes for next year"], "Pulled weeds and watered the beds"),
+        "politics" => (&["Followed the election news", "Argued about politics again", "The senate vote kept me up", "Too much politics on the feed"], "Doomscrolled the headlines"),
+        "startup" => (&["Worked on the startup idea", "Wrote the pitch deck", "Coffee with two founders", "Startup finances are a mess"], "Sketched the business plan"),
+        "cooking" => (&["Tried a new recipe", "Baking day", "Cooking is a good break", "Copied a recipe into the notebook"], "Tested a sourdough starter"),
+        "music" => (&["Practiced guitar", "Music playlist for the week", "Went to a concert", "Found new music"], "Learned a new chord shape"),
+        "travel" => (&["Booked a flight", "Planning the trip", "Travel insurance paperwork", "Packing list for the trip"], "Checked passport dates"),
+        "health" => (&["Doctor appointment", "Health insurance paperwork", "Annual checkup went fine", "Thinking about health"], "Blood test results came back"),
+        "books" => (&["Borrowed books from the library", "Started a new novel", "Library hold arrived", "Sorted the shelf of old books"], "Rearranged the shelf of paperbacks"),
+        _ => (&["Thought about it"], "Thought about it"),
+    };
+    let _ = noise;
+    if unlisted {
+        other.to_string()
+    } else {
+        format!("{}.", listed[rng.below(listed.len())])
+    }
+}
+
+/// Chatter that carries action keywords without being the action.
+const DISTRACTORS: [&str; 8] = [
+    "The bus ran late again.",
+    "My reading glasses broke.",
+    "The podcast app crashed on my phone.",
+    "Hike permit prices went up.",
+    "The cook at the corner cafe was friendly.",
+    "The baby's nap schedule is a mess.",
+    "Updated the project plan and replied to emails.",
+    "Watched the game with friends.",
+];
+
+/// The keyword rules that match the free-text templates above (what a user of
+/// this life would plausibly write after looking at `self_tag_rules_check`).
+pub fn free_text_rules() -> String {
+    "# synthetic life: rules written by the same author as the templates\n\
+     negation = actions\n\
+     ctx:morning = morning\n\
+     ctx:evening = evening, tonight\n\
+     ctx:commute = commute, train ride\n\
+     ctx:afternoon = afternoon\n\
+     ctx:lunch = lunch\n\
+     ctx:night = night\n\
+     ctx:retreat = retreat\n\
+     ctx:conference = conference\n\
+     action:run = run, ran, jogged\n\
+     action:read = read, reading\n\
+     action:podcast = podcast, podcasts\n\
+     action:hike = hike, hiked\n\
+     action:cook = cook, cooked, made dinner\n\
+     action:nap = nap, napped\n\
+     topic:gardening = gardening, garden, tomatoes\n\
+     topic:politics = politics, election, senate\n\
+     topic:startup = startup, founders, pitch\n\
+     topic:cooking = cooking, recipe, baking\n\
+     topic:music = music, guitar, concert\n\
+     topic:travel = travel, flight, trip\n\
+     topic:health = health, doctor, checkup\n\
+     topic:books = books, novel, library\n"
+        .to_string()
+}
 
 pub fn generate(cfg: &SynthConfig) -> (Vec<NewEvent>, Truth) {
     let mut rng = Rng::new(cfg.seed);
@@ -222,8 +374,9 @@ pub fn generate(cfg: &SynthConfig) -> (Vec<NewEvent>, Truth) {
         }
         for d in 0..cfg.days {
             for _ in 0..rng.poisson(cfg.occasions_per_day) {
-                let act = if rng.f64() < h.p { h.action.clone() } else { other(&mut rng, &h.action, &cfg.actions) };
-                let (t, tags) = action_event(&h.context, &act);
+                let taken = rng.f64() < h.p;
+                let act = if taken { h.action.clone() } else { other(&mut rng, &h.action, &cfg.actions) };
+                let (t, tags) = if cfg.free_text { (free_action(&mut rng, &h.context, &act, if taken { None } else { Some(&h.action) }), vec![]) } else { action_event(&h.context, &act) };
                 push(&mut out, &mut per_day, cfg.start_day + d, "synth", "action", t, tags);
             }
         }
@@ -233,7 +386,7 @@ pub fn generate(cfg: &SynthConfig) -> (Vec<NewEvent>, Truth) {
         for d in 0..cfg.days {
             for _ in 0..rng.poisson(cfg.occasions_per_day) {
                 let act = cfg.actions[rng.below(cfg.actions.len())].clone();
-                let (t, tags) = action_event(c, &act);
+                let (t, tags) = if cfg.free_text { (free_action(&mut rng, c, &act, None), vec![]) } else { action_event(c, &act) };
                 push(&mut out, &mut per_day, cfg.start_day + d, "synth", "action", t, tags);
             }
         }
@@ -242,7 +395,7 @@ pub fn generate(cfg: &SynthConfig) -> (Vec<NewEvent>, Truth) {
         truth.rare_contexts.push(c.clone());
         for _ in 0..*n {
             let d = rng.below(cfg.days as usize) as i64;
-            let (t, tags) = action_event(c, a);
+            let (t, tags) = if cfg.free_text { (free_action(&mut rng, c, a, None), vec![]) } else { action_event(c, a) };
             push(&mut out, &mut per_day, cfg.start_day + d, "synth", "action", t, tags);
         }
     }
@@ -259,7 +412,12 @@ pub fn generate(cfg: &SynthConfig) -> (Vec<NewEvent>, Truth) {
         for d in 0..cfg.days {
             let rate = t.shifts.iter().rev().find(|(sd, _)| *sd <= d).map(|x| x.1).unwrap_or(t.base_rate);
             for _ in 0..rng.poisson(rate) {
-                push(&mut out, &mut per_day, cfg.start_day + d, "synth", "note", format!("Thought about {} today", t.topic), vec![format!("topic:{}", t.topic)]);
+                if cfg.free_text {
+                    let text = free_topic(&mut rng, &t.topic, false);
+                    push(&mut out, &mut per_day, cfg.start_day + d, "synth", "note", text, vec![]);
+                } else {
+                    push(&mut out, &mut per_day, cfg.start_day + d, "synth", "note", format!("Thought about {} today", t.topic), vec![format!("topic:{}", t.topic)]);
+                }
             }
         }
     }
@@ -279,13 +437,18 @@ pub fn generate(cfg: &SynthConfig) -> (Vec<NewEvent>, Truth) {
         if r < 0.4 {
             let c = &ctxs[rng.below(ctxs.len())];
             let a = cfg.actions[rng.below(cfg.actions.len())].clone();
-            let (t, tags) = action_event(c, &a);
+            let (t, tags) = if cfg.free_text { (free_action(&mut rng, c, &a, None), vec![]) } else { action_event(c, &a) };
             push(&mut out, &mut per_day, cfg.start_day + d, "synth-noise", "action", t, tags);
         } else if r < 0.8 {
             let t = &cfg.topics[rng.below(cfg.topics.len())].topic;
-            push(&mut out, &mut per_day, cfg.start_day + d, "synth-noise", "note", format!("Noise mention of {t}"), vec![format!("topic:{t}")]);
+            if cfg.free_text {
+                let text = free_topic(&mut rng, t, true);
+                push(&mut out, &mut per_day, cfg.start_day + d, "synth-noise", "note", text, vec![]);
+            } else {
+                push(&mut out, &mut per_day, cfg.start_day + d, "synth-noise", "note", format!("Noise mention of {t}"), vec![format!("topic:{t}")]);
+            }
         } else {
-            let t = NEAR_MISS[rng.below(NEAR_MISS.len())].to_string();
+            let t = if cfg.free_text && rng.f64() < 0.6 { DISTRACTORS[rng.below(DISTRACTORS.len())].to_string() } else { NEAR_MISS[rng.below(NEAR_MISS.len())].to_string() };
             push(&mut out, &mut per_day, cfg.start_day + d, "synth-noise", "note", t, vec![]);
         }
     }

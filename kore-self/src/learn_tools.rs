@@ -7,14 +7,14 @@
 //! nothing here writes or compiles source code.
 
 use crate::learn::derive::{self, Kinds};
-use crate::learn::{evolve, ledger, Params};
+use crate::learn::{evolve, habits, ledger, Params, TagRules};
 use crate::log_tools::{err, log_err, open, req_str, str_list, text};
 use crate::safety;
 use crate::versioned::{self as vl, CauseRow, EventRow, NewOutcome, PredictionRow, RevisionRow};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-pub const TOOLS: [&str; 5] = ["self_learn", "self_explain", "self_evolve_rules", "self_ledger_snapshot", "self_ledger_outcome"];
+pub const TOOLS: [&str; 6] = ["self_learn", "self_explain", "self_evolve_rules", "self_ledger_snapshot", "self_ledger_outcome", "self_tag_rules_check"];
 
 pub fn handle(name: &str, args: &Value, owner: &str) -> Result<Value, Value> {
     match name {
@@ -23,6 +23,7 @@ pub fn handle(name: &str, args: &Value, owner: &str) -> Result<Value, Value> {
         "self_evolve_rules" => evolve_rules(args, owner),
         "self_ledger_snapshot" => ledger_snapshot(args, owner),
         "self_ledger_outcome" => ledger_outcome(args, owner),
+        "self_tag_rules_check" => tag_rules_check(owner),
         _ => Err(err("unknown tool")),
     }
 }
@@ -53,7 +54,8 @@ fn learn(args: &Value, owner: &str) -> Result<Value, Value> {
         params.habit_min_n = n;
     }
     params.validate().map_err(err)?;
-    let r = derive::learn(&mut log, &params, &kinds, dry).map_err(log_err)?;
+    let rules = TagRules::load(&safety::owner_dir(owner));
+    let r = derive::learn_with(&mut log, &params, &kinds, dry, rules.as_ref()).map_err(log_err)?;
     let mut counts = json!({});
     for k in ["habits", "changes", "stances"] {
         let (mut derived, mut new) = (0, 0);
@@ -77,7 +79,11 @@ fn learn(args: &Value, owner: &str) -> Result<Value, Value> {
                     "rev_id": o.rev_id, "new": o.is_new, "detail": it.detail })
         })
         .collect();
-    Ok(text(json!({
+    let tag_rules = rules.as_ref().map(|t| json!({
+        "file": crate::learn::tagrules::RULES_FILE, "rules": t.rules.len(), "fingerprint": t.fingerprint, "warnings": t.warnings,
+        "note": "keyword rules applied at read time; stored events and tags are unchanged; see self_tag_rules_check",
+    }));
+    let mut out = json!({
         "dry_run": dry,
         "params": params.to_json(),
         "params_source": rule_rev.map(|id| format!("rule revision {id}")).unwrap_or_else(|| "built-in defaults".into()),
@@ -90,6 +96,79 @@ fn learn(args: &Value, owner: &str) -> Result<Value, Value> {
             "topics": r.derivation.insufficient_topics.iter().map(|i| json!({"topic": i.topic, "mentions": i.total, "min_mentions": i.min_total})).collect::<Vec<_>>(),
         },
         "note": "rule-based, deterministic; accuracy has been measured only on synthetic data (docs/measured.md)",
+    });
+    if let Some(t) = tag_rules {
+        out["tag_rules"] = t;
+    }
+    Ok(text(out))
+}
+
+const CHECK_SAMPLE: usize = 5;
+const CHECK_UNMATCHED: usize = 15;
+
+type RuleStat = (usize, std::collections::BTreeSet<i64>, usize, usize, Vec<Value>);
+
+/// Read-only: how the owner's `tag_rules.txt` fares on the log.
+fn tag_rules_check(owner: &str) -> Result<Value, Value> {
+    let log = open(owner)?;
+    let Some(t) = TagRules::load(&safety::owner_dir(owner)) else {
+        return Ok(text(json!({
+            "file_present": false,
+            "note": "no tag_rules.txt in the owner directory; self_learn then uses stored ctx:/act:/topic: tags only. Create the file by hand (tools cannot write it): lines like 'topic:cooking = cooking, recipe' or 'action:gym = gym, workout'",
+        })));
+    };
+    let events = crate::learn::learnable(&log.open_latest().rows());
+    // per rule: events matched, days matched, events with suppressed hits, events with only suppressed hits, sample
+    let mut per: Vec<RuleStat> = t.rules.iter().map(|_| (0, Default::default(), 0, 0, Vec::new())).collect();
+    let (mut unmatched, mut unmatched_sample) = (0usize, Vec::new());
+    for e in &events {
+        let mut any = false;
+        for h in t.hits(&e.text) {
+            let slot = &mut per[h.rule];
+            if h.positive > 0 {
+                any = true;
+                slot.0 += 1;
+                slot.1.insert(e.day);
+                if slot.4.len() < CHECK_SAMPLE {
+                    slot.4.push(json!({"event_id": e.id, "occurred_at": e.ts, "text": crate::learn::clip(&e.text, 120)}));
+                }
+            }
+            if h.negated > 0 {
+                slot.2 += 1;
+                if h.positive == 0 {
+                    slot.3 += 1;
+                }
+            }
+        }
+        if !any {
+            unmatched += 1;
+            if unmatched_sample.len() < CHECK_UNMATCHED {
+                unmatched_sample.push(json!({"event_id": e.id, "occurred_at": e.ts, "text": crate::learn::clip(&e.text, 120)}));
+            }
+        }
+    }
+    let rules: Vec<Value> = t
+        .rules
+        .iter()
+        .zip(per)
+        .map(|(r, (n, days, neg, neg_only, sample))| {
+            json!({"rule": r.label(), "keywords": r.keywords, "events_matched": n, "days_matched": days.len(),
+                   "events_with_negated_hits": neg, "events_dropped_by_negation_guard": neg_only, "sample": sample})
+        })
+        .collect();
+    let day = habits::day_summary(&events, &t);
+    let occasions: Vec<Value> = day
+        .iter()
+        .map(|(c, (n, acts))| json!({"context": c, "days": n, "actions": acts.iter().map(|(a, k)| json!({"action": a, "days": k, "rate": ((*k as f64 / *n as f64) * 1000.0).round() / 1000.0})).collect::<Vec<_>>()}))
+        .collect();
+    Ok(text(json!({
+        "file_present": true, "fingerprint": t.fingerprint, "warnings": t.warnings,
+        "negation": format!("{:?}", t.neg).to_lowercase(), "builtin_contexts": t.builtin,
+        "events_total": events.len(), "events_matched_by_any_rule": events.len() - unmatched, "events_unmatched": unmatched,
+        "rules": rules,
+        "day_occasions": occasions,
+        "unmatched_sample": unmatched_sample,
+        "note": "read-only; nothing was written. 'unmatched_sample' shows events no rule recognised: add keywords for what matters. Matching is whole-word, case-insensitive, and the negation guard is best effort (docs/measured.md, free-text section)",
     })))
 }
 
@@ -184,7 +263,7 @@ fn ledger_outcome(args: &Value, owner: &str) -> Result<Value, Value> {
 pub fn tool_defs() -> Vec<Value> {
     vec![
         json!({ "name": "self_learn",
-          "description": "Derive habits, topic change points and explicit stance statements from the event log with deterministic rules; each derived revision is authored by a rule and cites its events (idempotent, incremental). Measured only on synthetic data",
+          "description": "Derive habits, topic change points and explicit stance statements from the event log with deterministic rules; each derived revision is authored by a rule and cites its events (idempotent, incremental). Free-text events are read through the optional hand-edited tag_rules.txt. Measured only on synthetic data",
           "inputSchema": { "type": "object", "properties": {
             "kinds": { "type": "array", "items": { "type": "string", "enum": ["habits", "changes", "stances"] }, "description": "Default: all three" },
             "dry_run": { "type": "boolean", "description": "Report what would be derived without writing" },
@@ -211,6 +290,9 @@ pub fn tool_defs() -> Vec<Value> {
             "resolved_at": { "type": "string", "description": "ISO-8601 UTC time the outcome became known. Required" },
             "outcome_event_id": { "type": "string" }
           }, "required": ["pred_id", "actual", "resolved_at"] } }),
+        json!({ "name": "self_tag_rules_check",
+          "description": "Read-only: show how your hand-edited tag_rules.txt (keyword rules for topics, actions and contexts in free-text events) matches the log: events and days matched per rule, hits dropped by the negation guard, day-level occasions, and a sample of events no rule matched",
+          "inputSchema": { "type": "object", "properties": {} } }),
     ]
 }
 

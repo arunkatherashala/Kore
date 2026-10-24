@@ -103,17 +103,21 @@ fn folder_must_be_inside_an_allowed_root() {
 fn allow_list_and_pattern_files_are_not_reachable_through_tool_paths() {
     let o = "ing-reserved";
     owner_dir(o);
-    for name in [ROOTS_FILE, PATTERN_FILE, "INGEST_ROOTS", "ingest_roots.txt"] {
+    for name in [ROOTS_FILE, PATTERN_FILE, "INGEST_ROOTS", "ingest_roots.txt", "tag_rules.txt", "TAG_RULES.TXT", "tag_rules"] {
         assert!(safety::safe_path(o, name).is_err(), "{name} must be refused by safe_path");
     }
     assert!(safety::safe_path(o, "context/x.md").is_ok());
     std::fs::write(owner_dir(o).join(PATTERN_FILE), "secretword\n").unwrap();
+    std::fs::write(owner_dir(o).join("tag_rules.txt"), "topic:x = tagrulesecret\n").unwrap();
+    let e = bad(o, "self_ingest_csv", json!({"path": "tag_rules.txt", "mapping": {"occurred_at": "a", "text": "b"}}));
+    assert!(e.contains("reserved"), "{e}");
     let e = bad(o, "self_ingest_csv", json!({"path": PATTERN_FILE, "mapping": {"occurred_at": "a", "text": "b"}}));
     assert!(e.contains("reserved"), "{e}");
     write(&owner_dir(o), "2024-01-01-x.md", "plain");
     let r = ok(o, "self_ingest_folder", json!({"path": "."}));
     assert_eq!(r["added"], 1, "{r}");
     assert!(!event_texts(o).contains("secretword"));
+    assert!(!event_texts(o).contains("tagrulesecret"), "tag_rules.txt must not be ingested as a note");
 }
 
 // ─── folder ingest ───────────────────────────────────────────────────────────

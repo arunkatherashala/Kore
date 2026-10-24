@@ -739,6 +739,7 @@ Generated from the tool registry with `kore-self --tool-table`. A test (`docs_ma
 | `self_evolve_rules` | Propose a neighbouring set of learner parameters, backtest it on the past of the log (rolling origin) against the current set and a trivial baseline, and promote it only if it wins; every promotion or rejection is logged with its scores |
 | `self_ledger_snapshot` | Record frequency-baseline predictions (action in context within the next 7 days) for each habit with enough data, using only events before the window start; one row per habit and window, never scored here |
 | `self_ledger_outcome` | Attach an outcome (yes or no) to a stored prediction, optionally citing the event that shows it; no score is computed |
+| `self_tag_rules_check` | Read-only: show how your hand-edited tag_rules.txt (keyword rules for topics, actions and contexts in free-text events) matches the log: events and days matched per rule, hits dropped by the negation guard, day-level occasions, and a sample of events no rule matched |
 <!-- tools:end -->
 
 ### Where files go
