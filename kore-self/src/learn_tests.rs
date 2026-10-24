@@ -304,7 +304,7 @@ fn evolve_cannot_see_events_after_the_cut() {
     assert_ne!(a, b);
     let p = Params::default();
     for o in (cut - 40)..=cut {
-        assert_eq!(evolve::predict_at(&a, &p, o), evolve::predict_at(&b, &p, o), "origin {o} saw the future");
+        assert_eq!(evolve::predict_at(&a, &p, o, None), evolve::predict_at(&b, &p, o, None), "origin {o} saw the future");
     }
     assert!(visible_before(&a, cut).iter().all(|e| e.day < cut));
     let inc = Params { habit_min_n: 20, ..Params::default() };
@@ -829,4 +829,42 @@ fn builtin_weekday_context_needs_a_difference_from_the_weekend() {
     let b = habits::detect_full(&weekday_only, &p, Some(&rules));
     assert!(b.habits.iter().any(|h| h.context == "weekday" && h.action == "gym"));
     assert!(!b.habits.iter().any(|h| h.context == "weekend" && h.action == "gym"));
+}
+
+// ── evolve and ledger read free text through tag_rules.txt too ──────────────
+
+#[test]
+fn evolve_and_ledger_use_the_same_virtual_tags_as_learn() {
+    crate::safety::test_support::init();
+    let (events, _) = synth::generate(&synth::free_text_config(11, 0.2));
+    let (with, without) = ("lt-evo-rules", "lt-evo-norules");
+    for o in [with, without] {
+        crate::log_tools::open(o).unwrap_or_else(|e| panic!("{e}")).append_events(&events).unwrap();
+    }
+    let dir = crate::safety::owner_dir(with);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("tag_rules.txt"), synth::free_text_rules()).unwrap();
+    // library level
+    let rules = TagRules::parse(&synth::free_text_rules());
+    let evs = synth::to_evs(&events);
+    let origin = evs.iter().map(|e| e.day).max().unwrap() - 30;
+    let p = Params::default();
+    assert!(evolve::predict_at(&evs, &p, origin, Some(&rules)).contains(&("morning".to_string(), "run".to_string())));
+    assert!(evolve::predict_at(&evs, &p, origin, None).is_empty(), "free text has no tags without rules");
+    let cfg = evolve::EvolveCfg { rules: Some(rules.clone()), ..evolve::EvolveCfg::default() };
+    assert!(evolve::truth_at(&evs, origin, &cfg).contains(&("morning".to_string(), "run".to_string())));
+    assert!(evolve::truth_at(&evs, origin, &evolve::EvolveCfg::default()).is_empty());
+    assert!(!evolve::baseline_at(&evs, origin, Some(&rules)).is_empty());
+    assert!(evolve::baseline_at(&evs, origin, None).is_empty());
+    // tool level: ledger
+    let l1 = ok("self_ledger_snapshot", with, json!({"dry_run": true}));
+    assert!(l1["written"].as_array().unwrap().iter().any(|w| w["context"] == "morning" && w["action"] == "run"), "{l1}");
+    let l0 = ok("self_ledger_snapshot", without, json!({"dry_run": true}));
+    assert!(l0["written"].as_array().unwrap().is_empty(), "{l0}");
+    // tool level: evolve (dry run): with rules the baseline has something to score
+    let e1 = ok("self_evolve_rules", with, json!({"dry_run": true}));
+    let e0 = ok("self_evolve_rules", without, json!({"dry_run": true}));
+    assert!(e1["evaluation"]["baseline"]["f1"].as_f64().unwrap() > 0.0, "{e1}");
+    assert_eq!(e0["evaluation"]["baseline"]["f1"].as_f64().unwrap_or(0.0), 0.0, "{e0}");
+    std::fs::remove_file(dir.join("tag_rules.txt")).unwrap();
 }

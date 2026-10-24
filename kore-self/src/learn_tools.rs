@@ -225,7 +225,8 @@ fn explain(args: &Value, owner: &str) -> Result<Value, Value> {
 fn evolve_rules(args: &Value, owner: &str) -> Result<Value, Value> {
     let dry = opt_bool(args, "dry_run")?;
     let mut log = open(owner)?;
-    let (d, rec) = evolve::run(&mut log, &evolve::EvolveCfg::default(), dry).map_err(log_err)?;
+    let cfg = evolve::EvolveCfg { rules: TagRules::load(&safety::owner_dir(owner)), ..evolve::EvolveCfg::default() };
+    let (d, rec) = evolve::run(&mut log, &cfg, dry).map_err(log_err)?;
     let mut out = d.to_json();
     out["dry_run"] = json!(dry);
     out["recorded"] = match rec {
@@ -250,7 +251,8 @@ fn ledger_snapshot(args: &Value, owner: &str) -> Result<Value, Value> {
         params.habit_min_n = n;
     }
     params.validate().map_err(err)?;
-    let r = ledger::snapshot(&mut log, &params, window_start, days, dry).map_err(log_err)?;
+    let rules = TagRules::load(&safety::owner_dir(owner));
+    let r = ledger::snapshot_with(&mut log, &params, window_start, days, dry, rules.as_ref()).map_err(log_err)?;
     Ok(text(json!({
         "dry_run": dry, "window_start": r.window_start, "resolves_by": r.resolves_by, "cutoff": r.cutoff,
         "model": format!("{} {}", ledger::MODEL_ID, ledger::MODEL_VERSION),

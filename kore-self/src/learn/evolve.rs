@@ -27,6 +27,7 @@
 use super::dates;
 use super::derive::{current_params_in, MAX_CITED};
 use super::params::{Params, RULE_KEY};
+use super::tagrules::TagRules;
 use super::{habits, visible_before, Ev};
 use crate::versioned::{sha256_hex, AsOf, Batch, LogError, NewEvent, NewRevision, RevisionRow, VersionedLog};
 use serde_json::{json, Value};
@@ -41,10 +42,13 @@ pub struct EvolveCfg {
     pub min_span_days: i64,
     pub eval_min: u32,
     pub eval_share: f64,
+    /// Keyword rules (tag_rules.txt): when set, predictions, truth and baseline all read free text through them,
+    /// exactly like `self_learn`.
+    pub rules: Option<TagRules>,
 }
 impl Default for EvolveCfg {
     fn default() -> Self {
-        EvolveCfg { horizon: 14, margin: 0.02, min_span_days: 90, eval_min: 3, eval_share: 0.5 }
+        EvolveCfg { horizon: 14, margin: 0.02, min_span_days: 90, eval_min: 3, eval_share: 0.5, rules: None }
     }
 }
 
@@ -68,35 +72,28 @@ impl Score {
 type Pairs = BTreeSet<(String, String)>;
 
 /// What the learner predicts at `origin`, from events before it only.
-pub fn predict_at(events: &[Ev], p: &Params, origin: i64) -> Pairs {
+pub fn predict_at(events: &[Ev], p: &Params, origin: i64, rules: Option<&TagRules>) -> Pairs {
     let vis = visible_before(events, origin);
-    habits::detect(&vis, p).0.into_iter().map(|h| (h.context, h.action)).collect()
+    habits::detect_with(&vis, p, rules).0.into_iter().map(|h| (h.context, h.action)).collect()
 }
 
-pub fn baseline_at(events: &[Ev], origin: i64) -> Pairs {
+pub fn baseline_at(events: &[Ev], origin: i64, rules: Option<&TagRules>) -> Pairs {
     let vis = visible_before(events, origin);
-    habits::modal_baseline(&vis, 0).into_iter().collect()
+    habits::modal_baseline_with(&vis, 0, rules).into_iter().collect()
 }
 
 /// Truth for the window [origin, origin + horizon). Uses the future by design;
 /// it is never given to a predictor.
 pub fn truth_at(events: &[Ev], origin: i64, cfg: &EvolveCfg) -> Pairs {
-    let mut by: BTreeMap<&str, (u32, BTreeMap<&str, u32>)> = BTreeMap::new();
-    for e in events.iter().filter(|e| e.day >= origin && e.day < origin + cfg.horizon) {
-        let Some(c) = e.tag_val(super::CTX_PREFIX) else { continue };
-        let a = e.tag_val(super::ACT_PREFIX).unwrap_or(super::NO_ACTION);
-        let s = by.entry(c).or_default();
-        s.0 += 1;
-        *s.1.entry(a).or_default() += 1;
-    }
+    let window: Vec<Ev> = events.iter().filter(|e| e.day >= origin && e.day < origin + cfg.horizon).cloned().collect();
     let mut out = Pairs::new();
-    for (c, (n, acts)) in by {
-        if n < cfg.eval_min {
+    for (c, o) in habits::occasions(&window, 0, cfg.rules.as_ref()) {
+        if o.n < cfg.eval_min {
             continue;
         }
-        for (a, k) in acts {
-            if a != super::NO_ACTION && k as f64 / n as f64 >= cfg.eval_share {
-                out.insert((c.to_string(), a.to_string()));
+        for (a, (k, _)) in o.acts {
+            if a != super::NO_ACTION && k as f64 / o.n as f64 >= cfg.eval_share {
+                out.insert((c.clone(), a));
             }
         }
     }
@@ -112,7 +109,7 @@ fn add(s: &mut Score, pred: &Pairs, truth: &Pairs) {
 pub fn score_params(events: &[Ev], p: &Params, origins: &[i64], cfg: &EvolveCfg) -> Score {
     let mut s = Score::default();
     for &o in origins {
-        add(&mut s, &predict_at(events, p, o), &truth_at(events, o, cfg));
+        add(&mut s, &predict_at(events, p, o, cfg.rules.as_ref()), &truth_at(events, o, cfg));
     }
     s
 }
@@ -120,7 +117,7 @@ pub fn score_params(events: &[Ev], p: &Params, origins: &[i64], cfg: &EvolveCfg)
 pub fn score_baseline(events: &[Ev], origins: &[i64], cfg: &EvolveCfg) -> Score {
     let mut s = Score::default();
     for &o in origins {
-        add(&mut s, &baseline_at(events, o), &truth_at(events, o, cfg));
+        add(&mut s, &baseline_at(events, o, cfg.rules.as_ref()), &truth_at(events, o, cfg));
     }
     s
 }

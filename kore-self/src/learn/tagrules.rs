@@ -42,7 +42,8 @@
 
 use super::Ev;
 use crate::versioned::sha256_hex;
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 pub const RULES_FILE: &str = "tag_rules.txt";
@@ -93,6 +94,26 @@ impl Rule {
     }
 }
 
+/// Per-text classification cache (backtests classify the same events many
+/// times). Ignored by equality, empty after `clone`.
+#[derive(Default)]
+struct Cache(RefCell<HashMap<String, Vec<Classified>>>);
+impl Clone for Cache {
+    fn clone(&self) -> Self {
+        Cache::default()
+    }
+}
+impl PartialEq for Cache {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl std::fmt::Debug for Cache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Cache")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TagRules {
     pub rules: Vec<Rule>,
@@ -101,6 +122,7 @@ pub struct TagRules {
     pub warnings: Vec<String>,
     /// First 12 hex of sha256 over the canonical rules text.
     pub fingerprint: String,
+    cache: Cache,
 }
 
 impl Default for TagRules {
@@ -187,7 +209,7 @@ fn valid_name(n: &str) -> bool {
 impl TagRules {
     /// Parse the file text. Bad lines are skipped and reported in `warnings`.
     pub fn parse(text: &str) -> TagRules {
-        let mut r = TagRules { rules: Vec::new(), neg: NegMode::Actions, builtin: true, warnings: Vec::new(), fingerprint: String::new() };
+        let mut r = TagRules { rules: Vec::new(), neg: NegMode::Actions, builtin: true, warnings: Vec::new(), fingerprint: String::new(), cache: Cache::default() };
         for (ln, raw) in text.lines().enumerate() {
             let line = match raw.find('#') {
                 Some(i) => &raw[..i],
@@ -370,6 +392,19 @@ impl TagRules {
     /// end at . ! ? ; or a line break; ':' and ',' do not end one). Negation
     /// guard as in `classify`.
     pub fn classify_sentences(&self, text: &str) -> Vec<Classified> {
+        if let Some(c) = self.cache.0.borrow().get(text) {
+            return c.clone();
+        }
+        let v = self.classify_sentences_uncached(text);
+        let mut m = self.cache.0.borrow_mut();
+        if m.len() > 200_000 {
+            m.clear();
+        }
+        m.insert(text.to_string(), v.clone());
+        v
+    }
+
+    fn classify_sentences_uncached(&self, text: &str) -> Vec<Classified> {
         let toks = tokenize(text);
         let mut out = Vec::new();
         let mut i = 0;
@@ -404,23 +439,13 @@ impl TagRules {
     /// Names (deduplicated, sorted) of the rules that hold for this text.
     /// Built-in date contexts are not included here.
     pub fn classify(&self, text: &str) -> Classified {
-        let mut c = Classified::default();
         let (mut t, mut a, mut x) = (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
-        for h in self.hits(text) {
-            if h.positive == 0 {
-                continue;
-            }
-            let r = &self.rules[h.rule];
-            match r.kind {
-                RuleKind::Topic => t.insert(r.name.clone()),
-                RuleKind::Action => a.insert(r.name.clone()),
-                RuleKind::Ctx => x.insert(r.name.clone()),
-            };
+        for c in self.classify_sentences(text) {
+            t.extend(c.topics);
+            a.extend(c.actions);
+            x.extend(c.ctxs);
         }
-        c.topics = t.into_iter().collect();
-        c.actions = a.into_iter().collect();
-        c.ctxs = x.into_iter().collect();
-        c
+        Classified { topics: t.into_iter().collect(), actions: a.into_iter().collect(), ctxs: x.into_iter().collect() }
     }
 
     /// Copies of `events` with a virtual `topic:<T>` tag added where a topic

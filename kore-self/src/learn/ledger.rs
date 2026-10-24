@@ -13,6 +13,7 @@
 use super::dates;
 use super::derive::MAX_CITED;
 use super::params::{wilson_smoothed, Params};
+use super::tagrules::TagRules;
 use super::{habits, visible_before};
 use crate::versioned::{Batch, LogError, NewPrediction, PredictionRow, VersionedLog};
 use serde_json::{json, Value};
@@ -33,6 +34,11 @@ pub struct SnapshotResult {
 }
 
 pub fn snapshot(log: &mut VersionedLog, p: &Params, window_start: Option<&str>, window_days: i64, dry_run: bool) -> Result<SnapshotResult, LogError> {
+    snapshot_with(log, p, window_start, window_days, dry_run, None)
+}
+
+/// `snapshot` reading free text through keyword rules (as `self_learn` does).
+pub fn snapshot_with(log: &mut VersionedLog, p: &Params, window_start: Option<&str>, window_days: i64, dry_run: bool, rules: Option<&TagRules>) -> Result<SnapshotResult, LogError> {
     let events = super::learnable(&log.open_latest().rows());
     let newest = events.iter().map(|e| e.day).max().ok_or_else(|| LogError::Invalid("the log has no events to learn from".into()))?;
     let ws = match window_start {
@@ -48,7 +54,7 @@ pub fn snapshot(log: &mut VersionedLog, p: &Params, window_start: Option<&str>, 
     let date = dates::date_of(ws);
     let resolves_by = dates::midnight_of(ws + window_days);
     let have: HashSet<String> = log.open_latest().rows::<PredictionRow>().into_iter().map(|r| r.question_id).collect();
-    let (hs, insuff) = habits::detect(&vis, p);
+    let (hs, insuff) = habits::detect_with(&vis, p, rules);
     let mut batch = Batch::default();
     let (mut written, mut present) = (Vec::new(), 0usize);
     for h in hs {
