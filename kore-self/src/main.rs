@@ -45,6 +45,7 @@ mod ingest_tools;
 mod learn;
 mod learn_tools;
 mod being;
+mod being_tools;
 #[cfg(test)]
 mod synth;
 #[cfg(test)]

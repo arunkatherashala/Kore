@@ -19,7 +19,7 @@ use std::sync::Mutex;
 static LOG_LOCK: Mutex<()> = Mutex::new(());
 
 /// Tools that only need the owner name (no `KoreSelf` state).
-pub const STATELESS_TOOLS: [&str; 18] = [
+pub const STATELESS_TOOLS: [&str; 21] = [
     "self_event_add",
     "self_belief_revise",
     "self_belief_history",
@@ -38,6 +38,9 @@ pub const STATELESS_TOOLS: [&str; 18] = [
     "self_ledger_snapshot",
     "self_ledger_outcome",
     "self_tag_rules_check",
+    "being_run",
+    "being_status",
+    "being_explain",
 ];
 
 pub fn is_log_tool(name: &str) -> bool {
@@ -110,6 +113,7 @@ pub fn handle(name: &str, args: &Value, owner: &str) -> Option<Value> {
         "self_forget" => crate::ingest_tools::forget(args, owner),
         "self_export" => crate::ingest_tools::export(args, owner),
         "self_learn" | "self_explain" | "self_evolve_rules" | "self_ledger_snapshot" | "self_ledger_outcome" | "self_tag_rules_check" => crate::learn_tools::handle(name, args, owner),
+        "being_run" | "being_status" | "being_explain" => crate::being_tools::handle(name, args, owner),
         _ => unreachable!(),
     };
     Some(r.unwrap_or_else(|e| e))
@@ -435,6 +439,7 @@ Example 2: SELECT r.key, r.stance, e.occurred_at, e.text FROM revisions r JOIN r
     .into_iter()
     .chain(crate::ingest_tools::tool_defs())
     .chain(crate::learn_tools::tool_defs())
+    .chain(crate::being_tools::tool_defs())
     .collect()
 }
 
