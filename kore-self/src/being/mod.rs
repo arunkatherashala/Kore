@@ -12,6 +12,7 @@
 pub mod chooser;
 pub mod measure;
 pub mod policy;
+pub mod replay;
 pub mod solver;
 pub mod state;
 pub mod world;
