@@ -756,6 +756,8 @@ fn free_text_measured_quality_stays_above_floor() {
         let med = |f: fn(&crate::measure::RunMetrics) -> f64| r.col(|m| Some(f(m))).unwrap().median;
         let max = |f: fn(&crate::measure::RunMetrics) -> f64| r.col(|m| Some(f(m))).unwrap().max;
         assert!(min(|m| m.habit_precision_planted) >= FT_PLANTED_PRECISION, "planted-context habit precision at noise {n}");
+        assert!(min(|m| m.habit_precision) >= FT_PLANTED_PRECISION, "overall habit precision at noise {n} (lift test and uninformative-context drop)");
+        assert!(max(|m| m.habit_builtin_detected as f64) <= 1.0, "built-in-context habits at noise {n}");
         assert!(min(|m| m.stance_precision) >= 0.95 && min(|m| m.stance_recall) >= 0.95, "stances at noise {n}");
         assert!(min(|m| m.minn_refused) >= 0.95, "min-n refusal at noise {n}");
         assert!(min(|m| m.change_precision) >= FT_CHANGE_PRECISION, "change precision at noise {n}");

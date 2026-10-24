@@ -29,7 +29,7 @@ cargo test -p kore-self --offline        # includes measured_detector_quality_on
 ```
 
 Seeds 1..=20, noise 0.0 / 0.2 / 0.5, default parameters
-`{"habit_min_n":8,"habit_lb":0.5,"habit_window_days":0,"change_llr":12.0,"change_min_seg":10,"change_min_ratio":1.8,"change_min_total":10}`.
+`{"habit_min_n":8,"habit_lb":0.5,"habit_window_days":0,"change_llr":12.0,"change_min_seg":10,"change_min_ratio":1.8,"change_min_total":10,"habit_lift":0.0,"habit_max_share":0.9}` (the two lift parameters were added after the tagged table was first recorded; the tagged table is unchanged by them, see "Tagged lives after the fix").
 Each synthetic life is 150 days from 2024-01-01 with about 2000-3000 events. Noise adds
 that fraction of extra events: 40% random actions inside the habit contexts (which
 dilutes the habits), 40% random topic mentions (which flattens topic shifts), 20% chatter,
@@ -102,52 +102,79 @@ They are not accuracy on anyone's real journal.
 How occasions are counted (code: `learn/habits.rs`, docs in `learn/tagrules.rs`): a keyword
 context is an occasion for each event with a sentence matching it, and the action counts if its
 keywords match in the same sentence; the built-in `weekday`/`weekend` contexts are day-level
-(every day with an event; the action counts if any event of the day matches). A first version
-that treated keyword contexts day-level too was measured: planted-context precision stayed
-fine but overall habit precision at 0% noise was 0.21 (mean), because in a dense log nearly every action
-appears on most days so every context "has" every action; it was replaced by the sentence-level rule.
+(every day with an event; the action counts if any event of the day matches).
 
-Real output of `cargo run -p kore-self --example measure_learning --offline --release` (code at commit 5d45ece3; 2026-10-24;
-median [min-max] over 20 seeds):
+### What was wrong at first, and the fix
+
+The first version of this section (commit 5d45ece3) reported overall habit precision 0.50 / 0.29 / 0.00 (median at 0 / 20 / 50% noise),
+with 1 to 12 false habits per life in the built-in `weekday` / `weekend` contexts. Cause: the synthetic life has about 15 events a day
+and no weekday structure, so an action such as `run` occurs on 60-70% of weekdays *and* on 60-70% of weekend days. A context that holds on
+almost every unit gives every frequent action a high in-context rate, and the Wilson bound alone cannot tell "the action's base rate"
+from "a habit of this context". (An even earlier variant that treated keyword contexts day-level too gave mean precision 0.21 at 0% noise
+for the same reason and was replaced by sentence-level occasions.)
+
+The fix (`habits::detect_full`, parameters in the rule set, see README "Free-text journals"):
+
+1. **Lift test** (`habit_lift`, default 0.0): the in-context Wilson lower bound must exceed the Wilson upper bound of the same action's
+   rate in all *other* contexts of the same family (stored tags, built-in date contexts, keyword contexts) plus the margin. For weekday the
+   comparison is exactly the weekend. A negative value switches the test off. With fewer than `habit_min_n` out-of-context occasions the
+   test cannot be made and the habit is kept (a log with a single context has nothing to compare with).
+2. **Uninformative contexts** (`habit_max_share`, default 0.9): a rule-derived context that holds on more than this share of its units
+   (days for weekday/weekend, events for keyword contexts) is dropped and reported (`uninformative_contexts` in `self_learn`).
+3. Min-n refusal is unchanged and comes first.
+
+The defaults are the principled values (a margin of zero, the 90% suggested in advance), not fitted. Parameter choices were looked at on
+tuning seeds 101..120 only (never on the reported seeds 1..20): on those seeds the free-text overall habit precision was median 1.00 with
+per-seed minimum 0.75 / 0.67 / 0.00 at 0 / 20 / 50% noise (0.00 where nothing planted was detected and one false habit existed), and a median of 0
+built-in-context habits per life (maximum 1). So a residual false habit does occur on some lives; on the reported seeds none did.
+
+### Reported numbers (seeds 1..20)
+
+Real output of `cargo run -p kore-self --example measure_learning --offline --release` (code at the commit that adds the lift test,
+2026-10-24; median [min-max] over 20 seeds; `measure_learning tune` prints the same for seeds 101..120):
 
 ```
 | noise | habit precision | habit recall | habit precision, planted contexts only | built-in-context habits per life | change precision | change recall | change abs error (days) | change delay (days) | change FP rate | stance precision | stance recall | stance key accuracy | min-n refused | would derive at min_n=1 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 0% | 0.50 [0.40-0.75] | 1.00 [0.67-1.00] | 1.00 [1.00-1.00] | 2.00 [1.00-4.00] | 1.00 [0.50-1.00] | 1.00 [0.67-1.00] | 1.67 [0.33-5.00] | 7.67 [5.33-14.00] | 0.00 [0.00-0.20] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 0.50 [0.00-0.50] |
-| 20% | 0.29 [0.17-0.43] | 0.67 [0.33-1.00] | 1.00 [1.00-1.00] | 5.00 [4.00-7.00] | 1.00 [0.33-1.00] | 1.00 [0.33-1.00] | 2.00 [0.33-5.00] | 9.00 [5.33-14.67] | 0.00 [0.00-0.20] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 0.50 [0.00-0.50] |
-| 50% | 0.00 [0.00-0.11] | 0.00 [0.00-0.33] | 1.00 [1.00-1.00] | 9.00 [8.00-12.00] | 1.00 [0.50-1.00] | 1.00 [0.33-1.00] | 2.00 [0.00-5.00] | 10.00 [6.00-17.50] | 0.00 [0.00-0.20] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 0.50 [0.00-0.50] |
+| 0% | 1.00 [1.00-1.00] | 1.00 [0.67-1.00] | 1.00 [1.00-1.00] | 0.00 [0.00-0.00] | 1.00 [0.50-1.00] | 1.00 [0.67-1.00] | 1.67 [0.33-5.00] | 7.67 [5.33-14.00] | 0.00 [0.00-0.20] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 0.50 [0.00-0.50] |
+| 20% | 1.00 [1.00-1.00] | 0.67 [0.33-1.00] | 1.00 [1.00-1.00] | 0.00 [0.00-0.00] | 1.00 [0.33-1.00] | 1.00 [0.33-1.00] | 2.00 [0.33-5.00] | 9.00 [5.33-14.67] | 0.00 [0.00-0.20] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 0.50 [0.00-0.50] |
+| 50% | 1.00 [1.00-1.00] | 0.00 [0.00-0.33] | 1.00 [1.00-1.00] | 0.00 [0.00-0.00] | 1.00 [0.50-1.00] | 1.00 [0.33-1.00] | 2.00 [0.00-5.00] | 10.00 [6.00-17.50] | 0.00 [0.00-0.20] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 1.00 [1.00-1.00] | 0.50 [0.00-0.50] |
 
-noise 0%: means over 20 seeds: habit precision 0.532, habit recall 0.933, change precision 0.883, change FP rate 0.010 (5 unchanged topics per seed), change recall 0.917, change delay 8.2 days
-noise 20%: means over 20 seeds: habit precision 0.286, habit recall 0.700, change precision 0.879, change FP rate 0.020 (5 unchanged topics per seed), change recall 0.900, change delay 9.1 days
-noise 50%: means over 20 seeds: habit precision 0.021, habit recall 0.067, change precision 0.883, change FP rate 0.010 (5 unchanged topics per seed), change recall 0.883, change delay 10.1 days
+noise 0%: means over 20 seeds: habit precision 1.000, habit recall 0.933, change precision 0.883, change FP rate 0.010 (5 unchanged topics per seed), change recall 0.917, change delay 8.2 days
+noise 20%: means over 20 seeds: habit precision 1.000, habit recall 0.700, change precision 0.879, change FP rate 0.020 (5 unchanged topics per seed), change recall 0.900, change delay 9.1 days
+noise 50%: means over 20 seeds: habit precision 1.000, habit recall 0.067, change precision 0.883, change FP rate 0.010 (5 unchanged topics per seed), change recall 0.883, change delay 10.1 days
 ```
+
+Before the fix (same seeds): overall habit precision 0.50 / 0.29 / 0.00 and 2 / 5 / 9 built-in-context habits per life (medians); everything else in the table is
+identical before and after (habit recall, change columns, stance columns), so the fix removed false habits without costing planted-habit recall on these data.
 
 Reading the table honestly:
 
-* **Habit precision is poor overall, and the reason is built in.** The synthetic life has no weekday
-  structure, but the built-in `weekday`/`weekend` contexts are on whenever an `action:` rule exists, and
-  in a log with about 15 events per day most actions occur on more than half the weekdays, so
-  `weekday x run` and similar pass the Wilson bound (1 to 12 such habits per life, column "built-in-context habits").
-  Those are all counted as false positives in "habit precision". Restricted to the contexts the life actually
-  plants, precision is 1.00 at every seed and noise level (caveat: at 50% noise no planted habit is detected
-  in most lives, and a precision of nothing detected is printed as 1.00 by the harness; read it together with recall).
-  The built-in contexts are only informative for sparse logs (about one entry per day, like the demo in the README);
-  `builtin_contexts = off` removes them.
-* Habit recall (planted habits found, 3 per life) falls with noise like the tagged table, plus loss from
-  unlisted synonyms and unseen post-negations: mean 0.93 / 0.70 / 0.07 at 0 / 20 / 50% noise versus
-  1.00 / 0.85 / 0.43 for tagged lives.
+* Overall habit precision is now 1.00 at every seed. Caveats: (a) at 50% noise most lives detect no planted habit at all (recall 0.07), and the harness
+  prints a precision of "nothing detected" as 1.00, so that cell is vacuous; (b) the tuning seeds showed that false habits do not vanish entirely
+  (see above); (c) the planted contexts were never at risk from the lift test here because the other contexts use different actions, so these data do not show
+  what the lift test costs when a true habit shares its action with other contexts (it would be refused, by design).
+* Habit recall (planted habits found, 3 per life) is unchanged and falls with noise like the tagged table, plus loss from unlisted synonyms and unseen
+  post-negations: mean 0.93 / 0.70 / 0.07 at 0 / 20 / 50% noise versus 1.00 / 0.85 / 0.43 for tagged lives. Precision recovered; recall did not improve and is still poor at 50% noise.
 * Topic change detection is slightly worse than with tags (mean recall 0.92 / 0.90 / 0.88 versus 0.97 / 0.93 / 0.90; delay 8.2 / 9.1 / 10.1 days
   versus 7.7 / 7.8 / 9.1) because 10% of mentions use unlisted words. Its false-positive rate is 1 or 2 of 100 unchanged series.
 * Stances never used tags, so they are unchanged (the same-author caveat above applies).
 
+### Tagged lives after the fix
+
+The lift test applies to stored-tag contexts too (family "stored tags"). Re-measured on seeds 1..20 the tagged table printed above in this file is identical to the
+table before the change in every cell (habit precision 1.00 [1.00-1.00], recall 1.00 / 0.85 / 0.43 means, and the rest): in these lives each planted habit's action is
+rare in the other contexts, so the lift test refuses nothing. Existing tagged revisions are not rewritten (their rationale text is unchanged); only the
+numbers and a new `out_of_context` field in the `self_learn` detail are added.
+
 Test floors for this section (`free_text_measured_quality_stays_above_floor`, set slightly under the minima above):
-planted-context habit precision >= 0.95; stance precision and recall >= 0.95; min-n refusal >= 0.95;
+overall and planted-context habit precision >= 0.95; at most 1 built-in-context habit per life; stance precision and recall >= 0.95; min-n refusal >= 0.95;
 change precision >= 0.3 and recall >= 0.3 per seed; change false-positive rate <= 0.25; date error <= 6 days;
-habit recall >= 0.6 (0% noise, per-seed minimum) and median >= 0.5 (20%). There is deliberately no floor for overall
-habit precision (it measures the built-in contexts), nor for habit recall at 50% noise.
+habit recall >= 0.6 (0% noise, per-seed minimum) and median >= 0.5 (20%). There is deliberately no floor for habit recall at 50% noise.
 
 Not measured for free text: any real journal; synonyms or sentences written by someone other than the rule author;
-the evolution loop and the ledger (they read stored tags only and do not use `tag_rules.txt`); rules with `negation = all`.
+`negation = all`; the evolution loop and ledger on free text beyond a functional test (they now read `tag_rules.txt`
+like `self_learn`, `evolve_and_ledger_use_the_same_virtual_tags_as_learn`; their scores on free-text lives are not measured).
 
 ## Not measured
 
