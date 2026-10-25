@@ -387,6 +387,43 @@ Measured (`docs/measured.md`, 20 simulated worlds, seeds 1..20, budget 600; tune
 
 Does NOT do: it does not discover new strategies or rules (the three strategies are fixed code; discovery is step B2); it does not adapt to new domains appearing mid-life (B3); it is not compared with any language model (B4); the oracle and the baselines are weak by design (the old policies cannot choose a strategy), so the gap to UCB1 mostly measures strategy choice and skipping; the result holds only for this author-written world and its trade-offs; it makes no claim of understanding, thinking or intelligence, only the measured numbers above.
 
+### Track B2: rule discovery
+
+The being searches for new solving rules in its own log. The DSL and the sequence families are written by the author, so "discovery" here means a search inside a small defined space, not open-ended invention.
+
+How it works. A being created with `pattern_families: "extended"` (needs `chooser: "model"`) lives in a world where sequence tasks also come from extra hidden families that the fixed solvers cannot solve (second-order recurrences, tribonacci-like, cubics, affine geometric, alternating add, a period-3 cycle) plus two families outside the grammar on purpose (a product recurrence and consecutive primes; negative controls). After each attempt the checker's exact next term is logged on the outcome event, so every attempt leaves one revealed example (prefix and next term). With `discover: true` the being runs a search every `discover_every` steps (default 10) over those examples only. The grammar has 17 forms: next = a weighted sum of the previous 1-3 terms (optional constant), or a polynomial of degree 1-3 in the term index; the coefficients are fitted per task from its own prefix with exact rational arithmetic. A rule applies to a prefix only if the fit is unique and at least 3 spare equations agree exactly. Smallest forms are tried first, per signature (pattern, difficulty); examples are split in log order and every third one is held out. A form is accepted only if it is never applicable-and-wrong on training or held-out examples and reproduces at least 3 training and 1 held-out example that no smaller accepted form already explains. An accepted rule is appended to the log as a `rule` note event and a `rule` revision that cites the example events it was proved on, with its content-derived id; searching again adds nothing. A fourth strategy, `discovered`, applies the being's own rule when one fits and otherwise behaves like `careful`; the model learner treats it as one more strategy. `being_rules` lists the rules (form, support, cited examples, how often used, and a check that the search over only the examples logged before the rule yields the same rule), `being_explain` names the rule used by a decision. Nothing reads the generator or the hidden family labels (a source-scan test checks this).
+
+Real output of `kore-self/tests/e2e_being.rs` (`being_rule_discovery_end_to_end`, real binary, temp data root; values shortened):
+
+```
+being_run {steps:700, seed:1, world_seed:6, budget:60000, chooser:"model", pattern_families:"extended", discover:true, discover_every:10}
+  steps_run 700, pattern_families "extended", total_reward 12685, total_energy_spent 3251 (3.90 reward per energy), rules_total 8
+  rules accepted: poly.3 (difficulty 3), poly.1 (d1), lin.3 (d5), lin.1.c (d2), lin.123 (d4), lin.1 (d2), lin.2.c (d5), lin.12 (d4)
+
+being_rules (first rule)
+  rule_id 1a7343ebffd9, signature "pattern difficulty 3", dsl "next = b0 + b1*n + b2*n^2 + b3*n^3", accepted_at_step 10
+  training_examples_reproduced 3, held_out_examples_reproduced 1, cited_example_events 4, times_used_in_attempts 25, rederived_from_log true
+  cited sample: terms "2;17;50;107;194;317;482" revealed_next "695"
+
+being_explain on the decision of step 70 (answered by a rule)
+  decision: "step 70: chose slot 0 (pattern difficulty 5, listed cost 10 reward 56) with strategy discovered by model-ucb (...); p_success=0.500 sd=0.224 ..."
+  discovered_rule_used {rule_id "3e88382ba97a", stance "pattern difficulty 5: next = a3*t[-3]"}
+  outcome_of_this_step: "step 70: task 70-0-pattern is correct; reward 56 cost 10 budget left 59659"
+  replay_check {"re_derived_domain": "0:discovered", "equal_to_recorded": true}
+
+self_sql: SELECT entity_type, COUNT(*) AS n FROM revisions GROUP BY entity_type ORDER BY entity_type
+  decision 700 | rule 8
+
+self_verify
+  OK: 30 version(s), latest 29, head hash b4148714fc5a08503da62810f8c68077e717141e3b3505053b609bcfcae8bc00
+self_verify after flipping one byte of events/0000000029.kore
+  VERIFY FAILED: checksum mismatch in segment: events/0000000029.kore
+```
+
+Measured (`docs/measured.md`, 20 simulated worlds, seeds 1..20, budget 3000; choices tuned on seeds 101..120; pattern puzzles pay 2x in this world so that rules are worth something): mean reward per energy 3.94 for the model learner with discovery against 3.78 for the same learner with fixed solvers only (difference +0.16, 95% interval +0.00 to +0.32; 8 wins, 7 losses, 5 ties), 1.20 for random and 4.27 for an oracle holding perfect rules. At budget 600 discovery did not help (-0.04, interval -0.16 to +0.08), and in a control world where pattern puzzles pay 1x it did not help either (-0.12, interval -0.29 to +0.05). The search found 52% of the (family, world) pairs by the end (median 60 to 170 steps to the first correct rule), accepted 99 rules of which all 99 were exactly correct on fresh tasks, applied a rule to none of the fresh tasks of the two families outside the grammar, and accepted nothing in a control with only those two families (30, 100 and 300 examples, 20 worlds). An earlier, looser guard (2 spare equations) accepted 4 wrong rules in 100 (consecutive primes can satisfy a lag-2 rule); the stricter guard removed them at the price of data.
+
+Does NOT do: it is not open-ended invention (17 author-written forms, fitted per task, for author-written families); it does not help reliably (the gain at budget 3000 has an interval touching 0, none at budget 600 or when the puzzles pay 1x); it finds about half of the expressible families in 3000 energy units and only after 60 to 170 steps; a rule needs only 4 supporting examples (3 training, 1 held out); rules are per difficulty level and are not transferred between levels; a rule cannot be retired once accepted; the algebra domain is not covered; it uses no real data and no language model; no claim is made about understanding or intelligence, only the measured numbers above.
+
 ### Talking to the being (A1)
 
 A chat scaffold with a pluggable thinker, off by default. You talk with `chat_say`; the reply comes from a thinker; the tool calls a thinker proposes run only if a policy file you wrote by hand allows them. Messages, the exact prompt and reply, every authorization decision and every tool result are events in the being's own log, so a conversation survives restarts and is queryable with `self_sql`. There is no model in this crate and the chat code makes no outgoing connections (there is no HTTP client in the crate): to use a model, you point `thinker.txt` at a program you trust (a local model CLI, or a script of your own that calls whatever service you choose).

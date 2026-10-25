@@ -347,6 +347,81 @@ Tests (`kore-self/src/being/tests.rs`, `tests/e2e_being.rs`): the menu world is 
 
 Not measured: worlds whose task mix or strategy trade-offs differ from this design; changing worlds (new domains appearing mid-life); strategies the learner has to discover (step B2); any language-model input (B4); the effect of the hyper-parameters outside the grid above. Changing `DEFAULT_BETA`, `DEFAULT_SKIP_FRAC` or the model's prior strength changes how an existing model-chooser log replays, so they are part of the version of the being.
 
+## Track B2: rule discovery by verified search (synthetic world, author-defined grammar)
+
+Everything here is a simulation written by one author: the sequence families, the grammar the search runs in, the rewards and the solvers. "Discovery" means a search inside a 17-form grammar over the being's own logged examples; it is not open-ended invention. Measured with `cargo run -p kore-self --example measure_being --offline --release -- discover` (2026-10-25, branch self-b2, built on commit 2d03cb28; the run takes about 6 minutes).
+
+What is new.
+* Extended pattern world (`pattern_families: extended`, default off; with it off every earlier result is bit-identical, a test checks it). Pattern tasks come from hidden families per difficulty: 1 arithmetic, 2 geometric or affine-geometric (a*t+c), 3 quadratic or cubic in n, 4 fibonacci-like or second-order recurrence (p*t[-1]+q*t[-2]) or tribonacci-like, 5 alternating add or period-3 cycle or two negative controls outside the grammar (product recurrence t[-1]*t[-2], consecutive primes). The fixed solvers know none of the new families (a test shows at most 6 of 60 tasks solved by any fixed strategy). In this world pattern tasks also pay 2x (`EXT_PATTERN_BONUS`), listed openly in every offer; without it the oracle with perfect rules gains almost nothing over the oracle with fixed solvers (see "No-bonus control").
+* After every attempt the checker's exact next term is logged on the outcome event (tags `terms`, `next`). `being/discover.rs` searches only those examples. Signature = (pattern, difficulty); examples of a signature are split in log order, every third one held out. Grammar: next = sum of a_l*t[-l] over a subset of lags {1,2,3} with optional constant (14 forms) or a polynomial of degree 1-3 in the term index (3 forms); coefficients are fitted per task from its own prefix by exact rational Gauss-Jordan elimination (a rule applies only if the fit is unique, at least 3 spare equations agree exactly, coefficients are small and the next term is an integer). Smallest forms first. A form is accepted for a signature only if it is never applicable-and-wrong on training or held-out examples and reproduces at least 3 training and 1 held-out example that no smaller accepted form already explains. Accepted rules are logged as a `rule` note event plus a `rule` revision citing the example events; a fourth strategy, `discovered`, applies the being's own rule when one fits the prefix and otherwise behaves like careful; the model learner treats it as one more strategy (its estimate for that signature restarts when a rule arrives).
+* Discovery runs every 10 steps of the being.
+
+Setup. Report seeds 1..20, tuning seeds 101..120, budgets 600 and 3000, beta 1.5 and skip_frac 1.0 as in B1. Chosen on the tuning seeds only: the minimum support (K_TRAIN, K_VAL), tried 4+2, 3+1, 3+2, 2+1 (recall 13%, 23%, 17%, 40% of (family, world) pairs at budget 600; precision stayed 100% for all; 3+1 chosen as a middle value, the support of only 4 examples is the weakest part of this guard), the number of spare equations (2 at first, 3 now, see below), and a curiosity bonus for pattern offers with few logged examples (0, 0.2, 0.4, 0.8: it LOWERED the reward at budget 600, 3.30 / 3.13 / 2.93 / 2.70, and did not help at budget 3000, so it ships switched off). Arms, all in the extended world: random (offer and fixed strategy), the B1 model learner with fixed solvers only (it may not use `discovered`), the B1 model learner plus discovery, the oracle with fixed solvers (knows hidden success rates), the oracle with perfect rules (knows the author's rules and the hidden success rates of all four strategies). Intervals are 95% intervals of the mean over 20 worlds (t distribution).
+
+#### Report seeds 1..20, budget 3000 (about 700 attempts per world)
+
+| policy | mean reward per energy unit | 95% interval of the mean |
+|---|---|---|
+| random (offer and fixed strategy) | 1.203 | [1.096, 1.310] |
+| model learner, fixed solvers only (no discovery) | 3.781 | [3.412, 4.150] |
+| model learner + discovery | 3.943 | [3.583, 4.303] |
+| oracle, fixed solvers only | 3.911 | [3.590, 4.233] |
+| oracle with perfect rules | 4.272 | [3.920, 4.624] |
+
+| paired difference, reward per energy | mean | 95% interval of the mean | first minus second |
+|---|---|---|---|
+| discovery minus no discovery | +0.162 | [+0.000, +0.324] | 8 wins, 7 losses, 5 ties of 20 |
+| discovery minus random | +2.741 | [+2.454, +3.027] | 20 wins |
+| oracle with rules minus discovery (regret) | +0.328 | [+0.177, +0.480] | 17 wins, 3 losses of 20 |
+
+Learning curve (reward per energy by step window, mean over worlds): steps 1-50: random 1.215, no discovery 2.532, discovery 2.532, oracle with rules 4.248; 51-100: 1.214 / 3.267 / 3.179 / 4.307; 101-200: 1.176 / 3.579 / 3.727 / 4.259; 201-400: 1.219 / 3.952 / 4.170 / 4.321; 401-end: 0.558 / 3.963 / 4.173 / 4.253. Discovery is behind for the first 100 steps (it explores one more strategy and has no rules yet), ahead from about step 100.
+
+Discovery quality (the being never sees these checks; families are verified on fresh tasks of the hidden family):
+
+| hidden family (expressible) | worlds where found by the end | median step count at first coverage |
+|---|---|---|
+| affine geometric (a*t+c) | 16 of 20 | 60 |
+| cubic in n | 12 of 20 | 120 |
+| second-order recurrence | 10 of 20 | 170 |
+| tribonacci-like | 12 of 20 | 100 |
+| alternating add | 6 of 20 | 130 |
+| period-3 cycle | 6 of 20 | 150 |
+
+"Found" = the final rule book applies a rule and is exactly right on at least 90% of 100 fresh tasks of that family. Recall: 62 of 120 (family, world) pairs = 51.7%. Precision: 99 rules accepted in total (4.95 per world), all 99 exactly correct (never applicable-and-wrong) on 300 fresh tasks of their signature, 0 wrong or overfit. False acceptance on the two families outside the grammar: inside the worlds the final rule books applied a rule to 0 of 300 fresh product-recurrence tasks and 0 of 300 prime tasks (per world, all 20 worlds); in the stand-alone control (only those two families, 30, 100 or 300 examples each, 20 worlds, seeds 1..20 and again 101..120) 0 rules were accepted. Positive control (one expressible family alone, 8 examples already): found in 120 of 120 (family, world) pairs at 8, 16, 30 and 60 examples. The `discovered` strategy was used 70.0 times per world; the discovery run made 749.8 attempts per world.
+
+#### Report seeds 1..20, budget 600 (about 160 attempts per world)
+
+| policy | mean reward per energy unit | 95% interval of the mean |
+|---|---|---|
+| random | 1.228 | [1.128, 1.328] |
+| model learner, fixed solvers only | 3.178 | [2.801, 3.556] |
+| model learner + discovery | 3.142 | [2.773, 3.512] |
+| oracle, fixed solvers only | 3.862 | [3.515, 4.210] |
+| oracle with perfect rules | 4.270 | [3.901, 4.639] |
+
+Discovery minus no discovery: -0.036, interval [-0.155, +0.083], 4 wins, 11 losses, 5 ties. Recall 45 of 120 (37.5%), 75 rules accepted, all 75 exact; 0 applications to the negative families. At this budget the being has too few examples and too little time to use rules; discovery does not pay.
+
+#### Tuning seeds 101..120 (the seeds the choices above were made on)
+
+Budget 3000: no discovery 4.017, discovery 4.154 (+0.138, interval [-0.053, +0.328], 7 wins, 10 losses, 3 ties), oracle with perfect rules 4.437, recall 35.0%, 74 rules, all exact. Budget 600: no discovery 3.413, discovery 3.305 (-0.108, [-0.224, +0.008]), oracle with perfect rules 4.440, recall 23.3%, 54 rules, all exact.
+
+#### No-bonus control (pattern tasks pay 1x, seeds 1..20)
+
+Budget 3000: oracle with fixed solvers 3.418, oracle with perfect rules 3.440 (the rules are worth +0.02 in that world), no discovery 3.356, discovery 3.238 (-0.118, [-0.290, +0.054], 1 win, 5 losses, 14 ties). Recall 10.0% (12 of 120), 22 rules accepted, all exact. The being rarely attempts the harder pattern tasks when they pay little, so it logs few examples. This is why the bonus world is the main experiment, and it must be read as a world built so that the rules are worth something.
+
+#### What was wrong at first, and the fix
+
+The first guard needed only 2 spare equations in the prefix fit and prefixes were one term shorter. At budget 3000 (report seeds, bonus world) discovery then found 50% of the families, but 4 of 100 accepted rules were wrong: the lag-2-plus-constant rule accepted for the alternating-add family also fits a few windows of consecutive primes exactly, so it was applied to 3.1% of the prime tasks and was wrong on 9.8% of those applications (report worlds 7, 8, 10 and 20; also tuning world 119). Requiring 3 spare equations and lengthening the hidden prefixes of four families by one term removed all wrong rules (precision 100%, 0 applications to the negative families) and halved the recall, because fewer rules are applicable to short prefixes (report seeds, budget 3000: recall 50.0% with 2 spare equations, 51.7% with 3 spare equations and 3+1 support; on the tuning seeds the new guard gave 20.0% with 4+2 support and 35.0% with 3+1). The trade is real: a stricter self-check costs data.
+
+Verdict.
+* The search itself works in the sense measured here: on revealed examples alone it finds every expressible family from 8 examples, accepts nothing for the two families outside the grammar, and in the worlds it accepted 99 rules of which all 99 were exact. Replay re-derives every rule from the log alone (checked by a test and by `being_rules`).
+* Whether it helps the being is not established. At budget 3000 discovery gained +0.16 reward per energy over the same learner without it (interval [+0.00, +0.32], 8 wins against 7 losses and 5 ties), about a third of the +0.49 that perfect rules would give; at budget 600 and in the no-bonus world it did not help (the point estimates are negative, intervals include 0). A tuned curiosity bonus made things worse and is off.
+* Weak points. Recall is about half at budget 3000 and the median time to the first correct rule is 60 to 170 steps (60 for the simple families, 120-170 for the others); the rule for a signature needs only 4 supporting examples, validated on 1 held-out example; rules are per signature (difficulty), a rule found for one signature is not tried on another; wrong rules cannot be retired (none were accepted in the final configuration, but nothing would remove one); the chooser's estimate for `discovered` restarts when a rule arrives, and it takes tens of attempts to re-learn.
+
+Tests (`kore-self/src/being/tests.rs`, `tests/e2e_being.rs`): the DSL evaluator on known sequences and refusals; search finds every expressible family and accepts nothing for the unexpressible ones (seeds 1..6); acceptance needs minimum support, rejects a rule that fits training but fails the held-out check, and rejects a rule that is wrong on a training example; the extended option is off by default and changes nothing when off; discovery source files name no hidden world fields; a logged discovery run stores rule revisions with cited example events and refolds to the same rule set, every rule re-derives from the examples logged before it, a second pass adds nothing; same seeds give the same log hash, two calls equal one call, a byte flip fails verify; the real binary end to end (`being_rule_discovery_end_to_end`). Floor test `measured_discovery_is_precise_finds_families_and_does_not_accept_junk` (seeds 1..6, budget 3000, measured: discovery 3.962, no discovery 3.892, random 1.133, oracle with rules 4.125, oracle fixed 3.870, 23 rules all exact, 15 of 36 families found, no application to negative families): oracle with rules at least 0.15 above oracle fixed, discovery and no discovery at least 1.5 above random, discovery not more than 0.2 below no discovery, at least 10 rules with at least 95% exact, at least 10 families found, negative-family applications at most 0.1.
+
+Not measured: real sequences or any task not written by this author; grammars the author did not write; the algebra domain (not done); transfer of a rule between signatures; retiring a rule that later turns out wrong; more than 3000 energy per world; other values of the discovery period (5, 10 and 20 gave the same results on the first tuning grid, before the guard change); any language-model input.
+
 ## Not measured
 
 Real-life data of any kind (the free-text section above is also synthetic); the ledger's probabilities (nothing is scored yet); behaviour with
