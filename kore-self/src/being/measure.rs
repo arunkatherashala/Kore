@@ -124,7 +124,7 @@ pub fn mean_ci(xs: &[f64]) -> (f64, f64, f64) {
 // ---- Track B1: menu world ----
 
 use super::chooser::{GreedyMenu, RandomMenu, UcbMenu};
-use super::planner::{Action, Choice, MenuChooser, ModelChooser, Offer};
+use super::planner::{Action, Choice, MenuChooser, ModelChooser, Offer, DEFAULT_SKIP_FRAC};
 use super::discover::Rule;
 use super::solver::{Strategy, STRATEGIES, STRATEGIES_EXT};
 use super::state::Chooser;
@@ -213,7 +213,7 @@ pub struct MenuRun {
     pub recs: Vec<Rec>,
     pub skips: u64,
     /// Strategy counts [fast, careful, deep].
-    pub strategies: [u64; 3],
+    pub strategies: [u64; 4],
 }
 
 impl MenuRun {
@@ -233,7 +233,7 @@ pub fn run_menu(world_seed: u64, budget: i64, chooser: &mut dyn MenuChooser) -> 
     let mut st = BeingState::default();
     st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: false }, String::new());
     let mut e = Engine::new(World::new(world_seed), st, &th);
-    let (mut recs, mut skips, mut strategies) = (vec![], 0, [0u64; 3]);
+    let (mut recs, mut skips, mut strategies) = (vec![], 0, [0u64; 4]);
     while let Ok(o) = e.step_menu(chooser) {
         let a = o.outcome;
         if !(o.predicted_p.is_some() || a.skipped) {
@@ -313,4 +313,194 @@ pub fn calibration(runs: &[&MenuRun], skip_first: usize) -> Calibration {
     }
     let bins = acc.iter().enumerate().map(|(i, a)| (i as f64 / 10.0, a.0, if a.0 > 0 { a.1 / a.0 as f64 } else { 0.0 }, if a.0 > 0 { a.2 as f64 / a.0 as f64 } else { 0.0 })).collect();
     Calibration { bins, brier: b / n.max(1) as f64, brier_base_rate: bb / n.max(1) as f64, n }
+}
+
+// ---- Track B2: extended pattern world, rule discovery ----
+
+use super::discover::{self, Example, Form};
+use super::world::Kind;
+use std::collections::HashMap;
+
+/// The six extended families the grammar of `discover.rs` can express and the fixed solvers cannot solve.
+pub const EXPRESSIBLE: [Kind; 6] = [Kind::ExtAffGeom, Kind::ExtPoly3, Kind::ExtRec2, Kind::ExtTribo, Kind::ExtAlt, Kind::ExtPeriodic];
+/// Negative controls: outside the grammar.
+pub const UNEXPRESSIBLE: [Kind; 2] = [Kind::NegProd, Kind::NegPrimes];
+
+/// Rules a perfect discoverer would hold (the author knows the families): used by the oracle only.
+pub fn perfect_rules() -> Vec<Rule> {
+    let lin = |mask: u8, constant: bool| Form::Lin { mask, constant };
+    [(1, lin(1, true)), (2, lin(1, true)), (3, Form::Poly(2)), (3, Form::Poly(3)), (4, lin(3, false)), (4, lin(7, false)), (5, lin(2, true)), (5, lin(4, false))]
+        .into_iter()
+        .map(|(sig, f)| Rule::new(sig, f, 0, 0, 0))
+        .collect()
+}
+
+pub struct ExtRun {
+    pub run: MenuRun,
+    /// (step count when accepted, rule)
+    pub accepted: Vec<(u64, Rule)>,
+    /// Outcome event id -> hidden family of the attempted task (measurement only).
+    pub kinds: HashMap<String, Kind>,
+    pub state: BeingState,
+}
+
+/// Menu run in the extended world. `discover_every` 0 = no discovery pass; `preload` rules are
+/// in the state from the start (oracle with perfect rules).
+pub fn run_menu_ext(world: World, budget: i64, chooser: &mut dyn MenuChooser, discover_every: u64, preload: &[Rule]) -> ExtRun {
+    let world_seed = world.seed;
+    let th = ScriptedThinker;
+    let mut st = BeingState::default();
+    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: true }, String::new());
+    for r in preload {
+        st.apply_rule(r.clone());
+    }
+    let mut e = Engine::new(world, st, &th);
+    let (mut recs, mut skips, mut strategies) = (vec![], 0, [0u64; 4]);
+    let (mut accepted, mut kinds) = (vec![], HashMap::new());
+    loop {
+        let tasks = e.world.offers(e.state.step);
+        let Ok(o) = e.step_menu(chooser) else { break };
+        let a = o.outcome;
+        if let Some(slot) = o.action.as_deref().and_then(|l| l.split(':').next()).and_then(|x| x.parse::<usize>().ok()) {
+            kinds.insert(a.event_id.clone(), tasks[slot].view.kind);
+        }
+        if o.predicted_p.is_some() || a.skipped {
+            if a.skipped {
+                skips += 1;
+            } else if let Some(s) = a.strategy {
+                strategies[s.idx()] += 1;
+            }
+            recs.push(Rec { reward: a.reward, cost: a.cost, attempted: !a.skipped, correct: a.correct, pred: o.predicted_p });
+        }
+        if discover_every > 0 && e.state.step % discover_every == 0 {
+            for nr in e.discover_pass() {
+                accepted.push((e.state.step, nr.rule));
+            }
+        }
+    }
+    ExtRun { run: MenuRun { reward: e.state.total_reward, cost: e.state.total_cost, recs, skips, strategies }, accepted, kinds, state: e.state }
+}
+
+/// Fraction of fresh tasks of one hidden family on which the rule book applies a rule and gets the exact answer.
+pub fn coverage(world: &World, rules: &[Rule], kind: Kind, n: u64) -> f64 {
+    let ok = (0..n)
+        .filter(|i| {
+            let t = world.task_of_kind(ORACLE_OFFSET + i, kind);
+            discover::apply(rules, t.view.difficulty, &t.view.params).map_or(false, |(v, _)| t.check(v))
+        })
+        .count();
+    ok as f64 / n as f64
+}
+
+/// Share of the family's tasks where the book applies SOME rule, and share of those answers that are wrong.
+pub fn applied_and_wrong(world: &World, rules: &[Rule], kind: Kind, n: u64) -> (f64, f64) {
+    let (mut applied, mut wrong) = (0u64, 0u64);
+    for i in 0..n {
+        let t = world.task_of_kind(ORACLE_OFFSET + i, kind);
+        if let Some((v, _)) = discover::apply(rules, t.view.difficulty, &t.view.params) {
+            applied += 1;
+            wrong += !t.check(v) as u64;
+        }
+    }
+    (applied as f64 / n as f64, if applied > 0 { wrong as f64 / applied as f64 } else { 0.0 })
+}
+
+pub const COVER_N: u64 = 100;
+pub const COVER_MIN: f64 = 0.9;
+
+#[derive(Debug, Clone)]
+pub struct Analysis {
+    /// Step count at which each expressible family was first covered (>= 90% exact on fresh tasks), per `EXPRESSIBLE`.
+    pub first: [Option<u64>; 6],
+    pub rules: usize,
+    /// Accepted rules that are never applicable-and-wrong on 300 fresh tasks of their signature (and right at least once).
+    pub exact: usize,
+    pub wrong: usize,
+    /// Over the unexpressible families: (share of tasks where a rule was applied, share of those applications that are wrong), per `UNEXPRESSIBLE`.
+    pub neg: [(f64, f64); 2],
+}
+
+pub fn analyze(world_seed: u64, run: &ExtRun) -> Analysis {
+    let w = World::with_extended(world_seed, true);
+    let mut first = [None; 6];
+    let mut book: Vec<Rule> = vec![];
+    let mut i = 0;
+    while i < run.accepted.len() {
+        let at = run.accepted[i].0;
+        while i < run.accepted.len() && run.accepted[i].0 == at {
+            book.push(run.accepted[i].1.clone());
+            i += 1;
+        }
+        for (k, f) in EXPRESSIBLE.iter().enumerate() {
+            if first[k].is_none() && coverage(&w, &book, *f, COVER_N) >= COVER_MIN {
+                first[k] = Some(at);
+            }
+        }
+    }
+    let (mut exact, mut wrong) = (0, 0);
+    for (_, r) in &run.accepted {
+        let (mut ok, mut bad) = (0, 0);
+        for j in 0..300u64 {
+            let t = w.task_forced(ORACLE_OFFSET + j, Domain::Pattern, r.sig);
+            match discover::predict(&r.form, &t.view.params) {
+                Some(v) if t.check(v) => ok += 1,
+                Some(_) => bad += 1,
+                None => {}
+            }
+        }
+        if bad == 0 && ok > 0 {
+            exact += 1;
+        } else {
+            wrong += 1;
+        }
+    }
+    let neg = [applied_and_wrong(&w, &book, UNEXPRESSIBLE[0], 300), applied_and_wrong(&w, &book, UNEXPRESSIBLE[1], 300)];
+    Analysis { first, rules: run.accepted.len(), exact, wrong, neg }
+}
+
+/// Revealed examples of the given hidden families only, interleaved, `n` per family (measurement and tests).
+pub fn control_examples(world_seed: u64, kinds: &[Kind], n: u64, offset: u64) -> Vec<Example> {
+    let w = World::with_extended(world_seed, true);
+    let mut v = vec![];
+    for i in 0..n {
+        for k in kinds {
+            let t = w.task_of_kind(offset + i, *k);
+            v.push(Example { event_id: format!("ctl-{}-{i}", *k as u64), sig: t.view.difficulty, terms: t.view.params.clone(), next: t.expected() });
+        }
+    }
+    v
+}
+
+pub struct DiscRow {
+    pub seed: u64,
+    pub random: ExtRun,
+    pub nodisc: ExtRun,
+    pub disc: ExtRun,
+    pub oracle_rules: ExtRun,
+    pub oracle_fixed: ExtRun,
+    pub analysis: Analysis,
+}
+
+pub const DISCOVER_EVERY: u64 = 10;
+
+/// `bonus`: reward multiplier of pattern tasks (EXT_PATTERN_BONUS in the logged extended world; 1 = no bonus control).
+pub fn disc_row(seed: u64, budget: i64, beta: f64, every: u64, bonus: i64) -> DiscRow {
+    let mk = || {
+        let mut w = World::with_extended(seed, true);
+        w.pattern_bonus = bonus;
+        w
+    };
+    let w = mk();
+    let perfect = perfect_rules();
+    let disc = run_menu_ext(mk(), budget, &mut ModelChooser::new(beta), every, &[]);
+    let analysis = analyze(seed, &disc);
+    DiscRow {
+        seed,
+        random: run_menu_ext(mk(), budget, &mut RandomMenu::new(seed), 0, &[]),
+        nodisc: run_menu_ext(mk(), budget, &mut ModelChooser { beta, skip_frac: DEFAULT_SKIP_FRAC, no_discovered: true }, 0, &[]),
+        oracle_rules: run_menu_ext(mk(), budget, &mut OracleMenu { truth: truth_in(&w, &perfect), strategies: STRATEGIES_EXT.to_vec() }, 0, &perfect),
+        oracle_fixed: run_menu_ext(mk(), budget, &mut OracleMenu { truth: truth_in(&w, &[]), strategies: STRATEGIES.to_vec() }, 0, &[]),
+        disc,
+        analysis,
+    }
 }

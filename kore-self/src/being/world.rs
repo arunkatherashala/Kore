@@ -240,15 +240,21 @@ pub struct World {
     pub profile: Profile,
     /// Pattern tasks come from the extended hidden families (default off: all earlier results are unchanged).
     pub extended: bool,
+    /// Multiplier on the reward of pattern tasks in the extended world (EXT_PATTERN_BONUS; 1 in the standard world).
+    pub pattern_bonus: i64,
 }
+
+/// In the extended world pattern puzzles pay this many times the usual reward (author-defined; it gives
+/// the discovered rules something to be worth). Visible in the listed reward of every pattern task.
+pub const EXT_PATTERN_BONUS: i64 = 2;
 
 impl World {
     pub fn new(seed: u64) -> World {
-        World { seed, profile: Profile::from_seed(seed), extended: false }
+        World { seed, profile: Profile::from_seed(seed), extended: false, pattern_bonus: 1 }
     }
 
     pub fn with_extended(seed: u64, extended: bool) -> World {
-        World { extended, ..World::new(seed) }
+        World { extended, pattern_bonus: if extended { EXT_PATTERN_BONUS } else { 1 }, ..World::new(seed) }
     }
 
     /// The world's per-attempt random source, handed to the solver as the
@@ -259,7 +265,7 @@ impl World {
 
     /// The task on offer in `domain` at `step` (single-task mode).
     pub fn task(&self, step: u64, d: Domain) -> Task {
-        self.build(step, d, 0, None, format!("{step}-{}", d.name()))
+        self.build(step, d, 0, None, None, format!("{step}-{}", d.name()))
     }
 
     /// One task per domain, in `DOMAINS` order (single-task mode).
@@ -274,7 +280,7 @@ impl World {
         (0..MENU_SIZE as u64)
             .map(|j| {
                 let d = DOMAINS[(mix(&[self.seed, step, j, 0xD0_0D]) % 4) as usize];
-                self.build(step, d, j + 1, None, format!("{step}-{j}-{}", d.name()))
+                self.build(step, d, j + 1, None, None, format!("{step}-{j}-{}", d.name()))
             })
             .collect()
     }
@@ -287,10 +293,16 @@ impl World {
     /// A task of a given difficulty, used only by the measurement's oracle to
     /// estimate hidden truth; no policy under test calls it.
     pub fn task_forced(&self, step: u64, d: Domain, difficulty: u8) -> Task {
-        self.build(step, d, 0x77, Some(difficulty), format!("forced-{step}-{}", d.name()))
+        self.build(step, d, 0x77, Some(difficulty), None, format!("forced-{step}-{}", d.name()))
     }
 
-    fn build(&self, step: u64, d: Domain, salt: u64, forced: Option<u8>, id: String) -> Task {
+    /// A pattern task of one given hidden family (extended world), for measurement only.
+    pub fn task_of_kind(&self, step: u64, kind: Kind) -> Task {
+        let difficulty = (1..=5u8).find(|k| Kind::options_ext(Domain::Pattern, *k).contains(&kind)).unwrap_or(1);
+        self.build(step, Domain::Pattern, 0x99 + kind as u64, Some(difficulty), Some(kind), format!("kind-{step}-{}", kind as u64))
+    }
+
+    fn build(&self, step: u64, d: Domain, salt: u64, forced: Option<u8>, force_kind: Option<Kind>, id: String) -> Task {
         let mut r = if salt == 0 {
             Rng::new(mix(&[self.seed, step, d.idx() as u64, 0x7A5C]))
         } else {
@@ -298,7 +310,9 @@ impl World {
         };
         let u = r.f64();
         let difficulty = forced.unwrap_or_else(|| (1.0 + (u.powf(self.profile.diff_bias[d.idx()]) * 5.0).floor()).clamp(1.0, 5.0) as u8);
-        let kind = if self.extended && d == Domain::Pattern {
+        let kind = if let Some(k) = force_kind {
+            k
+        } else if self.extended && d == Domain::Pattern {
             let opts = Kind::options_ext(d, difficulty);
             opts[r.below(opts.len() as u64) as usize]
         } else {
@@ -306,7 +320,8 @@ impl World {
         };
         let (params, prompt, expected) = generate(kind, &mut r);
         let k = difficulty as i64;
-        let reward = ((self.profile.reward_scale[d.idx()] * (4.0 + 3.0 * k as f64)).round() as i64).max(1);
+        let bonus = if d == Domain::Pattern { self.pattern_bonus as f64 } else { 1.0 };
+        let reward = ((self.profile.reward_scale[d.idx()] * (4.0 + 3.0 * k as f64) * bonus).round() as i64).max(1);
         let cost = self.profile.cost_base[d.idx()] + k;
         Task { view: TaskView { id, step, domain: d, difficulty, kind, params, prompt, cost, reward }, expected }
     }
