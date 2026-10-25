@@ -743,6 +743,10 @@ Generated from the tool registry with `kore-self --tool-table`. A test (`docs_ma
 | `being_run` | Run the being loop for N steps in a deterministic simulated world (arithmetic, algebra, physics formulas, sequences) with a seeded budget; the being picks the domain by learned reward per energy and every decision, action and outcome is appended to its own log |
 | `being_status` | Read-only: the being's steps, budget, per-domain selections and reward per energy, its last decisions with their reasons, and a check that every decision can be re-derived from the log |
 | `being_explain` | Read-only: for one decision event, show why the domain was chosen (counts, mean reward per energy, exploration bonus and score of every alternative), the events it cited as evidence, the outcome, and a replay that re-derives the choice from the log |
+| `chat_say` | Say something to the being and get its reply |
+| `chat_history` | Read-only: the last messages of a conversation (yours, the being's replies and tool results), from the log |
+| `chat_pending` | Read-only: tool calls the thinker proposed that need your approval (listed under L3 in autonomy_policy.txt) and that you have not decided yet |
+| `chat_approve` | Approve or reject one pending tool call by id (from chat_pending) |
 <!-- tools:end -->
 
 ### Where files go

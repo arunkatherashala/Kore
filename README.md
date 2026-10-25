@@ -87,6 +87,10 @@ This table is generated from the tool registry (`kore-self --tool-table`); a tes
 | `being_run` | Run the being loop for N steps in a deterministic simulated world (arithmetic, algebra, physics formulas, sequences) with a seeded budget; the being picks the domain by learned reward per energy and every decision, action and outcome is appended to its own log |
 | `being_status` | Read-only: the being's steps, budget, per-domain selections and reward per energy, its last decisions with their reasons, and a check that every decision can be re-derived from the log |
 | `being_explain` | Read-only: for one decision event, show why the domain was chosen (counts, mean reward per energy, exploration bonus and score of every alternative), the events it cited as evidence, the outcome, and a replay that re-derives the choice from the log |
+| `chat_say` | Say something to the being and get its reply |
+| `chat_history` | Read-only: the last messages of a conversation (yours, the being's replies and tool results), from the log |
+| `chat_pending` | Read-only: tool calls the thinker proposed that need your approval (listed under L3 in autonomy_policy.txt) and that you have not decided yet |
+| `chat_approve` | Approve or reject one pending tool call by id (from chat_pending) |
 <!-- tools:end -->
 
 ### Versioned self: quick start
@@ -362,11 +366,101 @@ Notes. A decision cites the genesis event and the latest 5 outcome events per do
 
 Does NOT do: there is no language-model thinker yet (the solvers are fixed scripts); no access to the real world (no files, web or tools); no open-ended goals (the only goal is reward per energy in the simulation); its preferences are produced by the rewards the author defined, they are not discovered values; it is not shown to beat always choosing the best single domain; it does not run by itself between calls (no scheduler); no claim is made about understanding or intelligence.
 
+### Talking to the being (A1)
+
+A chat scaffold with a pluggable thinker, off by default. You talk with `chat_say`; the reply comes from a thinker; the tool calls a thinker proposes run only if a policy file you wrote by hand allows them. Messages, the exact prompt and reply, every authorization decision and every tool result are events in the being's own log, so a conversation survives restarts and is queryable with `self_sql`. There is no model in this crate and the chat code makes no outgoing connections (there is no HTTP client in the crate): to use a model, you point `thinker.txt` at a program you trust (a local model CLI, or a script of your own that calls whatever service you choose).
+
+Tools: `chat_say {text, session?}`, `chat_history {session?, limit?}`, `chat_pending {}`, `chat_approve {id, approve}`. They are for you (the MCP caller); a thinker cannot call them. The tools a thinker may propose in A1 are only `self_sql`, `self_belief_history`, `being_status` (read-only) and `self_event_add` (a note into the being's own log, stored with source `chat_note`; the thinker cannot choose the source, kind or time).
+
+**Policy file** `<owner dir>/autonomy_policy.txt` (you create and edit it by hand; no tool can read, create or change it). Default with no file: every proposed tool call is denied.
+
+```text
+# comments start with '#'
+[L1]            # suggest only: read-only tools, no effects
+self_sql
+being_status
+self_belief_history
+[L2]            # low-risk effects: a note into the being's own log
+self_event_add
+[L3]            # always needs your approval via chat_approve, never automatic
+```
+
+A tool may be listed under its built-in tier or a higher one (a read-only tool under `[L3]` means "ask me every time"). Any parse error (unknown section, unknown tool name, a tool listed twice or below its built-in tier, text before the first section, a file over 64 KiB, or on unix a group/world-writable file) makes the whole policy invalid and everything is denied. Every decision for a thinker's proposal is appended as an event with source `authorize` (actor, tool, decision, reason, redacted and truncated arguments); if that row cannot be written, the call is denied. Your own `chat_say` / `chat_approve` calls are audited too; `chat_history` and `chat_pending` reads are not. A file named `KILL` in the owner directory (create it by hand) is a kill switch: `chat_say`, `chat_approve` and every proposed tool call are refused and the thinker command is not started; only the read-only `being_status`, `chat_history` and `chat_pending` still work (a tool call still has to be listed in the policy). `self_event_add` refuses the sources `authorize`, `thinker` and `chat:*`, so audit and chat rows cannot be forged through it. The files `thinker.txt`, `autonomy_policy.txt` and `KILL` are reserved like `ingest_roots`: no tool path, ingest or export can read, create or overwrite them.
+
+**Thinker file** `<owner dir>/thinker.txt` (by hand; there is no default). Without it the built-in `ScriptedChatThinker` answers: `echo <text>`, `help`, `status`, `beliefs`, `recall <word>`, `history <key>`, `remember <text>` (rules only, it proposes tool calls and the policy decides). With a broken `thinker.txt` the turn is refused and nothing runs (no silent fallback).
+
+```text
+# one setting per line, key = value; unknown keys are an error
+command = C:\tools\my_model_cli.exe     # absolute path to an existing file, required
+arg = --json                            # one line per argument, in order; no shell, no quoting
+arg = --model
+arg = small
+timeout_secs = 60                       # 1..600, default 30
+max_output_bytes = 65536                # 1024..4194304, default 65536
+env_allow = MY_API_KEY                  # repeat; the only variables passed through besides PATH and SystemRoot
+```
+
+Protocol: one process per turn. stdin gets one JSON object (`protocol`, `session`, `user`, `messages` [{role,text}], `facts`, `tools`, `reply_format`), stdout must be one JSON object `{"reply": "...", "tool_calls": [{"tool": "...", "args": {...}}]}` (at most 5 tool calls are considered per turn). Before anything is sent, every text in the context goes through the redaction of `src/redact.rs` (emails, card numbers, SSNs, phone numbers and your `redact_patterns.txt`; best effort, not a guarantee). The exact request and the raw reply are logged as events with source `thinker` (the reply after redaction, as for every event).
+
+**Security model.** `thinker.txt` makes this crate run a program of your choosing with your own rights. Only configure a program you would run yourself and keep `thinker.txt`, the program and the policy file writable by you only (on unix a group/world-writable file is refused; on Windows this is not checked). What this crate does: no shell; absolute program path required; working directory `<owner dir>/scratch`; a cleared environment (`PATH`, `SystemRoot`, `TEMP`/`TMP`/`TMPDIR` set to scratch, plus only the names in `env_allow`); stderr discarded; a timeout (the process is killed); an output cap (the process is killed); a reply that is not valid JSON fails the turn; each proposed tool call is checked by `authorize` and then by the normal argument validation of the tool. What it does not do: it cannot stop the program from using the network or your files (there is no sandbox), it cannot tell a good reply from a bad one, and redaction can miss secrets, so anything you type may reach the program in some form. A thinker can only propose; it cannot approve its own request (`chat_approve` is refused to every actor but the human) and cannot edit the policy, the kill switch or its own configuration through any tool.
+
+Real output of the end-to-end test (`cargo test -p kore-self --test e2e_chat -- --nocapture`, run after `cargo test -p kore-self` or `cargo build -p kore-self --example chat_helper`, which builds the helper program the test uses as its "thinker"; it is not a model). Trimmed to the interesting fields.
+
+```text
+--- chat_say 'status' (no thinker.txt, no policy file)
+  "reply": "Asking for the being loop status.",
+  "thinker": "scripted-chat-1",
+  "tools": [ { "reason": "no autonomy_policy.txt: default deny", "status": "denied", "tool": "being_status" } ]
+
+--- chat_say with secrets, thinker = helper echo (the helper replies with what it received)
+  input:  my email is bob.builder@example.com, ssn 123-45-6789, card 4111 1111 1111 1111
+  the helper received text with these replaced by [REDACTED:...]; the three values appear nowhere in the log
+
+--- thinker proposes self_forget (not in the policy, not a chat tool)
+  "tools": [ { "status": "denied", ... } ]
+
+--- self_sql: audit rows by decision/tool/actor
+events.tags                                      | n
+decision:allow,tool:being_status,actor:thinker   | 1
+decision:allow,tool:chat_say,actor:human         | 9
+decision:allow,tool:self_event_add,actor:thinker | 1
+decision:allow,tool:self_sql,actor:thinker       | 2
+decision:deny,tool:being_status,actor:thinker    | 1
+decision:deny,tool:chat_approve,actor:thinker    | 1
+decision:deny,tool:self_forget,actor:thinker     | 1
+
+--- thinker proposes self_event_add (listed under [L3]), then chat_pending, then chat_approve {approve:true}
+  status "needs_approval" -> "pending": 1 -> "approved": true, "ran": true (the note exists only after the approval)
+
+--- chat_say with the KILL file present
+chat_say refused: kill switch: the KILL file exists, only read-only status is allowed
+
+--- self_sql: events by source after restart
+authorize 32 | chat:being 9 | chat:human 3 | chat:pending 3 | chat:tool 14 | chat:user 13 | chat_note 3 | thinker 26
+
+--- self_verify
+OK: 104 version(s), latest 103, head hash 13abd8c2c9bd...
+
+--- self_verify after flipping a byte
+VERIFY FAILED: checksum mismatch in segment: events/0000000103.kore
+```
+
+A second test runs the helper in misbehaving modes: a program that sleeps is killed at the timeout, one that prints more than `max_output_bytes` is killed, bad JSON and a non-zero exit fail the turn (each logged as a `thinker` error event), a relative or missing command path and unknown keys refuse the turn, and only `env_allow` variables reach the program.
+
+What the chat does NOT do:
+
+- It has no built-in model: without `thinker.txt` only the fixed rules above answer, and they do not understand language.
+- The chat code contains no network client; if your thinker program talks to a hosted service, that is your program's doing, under your account, and what you type (after best-effort redaction) is sent there.
+- No autonomy beyond the policy: nothing runs unless you wrote it into `autonomy_policy.txt`, there is no scheduler or background loop, and in A1 a thinker cannot reach any tool outside the four listed above (nothing that writes outside the log, no files, no processes, no ingestion, no forgetting).
+- No reply-quality claim: how good the replies are depends entirely on the program you plug in and is not measured here; there is no row for it in `docs/measured.md`.
+- One thinker call per turn: tool results are logged and appear in the next turn's context, they are not fed back within the same turn.
+- No sandbox for the thinker program, no check of file permissions on Windows, no encryption of the conversation (it is in the log, which is not encrypted), and the kill switch is a file check made before each decision, not a way to stop a call already running.
+
 ### What this does NOT do
 
 - It does not think, understand, or know you. Its "profile" values are counters over the words in your memories.
 - It does not predict reliably. The predictor counts keyword to choice matches and is not scored against outcomes yet.
-- It does not run any language model and makes no network calls on its own.
+- It does not run any language model and makes no network calls on its own (the chat can run a program you configure; see "Talking to the being (A1)").
 - It does not write or modify source code. The former code-generating tool was removed.
 - It does not push anything to GitHub or any remote (`self_pushback` only compares a decision with your own recorded history).
 - It does not encrypt data at rest (see below).

@@ -480,4 +480,15 @@ mod tests {
         assert_eq!(bind_arg(&a(&["x", "--bind=10.0.0.1"])), Some("10.0.0.1".into()));
         assert_eq!(bind_arg(&a(&["x", "o", "api"])), None);
     }
+
+    #[test]
+    fn hand_edited_chat_files_are_reserved() {
+        test_support::init();
+        for f in ["thinker.txt", "autonomy_policy.txt", "KILL", "kill", "Thinker.TXT", "autonomy_policy.txt.bak", "kill."] {
+            let e = safe_path("reserved-chat", f).unwrap_err();
+            assert!(e.contains("reserved"), "{f}: {e}");
+        }
+        assert!(safe_path("reserved-chat", "notes.txt").is_ok());
+        assert!(safe_path("reserved-chat", "scratch/thinker.txt").is_ok());
+    }
 }
