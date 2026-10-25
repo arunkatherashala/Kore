@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-static LOG_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) static LOG_LOCK: Mutex<()> = Mutex::new(());
 
 /// Tools that only need the owner name (no `KoreSelf` state).
 pub const STATELESS_TOOLS: [&str; 21] = [
@@ -95,6 +95,10 @@ pub(crate) fn str_list(args: &Value, k: &str) -> Result<Vec<String>, Value> {
 
 /// Handle a stateless log tool. Returns None for any other tool name.
 pub fn handle(name: &str, args: &Value, owner: &str) -> Option<Value> {
+    // chat tools take LOG_LOCK themselves, per log access (they call back into this function)
+    if let Some(r) = crate::chat_tools::handle(name, args, owner) {
+        return Some(r);
+    }
     if !STATELESS_TOOLS.contains(&name) {
         return None;
     }
@@ -128,6 +132,9 @@ fn event_add(args: &Value, owner: &str) -> Result<Value, Value> {
     let occurred = vl::normalize_ts(occurred).map_err(|e| err(e))?;
     let source = args.get("source").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()).unwrap_or("mcp");
     let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("note");
+    if crate::authorize::is_reserved_source(source) {
+        return Err(err(format!("source '{source}' is reserved for the authorization audit, the thinker and the chat; choose another source")));
+    }
     let tags = str_list(args, "tags")?;
     let mut log = open(owner)?;
     let red = crate::redact::Redactor::load(&safety::owner_dir(owner)).redact(t);
@@ -440,6 +447,7 @@ Example 2: SELECT r.key, r.stance, e.occurred_at, e.text FROM revisions r JOIN r
     .chain(crate::ingest_tools::tool_defs())
     .chain(crate::learn_tools::tool_defs())
     .chain(crate::being_tools::tool_defs())
+    .chain(crate::chat_tools::tool_defs())
     .collect()
 }
 

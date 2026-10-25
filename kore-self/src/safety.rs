@@ -127,11 +127,23 @@ pub fn safe_path(owner: &str, user_path: &str) -> Result<PathBuf, String> {
     // never reachable through tool paths, for reading or for writing.
     if resolved.parent() == Some(base.as_path()) {
         let n = resolved.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
-        if n.starts_with("ingest_roots") || n.starts_with("redact_patterns") || n.starts_with("tag_rules") {
+        if n.starts_with("ingest_roots") || n.starts_with("redact_patterns") || n.starts_with("tag_rules") || is_hand_edited_name(&n) {
             return Err("that file is reserved: edit it by hand, tools may not read or write it".into());
         }
     }
     Ok(resolved)
+}
+
+/// Files in the owner directory that only the human edits or creates by hand:
+/// the chat policy, the thinker command and the kill switch.
+pub const HAND_EDITED_FILES: [&str; 3] = ["autonomy_policy.txt", "thinker.txt", "KILL"];
+
+/// True if a lower-cased file name (as found in the owner directory) is one of
+/// `HAND_EDITED_FILES` or a variant that Windows would resolve to it (trailing
+/// dots or spaces, an NTFS stream suffix) or an editor backup of the policy files.
+pub fn is_hand_edited_name(lower: &str) -> bool {
+    let base = lower.split(':').next().unwrap_or("").trim_end_matches(|c| c == '.' || c == ' ');
+    base == "kill" || base.starts_with("autonomy_policy") || base.starts_with("thinker")
 }
 
 /// Like `safe_path` but returns a user-presentable error value for tool results.
@@ -467,5 +479,16 @@ mod tests {
         assert_eq!(bind_arg(&a(&["x", "o", "api", "--bind", "0.0.0.0"])), Some("0.0.0.0".into()));
         assert_eq!(bind_arg(&a(&["x", "--bind=10.0.0.1"])), Some("10.0.0.1".into()));
         assert_eq!(bind_arg(&a(&["x", "o", "api"])), None);
+    }
+
+    #[test]
+    fn hand_edited_chat_files_are_reserved() {
+        test_support::init();
+        for f in ["thinker.txt", "autonomy_policy.txt", "KILL", "kill", "Thinker.TXT", "autonomy_policy.txt.bak", "kill."] {
+            let e = safe_path("reserved-chat", f).unwrap_err();
+            assert!(e.contains("reserved"), "{f}: {e}");
+        }
+        assert!(safe_path("reserved-chat", "notes.txt").is_ok());
+        assert!(safe_path("reserved-chat", "scratch/thinker.txt").is_ok());
     }
 }

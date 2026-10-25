@@ -46,6 +46,9 @@ mod learn;
 mod learn_tools;
 mod being;
 mod being_tools;
+mod authorize;
+mod chat;
+mod chat_tools;
 #[cfg(test)]
 mod synth;
 #[cfg(test)]
