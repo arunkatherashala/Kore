@@ -437,3 +437,308 @@ fn measured_model_learner_beats_baselines_and_is_better_calibrated_than_the_base
     let long = menu_row(3, LONG_BUDGET, DEFAULT_BETA, DEFAULT_SKIP_FRAC);
     assert!(long.model.per_budget() > long.ucb.per_budget() + 0.8);
 }
+
+// ---- Track B2: rule discovery ----
+
+use super::discover::{self, apply, evaluate, forms, predict, rule_id, search, search_with, Example, Form, Rule, K_TRAIN, K_VAL};
+use super::measure::{control_examples, coverage, disc_row, perfect_rules, EXPRESSIBLE, UNEXPRESSIBLE};
+use super::replay::rederive_rules;
+use super::world::Kind;
+
+fn ex(id: usize, sig: u8, terms: &[i64], next: i64) -> Example {
+    Example { event_id: format!("e{id}"), sig, terms: terms.to_vec(), next }
+}
+
+#[test]
+fn dsl_evaluator_fits_known_sequences_exactly_and_refuses_the_rest() {
+    let lin = |mask: u8, constant: bool| Form::Lin { mask, constant };
+    // arithmetic, geometric, affine geometric, fibonacci-like, second-order, tribonacci, lag-2 with constant, cycle, polynomials
+    assert_eq!(predict(&Form::Poly(1), &[3, 7, 11, 15, 19]), Some(23));
+    assert_eq!(predict(&lin(1, false), &[2, 6, 18, 54, 162]), Some(486));
+    assert_eq!(predict(&lin(1, true), &[1, 3, 7, 15, 31, 63]), Some(127)); // t -> 2t + 1
+    assert_eq!(predict(&lin(3, false), &[1, 1, 2, 3, 5, 8, 13]), Some(21));
+    assert_eq!(predict(&lin(3, false), &[1, 2, 7, 20, 61, 182, 547]), Some(1640)); // t -> 2*t[-1] + 3*t[-2]
+    assert_eq!(predict(&lin(7, false), &[1, 1, 2, 4, 7, 13, 24, 44, 81]), Some(149));
+    assert_eq!(predict(&lin(2, true), &[1, 3, 4, 6, 7, 9, 10]), Some(12)); // add 2, add 1, add 2, ...
+    assert_eq!(predict(&lin(4, false), &[5, 8, 2, 5, 8, 2, 5]), Some(8));
+    assert_eq!(predict(&Form::Poly(3), &[0, 1, 8, 27, 64, 125, 216]), Some(343));
+    // rational coefficients are fine when the next term is an integer
+    assert_eq!(predict(&lin(1, false), &[64, 32, 16, 8, 4]), Some(2));
+    // refusals: too short for the slack, inconsistent, not unique, non-integer next term
+    assert_eq!(predict(&lin(3, false), &[1, 1, 2, 3, 5, 8]), None, "needs 3 spare equations");
+    assert_eq!(predict(&lin(1, false), &[2, 6, 18, 54, 163]), None, "inconsistent prefix");
+    assert_eq!(predict(&lin(1, true), &[4, 4, 4, 4, 4, 4]), None, "constant column pair is not unique");
+    assert_eq!(predict(&lin(1, false), &[3, 2, 1, 3, 2]), None);
+    assert_eq!(predict(&lin(1, false), &[16, 8, 4, 2, 1]), None, "next term 1/2 is not an integer");
+    // codes round-trip and the grammar has exactly 17 forms, smallest first
+    let all = forms();
+    assert_eq!(all.len(), 17);
+    assert!(all.windows(2).all(|w| w[0].size() <= w[1].size()));
+    for f in &all {
+        assert_eq!(Form::parse(&f.code()), Some(*f));
+        assert!(f.dsl().starts_with("next = "));
+    }
+    assert_eq!(Form::parse("lin.3.c"), Some(lin(4, true)));
+    assert_eq!(Form::parse("lin.9"), None);
+    assert_eq!(Form::parse("poly.7"), None);
+}
+
+#[test]
+fn search_finds_every_expressible_family_and_accepts_nothing_for_unexpressible_ones() {
+    for seed in 1..=6u64 {
+        let w = World::with_extended(seed, true);
+        for k in EXPRESSIBLE {
+            let found = search(&control_examples(seed, &[k], 40, 7_000_000));
+            let book: Vec<Rule> = found.iter().map(|f| Rule::new(f.sig, f.form, f.train_ok, f.val_ok, 0)).collect();
+            assert!(coverage(&w, &book, k, 100) >= 0.9, "seed {seed} family {k:?}: found {:?}", found.iter().map(|f| f.form.code()).collect::<Vec<_>>());
+        }
+        for n in [30u64, 150] {
+            let junk = search(&control_examples(seed, &UNEXPRESSIBLE, n, 7_000_000));
+            assert!(junk.is_empty(), "seed {seed}: accepted {:?} for families outside the grammar", junk.iter().map(|f| f.form.code()).collect::<Vec<_>>());
+        }
+    }
+    // the hidden families are not solved by any fixed strategy
+    let w = World::with_extended(2, true);
+    let th = ScriptedThinker;
+    let st = [Default::default(); 4];
+    for k in EXPRESSIBLE.iter().chain(UNEXPRESSIBLE.iter()) {
+        for s in [Strategy::Fast, Strategy::Careful, Strategy::Deep] {
+            let hits = (0..60u64)
+                .filter(|i| {
+                    let t = w.task_of_kind(*i, *k);
+                    let ctx = Context { step: *i, task: &t.view, noise: 999_999, stats: &st, rules: &[] };
+                    t.check(th.propose_with(&ctx, s).answer)
+                })
+                .count();
+            assert!(hits <= 6, "{k:?} {s:?} solved {hits}/60 by a fixed solver");
+        }
+    }
+    // with the perfect rule book the discovered strategy solves the expressible ones and not the others
+    let book = perfect_rules();
+    for k in EXPRESSIBLE {
+        assert!(coverage(&w, &book, k, 100) >= 0.95, "{k:?}");
+    }
+    for k in UNEXPRESSIBLE {
+        assert!(coverage(&w, &book, k, 100) <= 0.02, "{k:?}");
+    }
+}
+
+#[test]
+fn acceptance_needs_support_a_held_out_check_and_no_wrong_application() {
+    // arithmetic examples of one signature: accepted (poly.1 is the smallest form that fits)
+    let mk = |n: usize| -> Vec<Example> {
+        (0..n)
+            .map(|i| {
+                let (s, d) = (i as i64 % 7, 1 + i as i64 % 4);
+                let t: Vec<i64> = (0..5).map(|j| s + d * j).collect();
+                ex(i, 1, &t, s + d * 5)
+            })
+            .collect()
+    };
+    let good = search(&mk(20));
+    assert_eq!(good.len(), 1);
+    assert_eq!(good[0].form, Form::Poly(1));
+    assert!(good[0].train_ok >= K_TRAIN && good[0].val_ok >= K_VAL && good[0].cite.len() <= discover::MAX_CITE);
+    // minimum support: too few examples, nothing is accepted
+    assert!(search(&mk((K_TRAIN + K_VAL) as usize - 1)).is_empty());
+    assert!(search_with(&mk(20), 30, 1).is_empty());
+    // overfit guard: the rule fits every training example, but one held-out example (index 2, 5, 8, 11, ...)
+    // is applicable and wrong; the rule must be rejected although the training support is large
+    let mut bad = mk(20);
+    let (t, n) = (bad[11].terms.clone(), bad[11].next);
+    bad[11] = ex(11, 1, &t, n + 1);
+    assert!(discover::is_held_out(11));
+    assert_eq!(evaluate(&Form::Poly(1), &bad[..11]).1, 0, "fits all training examples");
+    assert_eq!(search(&bad).len(), 0, "a rule that fails validation must not be accepted");
+    // the same wrong example as a TRAINING example (index 10) is rejected too: never applicable-and-wrong
+    let mut bad2 = mk(20);
+    let (t, n) = (bad2[10].terms.clone(), bad2[10].next);
+    bad2[10] = ex(10, 1, &t, n + 1);
+    assert!(!discover::is_held_out(10));
+    assert_eq!(search(&bad2).len(), 0);
+    // a larger form that only repeats what a smaller accepted form already explains is not added
+    assert!(search(&mk(40)).iter().all(|f| f.form == Form::Poly(1)));
+    // signatures are separate: the same examples under two signatures give a rule for each
+    let both: Vec<Example> = mk(20).into_iter().chain(mk(20).into_iter().map(|e| Example { sig: 2, event_id: format!("b{}", e.event_id), ..e })).collect();
+    assert_eq!(search(&both).iter().map(|x| x.sig).collect::<Vec<_>>(), vec![1, 2]);
+    let (r, wr, _) = evaluate(&Form::Poly(1), &mk(20));
+    assert_eq!((r, wr), (20, 0));
+    // determinism and ids derived from content
+    assert_eq!(search(&both), search(&both));
+    assert_ne!(rule_id(1, &Form::Poly(1)), rule_id(2, &Form::Poly(1)));
+    assert_ne!(rule_id(1, &Form::Poly(1)), rule_id(1, &Form::Poly(2)));
+    // apply: smallest applicable rule of the signature, none for another signature
+    let rules = vec![Rule::new(1, Form::Poly(2), 0, 0, 0), Rule::new(1, Form::Poly(1), 0, 0, 0)];
+    assert_eq!(apply(&rules, 1, &[1, 2, 3, 4, 5]).map(|(v, r)| (v, r.form)), Some((6, Form::Poly(1))));
+    assert!(apply(&rules, 2, &[1, 2, 3, 4, 5]).is_none());
+}
+
+#[test]
+fn discovery_source_names_no_hidden_world_fields() {
+    let forbidden = ["Profile", "profile", "reward_scale", "cost_base", "diff_bias", ".expected(", "noise(", "task_forced", "task_of_kind", "truth", "World", "generate", "Kind::", "ExtAlt", "NegProd", "NegPrimes", "pattern_bonus"];
+    let dir_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("being");
+    for f in ["discover.rs", "model.rs", "planner.rs"] {
+        let src = std::fs::read_to_string(dir_src.join(f)).unwrap();
+        for b in forbidden {
+            assert!(!src.contains(b), "{f} mentions {b}");
+        }
+    }
+}
+
+#[test]
+fn extended_option_is_off_by_default_and_changes_nothing_when_off() {
+    let (a, b) = (World::new(5), World::with_extended(5, false));
+    for step in 0..60 {
+        for (x, y) in a.offers(step).iter().zip(b.offers(step).iter()) {
+            assert_eq!(x.view, y.view);
+        }
+    }
+    let ext = World::with_extended(5, true);
+    // same menu domains, difficulties and costs; only pattern tasks change (families, reward bonus)
+    for step in 0..60 {
+        for (x, y) in a.offers(step).iter().zip(ext.offers(step).iter()) {
+            assert_eq!((x.view.domain, x.view.difficulty, x.view.cost), (y.view.domain, y.view.difficulty, y.view.cost));
+            if x.view.domain != Domain::Pattern {
+                assert_eq!(x.view, y.view);
+            } else {
+                assert!((y.view.reward - 2 * x.view.reward).abs() <= 1);
+                assert!(y.check(y.expected()) && !y.check(y.expected() + 1));
+            }
+        }
+    }
+    // the standard being's log carries no revealed examples, no extended tag and no rule
+    let dir = tempfile::tempdir().unwrap();
+    let (log, _) = run_model_logged(dir.path(), 4, 1, 60, 3000);
+    let rows: Vec<EventRow> = log.open_latest().rows();
+    assert!(rows.iter().all(|e| !e.tags.contains("terms:") && !e.tags.contains("pattern_families") && !e.tags.contains("rule")));
+    assert!(BeingState::from_events(&rows).rules.is_empty());
+    // extended needs the menu world, and discovery needs the extended world
+    let d2 = tempfile::tempdir().unwrap();
+    let mut l2 = open(d2.path());
+    assert!(run(&mut l2, &RunCfg { extended: Some(true), ..cfg(1, 1, 5, 500) }, &ScriptedThinker, &Policy::new(5)).is_err());
+    let d3 = tempfile::tempdir().unwrap();
+    let mut l3 = open(d3.path());
+    assert!(run(&mut l3, &RunCfg { discover_every: Some(5), ..cfg_model(1, 1, 5, 500) }, &ScriptedThinker, &Policy::new(5)).is_err());
+}
+
+fn cfg_ext(world: u64, seed: u64, steps: u64, budget: i64, every: u64) -> RunCfg {
+    RunCfg { extended: Some(true), discover_every: Some(every), ..cfg_model(world, seed, steps, budget) }
+}
+
+fn run_ext(root: &std::path::Path, world: u64, steps: u64, budget: i64, every: u64) -> (VersionedLog, super::run_loop::RunSummary) {
+    let mut log = open(root);
+    let s = run(&mut log, &cfg_ext(world, 1, steps, budget, every), &ScriptedThinker, &Policy::new(steps)).unwrap();
+    (log, s)
+}
+
+const EXT_WORLD: u64 = 6;
+const EXT_BUDGET: i64 = 60_000;
+
+#[test]
+fn discovery_run_stores_rules_as_revisions_with_provenance_and_replays_from_the_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut log, s) = run_ext(dir.path(), EXT_WORLD, 700, EXT_BUDGET, 10);
+    assert_eq!(s.state.step, 700);
+    assert!(!s.state.rules.is_empty(), "no rule was discovered in 700 steps");
+    assert_eq!(s.new_rules.len(), s.state.rules.len());
+    verify_dir(log.dir()).unwrap();
+    let snap = log.open_latest();
+    let rows: Vec<EventRow> = snap.rows();
+    let revs: Vec<RevisionRow> = snap.rows::<RevisionRow>().into_iter().filter(|r| r.entity_type == "rule").collect();
+    let causes: Vec<CauseRow> = snap.rows();
+    assert_eq!(revs.len(), s.state.rules.len());
+    for r in &s.state.rules {
+        let rev = revs.iter().find(|v| v.key == format!("being/rule/{}", r.id)).expect("a rule revision per rule");
+        assert_eq!(rev.author, "rule:being-discover");
+        assert!(rev.stance.contains("next = "), "{}", rev.stance);
+        let v: serde_json::Value = serde_json::from_str(&rev.rationale).unwrap();
+        assert!(v["training_examples_reproduced"].as_u64().unwrap() >= K_TRAIN as u64 && v["held_out_examples_reproduced"].as_u64().unwrap() >= K_VAL as u64);
+        assert_eq!(v["dsl"], r.form.dsl());
+        // provenance: the rule note plus logged outcome events that carry the revealed examples
+        let cited: Vec<&EventRow> = causes.iter().filter(|c| c.rev_id == rev.rev_id).filter_map(|c| rows.iter().find(|e| e.event_id == c.event_id)).collect();
+        assert!(cited.iter().any(|e| e.event_id == r.event_id));
+        let outs: Vec<&&EventRow> = cited.iter().filter(|e| e.kind == "outcome").collect();
+        assert!(outs.len() >= (K_TRAIN + K_VAL) as usize);
+        for e in outs {
+            let ex = discover::example_from_event(e).expect("cited outcome carries terms and the revealed next term");
+            assert_eq!(ex.sig, r.sig);
+            assert_eq!(predict(&r.form, &ex.terms), Some(ex.next), "a cited example is reproduced exactly by its rule");
+        }
+    }
+    // the rule set is a function of the log
+    let refolded = BeingState::from_events(&rows);
+    assert_eq!(refolded.rules.iter().map(|r| r.id.clone()).collect::<Vec<_>>(), s.state.rules.iter().map(|r| r.id.clone()).collect::<Vec<_>>());
+    assert_eq!(refolded.model, s.state.model);
+    let re = rederive_rules(&rows);
+    assert_eq!(re.len(), s.state.rules.len());
+    assert!(re.iter().all(|x| x.1), "every logged rule is re-derived by the search over the examples logged before it");
+    assert!(replay_decisions(&rows).iter().all(|r| r.matches()));
+    // idempotent: another pass over the same log adds nothing; more steps never duplicate a rule
+    let mut eng = super::run_loop::Engine::new(World::with_extended(EXT_WORLD, true), refolded.clone(), &ScriptedThinker);
+    assert!(eng.discover_pass().is_empty());
+    let n0 = s.state.rules.len();
+    let s2 = run(&mut log, &RunCfg { steps: 60, discover_every: Some(10), ..Default::default() }, &ScriptedThinker, &Policy::new(60)).unwrap();
+    let mut ids: Vec<String> = s2.state.rules.iter().map(|r| r.id.clone()).collect();
+    let total = ids.len();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), total, "no duplicate rule ids");
+    assert!(total >= n0);
+    // the discovered strategy used a rule, and the logged answer was checked like any other
+    let used = log.open_latest().rows::<EventRow>().iter().filter(|e| e.kind == "action" && e.tags.contains("rule_used:")).count();
+    assert!(used > 0, "the being applied one of its own rules");
+    // the extended being keeps its world option
+    let bad = run(&mut log, &RunCfg { extended: Some(false), steps: 1, ..Default::default() }, &ScriptedThinker, &Policy::new(1));
+    assert!(bad.is_err());
+}
+
+#[test]
+fn discovery_is_deterministic_split_runs_equal_one_run_and_tamper_fails_verify() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (la, sa) = run_ext(a.path(), EXT_WORLD, 300, EXT_BUDGET, 10);
+    let (lb, _) = run_ext(b.path(), EXT_WORLD, 300, EXT_BUDGET, 10);
+    assert_eq!(la.open_latest().content_hash(), lb.open_latest().content_hash());
+    // two calls of 150 steps equal one call of 300 (passes depend on the being's own step count)
+    let c = tempfile::tempdir().unwrap();
+    let (mut lc, _) = run_ext(c.path(), EXT_WORLD, 150, EXT_BUDGET, 10);
+    run(&mut lc, &RunCfg { steps: 150, discover_every: Some(10), ..Default::default() }, &ScriptedThinker, &Policy::new(150)).unwrap();
+    let ids = |l: &VersionedLog| l.open_latest().rows::<EventRow>().into_iter().map(|e| e.event_id).collect::<Vec<_>>();
+    assert_eq!(ids(&la), ids(&lc));
+    // a being that never runs a pass has no rules, a different log, and the same decisions up to the first rule
+    let d = tempfile::tempdir().unwrap();
+    let mut ld = open(d.path());
+    let sd = run(&mut ld, &RunCfg { extended: Some(true), ..cfg_model(EXT_WORLD, 1, 300, EXT_BUDGET) }, &ScriptedThinker, &Policy::new(300)).unwrap();
+    assert!(sd.state.rules.is_empty());
+    assert!(!sa.state.rules.is_empty());
+    assert_ne!(la.open_latest().content_hash(), ld.open_latest().content_hash());
+    // tamper after a run fails verify
+    verify_dir(la.dir()).unwrap();
+    let seg = std::fs::read_dir(la.dir().join("events")).unwrap().flatten().map(|f| f.path()).filter(|p| p.extension().map_or(false, |x| x == "kore")).last().unwrap();
+    let mut bytes = std::fs::read(&seg).unwrap();
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0xFF;
+    std::fs::write(&seg, bytes).unwrap();
+    assert!(verify_dir(la.dir()).is_err());
+}
+
+#[test]
+fn model_treats_discovered_as_one_more_strategy_and_restarts_its_cell_when_a_rule_arrives() {
+    let dir = tempfile::tempdir().unwrap();
+    let (log, s) = run_ext(dir.path(), EXT_WORLD, 300, EXT_BUDGET, 10);
+    let snap = log.open_latest();
+    let revs: Vec<RevisionRow> = snap.rows();
+    let dec = revs.iter().find(|r| r.entity_type == "decision").unwrap();
+    let v: serde_json::Value = serde_json::from_str(&dec.rationale).unwrap();
+    assert_eq!(v["alternatives"].as_array().unwrap().len(), 16, "4 offers x 4 strategies");
+    assert!(v["alternatives"].as_array().unwrap().iter().any(|a| a["strategy"] == "discovered"));
+    // applying a rule restarts the estimate of the discovered strategy for that signature only
+    let mut st = s.state.clone();
+    let before = st.model.estimate(Domain::Pattern, 5, Strategy::Discovered).n;
+    let other = st.model.estimate(Domain::Pattern, 4, Strategy::Discovered).n;
+    st.apply_rule(Rule::new(5, Form::Poly(3), 3, 1, 999));
+    assert_eq!(st.model.estimate(Domain::Pattern, 5, Strategy::Discovered).n, 0);
+    assert_eq!(st.model.estimate(Domain::Pattern, 4, Strategy::Discovered).n, other);
+    let _ = before;
+    // the same rule twice changes nothing
+    assert!(!st.apply_rule(Rule::new(5, Form::Poly(3), 3, 1, 1000)));
+}

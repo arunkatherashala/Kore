@@ -329,7 +329,7 @@ pub const UNEXPRESSIBLE: [Kind; 2] = [Kind::NegProd, Kind::NegPrimes];
 /// Rules a perfect discoverer would hold (the author knows the families): used by the oracle only.
 pub fn perfect_rules() -> Vec<Rule> {
     let lin = |mask: u8, constant: bool| Form::Lin { mask, constant };
-    [(1, Form::Poly(1)), (2, lin(1, false)), (2, lin(1, true)), (3, Form::Poly(3)), (4, lin(3, false)), (4, lin(7, false)), (5, lin(2, true)), (5, lin(4, false))]
+    [(1, Form::Poly(1)), (2, lin(1, false)), (2, lin(1, true)), (3, Form::Poly(3)), (4, lin(1, false)), (4, lin(3, false)), (4, lin(7, false)), (5, lin(2, true)), (5, lin(4, false))]
         .into_iter()
         .map(|(sig, f)| Rule::new(sig, f, 0, 0, 0))
         .collect()
