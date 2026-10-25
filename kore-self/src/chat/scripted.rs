@@ -37,7 +37,7 @@ impl ChatThinker for ScriptedChatThinker {
             let w = w.trim().to_lowercase();
             let w = w.as_str();
             if word_ok(w) {
-                (format!("Looking for events that contain '{w}'."), call("self_sql", json!({"sql": format!("SELECT occurred_at, source, text FROM events WHERE text LIKE '%{w}%' LIMIT 10")})))
+                (format!("Looking for events that contain '{w}'."), call("self_sql", json!({"sql": format!("SELECT occurred_at, source, text FROM events WHERE text LIKE '%{w}%' AND source <> 'thinker' AND source <> 'authorize' LIMIT 10")})))
             } else {
                 ("recall takes one plain word (letters, digits, '-', '_').".to_string(), vec![])
             }

@@ -3090,20 +3090,30 @@ fn like_match(value: &str, pattern: &str) -> bool {
     like_recursive(value.as_bytes(), pattern.as_bytes())
 }
 
+// Iterative (no recursion: a long value must not overflow the stack) wildcard match with
+// one backtrack point, the same semantics as before: `%` any run, `_` any single byte.
 fn like_recursive(s: &[u8], p: &[u8]) -> bool {
-    match (s, p) {
-        (_, [])           => s.is_empty(),
-        (_, [b'%', rest @ ..]) => {
-            // % matches 0 or more characters
-            if like_recursive(s, rest) { return true; }
-            if let [_, tail @ ..] = s { return like_recursive(tail, p); }
-            false
+    let (mut i, mut j) = (0usize, 0usize);
+    let mut star: Option<(usize, usize)> = None; // (pattern index after '%', value index to resume from)
+    while i < s.len() {
+        if j < p.len() && p[j] == b'%' {
+            star = Some((j + 1, i));
+            j += 1;
+        } else if j < p.len() && (p[j] == b'_' || p[j] == s[i]) {
+            i += 1;
+            j += 1;
+        } else if let Some((sj, si)) = star {
+            star = Some((sj, si + 1));
+            j = sj;
+            i = si + 1;
+        } else {
+            return false;
         }
-        ([], _) => false,
-        ([sc, st @ ..], [b'_', pt @ ..]) => like_recursive(st, pt),  // _ matches any one
-        ([sc, st @ ..], [pc, pt @ ..]) if sc == pc => like_recursive(st, pt),
-        _ => false,
     }
+    while j < p.len() && p[j] == b'%' {
+        j += 1;
+    }
+    j == p.len()
 }
 
 fn col_name_from_expr(e: &Expr) -> String {    match e {
@@ -3355,3 +3365,18 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod like_match_tests {
+    use super::like_match;
+
+    #[test]
+    fn like_semantics_and_long_values() {
+        assert!(like_match("hello", "hello") && like_match("hello", "h%o") && like_match("hello", "%") && like_match("", "%"));
+        assert!(like_match("hello", "_ello") && like_match("hello", "%ll_") && !like_match("hello", "hell"));
+        assert!(!like_match("hello", "x%") && like_match("abcabc", "%abc") && like_match("aXbXc", "a%b%c"));
+        assert!(!like_match("ab", "abc") && like_match("ab", "ab%%") && !like_match("", "_"));
+        let long = "a".repeat(2_000_000);
+        assert!(like_match(&long, "%a") && !like_match(&long, "%b%") && like_match(&format!("{long}needle{long}"), "%needle%"));
+    }
+}
