@@ -188,8 +188,8 @@ fn discover_report(label: &str, seeds: std::ops::RangeInclusive<u64>, budget: i6
     ];
     for (name, a, b) in pairs {
         let (m, lo, hi) = drow(&rows, |r| a(r) - b(r));
-        let w = rows.iter().filter(|r| a(r) > b(r)).count();
-        println!("| {name} | {m:+.3} | [{lo:+.3}, {hi:+.3}] | {w} of {n} |");
+        let (w, l) = (rows.iter().filter(|r| a(r) > b(r)).count(), rows.iter().filter(|r| a(r) < b(r)).count());
+        println!("| {name} | {m:+.3} | [{lo:+.3}, {hi:+.3}] | {w} wins, {l} losses, {} ties of {n} |", n - w - l);
     }
     println!("\nLearning curve, reward per energy by step window (mean over worlds):\n");
     println!("| steps | random | no discovery | discovery | oracle with rules |");

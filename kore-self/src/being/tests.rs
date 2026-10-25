@@ -742,3 +742,28 @@ fn model_treats_discovered_as_one_more_strategy_and_restarts_its_cell_when_a_rul
     // the same rule twice changes nothing
     assert!(!st.apply_rule(Rule::new(5, Form::Poly(3), 3, 1, 1000)));
 }
+
+#[test]
+fn measured_discovery_is_precise_finds_families_and_does_not_accept_junk() {
+    // floors set below the measured values (docs/measured.md); seeds 1..6 of the report seeds, budget 3000
+    let rows: Vec<_> = (1..=6u64).map(|s| disc_row(s, super::measure::LONG_BUDGET, DEFAULT_BETA, super::measure::DISCOVER_EVERY, super::world::EXT_PATTERN_BONUS, super::planner::DEFAULT_CURIOSITY)).collect();
+    let m = |f: &dyn Fn(&super::measure::DiscRow) -> f64| mean_ci(&rows.iter().map(f).collect::<Vec<_>>()).0;
+    let (disc, nodisc, random, oracle_rules, oracle_fixed) = (
+        m(&|r| r.disc.run.per_budget()), m(&|r| r.nodisc.run.per_budget()), m(&|r| r.random.run.per_budget()),
+        m(&|r| r.oracle_rules.run.per_budget()), m(&|r| r.oracle_fixed.run.per_budget()),
+    );
+    println!("disc {disc:.3} nodisc {nodisc:.3} random {random:.3} oracle_rules {oracle_rules:.3} oracle_fixed {oracle_fixed:.3}");
+    let (acc, ex): (usize, usize) = rows.iter().fold((0, 0), |a, r| (a.0 + r.analysis.rules, a.1 + r.analysis.exact));
+    let found: usize = rows.iter().map(|r| r.analysis.first.iter().filter(|x| x.is_some()).count()).sum();
+    println!("rules {acc} exact {ex} found {found} of {}", rows.len() * 6);
+    let neg: f64 = rows.iter().map(|r| r.analysis.neg[0].0 + r.analysis.neg[1].0).sum();
+    println!("negative application {neg}");
+    // the world gives rules something to be worth, and a being with rules can use it
+    assert!(oracle_rules > oracle_fixed + 0.15, "oracle with rules {oracle_rules} fixed {oracle_fixed}");
+    assert!(disc > random + 1.5 && nodisc > random + 1.5);
+    // honest floor: discovery must not cost more than a small amount against the learner without it (it gained +0.07 on these seeds)
+    assert!(disc > nodisc - 0.2, "discovery {disc} vs none {nodisc}");
+    assert!(acc >= 10 && ex as f64 >= 0.95 * acc as f64, "precision {ex}/{acc}");
+    assert!(found >= 10, "families found {found} of 36");
+    assert!(neg <= 0.1, "rules were applied to families outside the grammar: {neg}");
+}

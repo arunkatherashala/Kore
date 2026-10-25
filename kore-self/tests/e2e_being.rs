@@ -1,6 +1,9 @@
 //! End to end: the being loop through the real binary (stdio MCP) against a temp data root.
 //! being_run (300 steps), being_status, being_explain on one decision, self_sql over the
 //! events to show domain counts, self_verify, then a byte flip that verify must catch.
+//! Track B2: being_rule_discovery_end_to_end runs a being in the extended pattern world with
+//! discovery on, lists its rules (being_rules), explains a decision answered by a rule, verifies
+//! and flips a byte.
 #![allow(dead_code)]
 
 use serde_json::{json, Value};
