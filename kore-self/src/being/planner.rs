@@ -75,8 +75,9 @@ pub trait MenuChooser {
     fn choose(&mut self, st: &BeingState, offers: &[Offer]) -> Option<Choice>;
 }
 
-pub const DEFAULT_BETA: f64 = 1.0;
-pub const DEFAULT_SKIP_FRAC: f64 = 0.0;
+/// Chosen on tuning seeds 101..120 only (see docs/measured.md).
+pub const DEFAULT_BETA: f64 = 1.5;
+pub const DEFAULT_SKIP_FRAC: f64 = 1.0;
 pub const SKIP_MIN_COST: i64 = 40;
 
 #[derive(Debug, Clone)]

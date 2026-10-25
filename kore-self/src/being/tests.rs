@@ -261,3 +261,179 @@ fn measured_chooser_beats_random_and_regret_stays_below_floor() {
     assert!(mo - ml < 0.45, "regret {}", mo - ml);
     assert!(l.iter().zip(&r).filter(|(a, b)| a > b).count() >= 15);
 }
+
+// ---- Track B1: menu world, learned model, planner ----
+
+use super::measure::{calibration, menu_row, run_menu, truth, LONG_BUDGET};
+use super::planner::{ModelChooser, DEFAULT_BETA, DEFAULT_SKIP_FRAC};
+use super::solver::{Strategy, STRATEGIES};
+use super::state::Chooser;
+
+fn cfg_model(world: u64, seed: u64, steps: u64, budget: i64) -> RunCfg {
+    RunCfg { chooser: Some(Chooser::Model), ..cfg(world, seed, steps, budget) }
+}
+
+fn run_model_logged(root: &std::path::Path, world: u64, seed: u64, steps: u64, budget: i64) -> (VersionedLog, super::run_loop::RunSummary) {
+    let mut log = open(root);
+    let s = run(&mut log, &cfg_model(world, seed, steps, budget), &ScriptedThinker, &Policy::new(steps)).unwrap();
+    (log, s)
+}
+
+#[test]
+fn menu_world_is_deterministic_and_single_mode_is_untouched() {
+    let (a, b) = (World::new(11), World::new(11));
+    for step in 0..40 {
+        let (oa, ob) = (a.offers(step), b.offers(step));
+        assert_eq!(oa.len(), 4);
+        for (x, y) in oa.iter().zip(&ob) {
+            assert_eq!(x.view, y.view);
+            assert!(x.check(x.expected()) && !x.check(x.expected() + 1));
+        }
+        for d in DOMAINS {
+            assert_eq!(a.task(step, d).view.id, format!("{step}-{}", d.name()), "single-task ids are unchanged");
+        }
+    }
+    let domains: std::collections::HashSet<_> = (0..40).flat_map(|s| a.offers(s)).map(|t| t.view.domain).collect();
+    assert_eq!(domains.len(), 4, "all domains appear in menus");
+    // the same menu run twice gives the same decisions and totals
+    let r1 = run_menu(5, 600, &mut ModelChooser::new(DEFAULT_BETA));
+    let r2 = run_menu(5, 600, &mut ModelChooser::new(DEFAULT_BETA));
+    assert_eq!((r1.reward, r1.cost, r1.recs.len()), (r2.reward, r2.cost, r2.recs.len()));
+    assert!(r1.recs.iter().zip(&r2.recs).all(|(x, y)| x.correct == y.correct && x.cost == y.cost));
+}
+
+#[test]
+fn strategies_trade_cost_against_reliability_in_every_domain() {
+    for s in STRATEGIES {
+        assert!(Strategy::parse(s.name()) == Some(s));
+    }
+    assert!(Strategy::Fast.energy(7) < Strategy::Careful.energy(7) && Strategy::Careful.energy(7) < Strategy::Deep.energy(7));
+    for w in [1u64, 2, 3] {
+        let t = truth(w);
+        for d in DOMAINS {
+            let avg = |s: Strategy, lo: usize| (lo..5).map(|k| t.p[d.idx()][k][s.idx()]).sum::<f64>() / (5 - lo) as f64;
+            // deep is the most reliable on the hard templates, fast the least; fast is good on easy ones
+            assert!(avg(Strategy::Deep, 2) > avg(Strategy::Careful, 2) - 0.05, "{d:?}");
+            assert!(avg(Strategy::Deep, 2) > avg(Strategy::Fast, 2) + 0.15, "{d:?} deep {} fast {}", avg(Strategy::Deep, 2), avg(Strategy::Fast, 2));
+            assert!(t.p[d.idx()][0][Strategy::Fast.idx()] > 0.6, "{d:?} easy tasks are solved by the fast strategy");
+        }
+    }
+}
+
+#[test]
+fn model_is_derived_from_the_log_and_the_planner_cannot_see_hidden_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let (log, s) = run_model_logged(dir.path(), 7, 3, 150, 4000);
+    let refolded = BeingState::from_snapshot(&log.open_latest());
+    assert_eq!(refolded.model, s.state.model, "the model folded from the log equals the live model");
+    assert!(refolded.model.attempts() > 100);
+    // the model has learned that the fast strategy is cheaper than the listed cost
+    let e = refolded.model.estimate(Domain::Arithmetic, 1, Strategy::Fast);
+    assert!(e.n == 0 || e.cost_ratio < 1.0);
+    // source scan: model.rs and planner.rs name none of the hidden world parameters
+    let forbidden = ["Profile", "profile", "reward_scale", "cost_base", "diff_bias", ".expected(", "noise(", "task_forced", "truth", "World", "generate"];
+    let dir_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("being");
+    for f in ["model.rs", "planner.rs"] {
+        let src = std::fs::read_to_string(dir_src.join(f)).unwrap();
+        for b in forbidden {
+            assert!(!src.contains(b), "{f} mentions {b}");
+        }
+    }
+}
+
+#[test]
+fn model_decisions_replay_exactly_from_the_log_with_reasons_logged() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut log, s) = run_model_logged(dir.path(), 8, 2, 200, 6000);
+    assert!(s.state.step == 200);
+    let rows: Vec<EventRow> = log.open_latest().rows();
+    let rep = replay_decisions(&rows);
+    assert_eq!(rep.len(), 200);
+    assert!(rep.iter().all(|r| r.matches()), "a menu decision was not re-derived");
+    // every decision carries its reasons: 12 alternatives (4 offers x 3 strategies) with estimates
+    let snap = log.open_latest();
+    let revs: Vec<RevisionRow> = snap.rows();
+    assert_eq!(revs.len(), 200);
+    for r in &revs {
+        let v: serde_json::Value = serde_json::from_str(&r.rationale).unwrap();
+        let alts = v["alternatives"].as_array().unwrap();
+        assert_eq!(alts.len(), 12);
+        assert!(alts[0]["p_success"].is_number() && alts[0]["uncertainty_sd"].is_number() && alts[0]["score"].is_number());
+    }
+    // next decision equals the replayed prediction, and a split run equals one run
+    let predicted = super::replay::next_action(&rows).unwrap();
+    run(&mut log, &RunCfg { steps: 1, ..Default::default() }, &ScriptedThinker, &Policy::new(1)).unwrap();
+    let rows2: Vec<EventRow> = log.open_latest().rows();
+    let last = rows2.iter().rev().find(|e| e.kind == "decision").unwrap();
+    assert_eq!(super::state::tag(&last.tags, "action"), Some(predicted.as_str()));
+    let d2 = tempfile::tempdir().unwrap();
+    let (one, _) = run_model_logged(d2.path(), 8, 2, 201, 6000);
+    let ids = |l: &VersionedLog| l.open_latest().rows::<EventRow>().into_iter().map(|e| e.event_id).collect::<Vec<_>>();
+    assert_eq!(ids(&log), ids(&one));
+}
+
+#[test]
+fn menu_run_logs_skips_without_predictions_and_keeps_its_chooser() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut log, s) = run_model_logged(dir.path(), 9, 1, 400, 20_000);
+    let rows: Vec<EventRow> = log.open_latest().rows();
+    let skips = rows.iter().filter(|e| e.kind == "outcome" && e.tags.contains("result:skip")).count();
+    assert!(skips > 0, "the planner skips some menus in this run");
+    let preds = log.open_latest().rows::<PredictionRow>().len();
+    assert_eq!(preds, 400 - skips);
+    assert_eq!(s.state.total_cost, 20_000 - s.state.budget_left);
+    verify_dir(log.dir()).unwrap();
+    // chooser is fixed once the being exists
+    let bad = run(&mut log, &RunCfg { chooser: Some(Chooser::Ucb), steps: 1, ..Default::default() }, &ScriptedThinker, &Policy::new(1));
+    assert!(bad.is_err());
+    let ok = run(&mut log, &RunCfg { chooser: Some(Chooser::Model), steps: 1, ..Default::default() }, &ScriptedThinker, &Policy::new(1));
+    assert!(ok.is_ok());
+    assert!(replay_decisions(&log.open_latest().rows::<EventRow>()).iter().all(|r| r.matches()));
+}
+
+#[test]
+fn tamper_after_a_model_run_fails_verify() {
+    let dir = tempfile::tempdir().unwrap();
+    let (log, _) = run_model_logged(dir.path(), 6, 6, 80, 3000);
+    verify_dir(log.dir()).unwrap();
+    let seg = std::fs::read_dir(log.dir().join("events")).unwrap().flatten().map(|f| f.path()).filter(|p| p.extension().map_or(false, |x| x == "kore")).last().unwrap();
+    let mut bytes = std::fs::read(&seg).unwrap();
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0xFF;
+    std::fs::write(&seg, bytes).unwrap();
+    assert!(verify_dir(log.dir()).is_err());
+}
+
+#[test]
+fn menu_budget_exhaustion_and_refill_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = open(dir.path());
+    let s = run(&mut log, &cfg_model(1, 1, 10_000, 120), &ScriptedThinker, &Policy::new(10_000)).unwrap();
+    assert_eq!(s.stopped, StopReason::BudgetExhausted);
+    let mut p = Policy::new(40);
+    p.refill_when_exhausted = true;
+    let s3 = run(&mut log, &RunCfg { steps: 40, ..Default::default() }, &ScriptedThinker, &p).unwrap();
+    assert!(s3.steps_run > 0);
+    assert!(replay_decisions(&log.open_latest().rows::<EventRow>()).iter().all(|r| r.matches()));
+}
+
+#[test]
+fn measured_model_learner_beats_baselines_and_is_better_calibrated_than_the_base_rate() {
+    // floors set below the measured minima (docs/measured.md); report seeds 1..20, budget 600
+    let rows: Vec<_> = (1..=20).map(|s| menu_row(s, BUDGET, DEFAULT_BETA, DEFAULT_SKIP_FRAC)).collect();
+    let m = |f: &dyn Fn(&super::measure::MenuRow) -> f64| mean_ci(&rows.iter().map(f).collect::<Vec<_>>()).0;
+    let (model, ucb, greedy, fast, random, oracle) = (
+        m(&|r| r.model.per_budget()), m(&|r| r.ucb.per_budget()), m(&|r| r.greedy.per_budget()), m(&|r| r.greedy_fast.per_budget()),
+        m(&|r| r.random.per_budget()), m(&|r| r.oracle.per_budget()),
+    );
+    assert!(model > ucb + 1.0, "model {model} ucb {ucb}");
+    assert!(model > greedy + 1.0 && model > random + 1.0);
+    assert!(model > fast + 0.6, "model {model} greedy-fast {fast}");
+    assert!(oracle - model < 1.0, "regret {}", oracle - model);
+    assert!(rows.iter().filter(|r| r.model.per_budget() > r.ucb.per_budget()).count() >= 18);
+    let runs: Vec<_> = rows.iter().map(|r| &r.model).collect();
+    let cal = calibration(&runs, 10);
+    assert!(cal.n > 1000 && cal.brier < cal.brier_base_rate, "brier {} base {}", cal.brier, cal.brier_base_rate);
+    let long = menu_row(3, LONG_BUDGET, DEFAULT_BETA, DEFAULT_SKIP_FRAC);
+    assert!(long.model.per_budget() > long.ucb.per_budget() + 0.8);
+}

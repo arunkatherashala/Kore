@@ -222,14 +222,16 @@ impl MenuChooser for UcbMenu {
 }
 
 /// Greedy on observable features only: best listed reward per listed cost, `careful` strategy.
-pub struct GreedyMenu;
+pub struct GreedyMenu {
+    pub strategy: Strategy,
+}
 impl MenuChooser for GreedyMenu {
     fn name(&self) -> String {
-        "greedy-listed".into()
+        if self.strategy == Strategy::Careful { "greedy-listed".into() } else { format!("greedy-listed-{}", self.strategy.name()) }
     }
     fn choose(&mut self, st: &BeingState, offers: &[Offer]) -> Option<Choice> {
-        let o = best_ratio(offers.iter().filter(|o| o.listed_cost <= st.budget_left))?;
-        Some(plain_choice(&self.name(), "baseline: best listed reward per listed cost", Action::Attempt { slot: o.slot, strategy: Strategy::Careful }, j!({ "policy": self.name() })))
+        let o = best_ratio(offers.iter().filter(|o| self.strategy.energy(o.listed_cost) <= st.budget_left))?;
+        Some(plain_choice(&self.name(), "baseline: best listed reward per listed cost", Action::Attempt { slot: o.slot, strategy: self.strategy }, j!({ "policy": self.name() })))
     }
 }
 
