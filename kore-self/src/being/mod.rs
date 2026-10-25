@@ -11,6 +11,8 @@
 
 pub mod chooser;
 pub mod measure;
+pub mod model;
+pub mod planner;
 pub mod policy;
 pub mod replay;
 pub mod solver;

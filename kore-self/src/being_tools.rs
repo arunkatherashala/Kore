@@ -7,7 +7,7 @@
 
 use crate::being::replay::replay_decisions;
 use crate::being::run_loop::{domain_json, RunCfg};
-use crate::being::state::{tag, BeingState, SOURCE};
+use crate::being::state::{tag, BeingState, Chooser, SOURCE};
 use crate::being::{self, Policy, ScriptedThinker};
 use crate::log_tools::{err, log_err, open, req_str, text};
 use crate::versioned::{CauseRow, EventRow, RevisionRow};
@@ -48,7 +48,13 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         Some(b) if (1..=1_000_000).contains(&b) => Some(b as i64),
         Some(_) => return Err(err("'budget' must be 1..1000000 energy units")),
     };
+    let chooser = match args.get("chooser") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(Chooser::parse(s).ok_or_else(|| err("'chooser' must be \"ucb\" or \"model\""))?),
+        Some(_) => return Err(err("'chooser' must be \"ucb\" or \"model\"")),
+    };
     let cfg = RunCfg {
+        chooser,
         world_seed: opt_u64(args, "world_seed")?,
         loop_seed: opt_u64(args, "seed")?,
         budget,
@@ -86,14 +92,15 @@ fn status(owner: &str) -> Result<Value, Value> {
         .take(5)
         .map(|e| {
             let rationale = tag(&e.tags, "rev_key").and_then(|k| revs.get(k)).and_then(|r| serde_json::from_str::<Value>(&r.rationale).ok());
-            json!({ "decision_event_id": e.event_id, "occurred_at": e.occurred_at, "step": tag(&e.tags, "step"), "domain": tag(&e.tags, "domain"), "text": e.text, "reasons": rationale })
+            json!({ "decision_event_id": e.event_id, "occurred_at": e.occurred_at, "step": tag(&e.tags, "step"), "domain": tag(&e.tags, "domain"), "action": tag(&e.tags, "action"), "text": e.text, "reasons": rationale })
         })
         .collect();
     let rep = replay_decisions(&rows);
     let ok = rep.iter().filter(|r| r.matches()).count();
     Ok(text(json!({
         "exists": true,
-        "world_seed": g.world_seed, "loop_seed": g.loop_seed, "initial_budget": g.budget, "explore_c": g.explore_c,
+        "world_seed": g.world_seed, "loop_seed": g.loop_seed, "initial_budget": g.budget, "explore_c": g.explore_c, "chooser": g.chooser.name(),
+        "model_attempts": st.model.attempts(),
         "steps": st.step, "budget_left": st.budget_left, "refills": st.refills, "world_clock_seconds": st.clock,
         "total_reward": st.total_reward, "total_energy_spent": st.total_cost,
         "reward_per_energy": if st.total_cost > 0 { st.total_reward as f64 / st.total_cost as f64 } else { 0.0 },
@@ -131,26 +138,27 @@ fn explain(args: &Value, owner: &str) -> Result<Value, Value> {
     let result = rows.iter().find(|e| e.source == SOURCE && e.kind == "outcome" && tag(&e.tags, "step") == step).map(|e| json!({ "event_id": e.event_id, "text": e.text }));
     let rep = replay_decisions(&rows).into_iter().find(|r| r.event_id == d.event_id);
     Ok(text(json!({
-        "decision_event_id": d.event_id, "occurred_at": d.occurred_at, "step": step, "domain": tag(&d.tags, "domain"),
+        "decision_event_id": d.event_id, "occurred_at": d.occurred_at, "step": step, "domain": tag(&d.tags, "domain"), "action": tag(&d.tags, "action"),
         "decision": d.text,
         "revision": rev.as_ref().map(|r| json!({ "rev_id": r.rev_id, "key": r.key, "stance": r.stance, "author": r.author })),
         "reasons_and_alternatives": reasons,
         "evidence_events_cited": cited,
         "evidence_note": "the cited events are the genesis event and the latest outcomes per domain; the counts and means used come from all outcomes before this step",
         "outcome_of_this_step": result,
-        "replay_check": rep.map(|r| json!({ "re_derived_domain": r.rederived.name(), "equal_to_recorded": r.matches() })),
+        "replay_check": rep.map(|r| json!({ "re_derived_domain": r.rederived, "equal_to_recorded": r.matches() })),
     })))
 }
 
 pub fn tool_defs() -> Vec<Value> {
     vec![
         json!({ "name": "being_run",
-          "description": "Run the being loop for N steps in a deterministic simulated world (arithmetic, algebra, physics formulas, sequences) with a seeded budget; the being picks the domain by learned reward per energy and every decision, action and outcome is appended to its own log. A simulation with author-defined rewards, not a real-world agent",
+          "description": "Run the being loop for N steps in a deterministic simulated world (arithmetic, algebra, physics formulas, sequences) with a seeded budget; the being picks the domain by learned reward per energy (or, with chooser model, picks one of 4 offered tasks and a solver strategy from a world model learned from its own log) and every decision, action and outcome is appended to its own log. A simulation with author-defined rewards, not a real-world agent",
           "inputSchema": { "type": "object", "properties": {
             "steps": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum steps to run in this call" },
             "seed": { "type": "integer", "minimum": 0, "description": "Loop seed (order of first exploration). Default 1; fixed once the being exists" },
             "world_seed": { "type": "integer", "minimum": 0, "description": "World seed (hidden rewards and tasks). Default 1; fixed once the being exists" },
             "budget": { "type": "integer", "minimum": 1, "description": "Energy units for a new being. Default 2000" },
+            "chooser": { "type": "string", "enum": ["ucb", "model"], "description": "Default ucb (single task per step, UCB1 over domains). model: a menu of 4 tasks per step; a world model learned from the log picks task and solver strategy. Fixed once the being exists" },
             "stop_after_budget": { "type": "boolean", "description": "Default true: stop when no task is affordable. False: the world refills the budget at the next world day (logged) and the run continues" }
           }, "required": ["steps"] } }),
         json!({ "name": "being_status",

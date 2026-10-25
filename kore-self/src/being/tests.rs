@@ -13,7 +13,7 @@ fn open(root: &std::path::Path) -> VersionedLog {
 }
 
 fn cfg(world: u64, seed: u64, steps: u64, budget: i64) -> RunCfg {
-    RunCfg { world_seed: Some(world), loop_seed: Some(seed), budget: Some(budget), explore_c: None, steps, refill_when_exhausted: false }
+    RunCfg { world_seed: Some(world), loop_seed: Some(seed), budget: Some(budget), explore_c: None, chooser: None, steps, refill_when_exhausted: false }
 }
 
 fn run_logged(root: &std::path::Path, world: u64, seed: u64, steps: u64, budget: i64) -> VersionedLog {

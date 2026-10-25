@@ -53,6 +53,58 @@ pub struct Proposal {
 pub trait Thinker {
     fn id(&self) -> &str;
     fn propose(&self, ctx: &Context) -> Proposal;
+    /// Menu mode: answer with a chosen strategy. The default ignores it.
+    fn propose_with(&self, ctx: &Context, _strategy: Strategy) -> Proposal {
+        self.propose(ctx)
+    }
+}
+
+/// Solver strategies of menu mode, with different cost/reliability trade-offs.
+///
+/// | strategy | energy spent | capability | slip rate |
+/// |---|---|---|---|
+/// | fast | half the listed cost (rounded up) | exact only for difficulty 1-2, a cheap heuristic above | 3x the domain rate (max 40%) |
+/// | careful | the listed cost | the scripted table above | the domain rate |
+/// | deep | twice the listed cost | exact for every template | half the domain rate |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Strategy {
+    Fast = 0,
+    Careful = 1,
+    Deep = 2,
+}
+
+pub const STRATEGIES: [Strategy; 3] = [Strategy::Fast, Strategy::Careful, Strategy::Deep];
+
+impl Strategy {
+    pub fn idx(self) -> usize {
+        self as usize
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Strategy::Fast => "fast",
+            Strategy::Careful => "careful",
+            Strategy::Deep => "deep",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Strategy> {
+        STRATEGIES.iter().copied().find(|x| x.name() == s)
+    }
+    /// Energy actually spent on an attempt whose listed cost is `listed`.
+    pub fn energy(self, listed: i64) -> i64 {
+        match self {
+            Strategy::Fast => ((listed + 1) / 2).max(1),
+            Strategy::Careful => listed,
+            Strategy::Deep => 2 * listed,
+        }
+    }
+    fn slip(self, domain: usize) -> u64 {
+        let base = SLIP_PER_MILLE[domain];
+        match self {
+            Strategy::Fast => (3 * base).min(400),
+            Strategy::Careful => base,
+            Strategy::Deep => base / 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -70,6 +122,64 @@ impl Thinker for ScriptedThinker {
             return Proposal { answer, confidence: CONF_EXACT, method: format!("{method}+slip") };
         }
         Proposal { answer, confidence: if exact { CONF_EXACT } else { CONF_HEURISTIC }, method }
+    }
+    fn propose_with(&self, ctx: &Context, strategy: Strategy) -> Proposal {
+        let t = ctx.task;
+        let (mut answer, exact, method) = match strategy {
+            Strategy::Careful => solve(t),
+            Strategy::Fast if t.difficulty <= 2 => (exact_answer(t), true, "exact:easy".to_string()),
+            Strategy::Fast => (heuristic(t), false, "heuristic:cheap".to_string()),
+            Strategy::Deep => (exact_answer(t), true, "exact:deep".to_string()),
+        };
+        let method = format!("{}/{method}", strategy.name());
+        if exact && ctx.noise % 1000 < strategy.slip(t.domain.idx()) {
+            answer += 1;
+            return Proposal { answer, confidence: CONF_EXACT, method: format!("{method}+slip") };
+        }
+        Proposal { answer, confidence: if exact { CONF_EXACT } else { CONF_HEURISTIC }, method }
+    }
+}
+
+/// The correct answer, computed from the problem's numbers (what the deep strategy does).
+fn exact_answer(t: &TaskView) -> i64 {
+    use Kind::*;
+    let p = &t.params;
+    match t.kind {
+        ArithAdd => p[0] + p[1],
+        ArithAddSub => p[0] + p[2] * p[1],
+        ArithMulSmall | ArithMulBig => p[0] * p[1],
+        ArithMulSum => p[0] * p[1] + p[2] * p[3],
+        AlgXPlusB => p[1] - p[0],
+        AlgAX => p[1] / p[0],
+        AlgAXPlusB => (p[2] - p[1]) / p[0],
+        AlgBothSides => (p[3] - p[1]) / (p[0] - p[2]),
+        AlgParen => (p[3] - p[0] * p[1]) / (p[0] - p[2]),
+        PhysVelocity => p[0] + p[1] * p[2],
+        PhysOhm => p[0] * p[1],
+        PhysDisplacement => p[0] * p[2] + p[1] * p[2] * p[2] / 2,
+        PhysKinetic => p[0] * p[1] * p[1] / 2,
+        PhysStopping => p[0] * p[0] / (2 * p[1]),
+        PatArith | PatGeom | PatQuad | PatFib => pattern(p).0,
+        PatAlt => p[p.len() - 1] + (p[p.len() - 2] - p[p.len() - 3]),
+    }
+}
+
+/// The cheap approximation of the fast strategy above difficulty 2.
+fn heuristic(t: &TaskView) -> i64 {
+    use Kind::*;
+    let p = &t.params;
+    match t.kind {
+        ArithMulSmall | ArithMulBig => round_2sf(p[0]) * round_2sf(p[1]),
+        ArithMulSum => round_2sf(p[0]) * round_2sf(p[1]) + round_2sf(p[2]) * round_2sf(p[3]),
+        AlgAXPlusB => search(|x| p[0] * x + p[1] - p[2]),
+        AlgBothSides => search(|x| p[0] * x + p[1] - (p[2] * x + p[3])),
+        AlgParen => search(|x| p[0] * (x + p[1]) - p[2] * x - p[3]),
+        PhysDisplacement | PhysKinetic | PhysStopping => p.iter().product(),
+        PatQuad | PatFib | PatAlt => {
+            let n = p.len();
+            p[n - 1] + (p[n - 1] - p[n - 2])
+        }
+        _ => exact_answer(t),
     }
 }
 

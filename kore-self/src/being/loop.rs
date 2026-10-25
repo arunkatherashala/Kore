@@ -17,10 +17,11 @@
 //! the log stays valid. Nothing else is written anywhere.
 
 use super::chooser::{DomainPicker, Pick, Ucb1, DEFAULT_EXPLORE_C};
+use super::planner::{Action, MenuChooser, ModelChooser, Offer, DEFAULT_BETA};
 use super::policy::{Policy, StopReason};
-use super::solver::{Context, Thinker};
-use super::state::{genesis_event, refill_event, BeingState, Genesis, Outcome, SOURCE};
-use super::world::{iso_at, Domain, Task, World, DOMAINS, SECS_PER_ENERGY};
+use super::solver::{Context, Strategy, Thinker};
+use super::state::{genesis_event, refill_event, BeingState, Chooser, Genesis, Outcome, SOURCE};
+use super::world::{iso_at, Domain, Task, World, DOMAINS, SECS_PER_ENERGY, SKIP_COST};
 use crate::versioned::{event_id, prediction_id, Batch, LogError, NewEvent, NewOutcome, NewPrediction, NewRevision, VersionedLog};
 use serde_json::{json, Value};
 
@@ -30,12 +31,21 @@ pub const DEFAULT_BUDGET: i64 = 2000;
 /// Everything one step adds to the log.
 pub struct StepOut {
     pub outcome: Outcome,
-    pub pick: Pick,
+    pub pick: Option<Pick>,
+    /// Menu mode: the action taken and the model's predicted success (when it made one).
+    pub action: Option<String>,
+    pub predicted_p: Option<f64>,
     pub decision_event_id: String,
     pub events: Vec<NewEvent>,
     pub revision: NewRevision,
-    pub prediction: NewPrediction,
-    pub resolved: NewOutcome,
+    /// None for a skipped menu (nothing to predict).
+    pub prediction: Option<NewPrediction>,
+    pub resolved: Option<NewOutcome>,
+}
+
+/// The observable part of the tasks on offer.
+pub fn offers_of(tasks: &[Task]) -> Vec<Offer> {
+    tasks.iter().enumerate().map(|(i, t)| Offer { slot: i, domain: t.view.domain, difficulty: t.view.difficulty, listed_cost: t.view.cost, listed_reward: t.view.reward }).collect()
 }
 
 /// World + state + thinker; one `step` per call. Used by the logged loop and,
@@ -173,9 +183,184 @@ impl<'a> Engine<'a> {
             budget_left,
             clock: t1,
             event_id: oev_id,
+            strategy: None,
+            listed_cost: v.cost,
+            skipped: false,
         };
         self.state.apply(&outcome);
-        Ok(StepOut { outcome, pick, decision_event_id: dev_id, events: vec![dev, aev, oev], revision, prediction, resolved })
+        Ok(StepOut { outcome, pick: Some(pick), action: None, predicted_p: None, decision_event_id: dev_id, events: vec![dev, aev, oev], revision, prediction: Some(prediction), resolved: Some(resolved) })
+    }
+
+    /// Menu mode: one step over `MENU_SIZE` offered tasks. The chooser picks
+    /// (offer, strategy) or skips; the thinker answers with that strategy.
+    pub fn step_menu(&mut self, chooser: &mut dyn MenuChooser) -> Result<StepOut, StopReason> {
+        let step = self.state.step;
+        let tasks = self.world.offers(step);
+        let offers = offers_of(&tasks);
+        let Some(ch) = chooser.choose(&self.state, &offers) else {
+            return Err(StopReason::BudgetExhausted);
+        };
+        let label = ch.action.label();
+        let evidence = self.state.evidence_ids();
+        let t0 = self.state.clock;
+        let budget0 = self.state.budget_left;
+        let fin = |x: f64| if x.is_finite() { format!("{x:.3}") } else { "n/a".to_string() };
+
+        // act and check
+        struct Done {
+            correct: bool,
+            reward: i64,
+            cost: i64,
+            result: &'static str,
+            answer_text: String,
+            view: Option<(usize, Strategy)>,
+            conf: f64,
+        }
+        let done = match ch.action {
+            Action::Skip => {
+                let cost = SKIP_COST.min(budget0);
+                Done { correct: false, reward: 0, cost, result: "skip", answer_text: format!("skip the menu at step {step} (energy {cost})"), view: None, conf: 0.0 }
+            }
+            Action::Attempt { slot, strategy } => {
+                let task = &tasks[slot];
+                let v = &task.view;
+                let energy = strategy.energy(v.cost);
+                if energy > budget0 {
+                    Done {
+                        correct: false,
+                        reward: 0,
+                        cost: budget0,
+                        result: "unpaid",
+                        answer_text: format!("attempt task {} with {}: energy ran out before the answer ({budget0} left, {energy} needed)", v.id, strategy.name()),
+                        view: Some((slot, strategy)),
+                        conf: 0.0,
+                    }
+                } else {
+                    let ctx = Context { step, task: v, noise: self.world.menu_noise(step, slot), stats: &self.state.stats };
+                    let prop = self.thinker.propose_with(&ctx, strategy);
+                    let correct = task.check(prop.answer);
+                    Done {
+                        correct,
+                        reward: if correct { v.reward } else { 0 },
+                        cost: energy,
+                        result: if correct { "correct" } else { "wrong" },
+                        answer_text: format!("attempt task {} ({}) with thinker {} using {}: answer {} (own confidence {:.2})", v.id, v.prompt, self.thinker.id(), prop.method, prop.answer, prop.confidence),
+                        view: Some((slot, strategy)),
+                        conf: prop.confidence,
+                    }
+                }
+            }
+        };
+        let t1 = t0 + done.cost * SECS_PER_ENERGY;
+        let budget_left = budget0 - done.cost;
+        let key = format!("being/choice/{step:06}");
+        let (chosen_txt, mut dtags) = match done.view {
+            Some((slot, strategy)) => {
+                let v = &tasks[slot].view;
+                (
+                    format!("slot {slot} ({} difficulty {}, listed cost {} reward {}) with strategy {}", v.domain.name(), v.difficulty, v.cost, v.reward, strategy.name()),
+                    vec![format!("domain:{}", v.domain.name()), format!("strategy:{}", strategy.name())],
+                )
+            }
+            None => ("skip".to_string(), vec![]),
+        };
+        let dtext = format!(
+            "step {step}: chose {chosen_txt} by {} ({}); p_success={} sd={} est_energy={} score={}; cites {} events",
+            ch.policy, ch.why, fin(ch.p), fin(ch.sd), fin(ch.cost_est), fin(ch.score), evidence.len()
+        );
+        dtags.extend([format!("step:{step}"), format!("action:{label}"), format!("policy:{}", ch.policy), format!("rev_key:{key}")]);
+        let dev = NewEvent { source: SOURCE.into(), occurred_at: iso_at(t0), kind: "decision".into(), text: dtext, tags: dtags, redacted: false };
+        let dev_id = event_id(&dev.source, &dev.occurred_at, &dev.text);
+        let aev = NewEvent {
+            source: SOURCE.into(),
+            occurred_at: iso_at(t0),
+            kind: "action".into(),
+            text: format!("step {step}: {}", done.answer_text),
+            tags: vec![format!("step:{step}"), format!("action:{label}")],
+            redacted: false,
+        };
+        let mut otags = vec![format!("step:{step}")];
+        let (domain, task_id, difficulty, listed) = match done.view {
+            Some((slot, strategy)) => {
+                let v = &tasks[slot].view;
+                otags.extend([
+                    format!("domain:{}", v.domain.name()),
+                    format!("task:{}", v.id),
+                    format!("difficulty:{}", v.difficulty),
+                    format!("strategy:{}", strategy.name()),
+                    format!("slot:{slot}"),
+                ]);
+                (v.domain, v.id.clone(), v.difficulty, v.cost)
+            }
+            None => (Domain::Arithmetic, "none".to_string(), 1, done.cost),
+        };
+        otags.extend([
+            format!("result:{}", done.result),
+            format!("reward:{}", done.reward),
+            format!("cost:{}", done.cost),
+            format!("listed:{listed}"),
+            format!("budget_left:{budget_left}"),
+            format!("clock:{t1}"),
+        ]);
+        let what = if done.view.is_some() { format!("task {task_id}") } else { "menu".to_string() };
+        let oev = NewEvent {
+            source: SOURCE.into(),
+            occurred_at: iso_at(t1),
+            kind: "outcome".into(),
+            text: format!("step {step}: {what} is {}; reward {} cost {} budget left {budget_left}", done.result, done.reward, done.cost),
+            tags: otags,
+            redacted: false,
+        };
+        let oev_id = event_id(&oev.source, &oev.occurred_at, &oev.text);
+        let revision = NewRevision {
+            entity_type: "decision".into(),
+            key,
+            stance: format!("choose {label}"),
+            confidence: if ch.p.is_finite() && ch.p > 0.0 { ch.p.clamp(0.0, 1.0) } else { 0.5 },
+            rationale: ch.rationale.to_string(),
+            supersedes: None,
+            valid_from: iso_at(t0),
+            author: format!("rule:being-{}", ch.policy),
+            caused_by: evidence,
+        };
+        let attempted = done.result == "correct" || done.result == "wrong";
+        let predicted_p = if attempted { Some(if ch.p > 0.0 { ch.p } else { done.conf }.clamp(0.001, 0.999)) } else { None };
+        let (prediction, resolved) = match predicted_p {
+            Some(pp) => {
+                let pr = NewPrediction {
+                    made_at: iso_at(t0),
+                    question_id: format!("being:step:{step}"),
+                    target: format!("task:{task_id}"),
+                    options: vec!["correct".into(), "wrong".into()],
+                    probs: vec![pp, 1.0 - pp],
+                    model_id: format!("being:loop:{}", ch.policy),
+                    model_version: "1".into(),
+                    features_cite: vec![dev_id.clone()],
+                    resolves_by: None,
+                };
+                let pred_id = prediction_id(&pr).map_err(|_| StopReason::StopFlag)?;
+                let rs = NewOutcome { pred_id, resolved_at: iso_at(t1), actual: done.result.into(), outcome_event_id: Some(oev_id.clone()) };
+                (Some(pr), Some(rs))
+            }
+            None => (None, None),
+        };
+        let outcome = Outcome {
+            step,
+            domain,
+            task_id,
+            difficulty,
+            correct: done.correct,
+            reward: done.reward,
+            cost: done.cost,
+            budget_left,
+            clock: t1,
+            event_id: oev_id,
+            strategy: done.view.map(|x| x.1),
+            listed_cost: listed,
+            skipped: !attempted,
+        };
+        self.state.apply(&outcome);
+        Ok(StepOut { outcome, pick: None, action: Some(label), predicted_p, decision_event_id: dev_id, events: vec![dev, aev, oev], revision, prediction, resolved })
     }
 }
 
@@ -185,6 +370,8 @@ pub struct RunCfg {
     pub loop_seed: Option<u64>,
     pub budget: Option<i64>,
     pub explore_c: Option<f64>,
+    /// `Some(Chooser::Model)` creates a menu-world being with the learned planner; fixed once created.
+    pub chooser: Option<Chooser>,
     pub steps: u64,
     pub refill_when_exhausted: bool,
 }
@@ -211,6 +398,7 @@ impl RunSummary {
             "total_steps": self.state.step, "total_reward": self.state.total_reward, "total_energy_spent": self.state.total_cost,
             "budget_left": self.state.budget_left, "refills": self.state.refills,
             "world_seed": g.as_ref().map(|g| g.world_seed), "loop_seed": g.as_ref().map(|g| g.loop_seed),
+            "chooser": g.as_ref().map(|g| g.chooser.name()),
             "new_being": self.created, "version_before": self.version_before, "version_after": self.version_after,
             "domains": domain_json(&self.state),
         })
@@ -255,17 +443,23 @@ pub fn run_with(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
                     return bad("loop seed", g.loop_seed.to_string(), s.to_string());
                 }
             }
+            if let Some(c) = cfg.chooser {
+                if c != g.chooser {
+                    return bad("chooser", g.chooser.name().to_string(), c.name().to_string());
+                }
+            }
         }
         None => {
             let budget = cfg.budget.unwrap_or(DEFAULT_BUDGET);
             if !(1..=1_000_000).contains(&budget) {
                 return Err(LogError::Invalid("budget must be 1..=1000000 energy units".into()));
             }
-            let c = cfg.explore_c.unwrap_or(DEFAULT_EXPLORE_C);
+            let chooser = cfg.chooser.unwrap_or(Chooser::Ucb);
+            let c = cfg.explore_c.unwrap_or(if chooser == Chooser::Model { DEFAULT_BETA } else { DEFAULT_EXPLORE_C });
             if !c.is_finite() || !(0.0..=10.0).contains(&c) {
                 return Err(LogError::Invalid("explore_c must be within 0..=10".into()));
             }
-            let g = Genesis { world_seed: cfg.world_seed.unwrap_or(1), loop_seed: cfg.loop_seed.unwrap_or(1), budget, explore_c: c };
+            let g = Genesis { world_seed: cfg.world_seed.unwrap_or(1), loop_seed: cfg.loop_seed.unwrap_or(1), budget, explore_c: c, chooser };
             let (ev, id) = genesis_event(&g);
             log.append_events(&[ev])?;
             state.start(g, id);
@@ -279,6 +473,8 @@ pub fn run_with(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
         None => &mut own,
     };
 
+    let menu = g.chooser == Chooser::Model;
+    let mut mc = ModelChooser::new(g.explore_c);
     let mut engine = Engine::new(World::new(g.world_seed), state, thinker);
     let mut pending = Batch::default();
     let mut pending_steps = 0usize;
@@ -289,15 +485,16 @@ pub fn run_with(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
             stopped = r;
             break;
         }
-        match engine.step(picker) {
+        let stepped = if menu { engine.step_menu(&mut mc) } else { engine.step(picker) };
+        match stepped {
             Ok(out) => {
                 done += 1;
                 reward += out.outcome.reward;
                 cost += out.outcome.cost;
                 pending.events.extend(out.events);
                 pending.revisions.push(out.revision);
-                pending.predictions.push(out.prediction);
-                pending.outcomes.push(out.resolved);
+                pending.predictions.extend(out.prediction);
+                pending.outcomes.extend(out.resolved);
                 pending_steps += 1;
                 if pending_steps >= FLUSH_EVERY {
                     log.commit_batch(std::mem::take(&mut pending))?;
@@ -308,8 +505,13 @@ pub fn run_with(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
                 let (ev, clock) = refill_event(g.budget, engine.state.clock, engine.state.refills);
                 engine.state.apply_refill(g.budget, clock);
                 pending.events.push(ev);
-                let menu = engine.world.menu(engine.state.step);
-                if engine.affordable(&menu).is_empty() {
+                let none_left = if menu {
+                    let offers = offers_of(&engine.world.offers(engine.state.step));
+                    mc.choose(&engine.state, &offers).is_none()
+                } else {
+                    engine.affordable(&engine.world.menu(engine.state.step)).is_empty()
+                };
+                if none_left {
                     stopped = StopReason::BudgetExhausted;
                     break;
                 }

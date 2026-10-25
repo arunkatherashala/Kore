@@ -170,3 +170,95 @@ impl DomainPicker for FixedPicker {
         Pick { domain: d, policy: self.name(), why: "baseline: fixed domain".into(), reasons: reasons_for(st, affordable, 0.0), total_pulls: st.total_pulls() }
     }
 }
+
+// ---- menu-mode pickers (baselines; the learned planner is in planner.rs) ----
+
+use super::planner::{Action, Choice, MenuChooser, Offer};
+use super::solver::{Strategy, STRATEGIES};
+use serde_json::json as j;
+
+fn plain_choice(policy: &str, why: &str, action: Action, rationale: Value) -> Choice {
+    Choice { action, policy: policy.into(), why: why.into(), p: 0.0, sd: 0.0, cost_est: 0.0, score: 0.0, rationale }
+}
+
+fn best_ratio<'a>(offers: impl Iterator<Item = &'a Offer>) -> Option<&'a Offer> {
+    let mut best: Option<&Offer> = None;
+    for o in offers {
+        if best.map_or(true, |b| o.listed_reward * b.listed_cost > b.listed_reward * o.listed_cost) {
+            best = Some(o);
+        }
+    }
+    best
+}
+
+/// UCB1 over domains (as in single-task mode), then the offered task of that
+/// domain with the best listed reward per listed cost, solved with `careful`.
+pub struct UcbMenu {
+    pub inner: Ucb1,
+}
+impl UcbMenu {
+    pub fn new(loop_seed: u64, c: f64) -> UcbMenu {
+        UcbMenu { inner: Ucb1::new(loop_seed, c) }
+    }
+}
+impl MenuChooser for UcbMenu {
+    fn name(&self) -> String {
+        "ucb1-domain".into()
+    }
+    fn choose(&mut self, st: &BeingState, offers: &[Offer]) -> Option<Choice> {
+        let mut doms: Vec<Domain> = vec![];
+        for o in offers.iter().filter(|o| o.listed_cost <= st.budget_left) {
+            if !doms.contains(&o.domain) {
+                doms.push(o.domain);
+            }
+        }
+        if doms.is_empty() {
+            return None;
+        }
+        let pick = self.inner.pick(st, &doms);
+        let o = best_ratio(offers.iter().filter(|o| o.domain == pick.domain && o.listed_cost <= st.budget_left))?;
+        Some(plain_choice(&self.name(), &pick.why, Action::Attempt { slot: o.slot, strategy: Strategy::Careful }, pick.to_json()))
+    }
+}
+
+/// Greedy on observable features only: best listed reward per listed cost, `careful` strategy.
+pub struct GreedyMenu;
+impl MenuChooser for GreedyMenu {
+    fn name(&self) -> String {
+        "greedy-listed".into()
+    }
+    fn choose(&mut self, st: &BeingState, offers: &[Offer]) -> Option<Choice> {
+        let o = best_ratio(offers.iter().filter(|o| o.listed_cost <= st.budget_left))?;
+        Some(plain_choice(&self.name(), "baseline: best listed reward per listed cost", Action::Attempt { slot: o.slot, strategy: Strategy::Careful }, j!({ "policy": self.name() })))
+    }
+}
+
+/// Uniform over affordable (offer, strategy) pairs.
+pub struct RandomMenu {
+    rng: Rng,
+}
+impl RandomMenu {
+    pub fn new(seed: u64) -> RandomMenu {
+        RandomMenu { rng: Rng::new(seed ^ 0x2A4D_0C) }
+    }
+}
+impl MenuChooser for RandomMenu {
+    fn name(&self) -> String {
+        "random".into()
+    }
+    fn choose(&mut self, st: &BeingState, offers: &[Offer]) -> Option<Choice> {
+        let mut opts = vec![];
+        for o in offers {
+            for s in STRATEGIES {
+                if s.energy(o.listed_cost) <= st.budget_left {
+                    opts.push((o.slot, s));
+                }
+            }
+        }
+        if opts.is_empty() {
+            return None;
+        }
+        let (slot, strategy) = opts[self.rng.below(opts.len() as u64) as usize];
+        Some(plain_choice(&self.name(), "baseline: uniform over affordable options", Action::Attempt { slot, strategy }, j!({ "policy": self.name() })))
+    }
+}

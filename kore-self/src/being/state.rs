@@ -7,6 +7,8 @@
 //! replay tests check that both routes give the same state and therefore the
 //! same next decision.
 
+use super::model::{Model, Obs};
+use super::solver::Strategy;
 use super::world::{iso_at, Domain, DOMAINS};
 use crate::versioned::{event_id, EventRow, NewEvent, Snapshot};
 use std::collections::VecDeque;
@@ -41,12 +43,39 @@ impl DomainStat {
     }
 }
 
+/// Which chooser the being was created with. `Ucb` is the original
+/// single-task world with the UCB1 domain chooser; `Model` is the menu world
+/// with the learned world model and planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chooser {
+    Ucb,
+    Model,
+}
+
+impl Chooser {
+    pub fn name(self) -> &'static str {
+        match self {
+            Chooser::Ucb => "ucb",
+            Chooser::Model => "model",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Chooser> {
+        match s {
+            "ucb" => Some(Chooser::Ucb),
+            "model" => Some(Chooser::Model),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Genesis {
     pub world_seed: u64,
     pub loop_seed: u64,
     pub budget: i64,
+    /// UCB1 exploration constant, or beta of the model planner.
     pub explore_c: f64,
+    pub chooser: Chooser,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +90,13 @@ pub struct Outcome {
     pub budget_left: i64,
     pub clock: i64,
     pub event_id: String,
+    /// Menu mode: the strategy used (None in single-task mode).
+    pub strategy: Option<Strategy>,
+    /// Cost printed on the task (equals `cost` in single-task mode).
+    pub listed_cost: i64,
+    /// No attempt was run (menu skipped, or the energy ran out before the attempt):
+    /// only the energy is accounted for; no domain statistics, no model update.
+    pub skipped: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -78,6 +114,8 @@ pub struct BeingState {
     pub total_reward: i64,
     pub total_cost: i64,
     pub refills: u64,
+    /// Learned world model, folded from the attempts in the log.
+    pub model: Model,
 }
 
 /// Value of `key:` among comma-joined tags.
@@ -101,6 +139,16 @@ impl BeingState {
     }
 
     pub fn apply(&mut self, o: &Outcome) {
+        if o.skipped {
+            self.total_cost += o.cost;
+            self.budget_left = o.budget_left;
+            self.clock = o.clock;
+            self.step += 1;
+            return;
+        }
+        if let Some(strategy) = o.strategy {
+            self.model.observe(&Obs { domain: o.domain, difficulty: o.difficulty, strategy, correct: o.correct, listed_cost: o.listed_cost, spent: o.cost });
+        }
         let s = &mut self.stats[o.domain.idx()];
         s.n += 1;
         s.correct += o.correct as u64;
@@ -175,47 +223,65 @@ fn genesis_from_tags(tags: &str) -> Option<Genesis> {
         loop_seed: tag(tags, "loop_seed")?.parse().ok()?,
         budget: tag(tags, "budget")?.parse().ok()?,
         explore_c: tag(tags, "explore_c")?.parse().ok()?,
+        chooser: match tag(tags, "chooser") {
+            Some(c) => Chooser::parse(c)?,
+            None => Chooser::Ucb,
+        },
     })
 }
 
 pub fn outcome_from_event(e: &EventRow) -> Option<Outcome> {
     let t = &e.tags;
+    let result = tag(t, "result")?;
+    let skipped = result == "skip" || result == "unpaid";
+    let cost: i64 = tag(t, "cost")?.parse().ok()?;
     Some(Outcome {
         step: tag(t, "step")?.parse().ok()?,
-        domain: Domain::parse(tag(t, "domain")?)?,
-        task_id: tag(t, "task")?.to_string(),
-        difficulty: tag(t, "difficulty")?.parse().ok()?,
-        correct: tag(t, "result")? == "correct",
+        domain: match tag(t, "domain").and_then(Domain::parse) {
+            Some(d) => d,
+            None if skipped => Domain::Arithmetic,
+            None => return None,
+        },
+        task_id: tag(t, "task").unwrap_or("none").to_string(),
+        difficulty: tag(t, "difficulty").and_then(|v| v.parse().ok()).unwrap_or(1),
+        correct: result == "correct",
         reward: tag(t, "reward")?.parse().ok()?,
-        cost: tag(t, "cost")?.parse().ok()?,
+        cost,
         budget_left: tag(t, "budget_left")?.parse().ok()?,
         clock: tag(t, "clock")?.parse().ok()?,
         event_id: e.event_id.clone(),
+        strategy: tag(t, "strategy").and_then(Strategy::parse),
+        listed_cost: tag(t, "listed").and_then(|v| v.parse().ok()).unwrap_or(cost),
+        skipped,
     })
 }
 
 pub fn genesis_event(g: &Genesis) -> (NewEvent, String) {
+    let policy = match g.chooser {
+        Chooser::Ucb => format!("choice policy ucb1 with exploration constant {}", g.explore_c),
+        Chooser::Model => format!("menu world, choice policy model-ucb (learned world model, optimism beta {})", g.explore_c),
+    };
     let text = format!(
-        "being genesis: a deterministic simulation world and loop start; world_seed {} loop_seed {} budget {} energy units; choice policy ucb1 with exploration constant {}",
-        g.world_seed, g.loop_seed, g.budget, g.explore_c
+        "being genesis: a deterministic simulation world and loop start; world_seed {} loop_seed {} budget {} energy units; {policy}",
+        g.world_seed, g.loop_seed, g.budget
     );
     let at = iso_at(0);
     let id = event_id(SOURCE, &at, &text);
-    let ev = NewEvent {
-        source: SOURCE.into(),
-        occurred_at: at,
-        kind: "note".into(),
-        text,
-        tags: vec![
-            "genesis".into(),
-            format!("world_seed:{}", g.world_seed),
-            format!("loop_seed:{}", g.loop_seed),
-            format!("budget:{}", g.budget),
-            format!("explore_c:{}", g.explore_c),
-            "policy:ucb1".into(),
-        ],
-        redacted: false,
-    };
+    let mut tags = vec![
+        "genesis".to_string(),
+        format!("world_seed:{}", g.world_seed),
+        format!("loop_seed:{}", g.loop_seed),
+        format!("budget:{}", g.budget),
+        format!("explore_c:{}", g.explore_c),
+    ];
+    match g.chooser {
+        Chooser::Ucb => tags.push("policy:ucb1".into()),
+        Chooser::Model => {
+            tags.push("policy:model-ucb".into());
+            tags.push("chooser:model".into());
+        }
+    }
+    let ev = NewEvent { source: SOURCE.into(), occurred_at: at, kind: "note".into(), text, tags, redacted: false };
     (ev, id)
 }
 

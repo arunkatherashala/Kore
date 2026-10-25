@@ -220,27 +220,60 @@ impl World {
         mix(&[self.seed, step, d.idx() as u64, 0xA11CE])
     }
 
-    /// The task on offer in `domain` at `step`.
+    /// The task on offer in `domain` at `step` (single-task mode).
     pub fn task(&self, step: u64, d: Domain) -> Task {
-        let mut r = Rng::new(mix(&[self.seed, step, d.idx() as u64, 0x7A5C]));
+        self.build(step, d, 0, None, format!("{step}-{}", d.name()))
+    }
+
+    /// One task per domain, in `DOMAINS` order (single-task mode).
+    pub fn menu(&self, step: u64) -> Vec<Task> {
+        DOMAINS.iter().map(|d| self.task(step, *d)).collect()
+    }
+
+    /// Menu mode: `MENU_SIZE` candidate tasks at `step`. Slot j has a domain
+    /// drawn from the world seed (repeats allowed); difficulty, cost and
+    /// reward follow the hidden profile as in single-task mode.
+    pub fn offers(&self, step: u64) -> Vec<Task> {
+        (0..MENU_SIZE as u64)
+            .map(|j| {
+                let d = DOMAINS[(mix(&[self.seed, step, j, 0xD0_0D]) % 4) as usize];
+                self.build(step, d, j + 1, None, format!("{step}-{j}-{}", d.name()))
+            })
+            .collect()
+    }
+
+    /// Per-attempt random source for menu slot `slot` (execution slips).
+    pub fn menu_noise(&self, step: u64, slot: usize) -> u64 {
+        mix(&[self.seed, step, slot as u64, 0xA11CE, 0x51_07])
+    }
+
+    /// A task of a given difficulty, used only by the measurement's oracle to
+    /// estimate hidden truth; no policy under test calls it.
+    pub fn task_forced(&self, step: u64, d: Domain, difficulty: u8) -> Task {
+        self.build(step, d, 0x77, Some(difficulty), format!("forced-{step}-{}", d.name()))
+    }
+
+    fn build(&self, step: u64, d: Domain, salt: u64, forced: Option<u8>, id: String) -> Task {
+        let mut r = if salt == 0 {
+            Rng::new(mix(&[self.seed, step, d.idx() as u64, 0x7A5C]))
+        } else {
+            Rng::new(mix(&[self.seed, step, d.idx() as u64, 0x7A5C, salt]))
+        };
         let u = r.f64();
-        let difficulty = (1.0 + (u.powf(self.profile.diff_bias[d.idx()]) * 5.0).floor()).clamp(1.0, 5.0) as u8;
+        let difficulty = forced.unwrap_or_else(|| (1.0 + (u.powf(self.profile.diff_bias[d.idx()]) * 5.0).floor()).clamp(1.0, 5.0) as u8);
         let kind = Kind::of(d, difficulty);
         let (params, prompt, expected) = generate(kind, &mut r);
         let k = difficulty as i64;
         let reward = ((self.profile.reward_scale[d.idx()] * (4.0 + 3.0 * k as f64)).round() as i64).max(1);
         let cost = self.profile.cost_base[d.idx()] + k;
-        Task {
-            view: TaskView { id: format!("{step}-{}", d.name()), step, domain: d, difficulty, kind, params, prompt, cost, reward },
-            expected,
-        }
-    }
-
-    /// One task per domain, in `DOMAINS` order.
-    pub fn menu(&self, step: u64) -> Vec<Task> {
-        DOMAINS.iter().map(|d| self.task(step, *d)).collect()
+        Task { view: TaskView { id, step, domain: d, difficulty, kind, params, prompt, cost, reward }, expected }
     }
 }
+
+/// Candidate tasks per step in menu mode.
+pub const MENU_SIZE: usize = 4;
+/// Energy spent by skipping the whole menu.
+pub const SKIP_COST: i64 = 1;
 
 fn nz(r: &mut Rng, lo: i64, hi: i64) -> i64 {
     loop {
