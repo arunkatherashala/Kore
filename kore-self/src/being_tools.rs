@@ -1,11 +1,11 @@
-//! Tools of the being loop: being_run, being_status, being_explain.
+//! Tools of the being loop: being_run, being_status, being_explain, being_rules.
 //!
 //! The loop runs in-process, only against the simulated world and this owner's
 //! own log (see `being/policy.rs`); no network, no files other than the log.
 //! The owner directory holds the being's log. It is a deterministic simulation
 //! with author-defined rewards, measured in docs/measured.md.
 
-use crate::being::replay::replay_decisions;
+use crate::being::replay::{rederive_rules, replay_decisions};
 use crate::being::run_loop::{domain_json, RunCfg};
 use crate::being::state::{tag, BeingState, Chooser, SOURCE};
 use crate::being::{self, Policy, ScriptedThinker};
@@ -14,7 +14,7 @@ use crate::versioned::{CauseRow, EventRow, RevisionRow};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-pub const TOOLS: [&str; 3] = ["being_run", "being_status", "being_explain"];
+pub const TOOLS: [&str; 4] = ["being_run", "being_status", "being_explain", "being_rules"];
 const MAX_STEPS: u64 = 5000;
 
 pub fn handle(name: &str, args: &Value, owner: &str) -> Result<Value, Value> {
@@ -22,6 +22,7 @@ pub fn handle(name: &str, args: &Value, owner: &str) -> Result<Value, Value> {
         "being_run" => run(args, owner),
         "being_status" => status(owner),
         "being_explain" => explain(args, owner),
+        "being_rules" => rules(owner),
         _ => Err(err("unknown tool")),
     }
 }
@@ -53,7 +54,30 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         Some(Value::String(s)) => Some(Chooser::parse(s).ok_or_else(|| err("'chooser' must be \"ucb\" or \"model\""))?),
         Some(_) => return Err(err("'chooser' must be \"ucb\" or \"model\"")),
     };
+    let extended = match args.get("pattern_families") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if s == "standard" => Some(false),
+        Some(Value::String(s)) if s == "extended" => Some(true),
+        Some(_) => return Err(err("'pattern_families' must be \"standard\" or \"extended\"")),
+    };
+    let discover = match args.get("discover") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(err("'discover' must be a boolean")),
+    };
+    let every = opt_u64(args, "discover_every")?;
+    if every.is_some() && !discover {
+        return Err(err("'discover_every' only applies with discover: true"));
+    }
+    let discover_every = match (discover, every) {
+        (false, _) => None,
+        (true, None) => Some(10),
+        (true, Some(n)) if (1..=1000).contains(&n) => Some(n),
+        (true, Some(_)) => return Err(err("'discover_every' must be 1..1000 steps")),
+    };
     let cfg = RunCfg {
+        extended,
+        discover_every,
         chooser,
         world_seed: opt_u64(args, "world_seed")?,
         loop_seed: opt_u64(args, "seed")?,
@@ -69,6 +93,42 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
     let mut out = s.to_json();
     out["note"] = json!("deterministic simulation loop: a seeded world with author-defined rewards and a scripted solver; the preference comes from those rewards. See docs/measured.md");
     Ok(text(out))
+}
+
+fn rules(owner: &str) -> Result<Value, Value> {
+    let (log, rows) = load(owner)?;
+    let st = BeingState::from_events(&rows);
+    let Some(g) = st.genesis.clone() else {
+        return Ok(text(json!({ "exists": false, "note": "no being loop has run in this owner directory yet; call being_run" })));
+    };
+    let snap = log.open_latest();
+    let revs: HashMap<String, RevisionRow> = snap.rows::<RevisionRow>().into_iter().map(|r| (r.key.clone(), r)).collect();
+    let causes: Vec<CauseRow> = snap.rows();
+    let events: HashMap<String, &EventRow> = rows.iter().map(|e| (e.event_id.clone(), e)).collect();
+    let re = rederive_rules(&rows);
+    let list: Vec<Value> = st
+        .rules
+        .iter()
+        .map(|r| {
+            let rev = revs.get(&format!("being/rule/{}", r.id));
+            let cited: Vec<&EventRow> = rev.map(|v| causes.iter().filter(|c| c.rev_id == v.rev_id).filter_map(|c| events.get(&c.event_id).copied()).filter(|e| e.kind == "outcome").collect()).unwrap_or_default();
+            let used = rows.iter().filter(|e| e.source == SOURCE && e.kind == "action" && tag(&e.tags, "rule_used") == Some(r.id.as_str())).count();
+            json!({
+                "rule_id": r.id, "signature": format!("pattern difficulty {}", r.sig), "form": r.form.code(), "dsl": r.form.dsl(),
+                "training_examples_reproduced": r.train_ok, "held_out_examples_reproduced": r.val_ok, "accepted_at_step": r.step,
+                "rule_event_id": r.event_id, "revision": rev.map(|v| json!({ "rev_id": v.rev_id, "key": v.key, "confidence": v.confidence, "author": v.author })),
+                "cited_example_events": cited.len(),
+                "cited_sample": cited.iter().take(3).map(|e| json!({ "event_id": e.event_id, "text": e.text, "terms": tag(&e.tags, "terms"), "revealed_next": tag(&e.tags, "next") })).collect::<Vec<_>>(),
+                "times_used_in_attempts": used,
+                "rederived_from_log": re.iter().find(|(id, _)| *id == r.id).map(|x| x.1),
+            })
+        })
+        .collect();
+    Ok(text(json!({
+        "exists": true, "pattern_families": if g.extended { "extended" } else { "standard" }, "revealed_examples_in_log": st.examples.len(),
+        "rules": list,
+        "note": "rules are found by a search inside a small grammar written by the author (see README, Track B2); the coefficients are fitted per task from its own prefix. 'rederived_from_log' re-runs the search over only the examples logged before the rule and checks that it yields this rule",
+    })))
 }
 
 fn load(owner: &str) -> Result<(crate::versioned::VersionedLog, Vec<EventRow>), Value> {
@@ -100,7 +160,7 @@ fn status(owner: &str) -> Result<Value, Value> {
     Ok(text(json!({
         "exists": true,
         "world_seed": g.world_seed, "loop_seed": g.loop_seed, "initial_budget": g.budget, "explore_c": g.explore_c, "chooser": g.chooser.name(),
-        "model_attempts": st.model.attempts(),
+        "model_attempts": st.model.attempts(), "pattern_families": if g.extended { "extended" } else { "standard" }, "rules_discovered": st.rules.len(),
         "steps": st.step, "budget_left": st.budget_left, "refills": st.refills, "world_clock_seconds": st.clock,
         "total_reward": st.total_reward, "total_energy_spent": st.total_cost,
         "reward_per_energy": if st.total_cost > 0 { st.total_reward as f64 / st.total_cost as f64 } else { 0.0 },
@@ -137,6 +197,16 @@ fn explain(args: &Value, owner: &str) -> Result<Value, Value> {
     let step = tag(&d.tags, "step");
     let result = rows.iter().find(|e| e.source == SOURCE && e.kind == "outcome" && tag(&e.tags, "step") == step).map(|e| json!({ "event_id": e.event_id, "text": e.text }));
     let rep = replay_decisions(&rows).into_iter().find(|r| r.event_id == d.event_id);
+    // the discovered rule that produced the answer of this step, if one did
+    let rule_used = rows.iter().find(|e| e.source == SOURCE && e.kind == "action" && tag(&e.tags, "step") == step).and_then(|a| tag(&a.tags, "rule_used")).map(|id| {
+        let rev = snap.rows::<RevisionRow>().into_iter().find(|r| r.key == format!("being/rule/{id}"));
+        json!({
+            "rule_id": id,
+            "stance": rev.as_ref().map(|r| r.stance.clone()),
+            "rationale": rev.as_ref().and_then(|r| serde_json::from_str::<Value>(&r.rationale).ok()),
+            "note": "the answer of this step was computed by this rule from the log; the rule's cited example events are listed by being_rules",
+        })
+    });
     Ok(text(json!({
         "decision_event_id": d.event_id, "occurred_at": d.occurred_at, "step": step, "domain": tag(&d.tags, "domain"), "action": tag(&d.tags, "action"),
         "decision": d.text,
@@ -145,6 +215,7 @@ fn explain(args: &Value, owner: &str) -> Result<Value, Value> {
         "evidence_events_cited": cited,
         "evidence_note": "the cited events are the genesis event and the latest outcomes per domain; the counts and means used come from all outcomes before this step",
         "outcome_of_this_step": result,
+        "discovered_rule_used": rule_used,
         "replay_check": rep.map(|r| json!({ "re_derived_domain": r.rederived, "equal_to_recorded": r.matches() })),
     })))
 }
@@ -159,6 +230,9 @@ pub fn tool_defs() -> Vec<Value> {
             "world_seed": { "type": "integer", "minimum": 0, "description": "World seed (hidden rewards and tasks). Default 1; fixed once the being exists" },
             "budget": { "type": "integer", "minimum": 1, "description": "Energy units for a new being. Default 2000" },
             "chooser": { "type": "string", "enum": ["ucb", "model"], "description": "Default ucb (single task per step, UCB1 over domains). model: a menu of 4 tasks per step; a world model learned from the log picks task and solver strategy. Fixed once the being exists" },
+            "pattern_families": { "type": "string", "enum": ["standard", "extended"], "description": "Default standard. extended (needs chooser model): sequence tasks also come from extra hidden families the fixed solvers cannot solve, revealed answers are logged and a fourth strategy, discovered, applies rules the being found itself. Fixed once the being exists" },
+            "discover": { "type": "boolean", "description": "Run rule discovery during this run (needs a being created with pattern_families extended): every discover_every steps the being searches a small author-defined grammar of sequence rules over its own revealed examples and logs accepted rules" },
+            "discover_every": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "With discover: steps between discovery passes. Default 10" },
             "stop_after_budget": { "type": "boolean", "description": "Default true: stop when no task is affordable. False: the world refills the budget at the next world day (logged) and the run continues" }
           }, "required": ["steps"] } }),
         json!({ "name": "being_status",
@@ -167,5 +241,8 @@ pub fn tool_defs() -> Vec<Value> {
         json!({ "name": "being_explain",
           "description": "Read-only: for one decision event, show why the domain was chosen (counts, mean reward per energy, exploration bonus and score of every alternative), the events it cited as evidence, the outcome, and a replay that re-derives the choice from the log",
           "inputSchema": { "type": "object", "properties": { "decision_event_id": { "type": "string", "description": "Event id (or unique prefix of at least 8 characters) of a decision event, from self_sql over events or being_status" } }, "required": ["decision_event_id"] } }),
+        json!({ "name": "being_rules",
+          "description": "Read-only: the rules the being has discovered by search over its own logged examples (author-defined grammar): form, signature, training and held-out support, the cited example events, how often each was used, and a check that each rule is re-derived from the log alone",
+          "inputSchema": { "type": "object", "properties": {} } }),
     ]
 }

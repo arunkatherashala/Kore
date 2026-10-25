@@ -105,6 +105,17 @@ pub enum Kind {
     PatQuad,
     PatFib,
     PatAlt,
+    // Extended pattern families (world option `pattern_families: extended`). The fixed
+    // solvers have no exact method for any of them; the last two are outside the rule
+    // grammar of `discover.rs` on purpose (negative controls).
+    ExtAffGeom,
+    ExtPoly3,
+    ExtRec2,
+    ExtTribo,
+    ExtAlt,
+    ExtPeriodic,
+    NegProd,
+    NegPrimes,
 }
 
 impl Kind {
@@ -117,6 +128,26 @@ impl Kind {
             Domain::Physics => [PhysVelocity, PhysOhm, PhysDisplacement, PhysKinetic, PhysStopping][k],
             Domain::Pattern => [PatArith, PatGeom, PatQuad, PatFib, PatAlt][k],
         }
+    }
+
+    /// Families that can appear at (domain, difficulty) in the extended pattern world.
+    pub fn options_ext(d: Domain, difficulty: u8) -> Vec<Kind> {
+        use Kind::*;
+        if d != Domain::Pattern {
+            return vec![Kind::of(d, difficulty)];
+        }
+        match difficulty.clamp(1, 5) {
+            1 => vec![PatArith],
+            2 => vec![PatGeom, ExtAffGeom],
+            3 => vec![PatQuad, ExtPoly3],
+            4 => vec![PatFib, ExtRec2, ExtTribo],
+            _ => vec![ExtAlt, ExtPeriodic, NegProd, NegPrimes],
+        }
+    }
+
+    /// True for the families the author wrote outside the rule grammar (negative controls).
+    pub fn is_negative_control(self) -> bool {
+        matches!(self, Kind::NegProd | Kind::NegPrimes)
     }
 }
 
@@ -207,11 +238,17 @@ pub fn iso_at(secs: i64) -> String {
 pub struct World {
     pub seed: u64,
     pub profile: Profile,
+    /// Pattern tasks come from the extended hidden families (default off: all earlier results are unchanged).
+    pub extended: bool,
 }
 
 impl World {
     pub fn new(seed: u64) -> World {
-        World { seed, profile: Profile::from_seed(seed) }
+        World { seed, profile: Profile::from_seed(seed), extended: false }
+    }
+
+    pub fn with_extended(seed: u64, extended: bool) -> World {
+        World { extended, ..World::new(seed) }
     }
 
     /// The world's per-attempt random source, handed to the solver as the
@@ -261,7 +298,12 @@ impl World {
         };
         let u = r.f64();
         let difficulty = forced.unwrap_or_else(|| (1.0 + (u.powf(self.profile.diff_bias[d.idx()]) * 5.0).floor()).clamp(1.0, 5.0) as u8);
-        let kind = Kind::of(d, difficulty);
+        let kind = if self.extended && d == Domain::Pattern {
+            let opts = Kind::options_ext(d, difficulty);
+            opts[r.below(opts.len() as u64) as usize]
+        } else {
+            Kind::of(d, difficulty)
+        };
         let (params, prompt, expected) = generate(kind, &mut r);
         let k = difficulty as i64;
         let reward = ((self.profile.reward_scale[d.idx()] * (4.0 + 3.0 * k as f64)).round() as i64).max(1);
@@ -386,6 +428,85 @@ fn generate(kind: Kind, r: &mut Rng) -> (Vec<i64>, String, i64) {
             }
             let next = t[4] + t[5];
             (t.clone(), format!("Next term: {}", join(&t)), next)
+        }
+        ExtAffGeom => {
+            let (s, p, c) = (r.range(1, 5), [2, 3, 4, -2][r.below(4) as usize], nz(r, -5, 9));
+            let mut t = vec![s];
+            while t.len() < 6 {
+                let n = p * t[t.len() - 1] + c;
+                t.push(n);
+            }
+            let next = t[5];
+            t.truncate(5);
+            (t.clone(), format!("Next term: {}", join(&t)), next)
+        }
+        ExtPoly3 => {
+            let (a, b, c, d) = (r.range(1, 2), r.range(-3, 3), r.range(-5, 5), r.range(-5, 9));
+            let f = |n: i64| a * n * n * n + b * n * n + c * n + d;
+            let t: Vec<i64> = (1..=6).map(f).collect();
+            (t.clone(), format!("Next term: {}", join(&t)), f(7))
+        }
+        ExtRec2 => {
+            let (mut p, mut q) = (r.range(1, 3), nz(r, -2, 3));
+            if (p, q) == (1, 1) {
+                (p, q) = (2, 1);
+            }
+            let mut t = vec![r.range(1, 5), r.range(1, 5)];
+            while t.len() < 7 {
+                let n = p * t[t.len() - 1] + q * t[t.len() - 2];
+                t.push(n);
+            }
+            let next = t[6];
+            t.truncate(6);
+            (t.clone(), format!("Next term: {}", join(&t)), next)
+        }
+        ExtTribo => {
+            let mut t = vec![r.range(1, 4), r.range(1, 4), r.range(1, 4)];
+            while t.len() < 9 {
+                let n = t[t.len() - 1] + t[t.len() - 2] + t[t.len() - 3];
+                t.push(n);
+            }
+            let next = t[8];
+            t.truncate(8);
+            (t.clone(), format!("Next term: {}", join(&t)), next)
+        }
+        ExtAlt => {
+            let a = r.range(1, 9);
+            let mut b = r.range(-4, 9);
+            if b == a {
+                b = a % 9 + 1;
+            }
+            let mut t = vec![r.range(0, 10)];
+            for i in 0..7 {
+                let n = t[i] + if i % 2 == 0 { a } else { b };
+                t.push(n);
+            }
+            let next = t[7];
+            t.truncate(7);
+            (t.clone(), format!("Next term: {}", join(&t)), next)
+        }
+        ExtPeriodic => {
+            let cyc = [r.range(1, 9), r.range(1, 9), r.range(1, 9)];
+            let t: Vec<i64> = (0..8).map(|i| cyc[i % 3]).collect();
+            let next = t[7];
+            let t = t[..7].to_vec();
+            (t.clone(), format!("Next term: {}", join(&t)), next)
+        }
+        NegProd => {
+            let mut t = vec![r.range(2, 3), r.range(2, 3)];
+            while t.len() < 7 {
+                let n = t[t.len() - 1] * t[t.len() - 2];
+                t.push(n);
+            }
+            let next = t[6];
+            t.truncate(6);
+            (t.clone(), format!("Next term: {}", join(&t)), next)
+        }
+        NegPrimes => {
+            const P: [i64; 20] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71];
+            let i0 = r.range(0, 12) as usize;
+            let t = P[i0..i0 + 6].to_vec();
+            (t.clone(), format!("Next term: {}", join(&t)), P[i0 + 6])
         }
         PatAlt => {
             let a = r.range(1, 9);

@@ -68,7 +68,7 @@ pub struct Estimate {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Model {
-    cells: [[[Cell; 3]; 5]; 4],
+    cells: [[[Cell; 4]; 5]; 4],
 }
 
 fn shrink(s: f64, n: f64, prior: f64, k: f64) -> f64 {
@@ -82,6 +82,11 @@ impl Model {
         c.succ += o.correct as u64;
         c.spent += o.spent;
         c.listed += o.listed_cost;
+    }
+
+    /// Forget one cell (used when a new rule changes what the `discovered` strategy does there).
+    pub fn reset_cell(&mut self, d: Domain, difficulty: u8, s: Strategy) {
+        self.cells[d.idx()][(difficulty.clamp(1, 5) - 1) as usize][s.idx()] = Cell::default();
     }
 
     pub fn attempts(&self) -> u64 {

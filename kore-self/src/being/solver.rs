@@ -22,6 +22,7 @@
 //! when the world's noise falls under it, an exact answer is off by one.
 //! These capabilities are hidden from the chooser; it can only observe results.
 
+use super::discover::{self, Rule};
 use super::state::DomainStat;
 use super::world::{Domain, Kind, TaskView};
 
@@ -39,6 +40,8 @@ pub struct Context<'a> {
     pub noise: u64,
     /// What the being has observed so far in each domain, from its own log.
     pub stats: &'a [DomainStat; 4],
+    /// Rules the being has accepted into its own log (empty unless discovery ran).
+    pub rules: &'a [Rule],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,6 +51,8 @@ pub struct Proposal {
     pub confidence: f64,
     /// Short name of the strategy used (goes into the log).
     pub method: String,
+    /// Id of the discovered rule that produced the answer, if one did.
+    pub rule_id: Option<String>,
 }
 
 pub trait Thinker {
@@ -65,15 +70,20 @@ pub trait Thinker {
 /// |---|---|---|---|
 /// | fast | half the listed cost (rounded up) | exact only for difficulty 1-2, a cheap heuristic above | 3x the domain rate (max 40%) |
 /// | careful | the listed cost | the scripted table above | the domain rate |
-/// | deep | twice the listed cost | exact for every template | half the domain rate |
+/// | deep | twice the listed cost | exact for every template of the standard world | half the domain rate |
+/// | discovered | the listed cost | applies the being's own accepted rule when one fits the prefix, else behaves like careful (extended pattern world only) | the domain rate |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Strategy {
     Fast = 0,
     Careful = 1,
     Deep = 2,
+    Discovered = 3,
 }
 
+/// The strategies of the standard menu world.
 pub const STRATEGIES: [Strategy; 3] = [Strategy::Fast, Strategy::Careful, Strategy::Deep];
+/// The strategies of a being created with `pattern_families: extended`.
+pub const STRATEGIES_EXT: [Strategy; 4] = [Strategy::Fast, Strategy::Careful, Strategy::Deep, Strategy::Discovered];
 
 impl Strategy {
     pub fn idx(self) -> usize {
@@ -84,16 +94,17 @@ impl Strategy {
             Strategy::Fast => "fast",
             Strategy::Careful => "careful",
             Strategy::Deep => "deep",
+            Strategy::Discovered => "discovered",
         }
     }
     pub fn parse(s: &str) -> Option<Strategy> {
-        STRATEGIES.iter().copied().find(|x| x.name() == s)
+        STRATEGIES_EXT.iter().copied().find(|x| x.name() == s)
     }
     /// Energy actually spent on an attempt whose listed cost is `listed`.
     pub fn energy(self, listed: i64) -> i64 {
         match self {
             Strategy::Fast => ((listed + 1) / 2).max(1),
-            Strategy::Careful => listed,
+            Strategy::Careful | Strategy::Discovered => listed,
             Strategy::Deep => 2 * listed,
         }
     }
@@ -101,7 +112,7 @@ impl Strategy {
         let base = SLIP_PER_MILLE[domain];
         match self {
             Strategy::Fast => (3 * base).min(400),
-            Strategy::Careful => base,
+            Strategy::Careful | Strategy::Discovered => base,
             Strategy::Deep => base / 2,
         }
     }
@@ -119,14 +130,25 @@ impl Thinker for ScriptedThinker {
         let (mut answer, exact, method) = solve(t);
         if exact && ctx.noise % 1000 < SLIP_PER_MILLE[t.domain.idx()] {
             answer += 1;
-            return Proposal { answer, confidence: CONF_EXACT, method: format!("{method}+slip") };
+            return Proposal { answer, confidence: CONF_EXACT, method: format!("{method}+slip"), rule_id: None };
         }
-        Proposal { answer, confidence: if exact { CONF_EXACT } else { CONF_HEURISTIC }, method }
+        Proposal { answer, confidence: if exact { CONF_EXACT } else { CONF_HEURISTIC }, method, rule_id: None }
     }
     fn propose_with(&self, ctx: &Context, strategy: Strategy) -> Proposal {
         let t = ctx.task;
+        let mut rule_id = None;
         let (mut answer, exact, method) = match strategy {
             Strategy::Careful => solve(t),
+            Strategy::Discovered => match discover::apply(ctx.rules, t.difficulty, &t.params).filter(|_| t.domain == Domain::Pattern) {
+                Some((v, r)) => {
+                    rule_id = Some(r.id.clone());
+                    (v, true, format!("rule:{}:{}", r.id, r.form.code()))
+                }
+                None => {
+                    let (a, e, m) = solve(t);
+                    (a, e, format!("fallback:{m}"))
+                }
+            },
             Strategy::Fast if t.difficulty <= 2 => (exact_answer(t), true, "exact:easy".to_string()),
             Strategy::Fast => (heuristic(t), false, "heuristic:cheap".to_string()),
             Strategy::Deep => (exact_answer(t), true, "exact:deep".to_string()),
@@ -134,9 +156,9 @@ impl Thinker for ScriptedThinker {
         let method = format!("{}/{method}", strategy.name());
         if exact && ctx.noise % 1000 < strategy.slip(t.domain.idx()) {
             answer += 1;
-            return Proposal { answer, confidence: CONF_EXACT, method: format!("{method}+slip") };
+            return Proposal { answer, confidence: CONF_EXACT, method: format!("{method}+slip"), rule_id };
         }
-        Proposal { answer, confidence: if exact { CONF_EXACT } else { CONF_HEURISTIC }, method }
+        Proposal { answer, confidence: if exact { CONF_EXACT } else { CONF_HEURISTIC }, method, rule_id }
     }
 }
 
@@ -161,7 +183,14 @@ fn exact_answer(t: &TaskView) -> i64 {
         PhysStopping => p[0] * p[0] / (2 * p[1]),
         PatArith | PatGeom | PatQuad | PatFib => pattern(p).0,
         PatAlt => p[p.len() - 1] + (p[p.len() - 2] - p[p.len() - 3]),
+        // no fixed method knows these families
+        ExtAffGeom | ExtPoly3 | ExtRec2 | ExtTribo | ExtAlt | ExtPeriodic | NegProd | NegPrimes => last_difference(p),
     }
+}
+
+fn last_difference(p: &[i64]) -> i64 {
+    let n = p.len();
+    p[n - 1] + (p[n - 1] - p[n - 2])
 }
 
 /// The cheap approximation of the fast strategy above difficulty 2.
@@ -175,10 +204,7 @@ fn heuristic(t: &TaskView) -> i64 {
         AlgBothSides => search(|x| p[0] * x + p[1] - (p[2] * x + p[3])),
         AlgParen => search(|x| p[0] * (x + p[1]) - p[2] * x - p[3]),
         PhysDisplacement | PhysKinetic | PhysStopping => p.iter().product(),
-        PatQuad | PatFib | PatAlt => {
-            let n = p.len();
-            p[n - 1] + (p[n - 1] - p[n - 2])
-        }
+        PatQuad | PatFib | PatAlt => last_difference(p),
         _ => exact_answer(t),
     }
 }
@@ -210,6 +236,7 @@ fn solve(t: &TaskView) -> (i64, bool, String) {
         PhysOhm => (p[0] * p[1], true, "exact:V=IR".into()),
         PhysDisplacement | PhysKinetic | PhysStopping => (p.iter().product(), false, "heuristic:product-of-numbers".into()),
         PatArith | PatGeom | PatQuad | PatFib | PatAlt => pattern(p),
+        ExtAffGeom | ExtPoly3 | ExtRec2 | ExtTribo | ExtAlt | ExtPeriodic | NegProd | NegPrimes => (last_difference(p), false, "heuristic:last-difference".into()),
     }
 }
 

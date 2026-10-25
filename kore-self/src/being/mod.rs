@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 pub mod chooser;
+pub mod discover;
 pub mod measure;
 pub mod model;
 pub mod planner;

@@ -23,7 +23,7 @@ pub fn true_efficiency(world_seed: u64) -> [f64; 4] {
         for s in 0..ORACLE_SAMPLES {
             let step = ORACLE_OFFSET + s;
             let t = w.task(step, d);
-            let ctx = Context { step, task: &t.view, noise: w.noise(step, d), stats: &st };
+            let ctx = Context { step, task: &t.view, noise: w.noise(step, d), stats: &st, rules: &[] };
             if t.check(th.propose(&ctx).answer) {
                 r += t.view.reward;
             }
@@ -62,7 +62,7 @@ impl RunResult {
 pub fn run_policy(world_seed: u64, budget: i64, picker: &mut dyn DomainPicker) -> RunResult {
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: super::state::Chooser::Ucb }, String::new());
+    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: super::state::Chooser::Ucb, extended: false }, String::new());
     let mut e = Engine::new(World::new(world_seed), st, &th);
     let mut picks = vec![];
     while let Ok(o) = e.step(picker) {
@@ -125,7 +125,8 @@ pub fn mean_ci(xs: &[f64]) -> (f64, f64, f64) {
 
 use super::chooser::{GreedyMenu, RandomMenu, UcbMenu};
 use super::planner::{Action, Choice, MenuChooser, ModelChooser, Offer};
-use super::solver::{Strategy, STRATEGIES};
+use super::discover::Rule;
+use super::solver::{Strategy, STRATEGIES, STRATEGIES_EXT};
 use super::state::Chooser;
 
 /// Budget of the longer menu runs.
@@ -136,22 +137,26 @@ const TRUTH_SAMPLES: u64 = 400;
 /// Uses the generator and the noise source; only the oracle and the tests touch it.
 #[derive(Debug, Clone)]
 pub struct Truth {
-    pub p: [[[f64; 3]; 5]; 4],
+    pub p: [[[f64; 4]; 5]; 4],
 }
 
 pub fn truth(world_seed: u64) -> Truth {
-    let w = World::new(world_seed);
+    truth_in(&World::new(world_seed), &[])
+}
+
+/// As `truth`, in any world, for a being whose accepted rules are `rules` (fourth strategy included).
+pub fn truth_in(w: &World, rules: &[Rule]) -> Truth {
     let th = ScriptedThinker;
     let st = [Default::default(); 4];
-    let mut t = Truth { p: [[[0.0; 3]; 5]; 4] };
+    let mut t = Truth { p: [[[0.0; 4]; 5]; 4] };
     for d in DOMAINS {
         for k in 1..=5u8 {
-            for s in STRATEGIES {
+            for s in if w.extended { STRATEGIES_EXT.to_vec() } else { STRATEGIES.to_vec() } {
                 let mut ok = 0u64;
                 for i in 0..TRUTH_SAMPLES {
                     let step = ORACLE_OFFSET + i;
                     let task = w.task_forced(step, d, k);
-                    let ctx = Context { step, task: &task.view, noise: w.menu_noise(step, (i % 4) as usize), stats: &st };
+                    let ctx = Context { step, task: &task.view, noise: w.menu_noise(step, (i % 4) as usize), stats: &st, rules };
                     ok += task.check(th.propose_with(&ctx, s).answer) as u64;
                 }
                 t.p[d.idx()][k as usize - 1][s.idx()] = ok as f64 / TRUTH_SAMPLES as f64;
@@ -164,6 +169,8 @@ pub fn truth(world_seed: u64) -> Truth {
 /// Knows the hidden success probabilities and the real energy of each strategy.
 pub struct OracleMenu {
     pub truth: Truth,
+    /// Strategies the oracle may use (three, or four in the extended world).
+    pub strategies: Vec<Strategy>,
 }
 
 impl MenuChooser for OracleMenu {
@@ -173,7 +180,7 @@ impl MenuChooser for OracleMenu {
     fn choose(&mut self, st: &BeingState, offers: &[Offer]) -> Option<Choice> {
         let mut best: Option<(f64, usize, Strategy)> = None;
         for o in offers {
-            for s in STRATEGIES {
+            for &s in &self.strategies {
                 let e = s.energy(o.listed_cost);
                 if e > st.budget_left {
                     continue;
@@ -224,7 +231,7 @@ impl MenuRun {
 pub fn run_menu(world_seed: u64, budget: i64, chooser: &mut dyn MenuChooser) -> MenuRun {
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model }, String::new());
+    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: false }, String::new());
     let mut e = Engine::new(World::new(world_seed), st, &th);
     let (mut recs, mut skips, mut strategies) = (vec![], 0, [0u64; 3]);
     while let Ok(o) = e.step_menu(chooser) {
@@ -265,8 +272,8 @@ pub fn menu_row(seed: u64, budget: i64, beta: f64, skip_frac: f64) -> MenuRow {
         greedy_deep: run_menu(seed, budget, &mut GreedyMenu { strategy: Strategy::Deep }),
         ucb: run_menu(seed, budget, &mut UcbMenu::new(seed, super::chooser::DEFAULT_EXPLORE_C)),
         model: run_menu(seed, budget, &mut m),
-        model_noskip: run_menu(seed, budget, &mut ModelChooser { beta, skip_frac: 0.0 }),
-        oracle: run_menu(seed, budget, &mut OracleMenu { truth: truth(seed) }),
+        model_noskip: run_menu(seed, budget, &mut ModelChooser { beta, skip_frac: 0.0, no_discovered: false }),
+        oracle: run_menu(seed, budget, &mut OracleMenu { truth: truth(seed), strategies: STRATEGIES.to_vec() }),
     }
 }
 

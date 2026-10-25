@@ -23,7 +23,7 @@
 //! cost and listed reward, and the log-derived state. This file must not read
 //! hidden world parameters; a test scans for that.
 
-use super::solver::{Strategy, STRATEGIES};
+use super::solver::{Strategy, STRATEGIES, STRATEGIES_EXT};
 use super::state::BeingState;
 use super::world::Domain;
 use serde_json::{json, Value};
@@ -97,17 +97,28 @@ pub struct Cand {
 pub struct ModelChooser {
     pub beta: f64,
     pub skip_frac: f64,
+    /// Measurement control: never consider the `discovered` strategy even where it exists.
+    pub no_discovered: bool,
 }
 
 impl ModelChooser {
     pub fn new(beta: f64) -> ModelChooser {
-        ModelChooser { beta, skip_frac: DEFAULT_SKIP_FRAC }
+        ModelChooser { beta, skip_frac: DEFAULT_SKIP_FRAC, no_discovered: false }
+    }
+
+    /// Strategies on offer: three in the standard menu, four (with `discovered`) when the being was created with extended pattern families.
+    fn strategies(&self, st: &BeingState) -> &'static [Strategy] {
+        if !self.no_discovered && st.genesis.as_ref().map_or(false, |g| g.extended) {
+            &STRATEGIES_EXT
+        } else {
+            &STRATEGIES
+        }
     }
 
     pub fn candidates(&self, st: &BeingState, offers: &[Offer]) -> Vec<Cand> {
         let mut v = vec![];
         for o in offers {
-            for s in STRATEGIES {
+            for &s in self.strategies(st) {
                 let e = st.model.estimate(o.domain, o.difficulty, s);
                 let cost_est = (o.listed_cost as f64 * e.cost_ratio).max(1.0);
                 let pu = (e.p + self.beta * e.sd).min(1.0);

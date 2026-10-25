@@ -7,6 +7,7 @@
 //! is the check that preferences live in the log and nowhere else.
 
 use super::chooser::{DomainPicker, Pick, Ucb1};
+use super::discover::{rule_from_event, rule_id, search};
 use super::planner::{MenuChooser, ModelChooser};
 use super::run_loop::offers_of;
 use super::state::{tag, BeingState, Chooser, SOURCE};
@@ -41,7 +42,7 @@ pub fn next_action(rows: &[EventRow]) -> Option<String> {
 
 fn pick_for(st: &BeingState) -> Option<Pick> {
     let g = st.genesis.as_ref()?;
-    let world = World::new(g.world_seed);
+    let world = World::with_extended(g.world_seed, g.extended);
     let menu = world.menu(st.step);
     let afford: Vec<Domain> = menu.iter().filter(|t| t.view.cost <= st.budget_left).map(|t| t.view.domain).collect();
     if afford.is_empty() {
@@ -55,10 +56,25 @@ fn action_for(st: &BeingState) -> Option<String> {
     match g.chooser {
         Chooser::Ucb => pick_for(st).map(|p| p.domain.name().to_string()),
         Chooser::Model => {
-            let offers = offers_of(&World::new(g.world_seed).offers(st.step));
+            let offers = offers_of(&World::with_extended(g.world_seed, g.extended).offers(st.step));
             ModelChooser::new(g.explore_c).choose(st, &offers).map(|c| c.action.label())
         }
     }
+}
+
+/// For every rule note in the log: can the search, run over only the examples logged before that
+/// note, produce exactly this rule (same id and support)? The rule set is a function of the log.
+pub fn rederive_rules(rows: &[EventRow]) -> Vec<(String, bool)> {
+    let mut st = BeingState::default();
+    let mut out = vec![];
+    for e in rows.iter().filter(|e| e.source == SOURCE) {
+        if let Some(r) = rule_from_event(e) {
+            let ok = search(&st.examples).iter().any(|f| rule_id(f.sig, &f.form) == r.id && f.train_ok == r.train_ok && f.val_ok == r.val_ok);
+            out.push((r.id.clone(), ok));
+        }
+        st.fold_event(e);
+    }
+    out
 }
 
 pub fn replay_decisions(rows: &[EventRow]) -> Vec<Replayed> {

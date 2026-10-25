@@ -17,6 +17,7 @@
 //! the log stays valid. Nothing else is written anywhere.
 
 use super::chooser::{DomainPicker, Pick, Ucb1, DEFAULT_EXPLORE_C};
+use super::discover::{self, terms_tag, Rule};
 use super::planner::{Action, MenuChooser, ModelChooser, Offer, DEFAULT_BETA};
 use super::policy::{Policy, StopReason};
 use super::solver::{Context, Strategy, Thinker};
@@ -79,7 +80,7 @@ impl<'a> Engine<'a> {
         }
         let task = &menu[pick.domain.idx()];
         let v = &task.view;
-        let ctx = Context { step, task: v, noise: self.world.noise(step, v.domain), stats: &self.state.stats };
+        let ctx = Context { step, task: v, noise: self.world.noise(step, v.domain), stats: &self.state.stats, rules: &self.state.rules };
         let prop = self.thinker.propose(&ctx);
         let correct = task.check(prop.answer);
         let reward = if correct { v.reward } else { 0 };
@@ -186,6 +187,7 @@ impl<'a> Engine<'a> {
             strategy: None,
             listed_cost: v.cost,
             skipped: false,
+            example: None,
         };
         self.state.apply(&outcome);
         Ok(StepOut { outcome, pick: Some(pick), action: None, predicted_p: None, decision_event_id: dev_id, events: vec![dev, aev, oev], revision, prediction: Some(prediction), resolved: Some(resolved) })
@@ -215,11 +217,12 @@ impl<'a> Engine<'a> {
             answer_text: String,
             view: Option<(usize, Strategy)>,
             conf: f64,
+            rule: Option<String>,
         }
         let done = match ch.action {
             Action::Skip => {
                 let cost = SKIP_COST.min(budget0);
-                Done { correct: false, reward: 0, cost, result: "skip", answer_text: format!("skip the menu at step {step} (energy {cost})"), view: None, conf: 0.0 }
+                Done { correct: false, reward: 0, cost, result: "skip", answer_text: format!("skip the menu at step {step} (energy {cost})"), view: None, conf: 0.0, rule: None }
             }
             Action::Attempt { slot, strategy } => {
                 let task = &tasks[slot];
@@ -234,9 +237,10 @@ impl<'a> Engine<'a> {
                         answer_text: format!("attempt task {} with {}: energy ran out before the answer ({budget0} left, {energy} needed)", v.id, strategy.name()),
                         view: Some((slot, strategy)),
                         conf: 0.0,
+                        rule: None,
                     }
                 } else {
-                    let ctx = Context { step, task: v, noise: self.world.menu_noise(step, slot), stats: &self.state.stats };
+                    let ctx = Context { step, task: v, noise: self.world.menu_noise(step, slot), stats: &self.state.stats, rules: &self.state.rules };
                     let prop = self.thinker.propose_with(&ctx, strategy);
                     let correct = task.check(prop.answer);
                     Done {
@@ -247,6 +251,7 @@ impl<'a> Engine<'a> {
                         answer_text: format!("attempt task {} ({}) with thinker {} using {}: answer {} (own confidence {:.2})", v.id, v.prompt, self.thinker.id(), prop.method, prop.answer, prop.confidence),
                         view: Some((slot, strategy)),
                         conf: prop.confidence,
+                        rule: prop.rule_id.clone(),
                     }
                 }
             }
@@ -276,7 +281,13 @@ impl<'a> Engine<'a> {
             occurred_at: iso_at(t0),
             kind: "action".into(),
             text: format!("step {step}: {}", done.answer_text),
-            tags: vec![format!("step:{step}"), format!("action:{label}")],
+            tags: {
+                let mut t = vec![format!("step:{step}"), format!("action:{label}")];
+                if let Some(r) = &done.rule {
+                    t.push(format!("rule_used:{r}"));
+                }
+                t
+            },
             redacted: false,
         };
         let mut otags = vec![format!("step:{step}")];
@@ -290,6 +301,10 @@ impl<'a> Engine<'a> {
                     format!("strategy:{}", strategy.name()),
                     format!("slot:{slot}"),
                 ]);
+                if self.world.extended && v.domain == Domain::Pattern && (done.result == "correct" || done.result == "wrong") {
+                    // the checker's answer is revealed after the attempt and recorded: one example for the being's own search
+                    otags.extend([format!("terms:{}", terms_tag(&v.params)), format!("next:{}", tasks[slot].expected())]);
+                }
                 (v.domain, v.id.clone(), v.difficulty, v.cost)
             }
             None => (Domain::Arithmetic, "none".to_string(), 1, done.cost),
@@ -344,6 +359,11 @@ impl<'a> Engine<'a> {
             }
             None => (None, None),
         };
+        let example = if oev.tags.iter().any(|t| t.starts_with("terms:")) {
+            done.view.map(|(slot, _)| discover::Example { event_id: oev_id.clone(), sig: tasks[slot].view.difficulty, terms: tasks[slot].view.params.clone(), next: tasks[slot].expected() })
+        } else {
+            None
+        };
         let outcome = Outcome {
             step,
             domain,
@@ -358,9 +378,58 @@ impl<'a> Engine<'a> {
             strategy: done.view.map(|x| x.1),
             listed_cost: listed,
             skipped: !attempted,
+            example,
         };
         self.state.apply(&outcome);
         Ok(StepOut { outcome, pick: None, action: Some(label), predicted_p, decision_event_id: dev_id, events: vec![dev, aev, oev], revision, prediction, resolved })
+    }
+}
+
+/// A rule accepted by one discovery pass, with what has to go into the log.
+pub struct NewRule {
+    pub rule: Rule,
+    pub event: NewEvent,
+    pub revision: NewRevision,
+}
+
+impl<'a> Engine<'a> {
+    /// One discovery pass: search the being's own revealed examples and take every newly accepted
+    /// rule into the state. Pure function of the state; a second pass with no new examples adds nothing.
+    pub fn discover_pass(&mut self) -> Vec<NewRule> {
+        let mut out = vec![];
+        for f in discover::search(&self.state.examples) {
+            let mut rule = Rule::new(f.sig, f.form, f.train_ok, f.val_ok, self.state.step);
+            if self.state.rules.iter().any(|r| r.id == rule.id) {
+                continue;
+            }
+            let at = iso_at(self.state.clock);
+            let (event, ev_id) = rule.event(at.clone());
+            rule.event_id = ev_id.clone();
+            let mut caused_by = f.cite.clone();
+            caused_by.push(ev_id);
+            let rationale = json!({
+                "rule_id": rule.id, "signature": format!("pattern difficulty {}", rule.sig), "form": rule.form.code(), "dsl": rule.form.dsl(),
+                "training_examples_reproduced": f.train_ok, "held_out_examples_reproduced": f.val_ok,
+                "new_training_support": f.new_train, "new_held_out_support": f.new_val,
+                "min_training_support": discover::K_TRAIN, "min_held_out_support": discover::K_VAL,
+                "cited_examples": f.cite.len(), "accepted_at_step": self.state.step,
+                "grammar": "author-defined: 14 linear forms over lags 1-3 (optional constant) and polynomials of degree 1-3 in the term index; coefficients fitted per task",
+            });
+            let revision = NewRevision {
+                entity_type: "rule".into(),
+                key: format!("being/rule/{}", rule.id),
+                stance: format!("pattern difficulty {}: {}", rule.sig, rule.form.dsl()),
+                confidence: ((f.train_ok + f.val_ok + 1) as f64 / (f.train_ok + f.val_ok + 2) as f64).clamp(0.0, 1.0),
+                rationale: rationale.to_string(),
+                supersedes: None,
+                valid_from: at,
+                author: "rule:being-discover".into(),
+                caused_by,
+            };
+            self.state.apply_rule(rule.clone());
+            out.push(NewRule { rule, event, revision });
+        }
+        out
     }
 }
 
@@ -374,6 +443,10 @@ pub struct RunCfg {
     pub chooser: Option<Chooser>,
     pub steps: u64,
     pub refill_when_exhausted: bool,
+    /// `Some(true)` creates a being in the extended pattern world (menu world only); fixed once created.
+    pub extended: Option<bool>,
+    /// Run a discovery pass after every N-th step of the being (None or 0: never).
+    pub discover_every: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -386,6 +459,8 @@ pub struct RunSummary {
     pub version_before: u64,
     pub version_after: u64,
     pub created: bool,
+    /// Rules accepted during this run.
+    pub new_rules: Vec<Rule>,
 }
 
 impl RunSummary {
@@ -399,6 +474,8 @@ impl RunSummary {
             "budget_left": self.state.budget_left, "refills": self.state.refills,
             "world_seed": g.as_ref().map(|g| g.world_seed), "loop_seed": g.as_ref().map(|g| g.loop_seed),
             "chooser": g.as_ref().map(|g| g.chooser.name()),
+            "pattern_families": if g.as_ref().map_or(false, |g| g.extended) { "extended" } else { "standard" },
+            "rules_total": self.state.rules.len(), "rules_accepted_this_run": self.new_rules.iter().map(|r| json!({ "rule_id": r.id, "signature": format!("pattern difficulty {}", r.sig), "form": r.form.code() })).collect::<Vec<_>>(),
             "new_being": self.created, "version_before": self.version_before, "version_after": self.version_after,
             "domains": domain_json(&self.state),
         })
@@ -443,6 +520,11 @@ pub fn run_with(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
                     return bad("loop seed", g.loop_seed.to_string(), s.to_string());
                 }
             }
+            if let Some(e) = cfg.extended {
+                if e != g.extended {
+                    return bad("pattern_families", if g.extended { "extended" } else { "standard" }.into(), if e { "extended" } else { "standard" }.into());
+                }
+            }
             if let Some(c) = cfg.chooser {
                 if c != g.chooser {
                     return bad("chooser", g.chooser.name().to_string(), c.name().to_string());
@@ -459,7 +541,11 @@ pub fn run_with(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
             if !c.is_finite() || !(0.0..=10.0).contains(&c) {
                 return Err(LogError::Invalid("explore_c must be within 0..=10".into()));
             }
-            let g = Genesis { world_seed: cfg.world_seed.unwrap_or(1), loop_seed: cfg.loop_seed.unwrap_or(1), budget, explore_c: c, chooser };
+            let extended = cfg.extended.unwrap_or(false);
+            if extended && chooser != Chooser::Model {
+                return Err(LogError::Invalid("pattern_families extended needs chooser model (the menu world)".into()));
+            }
+            let g = Genesis { world_seed: cfg.world_seed.unwrap_or(1), loop_seed: cfg.loop_seed.unwrap_or(1), budget, explore_c: c, chooser, extended };
             let (ev, id) = genesis_event(&g);
             log.append_events(&[ev])?;
             state.start(g, id);
@@ -467,6 +553,10 @@ pub fn run_with(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
         }
     }
     let g = state.genesis.clone().expect("genesis exists now");
+    let discover_every = cfg.discover_every.unwrap_or(0);
+    if discover_every > 0 && !g.extended {
+        return Err(LogError::Invalid("discovery needs a being created with pattern_families extended (only then are revealed examples logged)".into()));
+    }
     let mut own = Ucb1::new(g.loop_seed, g.explore_c);
     let picker: &mut dyn DomainPicker = match picker {
         Some(p) => p,
@@ -475,7 +565,8 @@ pub fn run_with(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
 
     let menu = g.chooser == Chooser::Model;
     let mut mc = ModelChooser::new(g.explore_c);
-    let mut engine = Engine::new(World::new(g.world_seed), state, thinker);
+    let mut engine = Engine::new(World::with_extended(g.world_seed, g.extended), state, thinker);
+    let mut new_rules: Vec<Rule> = vec![];
     let mut pending = Batch::default();
     let mut pending_steps = 0usize;
     let (mut done, mut reward, mut cost) = (0u64, 0i64, 0i64);
@@ -496,6 +587,13 @@ pub fn run_with(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
                 pending.predictions.extend(out.prediction);
                 pending.outcomes.extend(out.resolved);
                 pending_steps += 1;
+                if discover_every > 0 && engine.state.step % discover_every == 0 {
+                    for nr in engine.discover_pass() {
+                        pending.events.push(nr.event);
+                        pending.revisions.push(nr.revision);
+                        new_rules.push(nr.rule);
+                    }
+                }
                 if pending_steps >= FLUSH_EVERY {
                     log.commit_batch(std::mem::take(&mut pending))?;
                     pending_steps = 0;
@@ -525,5 +623,5 @@ pub fn run_with(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
     if !pending.events.is_empty() {
         log.commit_batch(pending)?;
     }
-    Ok(RunSummary { steps_run: done, stopped, reward, cost, state: engine.state, version_before, version_after: log.latest_version(), created })
+    Ok(RunSummary { steps_run: done, stopped, reward, cost, state: engine.state, version_before, version_after: log.latest_version(), created, new_rules })
 }

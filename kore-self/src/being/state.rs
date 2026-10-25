@@ -7,6 +7,7 @@
 //! replay tests check that both routes give the same state and therefore the
 //! same next decision.
 
+use super::discover::{example_from_event, rule_from_event, Example, Rule};
 use super::model::{Model, Obs};
 use super::solver::Strategy;
 use super::world::{iso_at, Domain, DOMAINS};
@@ -76,6 +77,8 @@ pub struct Genesis {
     /// UCB1 exploration constant, or beta of the model planner.
     pub explore_c: f64,
     pub chooser: Chooser,
+    /// Pattern tasks come from the extended hidden families and the `discovered` strategy exists (menu world only).
+    pub extended: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -97,6 +100,8 @@ pub struct Outcome {
     /// No attempt was run (menu skipped, or the energy ran out before the attempt):
     /// only the energy is accounted for; no domain statistics, no model update.
     pub skipped: bool,
+    /// Sequence attempts of the extended world: the prefix and the revealed next term.
+    pub example: Option<Example>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -116,6 +121,10 @@ pub struct BeingState {
     pub refills: u64,
     /// Learned world model, folded from the attempts in the log.
     pub model: Model,
+    /// Revealed sequence examples read from the log (extended world only), in log order.
+    pub examples: Vec<Example>,
+    /// Rules accepted into the log, in acceptance order.
+    pub rules: Vec<Rule>,
 }
 
 /// Value of `key:` among comma-joined tags.
@@ -146,6 +155,9 @@ impl BeingState {
             self.step += 1;
             return;
         }
+        if let Some(ex) = &o.example {
+            self.examples.push(ex.clone());
+        }
         if let Some(strategy) = o.strategy {
             self.model.observe(&Obs { domain: o.domain, difficulty: o.difficulty, strategy, correct: o.correct, listed_cost: o.listed_cost, spent: o.cost });
         }
@@ -164,6 +176,18 @@ impl BeingState {
         while q.len() > EVIDENCE_WINDOW {
             q.pop_front();
         }
+    }
+
+    /// Take an accepted rule into the state. False if a rule with this id is already there
+    /// (discovering twice changes nothing). The `discovered` estimates of that signature start over,
+    /// because the strategy now does something different there.
+    pub fn apply_rule(&mut self, r: Rule) -> bool {
+        if self.rules.iter().any(|x| x.id == r.id) {
+            return false;
+        }
+        self.model.reset_cell(Domain::Pattern, r.sig, Strategy::Discovered);
+        self.rules.push(r);
+        true
     }
 
     pub fn apply_refill(&mut self, budget_left: i64, clock: i64) {
@@ -209,6 +233,10 @@ impl BeingState {
             let left = tag(&e.tags, "budget_left").and_then(|v| v.parse().ok()).unwrap_or(0);
             let clock = tag(&e.tags, "clock").and_then(|v| v.parse().ok()).unwrap_or(self.clock);
             self.apply_refill(left, clock);
+        } else if e.kind == "note" && has_tag(&e.tags, "rule") {
+            if let Some(r) = rule_from_event(e) {
+                self.apply_rule(r);
+            }
         } else if e.kind == "outcome" {
             if let Some(o) = outcome_from_event(e) {
                 self.apply(&o);
@@ -227,6 +255,7 @@ fn genesis_from_tags(tags: &str) -> Option<Genesis> {
             Some(c) => Chooser::parse(c)?,
             None => Chooser::Ucb,
         },
+        extended: tag(tags, "pattern_families") == Some("extended"),
     })
 }
 
@@ -253,6 +282,7 @@ pub fn outcome_from_event(e: &EventRow) -> Option<Outcome> {
         strategy: tag(t, "strategy").and_then(Strategy::parse),
         listed_cost: tag(t, "listed").and_then(|v| v.parse().ok()).unwrap_or(cost),
         skipped,
+        example: if skipped { None } else { example_from_event(e) },
     })
 }
 
@@ -261,8 +291,9 @@ pub fn genesis_event(g: &Genesis) -> (NewEvent, String) {
         Chooser::Ucb => format!("choice policy ucb1 with exploration constant {}", g.explore_c),
         Chooser::Model => format!("menu world, choice policy model-ucb (learned world model, optimism beta {})", g.explore_c),
     };
+    let ext = if g.extended { "; pattern families extended (author-defined hidden sequence families, strategy discovered added)" } else { "" };
     let text = format!(
-        "being genesis: a deterministic simulation world and loop start; world_seed {} loop_seed {} budget {} energy units; {policy}",
+        "being genesis: a deterministic simulation world and loop start; world_seed {} loop_seed {} budget {} energy units; {policy}{ext}",
         g.world_seed, g.loop_seed, g.budget
     );
     let at = iso_at(0);
@@ -280,6 +311,9 @@ pub fn genesis_event(g: &Genesis) -> (NewEvent, String) {
             tags.push("policy:model-ucb".into());
             tags.push("chooser:model".into());
         }
+    }
+    if g.extended {
+        tags.push("pattern_families:extended".into());
     }
     let ev = NewEvent { source: SOURCE.into(), occurred_at: at, kind: "note".into(), text, tags, redacted: false };
     (ev, id)

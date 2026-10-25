@@ -13,7 +13,7 @@ fn open(root: &std::path::Path) -> VersionedLog {
 }
 
 fn cfg(world: u64, seed: u64, steps: u64, budget: i64) -> RunCfg {
-    RunCfg { world_seed: Some(world), loop_seed: Some(seed), budget: Some(budget), explore_c: None, chooser: None, steps, refill_when_exhausted: false }
+    RunCfg { world_seed: Some(world), loop_seed: Some(seed), budget: Some(budget), explore_c: None, chooser: None, steps, refill_when_exhausted: false, extended: None, discover_every: None }
 }
 
 fn run_logged(root: &std::path::Path, world: u64, seed: u64, steps: u64, budget: i64) -> VersionedLog {
@@ -47,7 +47,7 @@ fn scripted_thinker_is_exact_where_documented_and_imperfect_elsewhere() {
     for step in 0..400 {
         for d in DOMAINS {
             let t = w.task(step, d);
-            let ctx = Context { step, task: &t.view, noise: 999_999, stats: &st }; // noise % 1000 = 999: no slip
+            let ctx = Context { step, task: &t.view, noise: 999_999, stats: &st, rules: &[] }; // noise % 1000 = 999: no slip
             let ok = t.check(th.propose(&ctx).answer);
             if scripted_is_exact(&t.view) {
                 exact_n += 1;
