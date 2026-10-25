@@ -84,7 +84,7 @@ This table is generated from the tool registry (`kore-self --tool-table`); a tes
 | `self_ledger_snapshot` | Record frequency-baseline predictions (action in context within the next 7 days) for each habit with enough data, using only events before the window start; one row per habit and window, never scored here |
 | `self_ledger_outcome` | Attach an outcome (yes or no) to a stored prediction, optionally citing the event that shows it; no score is computed |
 | `self_tag_rules_check` | Read-only: show how your hand-edited tag_rules.txt (keyword rules for topics, actions and contexts in free-text events) matches the log: events and days matched per rule, hits dropped by the negation guard, day-level occasions, and a sample of events no rule matched |
-| `being_run` | Run the being loop for N steps in a deterministic simulated world (arithmetic, algebra, physics formulas, sequences) with a seeded budget; the being picks the domain by learned reward per energy and every decision, action and outcome is appended to its own log |
+| `being_run` | Run the being loop for N steps in a deterministic simulated world (arithmetic, algebra, physics formulas, sequences) with a seeded budget; the being picks the domain by learned reward per energy (or, with chooser model, picks one of 4 offered tasks and a solver strategy from a world model learned from its own log) and every decision, action and outcome is appended to its own log |
 | `being_status` | Read-only: the being's steps, budget, per-domain selections and reward per energy, its last decisions with their reasons, and a check that every decision can be re-derived from the log |
 | `being_explain` | Read-only: for one decision event, show why the domain was chosen (counts, mean reward per energy, exploration bonus and score of every alternative), the events it cited as evidence, the outcome, and a replay that re-derives the choice from the log |
 <!-- tools:end -->
@@ -361,6 +361,26 @@ self_verify after flipping one byte of events/0000000013.kore
 Notes. A decision cites the genesis event and the latest 5 outcome events per domain; the counts it used come from all earlier outcomes. `being_run` with `stop_after_budget: false` lets the world refill the budget at the next world day (logged as a `refill` event). The loop can touch only the simulated world and this owner's log (no files, network or processes; a source-scan test checks this); it stops at the step limit, a stop flag, or when no task is affordable. The `Thinker` trait (`being/solver.rs`) is the seam where a language-model thinker could be plugged in later; only the scripted baseline exists. Under the defined rewards the learned chooser collected about 31% more reward per energy than random choice over 20 simulated worlds and about the same as the best single fixed domain (`docs/measured.md`).
 
 Does NOT do: there is no language-model thinker yet (the solvers are fixed scripts); no access to the real world (no files, web or tools); no open-ended goals (the only goal is reward per energy in the simulation); its preferences are produced by the rewards the author defined, they are not discovered values; it is not shown to beat always choosing the best single domain; it does not run by itself between calls (no scheduler); no claim is made about understanding or intelligence.
+
+### Track B: experience learner (research, step B1)
+
+`being_run` with `chooser: "model"` creates a being in a menu world: each step the world offers 4 tasks, and the being picks one task and one of three solver strategies (fast, careful, deep, with different energy and reliability), or skips the menu for 1 energy unit. A world model built only from the being's own logged outcomes (success probability and energy per domain, difficulty and strategy, with shrinkage from broader levels and an uncertainty) feeds a planner that maximizes optimistic reward per energy. Every decision logs all 12 alternatives with their estimates (`being_explain` shows them), and a replay re-derives every decision from the log alone. The default (`chooser: "ucb"`) is the unchanged single-task being above; the chooser is fixed once the being exists.
+
+Real output of `kore-self/tests/e2e_being.rs` (`being_model_chooser_end_to_end`, real binary, temp data root; values shortened):
+
+```
+being_run {steps:200, seed:1, world_seed:3, budget:3000, chooser:"model"}
+  steps_run 200, chooser "model", total_reward 1907, total_energy_spent 577 (3.31 reward per energy)
+being_status -> replay_check {"decisions": 200, "re_derived_from_log_and_equal": 200}
+being_explain on the last decision -> action "0:fast", replay equal_to_recorded true
+  alternative slot 0 arithmetic difficulty 2 fast: n_cell 21, p_success 0.821, uncertainty_sd 0.075, est_energy 2.985, score 3.44
+  alternative slot 0 arithmetic difficulty 2 careful: n_cell 0, p_success 0.5, uncertainty_sd 0.224, est_energy 5.0, score 1.838
+being_run {steps:1, chooser:"ucb"} on this being -> error: the being keeps its chooser
+```
+
+Measured (`docs/measured.md`, 20 simulated worlds, seeds 1..20, budget 600; tuned on seeds 101..120; author-defined rewards and strategies): mean reward per energy 3.12 for the model learner against 1.59 for the UCB1 domain chooser, 1.50 for greedy-by-listed-reward-per-cost, 2.01 for the best fixed strategy (greedy with fast), 1.19 for random and 3.49 for the oracle that knows the hidden success rates (which never skips). The learner is better than UCB1 in 20 of 20 worlds and than the best fixed strategy in 19 of 20; its predicted success has Brier 0.127 against 0.169 for the running base rate but is overconfident where it predicts 0.2-0.6.
+
+Does NOT do: it does not discover new strategies or rules (the three strategies are fixed code; discovery is step B2); it does not adapt to new domains appearing mid-life (B3); it is not compared with any language model (B4); the oracle and the baselines are weak by design (the old policies cannot choose a strategy), so the gap to UCB1 mostly measures strategy choice and skipping; the result holds only for this author-written world and its trade-offs; it makes no claim of understanding, thinking or intelligence, only the measured numbers above.
 
 ### What this does NOT do
 

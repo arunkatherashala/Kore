@@ -152,3 +152,45 @@ fn being_loop_end_to_end() {
     s.stop();
     std::fs::write(&seg, good).unwrap();
 }
+
+#[test]
+fn being_model_chooser_end_to_end() {
+    let root = tempfile::tempdir().unwrap();
+    let fake_home = tempfile::tempdir().unwrap();
+    let owner = "e2em";
+    let mut s = Server::start(root.path(), fake_home.path(), owner);
+
+    let (e, t) = s.call("being_run", json!({"steps": 5, "chooser": "bogus"}));
+    assert!(e, "{t}");
+    let run = s.json("being_run", json!({"steps": 200, "seed": 1, "world_seed": 3, "budget": 3000, "chooser": "model"}));
+    let mut shown = run.clone();
+    shown["domains"] = json!("(per-domain table cut)");
+    say("being_run {steps:200, seed:1, world_seed:3, budget:3000, chooser:\"model\"}", &serde_json::to_string_pretty(&shown).unwrap());
+    assert_eq!(run["steps_run"], 200);
+    assert_eq!(run["chooser"], "model");
+
+    let st = s.json("being_status", json!({}));
+    assert_eq!(st["chooser"], "model");
+    assert_eq!(st["replay_check"]["decisions"], 200);
+    assert_eq!(st["replay_check"]["re_derived_from_log_and_equal"], 200);
+
+    let id = st["last_decisions"][0]["decision_event_id"].as_str().unwrap().to_string();
+    let ex = s.json("being_explain", json!({"decision_event_id": id}));
+    let alts = ex["reasons_and_alternatives"]["alternatives"].as_array().unwrap();
+    assert_eq!(alts.len(), 12);
+    let mut shown = ex.clone();
+    shown["evidence_events_cited"] = json!("(cut)");
+    shown["reasons_and_alternatives"]["alternatives"] = json!(alts.iter().take(3).collect::<Vec<_>>());
+    say("being_explain on the last decision (3 of 12 alternatives shown)", &serde_json::to_string_pretty(&shown).unwrap());
+    assert_eq!(ex["replay_check"]["equal_to_recorded"], true);
+    assert!(alts[0]["p_success"].is_number() && alts[0]["uncertainty_sd"].is_number());
+
+    // the chooser is kept once the being exists
+    let (e, t) = s.call("being_run", json!({"steps": 1, "chooser": "ucb"}));
+    assert!(e && t.contains("chooser"), "{t}");
+    let more = s.json("being_run", json!({"steps": 10}));
+    assert_eq!(more["chooser"], "model");
+    let ver = s.ok("self_verify", json!({}));
+    assert!(ver.starts_with("OK"));
+    s.stop();
+}

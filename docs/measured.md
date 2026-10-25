@@ -211,6 +211,142 @@ Other tests (all in `kore-self/src/being/tests.rs`, `tests/e2e_being.rs`): two w
 
 Test floors (set after the measurement, a margin below it): learned minus random mean reward per energy > 0.2 (measured 0.40), regret versus oracle < 0.45 (measured 0.21), learned beats random in at least 15 of 20 worlds (measured 18). Guards against regression, not accuracy claims.
 
+## Track B1: world-model learner in a menu world (synthetic world, author-defined rewards)
+
+Everything here is the same kind of simulation as above: author-written tasks, rewards, costs and solvers, no real data. Track B asks whether a being can learn from its own log which options pay. Measured with `cargo run -p kore-self --example measure_being --offline --release -- menu` (2026-10-24, branch self-b1, built on commit a0ba7566).
+
+What is new. Each step the world offers a menu of 4 tasks (domain drawn from the world seed, difficulty and listed cost and reward as before); the being picks one task and one of three solver strategies, or skips the menu for 1 energy unit. Strategies: fast (half the listed energy, exact only for difficulty 1-2, a cheap heuristic above, three times the slip rate), careful (the old scripted solver, listed energy), deep (twice the energy, exact on every template, half the slip rate). The old single-task mode and its numbers above are unchanged (the old tests still pass). The learner (`being/model.rs`, `being/planner.rs`) keeps, per (domain, difficulty, strategy), a Beta posterior of the success probability shrunk from the (domain, strategy) estimate, which is shrunk from the strategy-wide estimate (prior strength 4), plus the energy actually spent as a ratio of the listed cost. It is built only from the logged outcomes. The planner scores every (offered task, strategy) as `listed reward x min(1, p + beta x sd) / estimated energy` (UCB on the model, no random numbers, so replay is exact), takes the best affordable one, and skips when that score is below `skip_frac` times the reward per energy it has earned so far. Every decision logs all 12 alternatives with their estimates, uncertainty and scores.
+
+Setup. Report seeds 1..20 (20 worlds), tuning seeds 101..120. Beta and skip_frac were chosen on the tuning seeds only (grid beta in 0, 0.25, 0.5, 1, 1.5, 2, 3 with skip_frac in 0, 0.3, 0.6, then beta in 1, 1.5, 2, 3 with skip_frac in 0, 0.6, 0.8, 1.0, 1.2, at both budgets; beta 1.5 with skip_frac 1.0 had the best mean over the two budgets: 3.42 at budget 600 and 3.65 at budget 3000 on the tuning seeds, against baselines of about 1.5-2.1 there). Budgets 600 (about 150 attempts) and 3000. Baselines: random over (offer, strategy); greedy by listed reward per listed cost (uses only what is printed on the menu) with the careful strategy, and also with fast always and deep always (the best fixed strategy is the fair comparison, since the old policies cannot choose a strategy); the UCB1 domain chooser (the best old policy: UCB1 over domains, then the best listed ratio in that domain, careful); the oracle (knows the hidden success probability of every strategy and the real energy, never skips). The oracle never skips, so a learner that skips can in principle get close to or above it. Intervals are 95% t-intervals of the mean over the 20 worlds.
+
+Verdict. The model learner beats every baseline in these worlds: +1.5 reward per energy over UCB1 at budget 600 (95% interval +1.2 to +1.8, better in 20 of 20 worlds), +1.1 over the best fixed strategy (greedy with fast, 19 of 20 worlds), and it comes within 0.38 (budget 600) and 0.16 (budget 3000, interval includes 0) of the oracle. Read this with its limits: most of the gap to UCB1 and to greedy-careful comes from choosing a strategy and from skipping, which those policies cannot do; the learner mainly found "use the fast strategy on tasks where it is reliable, skip menus where nothing looks good" (per world at budget 600: 143 fast, 11 careful, 0.3 deep attempts, 36 skips); deep is almost never worth its double energy in this world. The strategies' costs and reliabilities were written by the same author, so this shows the learner finds a good policy in this designed trade-off, not that the policy is generally good. Skipping adds a small gain (+0.17 at budget 600, 19 of 20 worlds; +0.07 at budget 3000, 15 of 20 worlds). The report-seed means are lower than the tuning-seed means (3.12 against 3.42 at budget 600), which is the usual small tuning optimism.
+
+#### Report seeds 1..20, budget 600
+
+| policy | mean reward per energy unit | 95% interval of the mean |
+|---|---|---|
+| random (offer and strategy) | 1.194 | [1.088, 1.301] |
+| greedy by listed reward per cost (careful) | 1.502 | [1.336, 1.668] |
+| greedy by listed reward per cost (fast always) | 2.006 | [1.626, 2.387] |
+| greedy by listed reward per cost (deep always) | 1.222 | [1.132, 1.311] |
+| UCB1 domain chooser (careful) | 1.593 | [1.465, 1.721] |
+| model learner, never skips | 2.950 | [2.648, 3.253] |
+| model learner (with skipping) | 3.117 | [2.757, 3.477] |
+| oracle (knows hidden success rates and energy) | 3.494 | [3.208, 3.779] |
+
+| regret per energy vs oracle | mean | 95% interval of the mean |
+|---|---|---|
+| random | 2.299 | [2.083, 2.516] |
+| greedy | 1.992 | [1.792, 2.191] |
+| greedy fast | 1.487 | [1.178, 1.796] |
+| greedy deep | 2.272 | [2.060, 2.484] |
+| UCB1 | 1.901 | [1.703, 2.099] |
+| model learner, never skips | 0.543 | [0.338, 0.748] |
+| model learner (with skipping) | 0.376 | [0.109, 0.644] |
+
+| paired difference (model minus other), reward per energy | mean | 95% interval of the mean | model wins |
+|---|---|---|---|
+| model never skips | +0.167 | [+0.060, +0.273] | 19 of 20 |
+| random | +1.923 | [+1.580, +2.266] | 20 of 20 |
+| greedy | +1.615 | [+1.342, +1.889] | 20 of 20 |
+| greedy fast | +1.111 | [+0.871, +1.350] | 19 of 20 |
+| greedy deep | +1.895 | [+1.579, +2.212] | 20 of 20 |
+| UCB1 | +1.524 | [+1.231, +1.817] | 20 of 20 |
+
+Learning curve, reward per energy by step window (mean over worlds):
+
+| steps | random | greedy | UCB1 | model | oracle |
+|---|---|---|---|---|---|
+| 1-15 | 1.272 | 1.511 | 1.471 | 2.526 | 3.551 |
+| 16-30 | 1.195 | 1.539 | 1.592 | 2.699 | 3.522 |
+| 31-50 | 1.163 | 1.520 | 1.648 | 3.015 | 3.459 |
+| 51-end | 1.221 | 1.513 | 1.638 | 3.268 | 3.499 |
+
+Model learner per world: 143.1 fast / 10.7 careful / 0.3 deep attempts, 36.4 skips, 154.1 attempts in total
+
+Calibration of the model's predicted success (all attempts after the 10th of each run; each prediction is made before its outcome is seen, so every point is out of sample), n = 2881 attempts:
+
+| predicted bin | attempts | mean predicted | observed rate |
+|---|---|---|---|
+| 0.1-0.2 | 1 | 0.190 | 0.000 |
+| 0.2-0.3 | 22 | 0.275 | 0.136 |
+| 0.3-0.4 | 73 | 0.359 | 0.219 |
+| 0.4-0.5 | 109 | 0.451 | 0.284 |
+| 0.5-0.6 | 153 | 0.550 | 0.438 |
+| 0.6-0.7 | 226 | 0.656 | 0.712 |
+| 0.7-0.8 | 527 | 0.755 | 0.786 |
+| 0.8-0.9 | 786 | 0.849 | 0.840 |
+| 0.9-1.0 | 984 | 0.953 | 0.952 |
+
+Brier score of the model: 0.1272; Brier of predicting the running overall success rate: 0.1689 (lower is better)
+
+#### Report seeds 1..20, budget 3000
+
+| policy | mean reward per energy unit | 95% interval of the mean |
+|---|---|---|
+| random (offer and strategy) | 1.187 | [1.090, 1.285] |
+| greedy by listed reward per cost (careful) | 1.490 | [1.317, 1.663] |
+| greedy by listed reward per cost (fast always) | 2.060 | [1.674, 2.446] |
+| greedy by listed reward per cost (deep always) | 1.215 | [1.123, 1.306] |
+| UCB1 domain chooser (careful) | 1.672 | [1.529, 1.815] |
+| model learner, never skips | 3.304 | [2.984, 3.623] |
+| model learner (with skipping) | 3.377 | [3.057, 3.697] |
+| oracle (knows hidden success rates and energy) | 3.535 | [3.253, 3.818] |
+
+| regret per energy vs oracle | mean | 95% interval of the mean |
+|---|---|---|
+| random | 2.348 | [2.141, 2.555] |
+| greedy | 2.045 | [1.850, 2.240] |
+| greedy fast | 1.476 | [1.174, 1.777] |
+| greedy deep | 2.320 | [2.117, 2.524] |
+| UCB1 | 1.863 | [1.708, 2.019] |
+| model learner, never skips | 0.232 | [0.030, 0.433] |
+| model learner (with skipping) | 0.158 | [-0.054, 0.371] |
+
+| paired difference (model minus other), reward per energy | mean | 95% interval of the mean | model wins |
+|---|---|---|---|
+| model never skips | +0.073 | [+0.015, +0.131] | 15 of 20 |
+| random | +2.190 | [+1.902, +2.477] | 20 of 20 |
+| greedy | +1.887 | [+1.669, +2.104] | 20 of 20 |
+| greedy fast | +1.317 | [+1.075, +1.559] | 19 of 20 |
+| greedy deep | +2.162 | [+1.891, +2.434] | 20 of 20 |
+| UCB1 | +1.705 | [+1.473, +1.937] | 20 of 20 |
+
+Learning curve, reward per energy by step window (mean over worlds):
+
+| steps | random | greedy | UCB1 | model | oracle |
+|---|---|---|---|---|---|
+| 1-25 | 1.195 | 1.476 | 1.480 | 2.562 | 3.519 |
+| 26-50 | 1.192 | 1.571 | 1.677 | 2.989 | 3.472 |
+| 51-100 | 1.191 | 1.459 | 1.604 | 3.174 | 3.474 |
+| 101-200 | 1.191 | 1.438 | 1.627 | 3.333 | 3.514 |
+| 201-400 | 1.184 | 1.526 | 1.731 | 3.545 | 3.583 |
+| 401-end | 0.615 | 1.221 | 1.460 | 3.423 | 3.532 |
+
+Model learner per world: 672.5 fast / 50.0 careful / 0.3 deep attempts, 396.2 skips, 722.8 attempts in total
+
+Calibration of the model's predicted success (all attempts after the 10th of each run; each prediction is made before its outcome is seen, so every point is out of sample), n = 14257 attempts:
+
+| predicted bin | attempts | mean predicted | observed rate |
+|---|---|---|---|
+| 0.1-0.2 | 1 | 0.190 | 0.000 |
+| 0.2-0.3 | 23 | 0.274 | 0.130 |
+| 0.3-0.4 | 86 | 0.358 | 0.186 |
+| 0.4-0.5 | 123 | 0.451 | 0.268 |
+| 0.5-0.6 | 166 | 0.550 | 0.446 |
+| 0.6-0.7 | 291 | 0.660 | 0.735 |
+| 0.7-0.8 | 1921 | 0.763 | 0.788 |
+| 0.8-0.9 | 4806 | 0.851 | 0.844 |
+| 0.9-1.0 | 6840 | 0.975 | 0.972 |
+
+Brier score of the model: 0.0895; Brier of predicting the running overall success rate: 0.1067 (lower is better)
+
+Calibration reading. Every prediction is made before its outcome is seen, so the points are out of sample (this is a one-step-ahead check, not a separate held-out set). The model beats the "predict the running overall success rate" baseline on Brier (0.127 against 0.169 at budget 600; 0.090 against 0.107 at budget 3000). It is overconfident where it predicts 0.2-0.6 (for example predicted 0.45, observed 0.27) and close to the diagonal from 0.6 up; the planner mostly attempts high-probability options, so the low bins hold few attempts (22-153 of 2881 at budget 600) and mostly cells with little evidence. The model's predicted success is also stored as the prediction of each attempt in the log.
+
+Tests (`kore-self/src/being/tests.rs`, `tests/e2e_being.rs`): the menu world is deterministic and the single-task ids are unchanged; every domain has three strategies with the documented cost/reliability trade-off (deep more reliable than fast on hard templates, fast reliable on easy ones); the model folded from the log equals the live model; model.rs and planner.rs mention none of the hidden world fields (source scan); every decision of a 200-step menu run is re-derived from the log alone, with 12 logged alternatives each, and a run split over two calls equals one run; skipped menus are logged without predictions; the chooser is fixed once the being exists; a flipped byte after a model run fails verification; refill replay; the real binary runs the model chooser, explains a decision and keeps the chooser setting. Floors (a margin below the measured values at budget 600, seeds 1..20): model above UCB1 by more than 1.0 (measured 1.52), above greedy-careful and random by more than 1.0, above greedy-fast by more than 0.6 (measured 1.11), regret versus the oracle below 1.0 (measured 0.38), better than UCB1 in at least 18 of 20 worlds (measured 20), Brier below the base-rate Brier; at budget 3000 on seed 3 above UCB1 by more than 0.8. These guard against regression; they are not accuracy claims.
+
+Not measured: worlds whose task mix or strategy trade-offs differ from this design; changing worlds (new domains appearing mid-life); strategies the learner has to discover (step B2); any language-model input (B4); the effect of the hyper-parameters outside the grid above. Changing `DEFAULT_BETA`, `DEFAULT_SKIP_FRAC` or the model's prior strength changes how an existing model-chooser log replays, so they are part of the version of the being.
+
 ## Not measured
 
 Real-life data of any kind (the free-text section above is also synthetic); the ledger's probabilities (nothing is scored yet); behaviour with
