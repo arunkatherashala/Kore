@@ -272,7 +272,7 @@ pub fn menu_row(seed: u64, budget: i64, beta: f64, skip_frac: f64) -> MenuRow {
         greedy_deep: run_menu(seed, budget, &mut GreedyMenu { strategy: Strategy::Deep }),
         ucb: run_menu(seed, budget, &mut UcbMenu::new(seed, super::chooser::DEFAULT_EXPLORE_C)),
         model: run_menu(seed, budget, &mut m),
-        model_noskip: run_menu(seed, budget, &mut ModelChooser { beta, skip_frac: 0.0, no_discovered: false }),
+        model_noskip: run_menu(seed, budget, &mut ModelChooser { beta, skip_frac: 0.0, no_discovered: false, curiosity: 0.0 }),
         oracle: run_menu(seed, budget, &mut OracleMenu { truth: truth(seed), strategies: STRATEGIES.to_vec() }),
     }
 }
@@ -329,7 +329,7 @@ pub const UNEXPRESSIBLE: [Kind; 2] = [Kind::NegProd, Kind::NegPrimes];
 /// Rules a perfect discoverer would hold (the author knows the families): used by the oracle only.
 pub fn perfect_rules() -> Vec<Rule> {
     let lin = |mask: u8, constant: bool| Form::Lin { mask, constant };
-    [(1, lin(1, true)), (2, lin(1, true)), (3, Form::Poly(2)), (3, Form::Poly(3)), (4, lin(3, false)), (4, lin(7, false)), (5, lin(2, true)), (5, lin(4, false))]
+    [(1, Form::Poly(1)), (2, lin(1, false)), (2, lin(1, true)), (3, Form::Poly(3)), (4, lin(3, false)), (4, lin(7, false)), (5, lin(2, true)), (5, lin(4, false))]
         .into_iter()
         .map(|(sig, f)| Rule::new(sig, f, 0, 0, 0))
         .collect()
@@ -416,6 +416,8 @@ pub struct Analysis {
     /// Accepted rules that are never applicable-and-wrong on 300 fresh tasks of their signature (and right at least once).
     pub exact: usize,
     pub wrong: usize,
+    /// The wrong ones: (signature, form code, training support, held-out support, fresh applicable-and-wrong count of 300).
+    pub wrong_rules: Vec<(u8, String, u32, u32, u32)>,
     /// Over the unexpressible families: (share of tasks where a rule was applied, share of those applications that are wrong), per `UNEXPRESSIBLE`.
     pub neg: [(f64, f64); 2],
 }
@@ -438,6 +440,7 @@ pub fn analyze(world_seed: u64, run: &ExtRun) -> Analysis {
         }
     }
     let (mut exact, mut wrong) = (0, 0);
+    let mut wrong_rules = vec![];
     for (_, r) in &run.accepted {
         let (mut ok, mut bad) = (0, 0);
         for j in 0..300u64 {
@@ -452,10 +455,11 @@ pub fn analyze(world_seed: u64, run: &ExtRun) -> Analysis {
             exact += 1;
         } else {
             wrong += 1;
+            wrong_rules.push((r.sig, r.form.code(), r.train_ok, r.val_ok, bad));
         }
     }
     let neg = [applied_and_wrong(&w, &book, UNEXPRESSIBLE[0], 300), applied_and_wrong(&w, &book, UNEXPRESSIBLE[1], 300)];
-    Analysis { first, rules: run.accepted.len(), exact, wrong, neg }
+    Analysis { first, rules: run.accepted.len(), exact, wrong, wrong_rules, neg }
 }
 
 /// Revealed examples of the given hidden families only, interleaved, `n` per family (measurement and tests).
@@ -484,7 +488,7 @@ pub struct DiscRow {
 pub const DISCOVER_EVERY: u64 = 10;
 
 /// `bonus`: reward multiplier of pattern tasks (EXT_PATTERN_BONUS in the logged extended world; 1 = no bonus control).
-pub fn disc_row(seed: u64, budget: i64, beta: f64, every: u64, bonus: i64) -> DiscRow {
+pub fn disc_row(seed: u64, budget: i64, beta: f64, every: u64, bonus: i64, curiosity: f64) -> DiscRow {
     let mk = || {
         let mut w = World::with_extended(seed, true);
         w.pattern_bonus = bonus;
@@ -492,12 +496,12 @@ pub fn disc_row(seed: u64, budget: i64, beta: f64, every: u64, bonus: i64) -> Di
     };
     let w = mk();
     let perfect = perfect_rules();
-    let disc = run_menu_ext(mk(), budget, &mut ModelChooser::new(beta), every, &[]);
+    let disc = run_menu_ext(mk(), budget, &mut ModelChooser { curiosity, ..ModelChooser::new(beta) }, every, &[]);
     let analysis = analyze(seed, &disc);
     DiscRow {
         seed,
         random: run_menu_ext(mk(), budget, &mut RandomMenu::new(seed), 0, &[]),
-        nodisc: run_menu_ext(mk(), budget, &mut ModelChooser { beta, skip_frac: DEFAULT_SKIP_FRAC, no_discovered: true }, 0, &[]),
+        nodisc: run_menu_ext(mk(), budget, &mut ModelChooser { beta, skip_frac: DEFAULT_SKIP_FRAC, no_discovered: true, curiosity: 0.0 }, 0, &[]),
         oracle_rules: run_menu_ext(mk(), budget, &mut OracleMenu { truth: truth_in(&w, &perfect), strategies: STRATEGIES_EXT.to_vec() }, 0, &perfect),
         oracle_fixed: run_menu_ext(mk(), budget, &mut OracleMenu { truth: truth_in(&w, &[]), strategies: STRATEGIES.to_vec() }, 0, &[]),
         disc,

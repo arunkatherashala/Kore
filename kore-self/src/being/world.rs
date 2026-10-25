@@ -447,19 +447,19 @@ fn generate(kind: Kind, r: &mut Rng) -> (Vec<i64>, String, i64) {
         ExtAffGeom => {
             let (s, p, c) = (r.range(1, 5), [2, 3, 4, -2][r.below(4) as usize], nz(r, -5, 9));
             let mut t = vec![s];
-            while t.len() < 6 {
+            while t.len() < 7 {
                 let n = p * t[t.len() - 1] + c;
                 t.push(n);
             }
-            let next = t[5];
-            t.truncate(5);
+            let next = t[6];
+            t.truncate(6);
             (t.clone(), format!("Next term: {}", join(&t)), next)
         }
         ExtPoly3 => {
             let (a, b, c, d) = (r.range(1, 2), r.range(-3, 3), r.range(-5, 5), r.range(-5, 9));
             let f = |n: i64| a * n * n * n + b * n * n + c * n + d;
-            let t: Vec<i64> = (1..=6).map(f).collect();
-            (t.clone(), format!("Next term: {}", join(&t)), f(7))
+            let t: Vec<i64> = (1..=7).map(f).collect();
+            (t.clone(), format!("Next term: {}", join(&t)), f(8))
         }
         ExtRec2 => {
             let (mut p, mut q) = (r.range(1, 3), nz(r, -2, 3));
@@ -467,22 +467,22 @@ fn generate(kind: Kind, r: &mut Rng) -> (Vec<i64>, String, i64) {
                 (p, q) = (2, 1);
             }
             let mut t = vec![r.range(1, 5), r.range(1, 5)];
-            while t.len() < 7 {
+            while t.len() < 8 {
                 let n = p * t[t.len() - 1] + q * t[t.len() - 2];
                 t.push(n);
             }
-            let next = t[6];
-            t.truncate(6);
+            let next = t[7];
+            t.truncate(7);
             (t.clone(), format!("Next term: {}", join(&t)), next)
         }
         ExtTribo => {
             let mut t = vec![r.range(1, 4), r.range(1, 4), r.range(1, 4)];
-            while t.len() < 9 {
+            while t.len() < 10 {
                 let n = t[t.len() - 1] + t[t.len() - 2] + t[t.len() - 3];
                 t.push(n);
             }
-            let next = t[8];
-            t.truncate(8);
+            let next = t[9];
+            t.truncate(9);
             (t.clone(), format!("Next term: {}", join(&t)), next)
         }
         ExtAlt => {

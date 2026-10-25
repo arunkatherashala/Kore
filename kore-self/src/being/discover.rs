@@ -27,7 +27,7 @@
 //! per task from the task's own prefix by exact rational Gauss-Jordan
 //! elimination (i128 fractions, no floats). A rule is APPLICABLE to a prefix
 //! only if (1) the fit is unique, (2) the equations leave at least
-//! `MIN_SLACK` more equations than unknowns, all satisfied exactly, (3) the
+//! `MIN_SLACK` (3) more equations than unknowns, all satisfied exactly, (3) the
 //! coefficients are small (numerators up to 100, denominators up to 12) and
 //! (4) the predicted next term is an integer. That self-check on the prefix
 //! is what keeps a rule from being applied where it does not describe the
@@ -53,9 +53,9 @@
 use super::state::tag;
 use crate::versioned::{sha256_hex, EventRow, NewEvent};
 
-pub const MIN_SLACK: usize = 2;
-pub const K_TRAIN: u32 = 4;
-pub const K_VAL: u32 = 2;
+pub const MIN_SLACK: usize = 3;
+pub const K_TRAIN: u32 = 3;
+pub const K_VAL: u32 = 1;
 pub const MAX_CITE: usize = 24;
 pub const MAX_LAG: usize = 3;
 pub const MAX_DEGREE: u8 = 3;

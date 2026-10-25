@@ -99,11 +99,20 @@ pub struct ModelChooser {
     pub skip_frac: f64,
     /// Measurement control: never consider the `discovered` strategy even where it exists.
     pub no_discovered: bool,
+    /// Extended pattern world only: extra optimism (in success probability) for a pattern offer whose
+    /// signature has fewer than `EXAMPLE_TARGET` revealed examples in the log, because every attempt
+    /// at it adds an example the rule search can learn from. 0 = off.
+    pub curiosity: f64,
 }
+
+/// Revealed examples per signature after which the curiosity bonus is gone.
+pub const EXAMPLE_TARGET: u64 = 24;
+/// Chosen on tuning seeds 101..120 only (see docs/measured.md).
+pub const DEFAULT_CURIOSITY: f64 = 0.0;
 
 impl ModelChooser {
     pub fn new(beta: f64) -> ModelChooser {
-        ModelChooser { beta, skip_frac: DEFAULT_SKIP_FRAC, no_discovered: false }
+        ModelChooser { beta, skip_frac: DEFAULT_SKIP_FRAC, no_discovered: false, curiosity: DEFAULT_CURIOSITY }
     }
 
     /// Strategies on offer: three in the standard menu, four (with `discovered`) when the being was created with extended pattern families.
@@ -117,11 +126,23 @@ impl ModelChooser {
 
     pub fn candidates(&self, st: &BeingState, offers: &[Offer]) -> Vec<Cand> {
         let mut v = vec![];
+        let discovering = !self.no_discovered && st.genesis.as_ref().map_or(false, |g| g.extended);
+        let mut seen = [0u64; 6];
+        if discovering {
+            for e in &st.examples {
+                seen[(e.sig as usize).min(5)] += 1;
+            }
+        }
         for o in offers {
+            let cur = if discovering && o.domain == Domain::Pattern && self.curiosity > 0.0 {
+                self.curiosity * (1.0 - seen[(o.difficulty as usize).min(5)] as f64 / EXAMPLE_TARGET as f64).max(0.0)
+            } else {
+                0.0
+            };
             for &s in self.strategies(st) {
                 let e = st.model.estimate(o.domain, o.difficulty, s);
                 let cost_est = (o.listed_cost as f64 * e.cost_ratio).max(1.0);
-                let pu = (e.p + self.beta * e.sd).min(1.0);
+                let pu = (e.p + self.beta * e.sd).min(1.0) + cur;
                 v.push(Cand {
                     slot: o.slot,
                     strategy: s,
@@ -169,7 +190,7 @@ impl MenuChooser for ModelChooser {
             })
             .collect();
         let rationale = json!({
-            "policy": self.name(), "beta": self.beta, "skip_frac": self.skip_frac, "realized_reward_per_energy": round3(rate),
+            "policy": self.name(), "beta": self.beta, "skip_frac": self.skip_frac, "curiosity": self.curiosity, "realized_reward_per_energy": round3(rate),
             "attempts_in_model": st.model.attempts(), "alternatives": alts,
         });
         if skip {

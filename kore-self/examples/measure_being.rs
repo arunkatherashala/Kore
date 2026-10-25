@@ -165,11 +165,11 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
     Some(v[v.len() / 2])
 }
 
-fn discover_report(label: &str, seeds: std::ops::RangeInclusive<u64>, budget: i64, beta: f64, every: u64, bonus: i64) {
+fn discover_report(label: &str, seeds: std::ops::RangeInclusive<u64>, budget: i64, beta: f64, every: u64, bonus: i64, curiosity: f64) {
     use being::world::Kind;
-    let rows: Vec<DiscRow> = seeds.clone().map(|s| disc_row(s, budget, beta, every, bonus)).collect();
+    let rows: Vec<DiscRow> = seeds.clone().map(|s| disc_row(s, budget, beta, every, bonus, curiosity)).collect();
     let n = rows.len();
-    println!("\n### Extended pattern world (pattern reward x{bonus}), {label} (budget {budget}, beta {beta}, discovery pass every {every} steps, n = {n} worlds)\n");
+    println!("\n### Extended pattern world (pattern reward x{bonus}), {label} (budget {budget}, beta {beta}, discovery pass every {every} steps, curiosity {curiosity}, n = {n} worlds)\n");
     println!("| policy | mean reward per energy unit | 95% interval of the mean |");
     println!("|---|---|---|");
     dline("random (offer and fixed strategy)", &rows, |r| r.random.run.per_budget());
@@ -213,6 +213,11 @@ fn discover_report(label: &str, seeds: std::ops::RangeInclusive<u64>, budget: i6
     println!("\nRecall: {found_total} of {} (family, world) pairs found by the end = {:.1}%", n * 6, 100.0 * found_total as f64 / (n * 6) as f64);
     let (acc, ex, wr): (usize, usize, usize) = rows.iter().fold((0, 0, 0), |a, r| (a.0 + r.analysis.rules, a.1 + r.analysis.exact, a.2 + r.analysis.wrong));
     println!("Rules accepted in total: {acc}; exactly correct on 300 fresh tasks of their signature: {ex}; wrong or overfit: {wr}; precision {:.1}%", 100.0 * ex as f64 / acc.max(1) as f64);
+    for r in &rows {
+        for w in &r.analysis.wrong_rules {
+            println!("  wrong rule in world {}: signature {} form {} support train {} held-out {}; applicable-and-wrong on {} of 300 fresh tasks", r.seed, w.0, w.1, w.2, w.3, w.4);
+        }
+    }
     println!("Worlds with at least one wrong rule: {} of {n}; mean rules per world {:.2}", rows.iter().filter(|r| r.analysis.wrong > 0).count(), acc as f64 / n as f64);
     println!("\nNegative controls inside the world (families outside the grammar; fresh tasks, final rule book):\n");
     println!("| family | share of tasks where some rule is applied | wrong share of those applications |");
@@ -256,10 +261,10 @@ fn control_report(seeds: std::ops::RangeInclusive<u64>) {
 
 fn discover_tune(bonus: i64) {
     for budget in [BUDGET, LONG_BUDGET] {
-        for every in [5u64, 10, 20] {
-            for beta in [1.5, 3.0] {
-                let rows: Vec<DiscRow> = (101..=120).map(|s| disc_row(s, budget, beta, every, bonus)).collect();
-                println!("budget {budget} every {every} beta {beta}: discovery {:.3} no-discovery {:.3} oracle-rules {:.3} (tuning seeds 101..120)", drow(&rows, |r| r.disc.run.per_budget()).0, drow(&rows, |r| r.nodisc.run.per_budget()).0, drow(&rows, |r| r.oracle_rules.run.per_budget()).0);
+        for every in [10u64] {
+            for (beta, cur) in [(1.5, 0.0), (1.5, 0.2), (1.5, 0.4), (1.5, 0.8), (3.0, 0.0), (3.0, 0.4)] {
+                let rows: Vec<DiscRow> = (101..=120).map(|s| disc_row(s, budget, beta, every, bonus, cur)).collect();
+                println!("budget {budget} every {every} beta {beta} curiosity {cur}: discovery {:.3} no-discovery {:.3} oracle-rules {:.3} (tuning seeds 101..120)", drow(&rows, |r| r.disc.run.per_budget()).0, drow(&rows, |r| r.nodisc.run.per_budget()).0, drow(&rows, |r| r.oracle_rules.run.per_budget()).0);
             }
         }
     }
@@ -271,12 +276,17 @@ fn main() {
         discover_tune(args.get(2).and_then(|x| x.parse().ok()).unwrap_or(2));
         return;
     }
+    if args.get(1).map(|a| a == "discover-one").unwrap_or(false) {
+        let g = |i: usize, d: i64| args.get(i).and_then(|x| x.parse::<i64>().ok()).unwrap_or(d);
+        discover_report("single", (g(4, 101) as u64)..=(g(5, 120) as u64), g(2, 3000), being::planner::DEFAULT_BETA, DISCOVER_EVERY, g(3, 2), being::planner::DEFAULT_CURIOSITY);
+        return;
+    }
     if args.get(1).map(|a| a == "discover").unwrap_or(false) {
-        use being::planner::DEFAULT_BETA;
+        use being::planner::{DEFAULT_BETA, DEFAULT_CURIOSITY};
         for budget in [BUDGET, LONG_BUDGET] {
             for bonus in [being::world::EXT_PATTERN_BONUS, 1] {
-                discover_report("tuning seeds 101..120", 101..=120, budget, DEFAULT_BETA, DISCOVER_EVERY, bonus);
-                discover_report("report seeds 1..20", 1..=20, budget, DEFAULT_BETA, DISCOVER_EVERY, bonus);
+                discover_report("tuning seeds 101..120", 101..=120, budget, DEFAULT_BETA, DISCOVER_EVERY, bonus, DEFAULT_CURIOSITY);
+                discover_report("report seeds 1..20", 1..=20, budget, DEFAULT_BETA, DISCOVER_EVERY, bonus, DEFAULT_CURIOSITY);
             }
         }
         control_report(101..=120);
