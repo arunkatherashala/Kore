@@ -194,3 +194,93 @@ fn being_model_chooser_end_to_end() {
     assert!(ver.starts_with("OK"));
     s.stop();
 }
+
+#[test]
+fn being_rule_discovery_end_to_end() {
+    let root = tempfile::tempdir().unwrap();
+    let fake_home = tempfile::tempdir().unwrap();
+    let owner = "e2ed";
+    let mut s = Server::start(root.path(), fake_home.path(), owner);
+
+    // option checks
+    let (e, t) = s.call("being_run", json!({"steps": 5, "pattern_families": "extended"}));
+    assert!(e && t.contains("chooser model"), "{t}");
+    let (e, t) = s.call("being_run", json!({"steps": 5, "discover": true}));
+    assert!(e && t.contains("pattern_families extended"), "{t}");
+    let (e, t) = s.call("being_run", json!({"steps": 5, "discover_every": 5}));
+    assert!(e, "{t}");
+    let (e, t) = s.call("being_rules", json!({}));
+    assert!(!e && t.contains("\"exists\":false"), "{t}");
+
+    let run = s.json("being_run", json!({"steps": 700, "seed": 1, "world_seed": 6, "budget": 60000, "chooser": "model", "pattern_families": "extended", "discover": true, "discover_every": 10}));
+    let mut shown = run.clone();
+    shown["domains"] = json!("(per-domain table cut)");
+    say("being_run {steps:700, seed:1, world_seed:6, budget:60000, chooser:\"model\", pattern_families:\"extended\", discover:true, discover_every:10}", &serde_json::to_string_pretty(&shown).unwrap());
+    assert_eq!(run["steps_run"], 700);
+    assert_eq!(run["pattern_families"], "extended");
+    assert!(run["rules_total"].as_u64().unwrap() >= 1);
+
+    let rules = s.json("being_rules", json!({}));
+    let list = rules["rules"].as_array().unwrap();
+    let mut shown = rules.clone();
+    shown["rules"] = json!(list.iter().take(2).map(|r| {
+        let mut r = r.clone();
+        r["cited_sample"] = json!(r["cited_sample"].as_array().unwrap().iter().take(1).map(|c| json!({"terms": c["terms"], "revealed_next": c["revealed_next"]})).collect::<Vec<_>>());
+        r
+    }).collect::<Vec<_>>());
+    say("being_rules (first 2 rules, cited sample cut to 1)", &serde_json::to_string_pretty(&shown).unwrap());
+    assert_eq!(list.len() as u64, run["rules_total"].as_u64().unwrap());
+    for r in list {
+        assert_eq!(r["rederived_from_log"], true);
+        assert!(r["cited_example_events"].as_u64().unwrap() >= 4);
+        assert!(r["dsl"].as_str().unwrap().starts_with("next = "));
+        assert_eq!(r["revision"]["author"], "rule:being-discover");
+    }
+    assert!(list.iter().any(|r| r["times_used_in_attempts"].as_u64().unwrap() > 0), "a rule was used");
+
+    let st = s.json("being_status", json!({}));
+    assert_eq!(st["pattern_families"], "extended");
+    assert_eq!(st["replay_check"]["decisions"], 700);
+    assert_eq!(st["replay_check"]["re_derived_from_log_and_equal"], 700);
+
+    // explain a decision whose answer came from a rule: find an action event that cites one
+    let a = s.ok("self_sql", json!({"sql": "SELECT text, tags FROM events WHERE kind = 'action' AND tags LIKE '%rule_used:%' LIMIT 1"}));
+    say("self_sql: an attempt answered by a discovered rule", &a);
+    let step: String = a.split("step:").nth(1).unwrap().chars().take_while(|c| c.is_ascii_digit()).collect();
+    let d = s.ok("self_sql", json!({"sql": format!("SELECT event_id FROM events WHERE kind = 'decision' AND tags LIKE '%step:{step},%'")}));
+    let id: String = d.split(|c: char| !c.is_ascii_hexdigit()).find(|t| t.len() >= 40).expect("a decision event id").to_string();
+    let ex = s.json("being_explain", json!({"decision_event_id": id}));
+    let mut shown = ex.clone();
+    shown["evidence_events_cited"] = json!("(cut)");
+    shown["reasons_and_alternatives"] = json!("(cut)");
+    say("being_explain on that decision (evidence and alternatives cut)", &serde_json::to_string_pretty(&shown).unwrap());
+    assert!(ex["discovered_rule_used"]["rule_id"].is_string());
+    assert!(ex["discovered_rule_used"]["stance"].as_str().unwrap().contains("next = "));
+    assert_eq!(ex["replay_check"]["equal_to_recorded"], true);
+
+    let by = s.ok("self_sql", json!({"sql": "SELECT entity_type, COUNT(*) AS n FROM revisions GROUP BY entity_type ORDER BY entity_type"}));
+    say("self_sql: revisions by entity type", &by);
+    assert!(by.contains("rule"));
+
+    // the world options are kept
+    let (e, t) = s.call("being_run", json!({"steps": 1, "pattern_families": "standard"}));
+    assert!(e && t.contains("pattern_families"), "{t}");
+    let ver = s.ok("self_verify", json!({}));
+    say("self_verify", &ver);
+    assert!(ver.starts_with("OK"));
+    s.stop();
+
+    let seg_dir = root.path().join(owner).join("log").join("events");
+    let seg = std::fs::read_dir(&seg_dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().map_or(false, |x| x == "kore")).max().unwrap();
+    let good = std::fs::read(&seg).unwrap();
+    let mut bad = good.clone();
+    let mid = bad.len() / 2;
+    bad[mid] ^= 1;
+    std::fs::write(&seg, &bad).unwrap();
+    let mut s = Server::start(root.path(), fake_home.path(), owner);
+    let (e, t) = s.call("self_verify", json!({}));
+    say("self_verify after flipping a byte", &t);
+    assert!(e && t.contains("VERIFY FAILED"), "{t}");
+    s.stop();
+    std::fs::write(&seg, good).unwrap();
+}

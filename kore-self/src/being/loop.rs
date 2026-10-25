@@ -507,6 +507,10 @@ pub fn run_with(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
     let version_before = log.latest_version();
     let mut state = BeingState::from_snapshot(&log.open_latest());
     let mut created = false;
+    // validated before anything is written, so a refused request never creates a being
+    if cfg.discover_every.unwrap_or(0) > 0 && !state.genesis.as_ref().map_or(cfg.extended == Some(true), |g| g.extended) {
+        return Err(LogError::Invalid("discovery needs a being created with pattern_families extended (only then are revealed examples logged)".into()));
+    }
     match &state.genesis {
         Some(g) => {
             let bad = |what: &str, a: String, b: String| Err(LogError::Invalid(format!("this being already has {what} {a}; the request says {b}. A being keeps one world and one seed")));
@@ -554,9 +558,6 @@ pub fn run_with(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
     }
     let g = state.genesis.clone().expect("genesis exists now");
     let discover_every = cfg.discover_every.unwrap_or(0);
-    if discover_every > 0 && !g.extended {
-        return Err(LogError::Invalid("discovery needs a being created with pattern_families extended (only then are revealed examples logged)".into()));
-    }
     let mut own = Ucb1::new(g.loop_seed, g.explore_c);
     let picker: &mut dyn DomainPicker = match picker {
         Some(p) => p,
