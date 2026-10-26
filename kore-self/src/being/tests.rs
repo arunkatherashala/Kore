@@ -13,7 +13,7 @@ fn open(root: &std::path::Path) -> VersionedLog {
 }
 
 fn cfg(world: u64, seed: u64, steps: u64, budget: i64) -> RunCfg {
-    RunCfg { world_seed: Some(world), loop_seed: Some(seed), budget: Some(budget), explore_c: None, chooser: None, steps, refill_when_exhausted: false, extended: None, discover_every: None }
+    RunCfg { world_seed: Some(world), loop_seed: Some(seed), budget: Some(budget), explore_c: None, chooser: None, steps, refill_when_exhausted: false, extended: None, discover_every: None, drift: None, adapt: None }
 }
 
 fn run_logged(root: &std::path::Path, world: u64, seed: u64, steps: u64, budget: i64) -> VersionedLog {
@@ -42,12 +42,12 @@ fn world_is_deterministic_and_checker_is_exact() {
 fn scripted_thinker_is_exact_where_documented_and_imperfect_elsewhere() {
     let w = World::new(3);
     let th = ScriptedThinker;
-    let st = [Default::default(); 4];
+    let st = [Default::default(); 5];
     let (mut exact_ok, mut exact_n, mut heur_ok, mut heur_n) = (0, 0, 0, 0);
     for step in 0..400 {
         for d in DOMAINS {
             let t = w.task(step, d);
-            let ctx = Context { step, task: &t.view, noise: 999_999, stats: &st, rules: &[] }; // noise % 1000 = 999: no slip
+            let ctx = Context { step, task: &t.view, noise: 999_999, stats: &st, rules: &[], degraded: false }; // noise % 1000 = 999: no slip
             let ok = t.check(th.propose(&ctx).answer);
             if scripted_is_exact(&t.view) {
                 exact_n += 1;
@@ -500,13 +500,13 @@ fn search_finds_every_expressible_family_and_accepts_nothing_for_unexpressible_o
     // the hidden families are not solved by any fixed strategy
     let w = World::with_extended(2, true);
     let th = ScriptedThinker;
-    let st = [Default::default(); 4];
+    let st = [Default::default(); 5];
     for k in EXPRESSIBLE.iter().chain(UNEXPRESSIBLE.iter()) {
         for s in [Strategy::Fast, Strategy::Careful, Strategy::Deep] {
             let hits = (0..60u64)
                 .filter(|i| {
                     let t = w.task_of_kind(*i, *k);
-                    let ctx = Context { step: *i, task: &t.view, noise: 999_999, stats: &st, rules: &[] };
+                    let ctx = Context { step: *i, task: &t.view, noise: 999_999, stats: &st, rules: &[], degraded: false };
                     t.check(th.propose_with(&ctx, s).answer)
                 })
                 .count();

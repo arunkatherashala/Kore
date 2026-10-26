@@ -61,9 +61,16 @@ pub enum Domain {
     Algebra = 1,
     Physics = 2,
     Pattern = 3,
+    /// Unit conversion. Only exists in a world created with `drift`: it appears in the menu from a scheduled time.
+    Units = 4,
 }
 
+/// The four domains of every world from the start.
 pub const DOMAINS: [Domain; 4] = [Domain::Arithmetic, Domain::Algebra, Domain::Physics, Domain::Pattern];
+/// All domains that can ever exist (the fifth only appears in a drifting world).
+pub const ALL_DOMAINS: [Domain; 5] = [Domain::Arithmetic, Domain::Algebra, Domain::Physics, Domain::Pattern, Domain::Units];
+/// Number of domain slots in per-domain arrays.
+pub const N_DOM: usize = 5;
 
 impl Domain {
     pub fn idx(self) -> usize {
@@ -75,10 +82,11 @@ impl Domain {
             Domain::Algebra => "algebra",
             Domain::Physics => "physics",
             Domain::Pattern => "pattern",
+            Domain::Units => "units",
         }
     }
     pub fn parse(s: &str) -> Option<Domain> {
-        DOMAINS.iter().copied().find(|d| d.name() == s)
+        ALL_DOMAINS.iter().copied().find(|d| d.name() == s)
     }
 }
 
@@ -116,6 +124,12 @@ pub enum Kind {
     ExtPeriodic,
     NegProd,
     NegPrimes,
+    // Unit conversion (domain `units`, drifting worlds only).
+    UnitKm,
+    UnitHm,
+    UnitKmh,
+    UnitHms,
+    UnitTrip,
 }
 
 impl Kind {
@@ -123,6 +137,7 @@ impl Kind {
         use Kind::*;
         let k = difficulty.clamp(1, 5) as usize - 1;
         match d {
+            Domain::Units => [UnitKm, UnitHm, UnitKmh, UnitHms, UnitTrip][k],
             Domain::Arithmetic => [ArithAdd, ArithAddSub, ArithMulSmall, ArithMulBig, ArithMulSum][k],
             Domain::Algebra => [AlgXPlusB, AlgAX, AlgAXPlusB, AlgBothSides, AlgParen][k],
             Domain::Physics => [PhysVelocity, PhysOhm, PhysDisplacement, PhysKinetic, PhysStopping][k],
@@ -190,23 +205,64 @@ impl Task {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Profile {
     /// Multiplier on the reward of every task in the domain (0.6 .. 1.6).
-    pub reward_scale: [f64; 4],
+    pub reward_scale: [f64; N_DOM],
     /// Cost of a difficulty-0 task; the task cost is `cost_base + difficulty` (2 .. 6).
-    pub cost_base: [i64; 4],
+    pub cost_base: [i64; N_DOM],
     /// Difficulty = 1 + floor(u^bias * 5), u uniform in [0,1). Above 1 favours easy tasks (0.6 .. 1.8).
-    pub diff_bias: [f64; 4],
+    pub diff_bias: [f64; N_DOM],
 }
 
 impl Profile {
     pub fn from_seed(world_seed: u64) -> Profile {
         let mut r = Rng::new(mix(&[world_seed, 0xFAB1E]));
-        let mut p = Profile { reward_scale: [1.0; 4], cost_base: [3; 4], diff_bias: [1.0; 4] };
+        let mut p = Profile { reward_scale: [1.0; N_DOM], cost_base: [3; N_DOM], diff_bias: [1.0; N_DOM] };
         for i in 0..4 {
             p.reward_scale[i] = ((0.6 + r.f64()) * 100.0).round() / 100.0;
             p.cost_base[i] = r.range(2, 6);
             p.diff_bias[i] = ((0.6 + r.f64() * 1.2) * 100.0).round() / 100.0;
         }
+        // the fifth domain (units) has its own stream, so the four original profiles are unchanged
+        let mut u = Rng::new(mix(&[world_seed, 0xFAB1E, 0x0017]));
+        p.reward_scale[4] = ((1.0 + u.f64()) * 100.0).round() / 100.0;
+        p.cost_base[4] = u.range(2, 4);
+        p.diff_bias[4] = ((0.6 + u.f64() * 1.2) * 100.0).round() / 100.0;
         p
+    }
+
+    /// The profile after the scheduled shift: physics pays twice as much and its difficulty mix turns
+    /// easy, arithmetic becomes cheap (base cost 1).
+    pub fn shifted(&self) -> Profile {
+        let mut p = self.clone();
+        p.reward_scale[Domain::Physics.idx()] = (self.reward_scale[Domain::Physics.idx()] * 2.0 * 100.0).round() / 100.0;
+        p.diff_bias[Domain::Physics.idx()] = 1.8;
+        p.cost_base[Domain::Arithmetic.idx()] = 1;
+        p
+    }
+}
+
+/// Fixed fractions of the initial budget at which the three scheduled changes happen
+/// (new domain, profile shift, strategy degradation); each is moved by up to +-0.04 by the world seed.
+pub const DRIFT_FRACTIONS: [f64; 3] = [0.25, 0.5, 0.75];
+/// Slip rate (per mille) of the `fast` strategy after it degrades.
+pub const FAST_DEGRADED_SLIP: u64 = 700;
+
+/// Scheduled, hidden changes of a drifting world. Times are world-clock seconds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Drift {
+    /// World-clock second at which each change takes effect: [new domain, profile shift, degradation].
+    pub at: [i64; 3],
+    pub shifted: Profile,
+}
+
+impl Drift {
+    pub fn new(world_seed: u64, budget: i64, base: &Profile) -> Drift {
+        let mut r = Rng::new(mix(&[world_seed, 0xD21F7]));
+        let mut at = [0i64; 3];
+        for (i, f) in DRIFT_FRACTIONS.iter().enumerate() {
+            let frac = f + (r.f64() * 2.0 - 1.0) * 0.04;
+            at[i] = (budget as f64 * frac).round() as i64 * SECS_PER_ENERGY;
+        }
+        Drift { at, shifted: base.shifted() }
     }
 }
 
@@ -242,6 +298,8 @@ pub struct World {
     pub extended: bool,
     /// Multiplier on the reward of pattern tasks in the extended world (EXT_PATTERN_BONUS; 1 in the standard world).
     pub pattern_bonus: i64,
+    /// Scheduled changes (default None: the world is stationary and every earlier result is unchanged).
+    pub drift: Option<Drift>,
 }
 
 /// In the extended world pattern puzzles pay this many times the usual reward (author-defined; it gives
@@ -250,11 +308,37 @@ pub const EXT_PATTERN_BONUS: i64 = 2;
 
 impl World {
     pub fn new(seed: u64) -> World {
-        World { seed, profile: Profile::from_seed(seed), extended: false, pattern_bonus: 1 }
+        World { seed, profile: Profile::from_seed(seed), extended: false, pattern_bonus: 1, drift: None }
     }
 
     pub fn with_extended(seed: u64, extended: bool) -> World {
         World { extended, pattern_bonus: if extended { EXT_PATTERN_BONUS } else { 1 }, ..World::new(seed) }
+    }
+
+    /// A world with scheduled changes; the times scale with the being's initial `budget`.
+    pub fn with_drift(seed: u64, extended: bool, drift_budget: Option<i64>) -> World {
+        let mut w = World::with_extended(seed, extended);
+        if let Some(b) = drift_budget {
+            w.drift = Some(Drift::new(seed, b, &w.profile));
+        }
+        w
+    }
+
+    /// Number of scheduled changes that have taken effect at world-clock second `clock` (0 without drift).
+    pub fn regime(&self, clock: i64) -> usize {
+        self.drift.as_ref().map_or(0, |d| d.at.iter().filter(|t| clock >= **t).count())
+    }
+
+    /// The `fast` strategy slips much more from the third change on.
+    pub fn degraded(&self, clock: i64) -> bool {
+        self.regime(clock) >= 3
+    }
+
+    fn profile_at(&self, clock: i64) -> &Profile {
+        match &self.drift {
+            Some(d) if self.regime(clock) >= 2 => &d.shifted,
+            _ => &self.profile,
+        }
     }
 
     /// The world's per-attempt random source, handed to the solver as the
@@ -265,7 +349,7 @@ impl World {
 
     /// The task on offer in `domain` at `step` (single-task mode).
     pub fn task(&self, step: u64, d: Domain) -> Task {
-        self.build(step, d, 0, None, None, format!("{step}-{}", d.name()))
+        self.build(step, d, 0, None, None, format!("{step}-{}", d.name()), &self.profile)
     }
 
     /// One task per domain, in `DOMAINS` order (single-task mode).
@@ -277,10 +361,18 @@ impl World {
     /// drawn from the world seed (repeats allowed); difficulty, cost and
     /// reward follow the hidden profile as in single-task mode.
     pub fn offers(&self, step: u64) -> Vec<Task> {
+        self.offers_at(step, 0)
+    }
+
+    /// As `offers`, at world-clock second `clock`: in a drifting world the menu, the profile and
+    /// the reward of the offers depend on which scheduled changes have already happened.
+    pub fn offers_at(&self, step: u64, clock: i64) -> Vec<Task> {
+        let regime = self.regime(clock);
+        let n: u64 = if regime >= 1 { 5 } else { 4 };
         (0..MENU_SIZE as u64)
             .map(|j| {
-                let d = DOMAINS[(mix(&[self.seed, step, j, 0xD0_0D]) % 4) as usize];
-                self.build(step, d, j + 1, None, None, format!("{step}-{j}-{}", d.name()))
+                let d = ALL_DOMAINS[(mix(&[self.seed, step, j, 0xD0_0D]) % n) as usize];
+                self.build(step, d, j + 1, None, None, format!("{step}-{j}-{}", d.name()), self.profile_at(clock))
             })
             .collect()
     }
@@ -293,23 +385,23 @@ impl World {
     /// A task of a given difficulty, used only by the measurement's oracle to
     /// estimate hidden truth; no policy under test calls it.
     pub fn task_forced(&self, step: u64, d: Domain, difficulty: u8) -> Task {
-        self.build(step, d, 0x77, Some(difficulty), None, format!("forced-{step}-{}", d.name()))
+        self.build(step, d, 0x77, Some(difficulty), None, format!("forced-{step}-{}", d.name()), &self.profile)
     }
 
     /// A pattern task of one given hidden family (extended world), for measurement only.
     pub fn task_of_kind(&self, step: u64, kind: Kind) -> Task {
         let difficulty = (1..=5u8).find(|k| Kind::options_ext(Domain::Pattern, *k).contains(&kind)).unwrap_or(1);
-        self.build(step, Domain::Pattern, 0x99 + kind as u64, Some(difficulty), Some(kind), format!("kind-{step}-{}", kind as u64))
+        self.build(step, Domain::Pattern, 0x99 + kind as u64, Some(difficulty), Some(kind), format!("kind-{step}-{}", kind as u64), &self.profile)
     }
 
-    fn build(&self, step: u64, d: Domain, salt: u64, forced: Option<u8>, force_kind: Option<Kind>, id: String) -> Task {
+    fn build(&self, step: u64, d: Domain, salt: u64, forced: Option<u8>, force_kind: Option<Kind>, id: String, prof: &Profile) -> Task {
         let mut r = if salt == 0 {
             Rng::new(mix(&[self.seed, step, d.idx() as u64, 0x7A5C]))
         } else {
             Rng::new(mix(&[self.seed, step, d.idx() as u64, 0x7A5C, salt]))
         };
         let u = r.f64();
-        let difficulty = forced.unwrap_or_else(|| (1.0 + (u.powf(self.profile.diff_bias[d.idx()]) * 5.0).floor()).clamp(1.0, 5.0) as u8);
+        let difficulty = forced.unwrap_or_else(|| (1.0 + (u.powf(prof.diff_bias[d.idx()]) * 5.0).floor()).clamp(1.0, 5.0) as u8);
         let kind = if let Some(k) = force_kind {
             k
         } else if self.extended && d == Domain::Pattern {
@@ -321,8 +413,8 @@ impl World {
         let (params, prompt, expected) = generate(kind, &mut r);
         let k = difficulty as i64;
         let bonus = if d == Domain::Pattern { self.pattern_bonus as f64 } else { 1.0 };
-        let reward = ((self.profile.reward_scale[d.idx()] * (4.0 + 3.0 * k as f64) * bonus).round() as i64).max(1);
-        let cost = self.profile.cost_base[d.idx()] + k;
+        let reward = ((prof.reward_scale[d.idx()] * (4.0 + 3.0 * k as f64) * bonus).round() as i64).max(1);
+        let cost = prof.cost_base[d.idx()] + k;
         Task { view: TaskView { id, step, domain: d, difficulty, kind, params, prompt, cost, reward }, expected }
     }
 }
@@ -522,6 +614,26 @@ fn generate(kind: Kind, r: &mut Rng) -> (Vec<i64>, String, i64) {
             let i0 = r.range(0, 12) as usize;
             let t = P[i0..i0 + 6].to_vec();
             (t.clone(), format!("Next term: {}", join(&t)), P[i0 + 6])
+        }
+        UnitKm => {
+            let k = r.range(2, 90);
+            (vec![k], format!("Convert {k} km to metres."), k * 1000)
+        }
+        UnitHm => {
+            let (h, m) = (r.range(1, 9), r.range(1, 59));
+            (vec![h, m], format!("How many minutes are {h} h {m} min?"), 60 * h + m)
+        }
+        UnitKmh => {
+            let v = 18 * r.range(1, 12);
+            (vec![v], format!("Convert {v} km/h to m/s."), v * 5 / 18)
+        }
+        UnitHms => {
+            let (h, m, s) = (r.range(1, 5), r.range(1, 59), r.range(1, 59));
+            (vec![h, m, s], format!("How many seconds are {h} h {m} min {s} s?"), 3600 * h + 60 * m + s)
+        }
+        UnitTrip => {
+            let (v, t) = (6 * r.range(2, 15), r.range(2, 45));
+            (vec![v, t], format!("A car drives at {v} km/h for {t} minutes. Distance in metres?"), v * 1000 * t / 60)
         }
         PatAlt => {
             let a = r.range(1, 9);

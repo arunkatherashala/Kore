@@ -75,7 +75,16 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         (true, Some(n)) if (1..=1000).contains(&n) => Some(n),
         (true, Some(_)) => return Err(err("'discover_every' must be 1..1000 steps")),
     };
+    let flag = |k: &str| -> Result<Option<bool>, Value> {
+        match args.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Bool(b)) => Ok(Some(*b)),
+            Some(_) => Err(err(format!("'{k}' must be a boolean"))),
+        }
+    };
     let cfg = RunCfg {
+        drift: flag("drift")?,
+        adapt: flag("adapt")?,
         extended,
         discover_every,
         chooser,
@@ -160,6 +169,7 @@ fn status(owner: &str) -> Result<Value, Value> {
     Ok(text(json!({
         "exists": true,
         "world_seed": g.world_seed, "loop_seed": g.loop_seed, "initial_budget": g.budget, "explore_c": g.explore_c, "chooser": g.chooser.name(),
+        "drift": g.drift, "adapt": g.adapt.name(), "changes_detected": changes_json(&rows, &revs, &snap.rows::<CauseRow>()),
         "model_attempts": st.model.attempts(), "pattern_families": if g.extended { "extended" } else { "standard" }, "rules_discovered": st.rules.len(),
         "steps": st.step, "budget_left": st.budget_left, "refills": st.refills, "world_clock_seconds": st.clock,
         "total_reward": st.total_reward, "total_energy_spent": st.total_cost,
@@ -169,6 +179,22 @@ fn status(owner: &str) -> Result<Value, Value> {
         "replay_check": { "decisions": rep.len(), "re_derived_from_log_and_equal": ok },
         "note": "deterministic simulation; preferences are produced by the defined rewards",
     })))
+}
+
+/// The changes the being's detector flagged: the logged note, its revision and how many outcome events it cites.
+fn changes_json(rows: &[EventRow], revs: &HashMap<String, RevisionRow>, causes: &[CauseRow]) -> Vec<Value> {
+    rows.iter()
+        .filter(|e| e.source == SOURCE && e.kind == "note" && e.tags.split(',').any(|t| t == "change"))
+        .map(|e| {
+            let rev = tag(&e.tags, "rev_key").and_then(|k| revs.get(k));
+            json!({
+                "change_event_id": e.event_id, "occurred_at": e.occurred_at, "step": tag(&e.tags, "step"), "domain": tag(&e.tags, "domain"),
+                "strategy": tag(&e.tags, "strategy"), "direction": tag(&e.tags, "direction"), "text": e.text,
+                "revision": rev.map(|r| json!({ "rev_id": r.rev_id, "key": r.key, "stance": r.stance, "author": r.author, "confidence": r.confidence })),
+                "evidence_events_cited": rev.map(|r| causes.iter().filter(|c| c.rev_id == r.rev_id).count().saturating_sub(1)),
+            })
+        })
+        .collect()
 }
 
 fn explain(args: &Value, owner: &str) -> Result<Value, Value> {
@@ -207,6 +233,13 @@ fn explain(args: &Value, owner: &str) -> Result<Value, Value> {
             "note": "the answer of this step was computed by this rule from the log; the rule's cited example events are listed by being_rules",
         })
     });
+    let changes_before = {
+        let revs: HashMap<String, RevisionRow> = snap.rows::<RevisionRow>().into_iter().map(|r| (r.key.clone(), r)).collect();
+        let upto: u64 = step.and_then(|s| s.parse().ok()).unwrap_or(0);
+        let all = changes_json(&rows, &revs, &snap.rows::<CauseRow>());
+        let before: Vec<Value> = all.into_iter().filter(|c| c["step"].as_str().and_then(|s| s.parse::<u64>().ok()).map_or(false, |s| s < upto)).collect();
+        json!({ "count": before.len(), "latest": before.iter().rev().take(3).collect::<Vec<_>>() })
+    };
     Ok(text(json!({
         "decision_event_id": d.event_id, "occurred_at": d.occurred_at, "step": step, "domain": tag(&d.tags, "domain"), "action": tag(&d.tags, "action"),
         "decision": d.text,
@@ -216,6 +249,7 @@ fn explain(args: &Value, owner: &str) -> Result<Value, Value> {
         "evidence_note": "the cited events are the genesis event and the latest outcomes per domain; the counts and means used come from all outcomes before this step",
         "outcome_of_this_step": result,
         "discovered_rule_used": rule_used,
+        "changes_flagged_before_this_decision": changes_before,
         "replay_check": rep.map(|r| json!({ "re_derived_domain": r.rederived, "equal_to_recorded": r.matches() })),
     })))
 }
@@ -231,6 +265,8 @@ pub fn tool_defs() -> Vec<Value> {
             "budget": { "type": "integer", "minimum": 1, "description": "Energy units for a new being. Default 2000" },
             "chooser": { "type": "string", "enum": ["ucb", "model"], "description": "Default ucb (single task per step, UCB1 over domains). model: a menu of 4 tasks per step; a world model learned from the log picks task and solver strategy. Fixed once the being exists" },
             "pattern_families": { "type": "string", "enum": ["standard", "extended"], "description": "Default standard. extended (needs chooser model): sequence tasks also come from extra hidden families the fixed solvers cannot solve, revealed answers are logged and a fourth strategy, discovered, applies rules the being found itself. Fixed once the being exists" },
+            "drift": { "type": "boolean", "description": "Default false. true (needs chooser model): the world changes at scheduled times the being is not told about (a new domain, units, appears in the menu; one domain's rewards and costs shift; the fast strategy gets much less reliable). The times scale with the initial budget. Fixed once the being exists" },
+            "adapt": { "type": "boolean", "description": "Default false. true (needs chooser model): the world model discounts old evidence exponentially and a detector flags changes in the success rate of a (domain, strategy) group; every flagged change is logged with the outcomes it rests on and shown by being_status. Fixed once the being exists" },
             "discover": { "type": "boolean", "description": "Run rule discovery during this run (needs a being created with pattern_families extended): every discover_every steps the being searches a small author-defined grammar of sequence rules over its own revealed examples and logs accepted rules" },
             "discover_every": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "With discover: steps between discovery passes. Default 10" },
             "stop_after_budget": { "type": "boolean", "description": "Default true: stop when no task is affordable. False: the world refills the budget at the next world day (logged) and the run continues" }

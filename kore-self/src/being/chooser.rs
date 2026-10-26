@@ -13,7 +13,7 @@
 //! always one domain, and the oracle (which is told the best domain).
 
 use super::state::BeingState;
-use super::world::{Domain, Rng, DOMAINS};
+use super::world::{Domain, Rng, ALL_DOMAINS, DOMAINS};
 use serde_json::{json, Value};
 
 /// Exploration constant used when a new being is created; tuned only on the
@@ -64,8 +64,9 @@ pub trait DomainPicker {
 
 fn reasons_for(st: &BeingState, affordable: &[Domain], c: f64) -> Vec<Reason> {
     let total = st.total_pulls().max(1) as f64;
-    DOMAINS
+    ALL_DOMAINS
         .iter()
+        .filter(|d| d.idx() < 4 || st.stats[d.idx()].n > 0 || affordable.contains(d))
         .map(|d| {
             let s = &st.stats[d.idx()];
             let (bonus, score) = if s.n == 0 {
@@ -110,11 +111,12 @@ impl DomainPicker for Ucb1 {
         let reasons = reasons_for(st, affordable, self.c);
         let total_pulls = st.total_pulls();
         // untried first, in the shuffled order
-        if let Some(d) = self.order.iter().copied().find(|d| affordable.contains(d) && st.stats[d.idx()].n == 0) {
+        let order: Vec<Domain> = self.order.iter().copied().chain(std::iter::once(Domain::Units)).collect();
+        if let Some(d) = order.iter().copied().find(|d| affordable.contains(d) && st.stats[d.idx()].n == 0) {
             return Pick { domain: d, policy: self.name(), why: "untried: initial exploration in seeded order".into(), reasons, total_pulls };
         }
         let mut best: Option<(f64, usize, Domain)> = None;
-        for (pos, d) in self.order.iter().enumerate() {
+        for (pos, d) in order.iter().enumerate() {
             if !affordable.contains(d) {
                 continue;
             }

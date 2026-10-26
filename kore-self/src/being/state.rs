@@ -8,9 +8,9 @@
 //! same next decision.
 
 use super::discover::{example_from_event, rule_from_event, Example, Rule};
-use super::model::{Model, Obs};
+use super::model::{AdaptMode, Alarm, Model, Obs, DEFAULT_HALF_LIFE};
 use super::solver::Strategy;
-use super::world::{iso_at, Domain, DOMAINS};
+use super::world::{iso_at, Domain, DOMAINS, N_DOM};
 use crate::versioned::{event_id, EventRow, NewEvent, Snapshot};
 use std::collections::VecDeque;
 
@@ -79,6 +79,10 @@ pub struct Genesis {
     pub chooser: Chooser,
     /// Pattern tasks come from the extended hidden families and the `discovered` strategy exists (menu world only).
     pub extended: bool,
+    /// The world has scheduled hidden changes (menu world only). Fixed once the being exists.
+    pub drift: bool,
+    /// How the world model treats old evidence. Fixed once the being exists.
+    pub adapt: AdaptMode,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -113,9 +117,9 @@ pub struct BeingState {
     pub budget_left: i64,
     /// World seconds since the origin.
     pub clock: i64,
-    pub stats: [DomainStat; 4],
+    pub stats: [DomainStat; N_DOM],
     /// Latest outcome event ids per domain, oldest first.
-    pub recent: [VecDeque<String>; 4],
+    pub recent: [VecDeque<String>; N_DOM],
     pub total_reward: i64,
     pub total_cost: i64,
     pub refills: u64,
@@ -125,7 +129,24 @@ pub struct BeingState {
     pub examples: Vec<Example>,
     /// Rules accepted into the log, in acceptance order.
     pub rules: Vec<Rule>,
+    /// Changes the model's detector has flagged, in order (adaptive learner only).
+    pub changes: Vec<Change>,
+    /// Latest outcome event ids per (domain, strategy), oldest first: the evidence a detected change cites.
+    group_recent: [[VecDeque<String>; 4]; N_DOM],
 }
+
+/// A change flagged by the detector, with the logged outcomes it rests on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Change {
+    pub index: usize,
+    pub step: u64,
+    pub clock: i64,
+    pub alarm: Alarm,
+    pub cites: Vec<String>,
+}
+
+/// Outcome events a detected change cites at most.
+pub const CHANGE_CITES: usize = 12;
 
 /// Value of `key:` among comma-joined tags.
 pub fn tag<'a>(tags: &'a str, key: &str) -> Option<&'a str> {
@@ -143,11 +164,13 @@ impl BeingState {
 
     pub fn start(&mut self, g: Genesis, event: String) {
         self.budget_left = g.budget;
+        self.model.set_mode(g.adapt, DEFAULT_HALF_LIFE);
         self.genesis = Some(g);
         self.genesis_event = event;
     }
 
     pub fn apply(&mut self, o: &Outcome) {
+        self.model.note_step(o.reward, o.cost);
         if o.skipped {
             self.total_cost += o.cost;
             self.budget_left = o.budget_left;
@@ -159,7 +182,15 @@ impl BeingState {
             self.examples.push(ex.clone());
         }
         if let Some(strategy) = o.strategy {
-            self.model.observe(&Obs { domain: o.domain, difficulty: o.difficulty, strategy, correct: o.correct, listed_cost: o.listed_cost, spent: o.cost });
+            let gq = &mut self.group_recent[o.domain.idx()][strategy.idx()];
+            gq.push_back(o.event_id.clone());
+            while gq.len() > CHANGE_CITES {
+                gq.pop_front();
+            }
+            if let Some(alarm) = self.model.observe(&Obs { domain: o.domain, difficulty: o.difficulty, strategy, correct: o.correct, listed_cost: o.listed_cost, spent: o.cost }) {
+                let cites: Vec<String> = self.group_recent[o.domain.idx()][strategy.idx()].iter().cloned().collect();
+                self.changes.push(Change { index: self.changes.len(), step: o.step, clock: o.clock, alarm, cites });
+            }
         }
         let s = &mut self.stats[o.domain.idx()];
         s.n += 1;
@@ -199,7 +230,7 @@ impl BeingState {
     /// The events a decision made now would cite.
     pub fn evidence_ids(&self) -> Vec<String> {
         let mut v = vec![self.genesis_event.clone()];
-        for d in DOMAINS {
+        for d in super::world::ALL_DOMAINS {
             v.extend(self.recent[d.idx()].iter().cloned());
         }
         v
@@ -256,6 +287,8 @@ fn genesis_from_tags(tags: &str) -> Option<Genesis> {
             None => Chooser::Ucb,
         },
         extended: tag(tags, "pattern_families") == Some("extended"),
+        drift: tag(tags, "drift") == Some("on"),
+        adapt: tag(tags, "adapt").and_then(AdaptMode::parse).unwrap_or(AdaptMode::Off),
     })
 }
 
@@ -292,8 +325,10 @@ pub fn genesis_event(g: &Genesis) -> (NewEvent, String) {
         Chooser::Model => format!("menu world, choice policy model-ucb (learned world model, optimism beta {})", g.explore_c),
     };
     let ext = if g.extended { "; pattern families extended (author-defined hidden sequence families, strategy discovered added)" } else { "" };
+    let drift = if g.drift { "; the world changes at scheduled times that the being is not told about" } else { "" };
+    let adapt = match g.adapt { AdaptMode::Off => "", AdaptMode::Forget => "; the model forgets old evidence exponentially", AdaptMode::Full => "; the model forgets old evidence exponentially and flags changes with a CUSUM detector" };
     let text = format!(
-        "being genesis: a deterministic simulation world and loop start; world_seed {} loop_seed {} budget {} energy units; {policy}{ext}",
+        "being genesis: a deterministic simulation world and loop start; world_seed {} loop_seed {} budget {} energy units; {policy}{ext}{drift}{adapt}",
         g.world_seed, g.loop_seed, g.budget
     );
     let at = iso_at(0);
@@ -314,6 +349,12 @@ pub fn genesis_event(g: &Genesis) -> (NewEvent, String) {
     }
     if g.extended {
         tags.push("pattern_families:extended".into());
+    }
+    if g.drift {
+        tags.push("drift:on".into());
+    }
+    if g.adapt != AdaptMode::Off {
+        tags.push(format!("adapt:{}", g.adapt.name()));
     }
     let ev = NewEvent { source: SOURCE.into(), occurred_at: at, kind: "note".into(), text, tags, redacted: false };
     (ev, id)

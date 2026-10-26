@@ -23,6 +23,7 @@
 //! cost and listed reward, and the log-derived state. This file must not read
 //! hidden world parameters; a test scans for that.
 
+use super::model::AdaptMode;
 use super::solver::{Strategy, STRATEGIES, STRATEGIES_EXT};
 use super::state::BeingState;
 use super::world::Domain;
@@ -103,16 +104,24 @@ pub struct ModelChooser {
     /// signature has fewer than `EXAMPLE_TARGET` revealed examples in the log, because every attempt
     /// at it adds an example the rule search can learn from. 0 = off.
     pub curiosity: f64,
+    /// Cold-start bonus for unseen (domain, strategy) pairs; used only when the model is in mode `Full`.
+    pub novelty: f64,
 }
 
 /// Revealed examples per signature after which the curiosity bonus is gone.
 pub const EXAMPLE_TARGET: u64 = 24;
+/// A (domain, strategy) group with less effective evidence than this counts as unseen.
+pub const NOVEL_BELOW: f64 = 1.0;
 /// Chosen on tuning seeds 101..120 only (see docs/measured.md).
 pub const DEFAULT_CURIOSITY: f64 = 0.0;
+/// Cold start (adaptive learner only): extra optimism, in success probability, for a (domain, strategy)
+/// pair the model has (almost) no evidence for, so a domain that appears for the first time is tried.
+/// Chosen on tuning seeds 101..120 only (see docs/measured.md).
+pub const DEFAULT_NOVELTY: f64 = 0.25;
 
 impl ModelChooser {
     pub fn new(beta: f64) -> ModelChooser {
-        ModelChooser { beta, skip_frac: DEFAULT_SKIP_FRAC, no_discovered: false, curiosity: DEFAULT_CURIOSITY }
+        ModelChooser { beta, skip_frac: DEFAULT_SKIP_FRAC, no_discovered: false, curiosity: DEFAULT_CURIOSITY, novelty: DEFAULT_NOVELTY }
     }
 
     /// Strategies on offer: three in the standard menu, four (with `discovered`) when the being was created with extended pattern families.
@@ -126,6 +135,7 @@ impl ModelChooser {
 
     pub fn candidates(&self, st: &BeingState, offers: &[Offer]) -> Vec<Cand> {
         let mut v = vec![];
+        let full = st.model.mode() == AdaptMode::Full;
         let discovering = !self.no_discovered && st.genesis.as_ref().map_or(false, |g| g.extended);
         let mut seen = [0u64; 6];
         if discovering {
@@ -142,7 +152,8 @@ impl ModelChooser {
             for &s in self.strategies(st) {
                 let e = st.model.estimate(o.domain, o.difficulty, s);
                 let cost_est = (o.listed_cost as f64 * e.cost_ratio).max(1.0);
-                let pu = (e.p + self.beta * e.sd).min(1.0) + cur;
+                let novel = if full && e.group_n < NOVEL_BELOW { self.novelty } else { 0.0 };
+                let pu = (e.p + self.beta * e.sd).min(1.0) + cur + novel;
                 v.push(Cand {
                     slot: o.slot,
                     strategy: s,
@@ -175,7 +186,10 @@ impl MenuChooser for ModelChooser {
             }
         }
         let best = best?;
-        let rate = if st.total_cost > 0 { st.total_reward as f64 / st.total_cost as f64 } else { 0.0 };
+        let rate = match st.model.recent_rate() {
+            Some(r) => r,
+            None => if st.total_cost > 0 { st.total_reward as f64 / st.total_cost as f64 } else { 0.0 },
+        };
         let skip = self.skip_frac > 0.0 && st.total_cost >= SKIP_MIN_COST && best.score < self.skip_frac * rate && st.budget_left >= super::world::SKIP_COST;
         let alts: Vec<Value> = cands
             .iter()
@@ -189,10 +203,15 @@ impl MenuChooser for ModelChooser {
                 })
             })
             .collect();
-        let rationale = json!({
+        let mut rationale = json!({
             "policy": self.name(), "beta": self.beta, "skip_frac": self.skip_frac, "curiosity": self.curiosity, "realized_reward_per_energy": round3(rate),
             "attempts_in_model": st.model.attempts(), "alternatives": alts,
         });
+        if st.model.adaptive() {
+            rationale["adapt"] = json!(st.model.mode().name());
+            rationale["novelty_bonus"] = json!(if st.model.mode() == AdaptMode::Full { self.novelty } else { 0.0 });
+            rationale["changes_flagged_so_far"] = json!(st.changes.len());
+        }
         if skip {
             return Some(Choice {
                 action: Action::Skip,

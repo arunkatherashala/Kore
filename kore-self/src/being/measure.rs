@@ -16,14 +16,14 @@ const ORACLE_SAMPLES: u64 = 3000;
 pub fn true_efficiency(world_seed: u64) -> [f64; 4] {
     let w = World::new(world_seed);
     let th = ScriptedThinker;
-    let st = [Default::default(); 4];
+    let st = [Default::default(); 5];
     let mut out = [0.0; 4];
     for d in DOMAINS {
         let (mut r, mut c) = (0i64, 0i64);
         for s in 0..ORACLE_SAMPLES {
             let step = ORACLE_OFFSET + s;
             let t = w.task(step, d);
-            let ctx = Context { step, task: &t.view, noise: w.noise(step, d), stats: &st, rules: &[] };
+            let ctx = Context { step, task: &t.view, noise: w.noise(step, d), stats: &st, rules: &[], degraded: false };
             if t.check(th.propose(&ctx).answer) {
                 r += t.view.reward;
             }
@@ -62,7 +62,7 @@ impl RunResult {
 pub fn run_policy(world_seed: u64, budget: i64, picker: &mut dyn DomainPicker) -> RunResult {
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: super::state::Chooser::Ucb, extended: false }, String::new());
+    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: super::state::Chooser::Ucb, extended: false, drift: false, adapt: Default::default() }, String::new());
     let mut e = Engine::new(World::new(world_seed), st, &th);
     let mut picks = vec![];
     while let Ok(o) = e.step(picker) {
@@ -137,7 +137,7 @@ const TRUTH_SAMPLES: u64 = 400;
 /// Uses the generator and the noise source; only the oracle and the tests touch it.
 #[derive(Debug, Clone)]
 pub struct Truth {
-    pub p: [[[f64; 4]; 5]; 4],
+    pub p: [[[f64; 4]; 5]; 5],
 }
 
 pub fn truth(world_seed: u64) -> Truth {
@@ -146,17 +146,23 @@ pub fn truth(world_seed: u64) -> Truth {
 
 /// As `truth`, in any world, for a being whose accepted rules are `rules` (fourth strategy included).
 pub fn truth_in(w: &World, rules: &[Rule]) -> Truth {
+    truth_flag(w, rules, false)
+}
+
+/// As `truth_in`, with the `fast` strategy degraded or not (drifting worlds).
+pub fn truth_flag(w: &World, rules: &[Rule], degraded: bool) -> Truth {
     let th = ScriptedThinker;
-    let st = [Default::default(); 4];
-    let mut t = Truth { p: [[[0.0; 4]; 5]; 4] };
-    for d in DOMAINS {
+    let st = [Default::default(); 5];
+    let mut t = Truth { p: [[[0.0; 4]; 5]; 5] };
+    let doms: Vec<Domain> = if w.drift.is_some() { super::world::ALL_DOMAINS.to_vec() } else { DOMAINS.to_vec() };
+    for d in doms {
         for k in 1..=5u8 {
             for s in if w.extended { STRATEGIES_EXT.to_vec() } else { STRATEGIES.to_vec() } {
                 let mut ok = 0u64;
                 for i in 0..TRUTH_SAMPLES {
                     let step = ORACLE_OFFSET + i;
                     let task = w.task_forced(step, d, k);
-                    let ctx = Context { step, task: &task.view, noise: w.menu_noise(step, (i % 4) as usize), stats: &st, rules };
+                    let ctx = Context { step, task: &task.view, noise: w.menu_noise(step, (i % 4) as usize), stats: &st, rules, degraded };
                     ok += task.check(th.propose_with(&ctx, s).answer) as u64;
                 }
                 t.p[d.idx()][k as usize - 1][s.idx()] = ok as f64 / TRUTH_SAMPLES as f64;
@@ -178,21 +184,44 @@ impl MenuChooser for OracleMenu {
         "oracle".into()
     }
     fn choose(&mut self, st: &BeingState, offers: &[Offer]) -> Option<Choice> {
-        let mut best: Option<(f64, usize, Strategy)> = None;
-        for o in offers {
-            for &s in &self.strategies {
-                let e = s.energy(o.listed_cost);
-                if e > st.budget_left {
-                    continue;
-                }
-                let v = o.listed_reward as f64 * self.truth.p[o.domain.idx()][o.difficulty as usize - 1][s.idx()] / e as f64;
-                if best.map_or(true, |b| v > b.0) {
-                    best = Some((v, o.slot, s));
-                }
+        oracle_choice(&self.truth, &self.strategies, st, offers, "oracle")
+    }
+}
+
+fn oracle_choice(truth: &Truth, strategies: &[Strategy], st: &BeingState, offers: &[Offer], name: &str) -> Option<Choice> {
+    let mut best: Option<(f64, usize, Strategy)> = None;
+    for o in offers {
+        for &s in strategies {
+            let e = s.energy(o.listed_cost);
+            if e > st.budget_left {
+                continue;
+            }
+            let v = o.listed_reward as f64 * truth.p[o.domain.idx()][o.difficulty as usize - 1][s.idx()] / e as f64;
+            if best.map_or(true, |b| v > b.0) {
+                best = Some((v, o.slot, s));
             }
         }
-        let (v, slot, strategy) = best?;
-        Some(Choice { action: Action::Attempt { slot, strategy }, policy: self.name(), why: "knows hidden truth".into(), p: 0.0, sd: 0.0, cost_est: 0.0, score: v, rationale: serde_json::json!({}) })
+    }
+    let (v, slot, strategy) = best?;
+    Some(Choice { action: Action::Attempt { slot, strategy }, policy: name.into(), why: "knows hidden truth".into(), p: 0.0, sd: 0.0, cost_est: 0.0, score: v, rationale: serde_json::json!({}) })
+}
+
+/// Oracle for a drifting world: knows the hidden success rates before and after the degradation of
+/// `fast` and the time of that change, and so re-optimises at the change. (The offers it chooses
+/// from already show the new rewards and costs after the other scheduled changes.)
+pub struct ScheduleOracle {
+    pub before: Truth,
+    pub after: Truth,
+    pub degrade_at: i64,
+}
+
+impl MenuChooser for ScheduleOracle {
+    fn name(&self) -> String {
+        "oracle-schedule".into()
+    }
+    fn choose(&mut self, st: &BeingState, offers: &[Offer]) -> Option<Choice> {
+        let t = if st.clock >= self.degrade_at { &self.after } else { &self.before };
+        oracle_choice(t, &STRATEGIES, st, offers, "oracle-schedule")
     }
 }
 
@@ -231,7 +260,7 @@ impl MenuRun {
 pub fn run_menu(world_seed: u64, budget: i64, chooser: &mut dyn MenuChooser) -> MenuRun {
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: false }, String::new());
+    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: false, drift: false, adapt: Default::default() }, String::new());
     let mut e = Engine::new(World::new(world_seed), st, &th);
     let (mut recs, mut skips, mut strategies) = (vec![], 0, [0u64; 4]);
     while let Ok(o) = e.step_menu(chooser) {
@@ -272,7 +301,7 @@ pub fn menu_row(seed: u64, budget: i64, beta: f64, skip_frac: f64) -> MenuRow {
         greedy_deep: run_menu(seed, budget, &mut GreedyMenu { strategy: Strategy::Deep }),
         ucb: run_menu(seed, budget, &mut UcbMenu::new(seed, super::chooser::DEFAULT_EXPLORE_C)),
         model: run_menu(seed, budget, &mut m),
-        model_noskip: run_menu(seed, budget, &mut ModelChooser { beta, skip_frac: 0.0, no_discovered: false, curiosity: 0.0 }),
+        model_noskip: run_menu(seed, budget, &mut ModelChooser { beta, skip_frac: 0.0, no_discovered: false, curiosity: 0.0, novelty: super::planner::DEFAULT_NOVELTY }),
         oracle: run_menu(seed, budget, &mut OracleMenu { truth: truth(seed), strategies: STRATEGIES.to_vec() }),
     }
 }
@@ -350,7 +379,7 @@ pub fn run_menu_ext(world: World, budget: i64, chooser: &mut dyn MenuChooser, di
     let world_seed = world.seed;
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: true }, String::new());
+    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: true, drift: false, adapt: Default::default() }, String::new());
     for r in preload {
         st.apply_rule(r.clone());
     }
@@ -501,10 +530,187 @@ pub fn disc_row(seed: u64, budget: i64, beta: f64, every: u64, bonus: i64, curio
     DiscRow {
         seed,
         random: run_menu_ext(mk(), budget, &mut RandomMenu::new(seed), 0, &[]),
-        nodisc: run_menu_ext(mk(), budget, &mut ModelChooser { beta, skip_frac: DEFAULT_SKIP_FRAC, no_discovered: true, curiosity: 0.0 }, 0, &[]),
+        nodisc: run_menu_ext(mk(), budget, &mut ModelChooser { beta, skip_frac: DEFAULT_SKIP_FRAC, no_discovered: true, curiosity: 0.0, novelty: super::planner::DEFAULT_NOVELTY }, 0, &[]),
         oracle_rules: run_menu_ext(mk(), budget, &mut OracleMenu { truth: truth_in(&w, &perfect), strategies: STRATEGIES_EXT.to_vec() }, 0, &perfect),
         oracle_fixed: run_menu_ext(mk(), budget, &mut OracleMenu { truth: truth_in(&w, &[]), strategies: STRATEGIES.to_vec() }, 0, &[]),
         disc,
         analysis,
     }
+}
+
+// ---- Track B3: drifting world, adaptive learner ----
+
+use super::model::{AdaptMode, CUSUM_H, CUSUM_K, DEFAULT_HALF_LIFE, KEEP_AFTER_ALARM};
+use super::planner::DEFAULT_NOVELTY;
+
+/// Settings of the learner under test (the logged being uses the defaults of `AdaptSpec::full`).
+#[derive(Debug, Clone, Copy)]
+pub struct AdaptSpec {
+    pub mode: AdaptMode,
+    pub half_life: f64,
+    pub k: f64,
+    pub h: f64,
+    pub keep: f64,
+    pub novelty: f64,
+}
+
+impl AdaptSpec {
+    pub fn off() -> AdaptSpec {
+        AdaptSpec { mode: AdaptMode::Off, half_life: DEFAULT_HALF_LIFE, k: CUSUM_K, h: CUSUM_H, keep: KEEP_AFTER_ALARM, novelty: DEFAULT_NOVELTY }
+    }
+    pub fn forget() -> AdaptSpec {
+        AdaptSpec { mode: AdaptMode::Forget, ..AdaptSpec::off() }
+    }
+    pub fn full() -> AdaptSpec {
+        AdaptSpec { mode: AdaptMode::Full, ..AdaptSpec::off() }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DRec {
+    /// Energy spent before this step.
+    pub at: i64,
+    pub cost: i64,
+    pub reward: i64,
+    pub domain: Option<Domain>,
+    pub strategy: Option<Strategy>,
+    pub attempted: bool,
+    pub correct: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AlarmAt {
+    pub energy: i64,
+    pub step: u64,
+    pub domain: Domain,
+    pub strategy: Strategy,
+    pub drop: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DriftRun {
+    pub recs: Vec<DRec>,
+    pub reward: i64,
+    pub cost: i64,
+    pub alarms: Vec<AlarmAt>,
+}
+
+impl DriftRun {
+    pub fn per_budget(&self) -> f64 {
+        if self.cost > 0 { self.reward as f64 / self.cost as f64 } else { 0.0 }
+    }
+    /// Reward per energy over the steps that started with `from <= energy spent < to`.
+    pub fn window_e(&self, from: i64, to: i64) -> f64 {
+        let (r, c) = self.recs.iter().filter(|x| x.at >= from && x.at < to).fold((0i64, 0i64), |a, x| (a.0 + x.reward, a.1 + x.cost));
+        if c > 0 { r as f64 / c as f64 } else { 0.0 }
+    }
+}
+
+/// One in-memory run in a (possibly drifting) menu world with the given learner settings.
+pub fn run_drift(seed: u64, budget: i64, drift: bool, spec: &AdaptSpec, chooser: &mut dyn MenuChooser) -> DriftRun {
+    let th = ScriptedThinker;
+    let mut st = BeingState::default();
+    st.start(Genesis { world_seed: seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: false, drift, adapt: spec.mode }, String::new());
+    st.model.set_mode(spec.mode, spec.half_life);
+    st.model.cusum_k = spec.k;
+    st.model.cusum_h = spec.h;
+    st.model.keep = spec.keep;
+    let world = World::with_drift(seed, false, if drift { Some(budget) } else { None });
+    let mut e = Engine::new(world, st, &th);
+    let mut recs = vec![];
+    let mut alarms = vec![];
+    loop {
+        let at = e.state.total_cost;
+        let n_alarms = e.state.changes.len();
+        let Ok(o) = e.step_menu(chooser) else { break };
+        let a = o.outcome;
+        recs.push(DRec { at, cost: a.cost, reward: a.reward, domain: if a.skipped { None } else { Some(a.domain) }, strategy: a.strategy, attempted: !a.skipped, correct: a.correct });
+        for c in &e.state.changes[n_alarms..] {
+            alarms.push(AlarmAt { energy: c.clock / super::world::SECS_PER_ENERGY, step: c.step, domain: c.alarm.domain, strategy: c.alarm.strategy, drop: c.alarm.drop });
+        }
+    }
+    DriftRun { recs, reward: e.state.total_reward, cost: e.state.total_cost, alarms }
+}
+
+/// Energy at which each scheduled change takes effect.
+pub fn schedule_energy(seed: u64, budget: i64) -> [i64; 3] {
+    let w = World::with_drift(seed, false, Some(budget));
+    let d = w.drift.expect("drift schedule");
+    [d.at[0] / super::world::SECS_PER_ENERGY, d.at[1] / super::world::SECS_PER_ENERGY, d.at[2] / super::world::SECS_PER_ENERGY]
+}
+
+fn model_chooser(spec: &AdaptSpec) -> ModelChooser {
+    ModelChooser { novelty: spec.novelty, ..ModelChooser::new(super::planner::DEFAULT_BETA) }
+}
+
+pub struct DriftRow {
+    pub seed: u64,
+    pub budget: i64,
+    pub drift: bool,
+    /// Energy of the three changes (empty schedule values when `drift` is false).
+    pub at: [i64; 3],
+    pub random: DriftRun,
+    pub greedy: DriftRun,
+    pub ucb: DriftRun,
+    pub off: DriftRun,
+    pub forget: DriftRun,
+    pub full: DriftRun,
+    pub oracle: DriftRun,
+}
+
+pub fn drift_row(seed: u64, budget: i64, drift: bool, forget: &AdaptSpec, full: &AdaptSpec) -> DriftRow {
+    let world = World::with_drift(seed, false, if drift { Some(budget) } else { None });
+    let off = AdaptSpec::off();
+    let degrade_at = world.drift.as_ref().map_or(i64::MAX, |d| d.at[2]);
+    let mut oracle = ScheduleOracle { before: truth_flag(&world, &[], false), after: if drift { truth_flag(&world, &[], true) } else { truth_flag(&world, &[], false) }, degrade_at };
+    DriftRow {
+        seed,
+        budget,
+        drift,
+        at: if drift { schedule_energy(seed, budget) } else { [i64::MAX; 3] },
+        random: run_drift(seed, budget, drift, &off, &mut RandomMenu::new(seed)),
+        greedy: run_drift(seed, budget, drift, &off, &mut GreedyMenu { strategy: Strategy::Careful }),
+        ucb: run_drift(seed, budget, drift, &off, &mut UcbMenu::new(seed, super::chooser::DEFAULT_EXPLORE_C)),
+        off: run_drift(seed, budget, drift, &off, &mut model_chooser(&off)),
+        forget: run_drift(seed, budget, drift, forget, &mut model_chooser(forget)),
+        full: run_drift(seed, budget, drift, full, &mut model_chooser(full)),
+        oracle: run_drift(seed, budget, drift, &off, &mut oracle),
+    }
+}
+
+/// Energy after the start of a regime until the trailing `w`-energy reward per energy of `run` first
+/// reaches `frac` of the oracle's mean over the regime `[from, to)`. The trailing window lies fully
+/// inside the regime, so the shortest possible answer is `w`. None: never within the regime.
+pub fn recovery(run: &DriftRun, oracle: &DriftRun, from: i64, to: i64, w: i64, frac: f64) -> Option<i64> {
+    let level = oracle.window_e(from, to);
+    let mut t = from + w;
+    while t <= to {
+        if run.window_e(t - w, t) >= frac * level {
+            return Some(t - from);
+        }
+        t += 10;
+    }
+    None
+}
+
+/// Energy after `from` until the first attempt in the new domain.
+pub fn first_units_attempt(run: &DriftRun, from: i64) -> Option<i64> {
+    run.recs.iter().find(|r| r.at >= from && r.domain == Some(Domain::Units)).map(|r| r.at - from)
+}
+
+/// Energy after `from` until the trailing 10 attempts in the new domain earn at least `frac` of the oracle's mean reward per energy there.
+pub fn units_competence(run: &DriftRun, oracle: &DriftRun, from: i64, frac: f64) -> Option<i64> {
+    let rate = |r: &DriftRun| {
+        let (a, b) = r.recs.iter().filter(|x| x.at >= from && x.domain == Some(Domain::Units)).fold((0i64, 0i64), |s, x| (s.0 + x.reward, s.1 + x.cost));
+        if b > 0 { a as f64 / b as f64 } else { 0.0 }
+    };
+    let level = rate(oracle);
+    let u: Vec<&DRec> = run.recs.iter().filter(|x| x.at >= from && x.domain == Some(Domain::Units)).collect();
+    for j in 9..u.len() {
+        let (a, b) = u[j - 9..=j].iter().fold((0i64, 0i64), |s, x| (s.0 + x.reward, s.1 + x.cost));
+        if b > 0 && a as f64 / b as f64 >= frac * level {
+            return Some(u[j].at - from);
+        }
+    }
+    None
 }

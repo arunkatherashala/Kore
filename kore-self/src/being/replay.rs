@@ -9,7 +9,7 @@
 use super::chooser::{DomainPicker, Pick, Ucb1};
 use super::discover::{rule_from_event, rule_id, search};
 use super::planner::{MenuChooser, ModelChooser};
-use super::run_loop::offers_of;
+use super::run_loop::{offers_of, world_for};
 use super::state::{tag, BeingState, Chooser, SOURCE};
 use super::world::{Domain, World};
 use crate::versioned::EventRow;
@@ -42,7 +42,7 @@ pub fn next_action(rows: &[EventRow]) -> Option<String> {
 
 fn pick_for(st: &BeingState) -> Option<Pick> {
     let g = st.genesis.as_ref()?;
-    let world = World::with_extended(g.world_seed, g.extended);
+    let world = world_for(g);
     let menu = world.menu(st.step);
     let afford: Vec<Domain> = menu.iter().filter(|t| t.view.cost <= st.budget_left).map(|t| t.view.domain).collect();
     if afford.is_empty() {
@@ -56,7 +56,7 @@ fn action_for(st: &BeingState) -> Option<String> {
     match g.chooser {
         Chooser::Ucb => pick_for(st).map(|p| p.domain.name().to_string()),
         Chooser::Model => {
-            let offers = offers_of(&World::with_extended(g.world_seed, g.extended).offers(st.step));
+            let offers = offers_of(&world_for(g).offers_at(st.step, st.clock));
             ModelChooser::new(g.explore_c).choose(st, &offers).map(|c| c.action.label())
         }
     }

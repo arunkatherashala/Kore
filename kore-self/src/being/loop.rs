@@ -21,7 +21,8 @@ use super::discover::{self, terms_tag, Rule};
 use super::planner::{Action, MenuChooser, ModelChooser, Offer, DEFAULT_BETA};
 use super::policy::{Policy, StopReason};
 use super::solver::{Context, Strategy, Thinker};
-use super::state::{genesis_event, refill_event, BeingState, Chooser, Genesis, Outcome, SOURCE};
+use super::model::AdaptMode;
+use super::state::{genesis_event, refill_event, BeingState, Change, Chooser, Genesis, Outcome, SOURCE};
 use super::world::{iso_at, Domain, Task, World, DOMAINS, SECS_PER_ENERGY, SKIP_COST};
 use crate::versioned::{event_id, prediction_id, Batch, LogError, NewEvent, NewOutcome, NewPrediction, NewRevision, VersionedLog};
 use serde_json::{json, Value};
@@ -42,6 +43,62 @@ pub struct StepOut {
     /// None for a skipped menu (nothing to predict).
     pub prediction: Option<NewPrediction>,
     pub resolved: Option<NewOutcome>,
+    /// Changes the detector flagged on this step: a note event and a revision citing the outcomes they rest on.
+    pub changes: Vec<(NewEvent, NewRevision)>,
+}
+
+/// The world a being lives in, from its genesis event.
+pub fn world_for(g: &Genesis) -> World {
+    World::with_drift(g.world_seed, g.extended, if g.drift { Some(g.budget) } else { None })
+}
+
+/// The log records of one detected change.
+pub fn change_records(c: &Change) -> (NewEvent, NewRevision) {
+    let a = &c.alarm;
+    let dir = if a.drop { "lower" } else { "higher" };
+    let at = iso_at(c.clock);
+    let text = format!(
+        "change {} detected at step {}: the success rate of strategy {} in domain {} looks {dir} than the model predicted (observed {} right of {} attempts, predicted {:.1}; CUSUM statistic {:.2}); older evidence of this group is cut to {:.0}% of its weight",
+        c.index, c.step, a.strategy.name(), a.domain.name(), a.run_succ, a.run_n, a.run_pred, a.statistic, 100.0 * super::model::KEEP_AFTER_ALARM
+    );
+    let key = format!("being/change/{:04}", c.index);
+    let ev = NewEvent {
+        source: SOURCE.into(),
+        occurred_at: at.clone(),
+        kind: "note".into(),
+        text,
+        tags: vec![
+            "change".into(),
+            format!("change_index:{}", c.index),
+            format!("step:{}", c.step),
+            format!("domain:{}", a.domain.name()),
+            format!("strategy:{}", a.strategy.name()),
+            format!("direction:{}", if a.drop { "drop" } else { "rise" }),
+            format!("rev_key:{key}"),
+        ],
+        redacted: false,
+    };
+    let ev_id = event_id(&ev.source, &ev.occurred_at, &ev.text);
+    let mut caused_by = c.cites.clone();
+    caused_by.push(ev_id);
+    let rationale = json!({
+        "detector": "two-sided CUSUM on standardized prediction residuals per (domain, strategy)", "domain": a.domain.name(), "strategy": a.strategy.name(),
+        "direction": if a.drop { "drop" } else { "rise" }, "statistic": a.statistic, "threshold": super::model::CUSUM_H, "drift_k": super::model::CUSUM_K,
+        "attempts_in_run": a.run_n, "right_in_run": a.run_succ, "predicted_right_in_run": a.run_pred, "cited_outcomes": c.cites.len(),
+        "action": "evidence of this (domain, strategy) group cut to a share of its weight", "share_kept": super::model::KEEP_AFTER_ALARM,
+    });
+    let rev = NewRevision {
+        entity_type: "change".into(),
+        key,
+        stance: format!("{} with {}: success rate {dir} than predicted", a.domain.name(), a.strategy.name()),
+        confidence: (a.statistic / (a.statistic + super::model::CUSUM_H)).clamp(0.0, 1.0),
+        rationale: rationale.to_string(),
+        supersedes: None,
+        valid_from: at,
+        author: "rule:being-detector".into(),
+        caused_by,
+    };
+    (ev, rev)
 }
 
 /// The observable part of the tasks on offer.
@@ -80,7 +137,7 @@ impl<'a> Engine<'a> {
         }
         let task = &menu[pick.domain.idx()];
         let v = &task.view;
-        let ctx = Context { step, task: v, noise: self.world.noise(step, v.domain), stats: &self.state.stats, rules: &self.state.rules };
+        let ctx = Context { step, task: v, noise: self.world.noise(step, v.domain), stats: &self.state.stats, rules: &self.state.rules, degraded: false };
         let prop = self.thinker.propose(&ctx);
         let correct = task.check(prop.answer);
         let reward = if correct { v.reward } else { 0 };
@@ -190,14 +247,14 @@ impl<'a> Engine<'a> {
             example: None,
         };
         self.state.apply(&outcome);
-        Ok(StepOut { outcome, pick: Some(pick), action: None, predicted_p: None, decision_event_id: dev_id, events: vec![dev, aev, oev], revision, prediction: Some(prediction), resolved: Some(resolved) })
+        Ok(StepOut { outcome, pick: Some(pick), action: None, predicted_p: None, decision_event_id: dev_id, events: vec![dev, aev, oev], revision, prediction: Some(prediction), resolved: Some(resolved), changes: vec![] })
     }
 
     /// Menu mode: one step over `MENU_SIZE` offered tasks. The chooser picks
     /// (offer, strategy) or skips; the thinker answers with that strategy.
     pub fn step_menu(&mut self, chooser: &mut dyn MenuChooser) -> Result<StepOut, StopReason> {
         let step = self.state.step;
-        let tasks = self.world.offers(step);
+        let tasks = self.world.offers_at(step, self.state.clock);
         let offers = offers_of(&tasks);
         let Some(ch) = chooser.choose(&self.state, &offers) else {
             return Err(StopReason::BudgetExhausted);
@@ -240,7 +297,7 @@ impl<'a> Engine<'a> {
                         rule: None,
                     }
                 } else {
-                    let ctx = Context { step, task: v, noise: self.world.menu_noise(step, slot), stats: &self.state.stats, rules: &self.state.rules };
+                    let ctx = Context { step, task: v, noise: self.world.menu_noise(step, slot), stats: &self.state.stats, rules: &self.state.rules, degraded: self.world.degraded(t0) };
                     let prop = self.thinker.propose_with(&ctx, strategy);
                     let correct = task.check(prop.answer);
                     Done {
@@ -380,8 +437,10 @@ impl<'a> Engine<'a> {
             skipped: !attempted,
             example,
         };
+        let before = self.state.changes.len();
         self.state.apply(&outcome);
-        Ok(StepOut { outcome, pick: None, action: Some(label), predicted_p, decision_event_id: dev_id, events: vec![dev, aev, oev], revision, prediction, resolved })
+        let changes: Vec<(NewEvent, NewRevision)> = self.state.changes[before..].iter().map(change_records).collect();
+        Ok(StepOut { outcome, pick: None, action: Some(label), predicted_p, decision_event_id: dev_id, events: vec![dev, aev, oev], revision, prediction, resolved, changes })
     }
 }
 
@@ -447,6 +506,10 @@ pub struct RunCfg {
     pub extended: Option<bool>,
     /// Run a discovery pass after every N-th step of the being (None or 0: never).
     pub discover_every: Option<u64>,
+    /// `Some(true)` creates a being in a world with scheduled hidden changes (menu world only); fixed once created.
+    pub drift: Option<bool>,
+    /// `Some(true)` creates a being whose model forgets old evidence and flags changes (menu world only); fixed once created.
+    pub adapt: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -475,6 +538,7 @@ impl RunSummary {
             "world_seed": g.as_ref().map(|g| g.world_seed), "loop_seed": g.as_ref().map(|g| g.loop_seed),
             "chooser": g.as_ref().map(|g| g.chooser.name()),
             "pattern_families": if g.as_ref().map_or(false, |g| g.extended) { "extended" } else { "standard" },
+            "drift": g.as_ref().map_or(false, |g| g.drift), "adapt": g.as_ref().map_or("off", |g| g.adapt.name()), "changes_flagged_total": self.state.changes.len(),
             "rules_total": self.state.rules.len(), "rules_accepted_this_run": self.new_rules.iter().map(|r| json!({ "rule_id": r.id, "signature": format!("pattern difficulty {}", r.sig), "form": r.form.code() })).collect::<Vec<_>>(),
             "new_being": self.created, "version_before": self.version_before, "version_after": self.version_after,
             "domains": domain_json(&self.state),
@@ -484,8 +548,9 @@ impl RunSummary {
 
 pub fn domain_json(st: &BeingState) -> Value {
     Value::Array(
-        DOMAINS
+        super::world::ALL_DOMAINS
             .iter()
+            .filter(|d| d.idx() < 4 || st.stats[d.idx()].n > 0)
             .map(|d| {
                 let s = &st.stats[d.idx()];
                 json!({
@@ -529,6 +594,16 @@ pub fn run_with(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
                     return bad("pattern_families", if g.extended { "extended" } else { "standard" }.into(), if e { "extended" } else { "standard" }.into());
                 }
             }
+            if let Some(e) = cfg.drift {
+                if e != g.drift {
+                    return bad("drift", if g.drift { "on" } else { "off" }.into(), if e { "on" } else { "off" }.into());
+                }
+            }
+            if let Some(e) = cfg.adapt {
+                if e != (g.adapt != AdaptMode::Off) {
+                    return bad("adapt", if g.adapt != AdaptMode::Off { "on" } else { "off" }.into(), if e { "on" } else { "off" }.into());
+                }
+            }
             if let Some(c) = cfg.chooser {
                 if c != g.chooser {
                     return bad("chooser", g.chooser.name().to_string(), c.name().to_string());
@@ -549,7 +624,11 @@ pub fn run_with(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
             if extended && chooser != Chooser::Model {
                 return Err(LogError::Invalid("pattern_families extended needs chooser model (the menu world)".into()));
             }
-            let g = Genesis { world_seed: cfg.world_seed.unwrap_or(1), loop_seed: cfg.loop_seed.unwrap_or(1), budget, explore_c: c, chooser, extended };
+            let (drift, adapt) = (cfg.drift.unwrap_or(false), cfg.adapt.unwrap_or(false));
+            if (drift || adapt) && chooser != Chooser::Model {
+                return Err(LogError::Invalid("drift and adapt need chooser model (the menu world)".into()));
+            }
+            let g = Genesis { world_seed: cfg.world_seed.unwrap_or(1), loop_seed: cfg.loop_seed.unwrap_or(1), budget, explore_c: c, chooser, extended, drift, adapt: if adapt { AdaptMode::Full } else { AdaptMode::Off } };
             let (ev, id) = genesis_event(&g);
             log.append_events(&[ev])?;
             state.start(g, id);
@@ -566,7 +645,7 @@ pub fn run_with(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
 
     let menu = g.chooser == Chooser::Model;
     let mut mc = ModelChooser::new(g.explore_c);
-    let mut engine = Engine::new(World::with_extended(g.world_seed, g.extended), state, thinker);
+    let mut engine = Engine::new(world_for(&g), state, thinker);
     let mut new_rules: Vec<Rule> = vec![];
     let mut pending = Batch::default();
     let mut pending_steps = 0usize;
@@ -585,6 +664,10 @@ pub fn run_with(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
                 cost += out.outcome.cost;
                 pending.events.extend(out.events);
                 pending.revisions.push(out.revision);
+                for (ev, rev) in out.changes {
+                    pending.events.push(ev);
+                    pending.revisions.push(rev);
+                }
                 pending.predictions.extend(out.prediction);
                 pending.outcomes.extend(out.resolved);
                 pending_steps += 1;
@@ -605,7 +688,7 @@ pub fn run_with(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
                 engine.state.apply_refill(g.budget, clock);
                 pending.events.push(ev);
                 let none_left = if menu {
-                    let offers = offers_of(&engine.world.offers(engine.state.step));
+                    let offers = offers_of(&engine.world.offers_at(engine.state.step, engine.state.clock));
                     mc.choose(&engine.state, &offers).is_none()
                 } else {
                     engine.affordable(&engine.world.menu(engine.state.step)).is_empty()

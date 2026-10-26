@@ -27,7 +27,7 @@ use super::state::DomainStat;
 use super::world::{Domain, Kind, TaskView};
 
 /// Slip rate per mille by domain (arithmetic, algebra, physics, pattern).
-pub const SLIP_PER_MILLE: [u64; 4] = [80, 50, 100, 30];
+pub const SLIP_PER_MILLE: [u64; 5] = [80, 50, 100, 30, 60];
 /// Self-reported confidence of the scripted thinker (author-set, not calibrated).
 pub const CONF_EXACT: f64 = 0.9;
 pub const CONF_HEURISTIC: f64 = 0.3;
@@ -39,7 +39,9 @@ pub struct Context<'a> {
     /// The world's per-attempt random source (execution slips).
     pub noise: u64,
     /// What the being has observed so far in each domain, from its own log.
-    pub stats: &'a [DomainStat; 4],
+    pub stats: &'a [DomainStat; 5],
+    /// The `fast` strategy has degraded (a scheduled change of a drifting world; false everywhere else).
+    pub degraded: bool,
     /// Rules the being has accepted into its own log (empty unless discovery ran).
     pub rules: &'a [Rule],
 }
@@ -108,9 +110,10 @@ impl Strategy {
             Strategy::Deep => 2 * listed,
         }
     }
-    fn slip(self, domain: usize) -> u64 {
+    fn slip(self, domain: usize, degraded: bool) -> u64 {
         let base = SLIP_PER_MILLE[domain];
         match self {
+            Strategy::Fast if degraded => super::world::FAST_DEGRADED_SLIP,
             Strategy::Fast => (3 * base).min(400),
             Strategy::Careful | Strategy::Discovered => base,
             Strategy::Deep => base / 2,
@@ -154,7 +157,7 @@ impl Thinker for ScriptedThinker {
             Strategy::Deep => (exact_answer(t), true, "exact:deep".to_string()),
         };
         let method = format!("{}/{method}", strategy.name());
-        if exact && ctx.noise % 1000 < strategy.slip(t.domain.idx()) {
+        if exact && ctx.noise % 1000 < strategy.slip(t.domain.idx(), ctx.degraded) {
             answer += 1;
             return Proposal { answer, confidence: CONF_EXACT, method: format!("{method}+slip"), rule_id };
         }
@@ -181,6 +184,11 @@ fn exact_answer(t: &TaskView) -> i64 {
         PhysDisplacement => p[0] * p[2] + p[1] * p[2] * p[2] / 2,
         PhysKinetic => p[0] * p[1] * p[1] / 2,
         PhysStopping => p[0] * p[0] / (2 * p[1]),
+        UnitKm => p[0] * 1000,
+        UnitHm => 60 * p[0] + p[1],
+        UnitKmh => p[0] * 5 / 18,
+        UnitHms => 3600 * p[0] + 60 * p[1] + p[2],
+        UnitTrip => p[0] * 1000 * p[1] / 60,
         PatArith | PatGeom | PatQuad | PatFib => pattern(p).0,
         PatAlt => p[p.len() - 1] + (p[p.len() - 2] - p[p.len() - 3]),
         // no fixed method knows these families
@@ -205,6 +213,9 @@ fn heuristic(t: &TaskView) -> i64 {
         AlgParen => search(|x| p[0] * (x + p[1]) - p[2] * x - p[3]),
         PhysDisplacement | PhysKinetic | PhysStopping => p.iter().product(),
         PatQuad | PatFib | PatAlt => last_difference(p),
+        UnitKmh => p[0] / 4,
+        UnitHms => 3600 * p[0] + 60 * p[1],
+        UnitTrip => p[0] * p[1] * 16,
         _ => exact_answer(t),
     }
 }
@@ -235,6 +246,11 @@ fn solve(t: &TaskView) -> (i64, bool, String) {
         PhysVelocity => (p[0] + p[1] * p[2], true, "exact:v=u+at".into()),
         PhysOhm => (p[0] * p[1], true, "exact:V=IR".into()),
         PhysDisplacement | PhysKinetic | PhysStopping => (p.iter().product(), false, "heuristic:product-of-numbers".into()),
+        UnitKm => (p[0] * 1000, true, "exact:km-to-m".into()),
+        UnitHm => (60 * p[0] + p[1], true, "exact:h-min".into()),
+        UnitKmh => (p[0] * 5 / 18, true, "exact:kmh-to-ms".into()),
+        UnitHms => (3600 * p[0] + 60 * p[1], false, "heuristic:drop-seconds".into()),
+        UnitTrip => (p[0] * p[1] * 16, false, "heuristic:approx-factor".into()),
         PatArith | PatGeom | PatQuad | PatFib | PatAlt => pattern(p),
         ExtAffGeom | ExtPoly3 | ExtRec2 | ExtTribo | ExtAlt | ExtPeriodic | NegProd | NegPrimes => (last_difference(p), false, "heuristic:last-difference".into()),
     }
