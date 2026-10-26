@@ -422,6 +422,104 @@ Tests (`kore-self/src/being/tests.rs`, `tests/e2e_being.rs`): the DSL evaluator 
 
 Not measured: real sequences or any task not written by this author; grammars the author did not write; the algebra domain (not done); transfer of a rule between signatures; retiring a rule that later turns out wrong; more than 3000 energy per world; other values of the discovery period (5, 10 and 20 gave the same results on the first tuning grid, before the guard change); any language-model input.
 
+## Track B3: adapting when the world changes (synthetic world, author-defined schedule)
+
+Everything here is a simulation written by one author: the tasks, the rewards, the three scheduled changes and the learner. Question: when the world changes in the middle of the being's life, does a learner that forgets and detects changes do better than the B1 learner that keeps every observation? Measured with `cargo run -p kore-self --example measure_being --offline --release -- drift` (2026-10-26, branch self-b3, built on commit f5f8be3d plus the B3 commits; about 80 s). The tuning runs are `-- drift-tune` and `-- drift-tune 2`.
+
+What is new.
+* Drifting world (`drift: true`, default off; with it off every earlier result is bit-identical, a test checks it). Three changes happen at hidden world-clock times, which scale with the being's initial budget: at about 25%, 50% and 75% of it (each moved by up to +-4% by the world seed). The being is told nothing; it sees only outcomes and the visible task features.
+  1. A new domain, `units` (unit conversion, five templates, exact checker, its own hidden profile), starts to appear in the menu. It is one new feature value.
+  2. A profile shift: physics pays twice as much and its difficulty mix turns easy; arithmetic becomes cheap (base cost 1). These are all visible in the listed reward and cost of the offers.
+  3. The `fast` strategy degrades: its slip rate goes from 3x the domain rate to 70% (careful and deep are unchanged).
+* Adaptive learner (`adapt: true`; all derived from the log only and replay-exact). (a) Cold start: a (domain, strategy) group with less than one effective attempt gets +0.25 optimism in success probability, on top of the B1 shrinkage towards the strategy-wide estimate. (b) Forgetting: every count is discounted exponentially with a half-life in attempts; the skip rule uses a discounted reward rate. (c) Change detection: for each attempt the model's own prediction for the cell is compared with the outcome before the outcome is added; the standardized residuals feed a two-sided CUSUM per (domain, strategy) (drift k = 1, threshold h = 8, started only once the cell holds 3 effective attempts). On an alarm the group's weight is cut to 10% and the change is logged as a note event plus a `belief` revision (author `rule:being-detector`) that cites the outcome events it rests on; `being_status` lists them and `being_explain` shows how many were flagged before a decision.
+* The old learners stay selectable: `adapt: false` is the B1 learner, bit for bit.
+
+Setup. Report seeds 1..20, tuning seeds 101..120, budget 6000 energy units (about 2500 to 3500 steps; the changes happen after about 1500, 3000 and 4500 energy units). Compared on the same worlds: random; greedy by listed reward per cost; UCB1 over domains (B1-era baseline, which does see the new domain); the B1 model learner; B1 with exponential forgetting only (half-life 300 attempts, the best half-life for forgetting alone on the tuning seeds); B1 with the cold-start bonus only (no forgetting, detector silent), as an attribution control; the adaptive learner; and an oracle that knows the hidden success rates and the schedule (it re-optimises at the degradation; the offers it chooses from already show the new rewards and costs).
+
+Chosen on the tuning seeds only (mean reward per energy over 20 worlds, drifting / stationary; B1 gets 4.050 / 3.656):
+* Forgetting alone, by half-life in attempts: 50: 3.511 / 3.430; 100: 3.731 / 3.574; 150: 3.821 / 3.619; 300: 3.975 / 3.684; 600: 4.001 / 3.655; 1200: 4.038 / 3.661. Every half-life is at or below B1 in the drifting world.
+* Forgetting + detector + cold start, grid of half-life, CUSUM (k, h), share kept and bonus: short half-lives with a sensitive detector were worse than B1 (half-life 150, k 0.5, h 4: 3.78 / 3.57 with about 10 alarms per run in both worlds, almost all false); the best cells all had a very long half-life. Chosen: half-life 5000 attempts (in a life of about 2500 attempts this is almost no forgetting; half-life 1e9 gave the same 4.141 / 3.768), k 1, h 8, keep 0.1, bonus 0.25: 4.141 drifting / 3.769 stationary, about 1.0 alarm per drifting run and 0.05 per stationary run. So the tuning itself says that forgetting does not help in this world.
+
+### Drifting world, report seeds 1..20 (budget 6000, n = 20 worlds)
+
+| policy | mean reward per energy unit | 95% interval of the mean |
+|---|---|---|
+| random | 1.332 | [1.242, 1.422] |
+| greedy by listed reward per cost | 1.612 | [1.434, 1.790] |
+| UCB1 domain chooser | 1.867 | [1.709, 2.025] |
+| B1 model learner (no adaptation) | 3.810 | [3.495, 4.125] |
+| B1 + forgetting only (half-life 300) | 3.710 | [3.395, 4.024] |
+| B1 + cold-start bonus only | 3.848 | [3.530, 4.166] |
+| adaptive learner | 3.840 | [3.525, 4.155] |
+| oracle that knows the schedule | 3.888 | [3.628, 4.148] |
+
+| comparison (reward per energy) | mean | 95% interval of the mean | wins / losses / ties |
+|---|---|---|---|
+| regret of B1 against the oracle | 0.078 | [-0.134, 0.290] | |
+| regret of the adaptive learner against the oracle | 0.048 | [-0.105, 0.201] | |
+| regret of forgetting only against the oracle | 0.178 | [-0.033, 0.390] | |
+| adaptive minus B1 | +0.030 | [-0.181, +0.241] | 10 / 10 / 0 |
+| adaptive minus forgetting only | +0.130 | [-0.076, +0.337] | 18 / 2 / 0 |
+| forgetting only minus B1 | -0.100 | [-0.124, -0.077] | 0 / 20 / 0 |
+| cold-start bonus only minus B1 | +0.038 | [-0.171, +0.247] | 10 / 10 / 0 |
+| adaptive minus cold-start bonus only | -0.008 | [-0.019, +0.003] | 8 / 12 / 0 |
+| adaptive minus UCB1 | +1.973 | [+1.778, +2.167] | 20 / 0 / 0 |
+| B1 minus UCB1 | +1.943 | [+1.731, +2.154] | 20 / 0 / 0 |
+
+On the tuning seeds (where the settings were chosen) the adaptive learner is at 4.141 against 4.050 for B1 (+0.091, interval [-0.054, +0.236], 10 wins and 10 losses) and the oracle at 4.090.
+
+Reward per energy by regime (mean over the 20 report worlds; regime 0 = before any change):
+
+| policy | before | after new domain | after shift | after fast degrades |
+|---|---|---|---|---|
+| UCB1 domain chooser | 1.634 | 1.694 | 2.052 | 2.097 |
+| B1 | 3.342 | 3.439 | 4.723 | 3.720 |
+| forgetting only | 3.298 | 3.334 | 4.571 | 3.624 |
+| adaptive | 3.388 | 3.470 | 4.828 | 3.674 |
+| oracle | 3.549 | 3.639 | 4.688 | 3.684 |
+
+Adaptive minus B1 by regime: +0.046 [-0.188, +0.280], +0.032 [-0.190, +0.254], +0.105 [-0.284, +0.494], -0.046 [-0.128, +0.035]; no interval excludes 0, and the difference is not larger after a change than before the first one.
+
+Recovery (energy units after a change until the trailing 100-unit reward per energy first reaches 90% of the oracle's mean in that regime; 100 is the smallest possible value; median over the worlds that reached it):
+
+| change | UCB1 | B1 | forgetting only | adaptive |
+|---|---|---|---|---|
+| new domain appears | never (0 of 20) | 140 (19 of 20) | 150 (19 of 20) | 160 (20 of 20) |
+| profile shift | never (0 of 20) | 100 (18 of 20) | 120 (19 of 20) | 100 (19 of 20) |
+| fast degrades | 1170 (4 of 20) | 100 (20 of 20) | 110 (20 of 20) | 100 (20 of 20) |
+
+New domain, from the moment it appears (energy units; median over the worlds that reached it):
+
+| learner | until the first attempt in units | until the trailing 10 units attempts earn 80% of the oracle's rate there |
+|---|---|---|
+| UCB1 | 8 (20 of 20) | 892 (7 of 20) |
+| B1 | 3 (20 of 20) | 142 (11 of 20) |
+| forgetting only | 4 (20 of 20) | 148 (13 of 20) |
+| adaptive | 3 (19 of 20) | 193 (13 of 20) |
+
+Change detection (adaptive learner, report seeds): alarms per world 0.00 before the first change, 0.05 between the first change and the degradation, 0.75 on `fast` after the degradation (drops), 0.00 elsewhere. The degradation of `fast` was flagged in 13 of 20 worlds, median delay 265 energy units (roughly 100 steps) after the change; in the other 7 it was not flagged (the reason was not investigated). The profile shift is not a change in any success rate, only in visible rewards and costs, and no alarm was tied to it.
+
+### Stationary world: what adaptation costs (no drift; same learners, same seeds)
+
+| budget | adaptive minus B1 (report seeds) | forgetting only minus B1 | false alarms of the detector |
+|---|---|---|---|
+| 600 | -0.040 [-0.236, +0.156], 5 wins / 15 losses | -0.021 [-0.072, +0.030], 4 / 16 | 0 alarms in 20 worlds |
+| 3000 | +0.047 [-0.180, +0.274], 6 / 14 | -0.046 [-0.073, -0.019], 3 / 17 | 0 alarms in 20 worlds |
+| 6000 | +0.054 [-0.182, +0.290], 6 / 14 | -0.023 [-0.056, +0.010], 6 / 14 | 0 alarms in 20 worlds |
+
+On the tuning seeds the adaptive minus B1 differences are +0.040, +0.114 and +0.113 at the three budgets and the detector raised 1 alarm in 60 worlds. Mean reward per energy of B1 / adaptive on the report seeds: 3.117 / 3.077 (600), 3.377 / 3.424 (3000), 3.395 / 3.449 (6000).
+
+Honest reading.
+* Adaptation did not help measurably in this world. The adaptive learner is 0.03 above B1 (interval -0.18 to +0.24) in the drifting world; B1 already sits within 0.08 of the oracle (interval including 0). The cold-start bonus alone gives the same (+0.038), and adding forgetting and the detector to it changes nothing (-0.008, interval -0.019 to +0.003). Wins and losses are 10 against 10, so the mean is carried by a few worlds.
+* Forgetting alone hurts: in the drifting world 0 wins and 20 losses against B1 (-0.100), in the stationary world 14 to 17 losses at every budget, and every half-life on the tuning seeds was at or below B1. Discounting makes the estimates noisier, which sends the optimistic planner to re-test options it already knows.
+* Why B1 is already robust here: the profile shift changes only things the offers show (listed reward and cost), which the planner reads directly each step; the new domain is handled by the shrinkage prior and the optimism of the planner (first attempt after 3 energy units); the one hidden change, the degradation of `fast`, only matters on easy tasks, where `careful` is almost as good, so an out-of-date belief costs little (B1 recovers within 100 energy units). A world where a stale belief is expensive, or where the visible features hide the change, was not tested.
+* The detector does work as a detector: it flagged the degradation in 13 of 20 worlds with a median delay of 265 energy units and raised 0 false alarms in 60 stationary report worlds and 1 in 60 tuning worlds. That did not turn into reward here. At tuning time, more sensitive settings produced about 10 false alarms per run and lost reward.
+* Cost in the stationary world: within noise of B1 (a difference between -0.04 and +0.05, intervals about +-0.2), but the adaptive learner lost in 14 to 15 of 20 report worlds at each budget with a positive mean at two of them. Forgetting alone costs 0.02 to 0.05.
+* UCB1 over domains, which keeps cumulative averages, is far behind everything else in both worlds (about 1.9 against 3.8), so the B1 gain over it (+1.94) is the B1 result, not an adaptation result; UCB1 never recovered to 90% of the oracle after the new domain or the shift.
+* The cold-start bonus (0.25) was tuned on the tuning seeds, where it gave +0.09 (drifting) and +0.11 (stationary); on the report seeds the gain is +0.04 and +0.05 with intervals crossing 0.
+
+Test floors (`measured_adaptation_is_close_to_the_oracle_does_not_cost_much_and_detects_the_degradation`, report seeds 1..6, below the measured values): adaptive and B1 each beat UCB1 by more than 1.0; adaptive within 0.5 of the oracle; adaptive not more than 0.3 below B1 in the drifting and in the stationary world; the degradation flagged in at least 2 of the 6 worlds; at most 2 false alarms in the 6 stationary worlds. Measured on those seeds: B1 4.228, adaptive 4.201, UCB1 1.995, oracle 4.034; stationary B1 3.716, adaptive 3.712; degradation flagged in 6 of 6; no false alarm.
+
 ## Not measured
 
 Real-life data of any kind (the free-text section above is also synthetic); the ledger's probabilities (nothing is scored yet); behaviour with

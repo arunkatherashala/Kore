@@ -385,7 +385,7 @@ being_run {steps:1, chooser:"ucb"} on this being -> error: the being keeps its c
 
 Measured (`docs/measured.md`, 20 simulated worlds, seeds 1..20, budget 600; tuned on seeds 101..120; author-defined rewards and strategies): mean reward per energy 3.12 for the model learner against 1.59 for the UCB1 domain chooser, 1.50 for greedy-by-listed-reward-per-cost, 2.01 for the best fixed strategy (greedy with fast), 1.19 for random and 3.49 for the oracle that knows the hidden success rates (which never skips). The learner is better than UCB1 in 20 of 20 worlds and than the best fixed strategy in 19 of 20; its predicted success has Brier 0.127 against 0.169 for the running base rate but is overconfident where it predicts 0.2-0.6.
 
-Does NOT do: it does not discover new strategies or rules (the three strategies are fixed code; discovery is step B2); it does not adapt to new domains appearing mid-life (B3); it is not compared with any language model (B4); the oracle and the baselines are weak by design (the old policies cannot choose a strategy), so the gap to UCB1 mostly measures strategy choice and skipping; the result holds only for this author-written world and its trade-offs; it makes no claim of understanding, thinking or intelligence, only the measured numbers above.
+Does NOT do: it does not discover new strategies or rules (the three strategies are fixed code; discovery is step B2); how it copes with change is measured in step B3 below; it is not compared with any language model (B4); the oracle and the baselines are weak by design (the old policies cannot choose a strategy), so the gap to UCB1 mostly measures strategy choice and skipping; the result holds only for this author-written world and its trade-offs; it makes no claim of understanding, thinking or intelligence, only the measured numbers above.
 
 ### Track B2: rule discovery
 
@@ -423,6 +423,43 @@ self_verify after flipping one byte of events/0000000029.kore
 Measured (`docs/measured.md`, 20 simulated worlds, seeds 1..20, budget 3000; choices tuned on seeds 101..120; pattern puzzles pay 2x in this world so that rules are worth something): mean reward per energy 3.94 for the model learner with discovery against 3.78 for the same learner with fixed solvers only (difference +0.16, 95% interval +0.00 to +0.32; 8 wins, 7 losses, 5 ties), 1.20 for random and 4.27 for an oracle holding perfect rules. At budget 600 discovery did not help (-0.04, interval -0.16 to +0.08), and in a control world where pattern puzzles pay 1x it did not help either (-0.12, interval -0.29 to +0.05). The search found 52% of the (family, world) pairs by the end (median 60 to 170 steps to the first correct rule), accepted 99 rules of which all 99 were exactly correct on fresh tasks, applied a rule to none of the fresh tasks of the two families outside the grammar, and accepted nothing in a control with only those two families (30, 100 and 300 examples, 20 worlds). An earlier, looser guard (2 spare equations) accepted 4 wrong rules in 100 (consecutive primes can satisfy a lag-2 rule); the stricter guard removed them at the price of data.
 
 Does NOT do: it is not open-ended invention (17 author-written forms, fitted per task, for author-written families); it does not help reliably (the gain at budget 3000 has an interval touching 0, none at budget 600 or when the puzzles pay 1x); it finds about half of the expressible families in 3000 energy units and only after 60 to 170 steps; a rule needs only 4 supporting examples (3 training, 1 held out); rules are per difficulty level and are not transferred between levels; a rule cannot be retired once accepted; the algebra domain is not covered; it uses no real data and no language model; no claim is made about understanding or intelligence, only the measured numbers above.
+
+### Track B3: adapting to change
+
+What happens when the world changes in the middle of the being's life, and does a learner built for change do better? Two creation-time options of `being_run` (both need `chooser: "model"`, both are fixed once the being exists, both default to off so every earlier result is unchanged):
+
+* `drift: true` makes the simulated world change at hidden times that scale with the initial budget (about 25%, 50% and 75% of it): a new domain (`units`, unit conversion with an exact checker) starts to appear in the menu; the rewards and costs of physics and arithmetic shift; the `fast` strategy becomes much less reliable. The being is not told; it sees only outcomes and the visible features of the offers.
+* `adapt: true` makes the world model forget old evidence exponentially (half-life in attempts), adds optimism for a (domain, strategy) pair it has hardly seen, and runs a change detector per (domain, strategy) on the prediction error of its own model (two-sided CUSUM). Everything is derived from the log, so replay is exact. Each flagged change is logged as a note event plus a `belief` revision (author `rule:being-detector`) that cites the outcome events it rests on; `being_status` lists them (`changes_detected`) and `being_explain` says how many were flagged before the decision. With `adapt: false` the model is the unchanged B1 model.
+
+Real output of `kore-self/tests/e2e_being.rs` (`being_drift_adapt_end_to_end`, real binary, temp data root; values shortened):
+
+```
+being_run {steps:3500, seed:1, world_seed:6, budget:6000, chooser:"model", drift:true, adapt:true}
+  steps_run 2214, stopped "budget exhausted", total_reward 23144, total_energy_spent 5999 (3.86 reward per energy)
+  drift true, adapt "full", changes_flagged_total 2
+being_status
+  replay_check {"decisions": 2214, "re_derived_from_log_and_equal": 2214}
+  changes_detected[0]: "change 0 detected at step 605: the success rate of strategy fast in domain units looks lower than the model
+    predicted (observed 0 right of 5 attempts, predicted 4.5; CUSUM statistic 9.17); older evidence of this group is cut to 10% of its weight"
+    revision key being/change/0000, author rule:being-detector, evidence_events_cited 12
+  changes_detected[1]: "change 1 detected at step 1496: ... strategy fast in domain units ... (observed 1 right of 12 attempts, predicted 9.4; CUSUM statistic 8.38) ..."
+being_explain on the last decision (step 2213, answered with units/fast)
+  changes_flagged_before_this_decision {"count": 2, ...}, reasons {"adapt": "full", "novelty_bonus": 0.25, "changes_flagged_so_far": 2, ...}
+  replay_check {"re_derived_domain": "3:fast", "equal_to_recorded": true}
+self_sql: SELECT occurred_at, text FROM events WHERE tags LIKE '%change_index:%'
+  2030-01-01T19:28:30Z | change 0 detected at step 605: the success rate of strategy~
+  2030-01-02T14:07:30Z | change 1 detected at step 1496: the success rate of strateg~
+self_verify
+  OK: 91 version(s), latest 90, head hash 03432260a42253328abfd878d4a0ea7ea58e42fbcc53c4322e2aae4e9b6feecc
+self_verify after flipping one byte of events/0000000090.kore
+  VERIFY FAILED: checksum mismatch in segment: events/0000000090.kore
+```
+
+In this world the second alarm (energy about 4570) is the degradation of `fast`; the first (about 2340) is the new domain, where the model had predicted that `fast` would work as in the other domains and it did not.
+
+Measured (`docs/measured.md`, 20 simulated worlds, seeds 1..20, budget 6000; settings chosen on seeds 101..120; author-defined schedule and rewards): mean reward per energy 3.81 for the B1 learner, 3.84 for the adaptive learner, 3.71 for B1 with forgetting only, 3.89 for an oracle that knows the schedule, 1.87 for UCB1 over domains and 1.33 for random. The adaptive learner minus B1 is +0.03 (95% interval -0.18 to +0.24, 10 wins and 10 losses): adaptation did not help measurably, because B1 is already within 0.08 of the oracle; the cold-start bonus alone gives the same gain and forgetting alone is worse than B1 in 20 of 20 worlds (-0.10). The detector flagged the degradation of `fast` in 13 of 20 worlds with a median delay of 265 energy units, with 0 false alarms in 60 stationary worlds, but that did not become reward. In the stationary world the adaptive learner is within noise of B1 (-0.04 to +0.05, interval about +-0.2) and lost in 14 to 15 of 20 worlds at each budget.
+
+Does NOT do: it does not show that adaptation helps (the interval of its gain over B1 contains 0, and the gain is explained by the cold-start bonus alone); forgetting by itself hurts, and the tuning picked a half-life of 5000 attempts, which is almost no forgetting in a life of about 2500 attempts; it does not adapt to a change that hides in the visible features or to a change whose stale belief is expensive (neither was tested; the one hidden change here, `fast` degrading, costs little because `careful` is almost as good); the detector missed the degradation in 7 of 20 worlds and has a delay of about 100 steps; the schedule has three changes in a fixed order, one world family and one seed range; the oracle never skips, so it is not an upper bound on reward; it uses no real data and no language model; it makes no claim of understanding, thinking or intelligence, only the measured numbers above.
 
 ### Talking to the being (A1)
 
