@@ -767,3 +767,226 @@ fn measured_discovery_is_precise_finds_families_and_does_not_accept_junk() {
     assert!(found >= 10, "families found {found} of 36");
     assert!(neg <= 0.1, "rules were applied to families outside the grammar: {neg}");
 }
+
+// ---- Track B3: drifting world, adaptive learner ----
+
+use super::measure::{run_drift, AdaptSpec};
+use super::model::AdaptMode;
+
+fn cfg_drift(world: u64, seed: u64, steps: u64, budget: i64, adapt: bool) -> RunCfg {
+    RunCfg { drift: Some(true), adapt: Some(adapt), ..cfg_model(world, seed, steps, budget) }
+}
+
+const DRIFT_BUDGET: i64 = 6000;
+
+fn run_drift_logged(root: &std::path::Path, world: u64, steps: u64, adapt: bool) -> (VersionedLog, super::run_loop::RunSummary) {
+    let mut log = open(root);
+    let s = run(&mut log, &cfg_drift(world, 1, steps, DRIFT_BUDGET, adapt), &ScriptedThinker, &Policy::new(steps)).unwrap();
+    (log, s)
+}
+
+/// A world seed whose adaptive being flags at least one change within the first `steps` steps.
+fn world_with_alarms() -> u64 {
+    (1..=12u64)
+        .find(|w| {
+            let r = run_drift(*w, DRIFT_BUDGET, true, &AdaptSpec::full(), &mut ModelChooser::new(DEFAULT_BETA));
+            !r.alarms.is_empty()
+        })
+        .expect("some world flags a change")
+}
+
+#[test]
+fn drift_is_off_by_default_and_changes_nothing_when_off() {
+    let a = World::new(5);
+    let b = World::with_drift(5, false, None);
+    assert!(b.drift.is_none() && b.regime(10_000_000) == 0 && !b.degraded(10_000_000));
+    for step in 0..60 {
+        for clock in [0i64, 123_456, 10_000_000] {
+            for (x, y) in a.offers(step).iter().zip(b.offers_at(step, clock).iter()) {
+                assert_eq!(x.view, y.view);
+            }
+        }
+    }
+    // a being without the options leaves no trace of them in its log
+    let dir = tempfile::tempdir().unwrap();
+    let (log, s) = run_model_logged(dir.path(), 4, 1, 80, 3000);
+    let rows: Vec<EventRow> = log.open_latest().rows();
+    assert!(rows.iter().all(|e| !e.tags.contains("drift") && !e.tags.contains("adapt") && !e.tags.contains("change")));
+    assert!(s.state.changes.is_empty() && s.state.model.mode() == AdaptMode::Off);
+    // the B1 learner run through the drift harness (no drift, adaptation off) is the B1 run, bit for bit
+    for seed in 1..=4u64 {
+        let r1 = run_menu(seed, BUDGET, &mut ModelChooser::new(DEFAULT_BETA));
+        let r2 = run_drift(seed, BUDGET, false, &AdaptSpec::off(), &mut ModelChooser::new(DEFAULT_BETA));
+        assert_eq!((r1.reward, r1.cost, r1.recs.len()), (r2.reward, r2.cost, r2.recs.len()), "seed {seed}");
+    }
+}
+
+#[test]
+fn drift_schedule_is_seeded_deterministic_and_hidden_from_the_being() {
+    let (w1, w2) = (World::with_drift(3, false, Some(DRIFT_BUDGET)), World::with_drift(3, false, Some(DRIFT_BUDGET)));
+    assert_eq!(w1.drift, w2.drift);
+    let at = w1.drift.as_ref().unwrap().at;
+    assert!(at[0] < at[1] && at[1] < at[2]);
+    for (i, f) in super::world::DRIFT_FRACTIONS.iter().enumerate() {
+        let frac = at[i] as f64 / (DRIFT_BUDGET * super::world::SECS_PER_ENERGY) as f64;
+        assert!((frac - f).abs() <= 0.0401, "change {i} at fraction {frac}");
+    }
+    assert_ne!(World::with_drift(4, false, Some(DRIFT_BUDGET)).drift.unwrap().at, at);
+    // the new domain is offered only from its time
+    let has_units = |clock: i64| (0..300).any(|s| w1.offers_at(s, clock).iter().any(|t| t.view.domain == Domain::Units));
+    assert!(!has_units(at[0] - 1) && has_units(at[0]));
+    // a logged being never sees units before the change, and its log does not carry the schedule
+    let dir = tempfile::tempdir().unwrap();
+    let (log, _) = run_drift_logged(dir.path(), 3, 1200, true);
+    let rows: Vec<EventRow> = log.open_latest().rows();
+    let genesis = rows.iter().find(|e| e.tags.contains("genesis")).unwrap();
+    assert!(genesis.tags.contains("drift:on") && genesis.tags.contains("adapt:full"));
+    for t in at {
+        assert!(!genesis.tags.contains(&t.to_string()) && !genesis.text.contains(&t.to_string()));
+    }
+    let clock_of = |e: &EventRow| super::state::tag(&e.tags, "clock").and_then(|c| c.parse::<i64>().ok());
+    let mut units_seen = 0;
+    for e in rows.iter().filter(|e| e.kind == "outcome" && e.tags.contains("domain:units")) {
+        units_seen += 1;
+        assert!(clock_of(e).unwrap() > at[0], "units outcome before the new domain exists");
+    }
+    assert!(units_seen > 0, "the being tried the new domain");
+}
+
+#[test]
+fn drift_has_a_new_domain_with_an_exact_checker_a_profile_shift_and_a_degrading_strategy() {
+    let w = World::with_drift(7, false, Some(DRIFT_BUDGET));
+    let d = w.drift.clone().unwrap();
+    let st = [Default::default(); 5];
+    let th = ScriptedThinker;
+    for k in 1..=5u8 {
+        for step in 0..60 {
+            let t = w.task_forced(step, Domain::Units, k);
+            assert!(t.check(t.expected()) && !t.check(t.expected() + 1));
+            assert_eq!(t.view.domain, Domain::Units);
+            let ctx = Context { step, task: &t.view, noise: 999_999, stats: &st, rules: &[], degraded: false };
+            assert!(t.check(th.propose_with(&ctx, Strategy::Deep).answer), "deep solves every units template");
+        }
+    }
+    // the shift: physics pays twice as much with an easier mix, arithmetic is cheap; the other domains are untouched
+    assert!((d.shifted.reward_scale[Domain::Physics.idx()] - 2.0 * w.profile.reward_scale[Domain::Physics.idx()]).abs() < 0.02);
+    assert_eq!(d.shifted.cost_base[Domain::Arithmetic.idx()], 1);
+    for dom in [Domain::Algebra, Domain::Pattern, Domain::Units] {
+        assert_eq!(d.shifted.reward_scale[dom.idx()], w.profile.reward_scale[dom.idx()]);
+        assert_eq!(d.shifted.cost_base[dom.idx()], w.profile.cost_base[dom.idx()]);
+    }
+    assert_eq!(w.regime(d.at[1] - 1), 1);
+    assert_eq!(w.regime(d.at[1]), 2);
+    // the degradation: fast slips on easy exact tasks far more often; careful and deep are not affected
+    let t = w.task_forced(1, Domain::Arithmetic, 1);
+    let ok = |s: Strategy, degraded: bool| {
+        let ctx = Context { step: 1, task: &t.view, noise: 500, stats: &st, rules: &[], degraded };
+        t.check(th.propose_with(&ctx, s).answer)
+    };
+    assert!(ok(Strategy::Fast, false) && !ok(Strategy::Fast, true));
+    assert!(ok(Strategy::Careful, true) && ok(Strategy::Deep, true));
+    assert!(!w.degraded(d.at[2] - 1) && w.degraded(d.at[2]));
+    // the old four domains keep their hidden profiles when the fifth exists
+    assert_eq!(World::new(7).profile, w.profile);
+}
+
+#[test]
+fn adaptive_run_is_deterministic_replays_exactly_and_logs_changes_with_evidence() {
+    let world = world_with_alarms();
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (mut la, sa) = run_drift_logged(a.path(), world, 5000, true);
+    let (lb, _) = run_drift_logged(b.path(), world, 5000, true);
+    assert!(sa.state.step > 300, "a run with several hundred steps, got {}", sa.state.step);
+    assert_eq!(la.open_latest().content_hash(), lb.open_latest().content_hash(), "same seeds, same log");
+    verify_dir(la.dir()).unwrap();
+    let rows: Vec<EventRow> = la.open_latest().rows();
+    // replay: every decision is re-derived from the log alone, and the model and the flagged changes equal the live ones
+    let rep = replay_decisions(&rows);
+    assert_eq!(rep.len() as u64, sa.state.step);
+    assert!(rep.iter().all(|r| r.matches()), "a decision of the adaptive learner was not re-derived");
+    let refolded = BeingState::from_events(&rows);
+    assert_eq!(refolded.model, sa.state.model);
+    assert_eq!(refolded.changes, sa.state.changes);
+    assert!(!sa.state.changes.is_empty());
+    // every change is a logged note and a revision whose causes are outcome events of that group
+    let snap = la.open_latest();
+    let revs: Vec<RevisionRow> = snap.rows();
+    let causes: Vec<CauseRow> = snap.rows();
+    let notes: Vec<&EventRow> = rows.iter().filter(|e| e.kind == "note" && e.tags.split(',').any(|t| t == "change")).collect();
+    assert_eq!(notes.len(), sa.state.changes.len());
+    for (n, c) in notes.iter().zip(&sa.state.changes) {
+        let key = super::state::tag(&n.tags, "rev_key").unwrap();
+        let rev = revs.iter().find(|r| r.key == key).expect("revision of the change");
+        assert_eq!((rev.entity_type.as_str(), rev.author.as_str()), ("belief", "rule:being-detector"));
+        let cited: Vec<&EventRow> = causes.iter().filter(|x| x.rev_id == rev.rev_id).filter_map(|x| rows.iter().find(|e| e.event_id == x.event_id)).collect();
+        let outcomes: Vec<&&EventRow> = cited.iter().filter(|e| e.kind == "outcome").collect();
+        assert!(outcomes.len() >= 3 && outcomes.len() == c.cites.len(), "a change cites the outcomes it rests on");
+        for o in outcomes {
+            assert!(o.tags.contains(&format!("domain:{}", c.alarm.domain.name())) && o.tags.contains(&format!("strategy:{}", c.alarm.strategy.name())));
+        }
+        assert!(cited.iter().any(|e| e.event_id == n.event_id));
+        assert!(n.text.contains("detected at step"));
+    }
+    // a run split over two calls equals one run, even with forgetting and detection
+    let d2 = tempfile::tempdir().unwrap();
+    let (mut ls, _) = run_drift_logged(d2.path(), world, 150, true);
+    run(&mut ls, &RunCfg { steps: 5000, ..Default::default() }, &ScriptedThinker, &Policy::new(5000)).unwrap();
+    let ids = |l: &VersionedLog| l.open_latest().rows::<EventRow>().into_iter().map(|e| e.event_id).collect::<Vec<_>>();
+    assert_eq!(ids(&ls), ids(&la));
+    // the options are kept once the being exists; a being with adapt needs the menu world
+    assert!(run(&mut la, &RunCfg { adapt: Some(false), steps: 1, ..Default::default() }, &ScriptedThinker, &Policy::new(1)).is_err());
+    assert!(run(&mut la, &RunCfg { drift: Some(false), steps: 1, ..Default::default() }, &ScriptedThinker, &Policy::new(1)).is_err());
+    let d3 = tempfile::tempdir().unwrap();
+    let mut l3 = open(d3.path());
+    assert!(run(&mut l3, &RunCfg { adapt: Some(true), ..cfg(1, 1, 5, 500) }, &ScriptedThinker, &Policy::new(5)).is_err());
+    assert!(run(&mut l3, &RunCfg { drift: Some(true), ..cfg(1, 1, 5, 500) }, &ScriptedThinker, &Policy::new(5)).is_err());
+    assert!(BeingState::from_snapshot(&l3.open_latest()).genesis.is_none(), "a refused request creates no being");
+}
+
+#[test]
+fn forgetting_without_detection_replays_and_the_detector_is_silent_without_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (log, s) = run_drift_logged(dir.path(), 5, 400, false);
+    assert_eq!(s.state.model.mode(), AdaptMode::Off);
+    assert!(s.state.changes.is_empty());
+    let rows: Vec<EventRow> = log.open_latest().rows();
+    assert!(replay_decisions(&rows).iter().all(|r| r.matches()));
+    // the forgetting-only mode (measurement setting) never flags anything and its model is a function of the outcomes
+    let r = run_drift(5, DRIFT_BUDGET, true, &AdaptSpec::forget(), &mut ModelChooser::new(DEFAULT_BETA));
+    assert!(r.alarms.is_empty());
+    let r2 = run_drift(5, DRIFT_BUDGET, true, &AdaptSpec::forget(), &mut ModelChooser::new(DEFAULT_BETA));
+    assert_eq!((r.reward, r.cost, r.recs.len()), (r2.reward, r2.cost, r2.recs.len()));
+}
+
+#[test]
+fn tamper_after_an_adaptive_drift_run_fails_verify() {
+    let dir = tempfile::tempdir().unwrap();
+    let (log, _) = run_drift_logged(dir.path(), world_with_alarms(), 5000, true);
+    verify_dir(log.dir()).unwrap();
+    let seg = std::fs::read_dir(log.dir().join("events")).unwrap().flatten().map(|f| f.path()).filter(|p| p.extension().map_or(false, |x| x == "kore")).last().unwrap();
+    let mut bytes = std::fs::read(&seg).unwrap();
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0xFF;
+    std::fs::write(&seg, bytes).unwrap();
+    assert!(verify_dir(log.dir()).is_err());
+}
+
+#[test]
+fn adaptation_code_reads_only_the_log_not_the_schedule_or_hidden_parameters() {
+    let forbidden = [
+        "Profile", "profile", "reward_scale", "cost_base", "diff_bias", ".expected(", "noise(", "task_forced", "task_of_kind", "truth", "World", "generate",
+        "Kind::", "Drift", "regime", "FAST_DEGRADED", "degraded", "schedule", "DRIFT_FRACTIONS", "offers_at", "pattern_bonus",
+    ];
+    let dir_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("being");
+    for f in ["model.rs", "planner.rs"] {
+        let src = std::fs::read_to_string(dir_src.join(f)).unwrap();
+        for b in forbidden {
+            assert!(!src.contains(b), "{f} mentions {b}");
+        }
+    }
+    // the state folds outcomes and notes only; it does not know the schedule either
+    let src = std::fs::read_to_string(dir_src.join("state.rs")).unwrap();
+    for b in ["Drift", "regime", "FAST_DEGRADED", "DRIFT_FRACTIONS", "offers_at", "reward_scale", "diff_bias"] {
+        assert!(!src.contains(b), "state.rs mentions {b}");
+    }
+}

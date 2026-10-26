@@ -88,7 +88,7 @@ pub fn change_records(c: &Change) -> (NewEvent, NewRevision) {
         "action": "evidence of this (domain, strategy) group cut to a share of its weight", "share_kept": super::model::KEEP_AFTER_ALARM,
     });
     let rev = NewRevision {
-        entity_type: "change".into(),
+        entity_type: "belief".into(),
         key,
         stance: format!("{} with {}: success rate {dir} than predicted", a.domain.name(), a.strategy.name()),
         confidence: (a.statistic / (a.statistic + super::model::CUSUM_H)).clamp(0.0, 1.0),

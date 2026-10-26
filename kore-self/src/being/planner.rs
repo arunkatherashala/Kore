@@ -11,7 +11,7 @@
 //! the log (replay is exact without seeding a generator from the log), and the
 //! optimism term is printed with every alternative. The bonus `beta * sd`
 //! decays with evidence because `sd` shrinks as cells fill up; unlike a
-//! global exploration schedule it only keeps exploring cells that are both
+//! global exploration decay it only keeps exploring cells that are both
 //! uncertain and potentially valuable.
 //!
 //! Skipping costs `SKIP_COST` energy and earns nothing. The planner skips when
