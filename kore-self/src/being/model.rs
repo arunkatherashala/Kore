@@ -42,13 +42,13 @@ pub const COST_K: f64 = 4.0;
 
 /// Half-life of evidence, in attempts, for the adaptive learners.
 /// Chosen on tuning seeds 101..120 only (see docs/measured.md).
-pub const DEFAULT_HALF_LIFE: f64 = 150.0;
+pub const DEFAULT_HALF_LIFE: f64 = 5000.0;
 /// CUSUM reference value (per standardized residual).
-pub const CUSUM_K: f64 = 0.5;
+pub const CUSUM_K: f64 = 1.0;
 /// CUSUM alarm threshold.
-pub const CUSUM_H: f64 = 4.0;
+pub const CUSUM_H: f64 = 8.0;
 /// Share of a group's weight kept after an alarm.
-pub const KEEP_AFTER_ALARM: f64 = 0.2;
+pub const KEEP_AFTER_ALARM: f64 = 0.1;
 /// A cell must hold at least this much (effective) evidence before it feeds the detector.
 pub const MIN_EVIDENCE: f64 = 3.0;
 /// Floor of the Bernoulli variance when standardizing a residual.

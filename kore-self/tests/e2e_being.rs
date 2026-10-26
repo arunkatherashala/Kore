@@ -287,3 +287,91 @@ fn being_rule_discovery_end_to_end() {
     s.stop();
     std::fs::write(&seg, good).unwrap();
 }
+
+#[test]
+fn being_drift_adapt_end_to_end() {
+    let root = tempfile::tempdir().unwrap();
+    let fake_home = tempfile::tempdir().unwrap();
+    let owner = "e2eb3";
+    let mut s = Server::start(root.path(), fake_home.path(), owner);
+
+    // option checks: both options need the menu world and are booleans
+    let (e, t) = s.call("being_run", json!({"steps": 5, "drift": true}));
+    assert!(e && t.contains("chooser model"), "{t}");
+    let (e, t) = s.call("being_run", json!({"steps": 5, "adapt": true}));
+    assert!(e && t.contains("chooser model"), "{t}");
+    let (e, t) = s.call("being_run", json!({"steps": 5, "chooser": "model", "drift": "yes"}));
+    assert!(e && t.contains("boolean"), "{t}");
+    let st = s.json("being_status", json!({}));
+    assert_eq!(st["exists"], false, "refused requests create no being");
+
+    let run = s.json("being_run", json!({"steps": 3500, "seed": 1, "world_seed": 6, "budget": 6000, "chooser": "model", "drift": true, "adapt": true}));
+    let mut shown = run.clone();
+    shown["domains"] = json!("(per-domain table cut)");
+    say("being_run {steps:3500, seed:1, world_seed:6, budget:6000, chooser:\"model\", drift:true, adapt:true}", &serde_json::to_string_pretty(&shown).unwrap());
+    assert_eq!(run["drift"], true);
+    assert_eq!(run["adapt"], "full");
+    let steps = run["total_steps"].as_u64().unwrap();
+    assert!(steps > 1500, "the run covers the scheduled changes: {steps} steps");
+    assert!(run["changes_flagged_total"].as_u64().unwrap() >= 1);
+
+    let st = s.json("being_status", json!({}));
+    assert_eq!(st["drift"], true);
+    assert_eq!(st["adapt"], "full");
+    assert_eq!(st["replay_check"]["decisions"], steps);
+    assert_eq!(st["replay_check"]["re_derived_from_log_and_equal"], steps);
+    let changes = st["changes_detected"].as_array().unwrap();
+    assert_eq!(changes.len() as u64, run["changes_flagged_total"].as_u64().unwrap());
+    let domains: Vec<&str> = st["domains"].as_array().unwrap().iter().map(|d| d["domain"].as_str().unwrap()).collect();
+    assert!(domains.contains(&"units"), "the new domain shows up once the being has met it: {domains:?}");
+    let mut shown = st.clone();
+    shown["domains"] = json!("(per-domain table cut)");
+    shown["last_decisions"] = json!("(cut)");
+    say("being_status (domains and last decisions cut)", &serde_json::to_string_pretty(&shown).unwrap());
+    for c in changes {
+        assert_eq!(c["revision"]["author"], "rule:being-detector");
+        assert!(c["evidence_events_cited"].as_u64().unwrap() >= 3);
+        assert!(c["text"].as_str().unwrap().contains("detected at step"));
+    }
+
+    // explain the last decision: it knows the changes flagged before it, and the replay agrees
+    let id = st["last_decisions"][0]["decision_event_id"].as_str().unwrap().to_string();
+    let ex = s.json("being_explain", json!({"decision_event_id": id}));
+    assert_eq!(ex["replay_check"]["equal_to_recorded"], true);
+    assert_eq!(ex["changes_flagged_before_this_decision"]["count"].as_u64().unwrap(), changes.len() as u64);
+    assert_eq!(ex["reasons_and_alternatives"]["adapt"], "full");
+    let mut shown = ex.clone();
+    shown["evidence_events_cited"] = json!("(cut)");
+    shown["reasons_and_alternatives"]["alternatives"] = json!("(cut)");
+    say("being_explain on the last decision (evidence and alternatives cut)", &serde_json::to_string_pretty(&shown).unwrap());
+
+    let q = s.ok("self_sql", json!({"sql": "SELECT occurred_at, text FROM events WHERE tags LIKE '%change_index:%'"}));
+    say("self_sql: change notes in the log", &q);
+    assert!(q.contains("change 0 detected at step"));
+    let by = s.ok("self_sql", json!({"sql": "SELECT entity_type, COUNT(*) AS n FROM revisions GROUP BY entity_type ORDER BY entity_type"}));
+    assert!(by.contains("belief") && by.contains("decision"), "{by}");
+
+    // the options are kept
+    let (e, t) = s.call("being_run", json!({"steps": 1, "adapt": false}));
+    assert!(e && t.contains("adapt"), "{t}");
+    let (e, t) = s.call("being_run", json!({"steps": 1, "drift": false}));
+    assert!(e && t.contains("drift"), "{t}");
+    let ver = s.ok("self_verify", json!({}));
+    say("self_verify", &ver);
+    assert!(ver.starts_with("OK"));
+    s.stop();
+
+    let seg_dir = root.path().join(owner).join("log").join("events");
+    let seg = std::fs::read_dir(&seg_dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().map_or(false, |x| x == "kore")).max().unwrap();
+    let good = std::fs::read(&seg).unwrap();
+    let mut bad = good.clone();
+    let mid = bad.len() / 2;
+    bad[mid] ^= 1;
+    std::fs::write(&seg, &bad).unwrap();
+    let mut s = Server::start(root.path(), fake_home.path(), owner);
+    let (e, t) = s.call("self_verify", json!({}));
+    say("self_verify after flipping a byte", &t);
+    assert!(e && t.contains("VERIFY FAILED"), "{t}");
+    s.stop();
+    std::fs::write(&seg, good).unwrap();
+}

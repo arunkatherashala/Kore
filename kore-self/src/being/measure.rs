@@ -655,12 +655,15 @@ pub struct DriftRow {
     pub off: DriftRun,
     pub forget: DriftRun,
     pub full: DriftRun,
+    /// Attribution control: cold-start bonus only (no forgetting, detector never fires).
+    pub novel: DriftRun,
     pub oracle: DriftRun,
 }
 
 pub fn drift_row(seed: u64, budget: i64, drift: bool, forget: &AdaptSpec, full: &AdaptSpec) -> DriftRow {
     let world = World::with_drift(seed, false, if drift { Some(budget) } else { None });
     let off = AdaptSpec::off();
+    let novel_spec = AdaptSpec { mode: AdaptMode::Full, half_life: 1e12, h: 1e12, ..*full };
     let degrade_at = world.drift.as_ref().map_or(i64::MAX, |d| d.at[2]);
     let mut oracle = ScheduleOracle { before: truth_flag(&world, &[], false), after: if drift { truth_flag(&world, &[], true) } else { truth_flag(&world, &[], false) }, degrade_at };
     DriftRow {
@@ -674,6 +677,7 @@ pub fn drift_row(seed: u64, budget: i64, drift: bool, forget: &AdaptSpec, full: 
         off: run_drift(seed, budget, drift, &off, &mut model_chooser(&off)),
         forget: run_drift(seed, budget, drift, forget, &mut model_chooser(forget)),
         full: run_drift(seed, budget, drift, full, &mut model_chooser(full)),
+        novel: run_drift(seed, budget, drift, &novel_spec, &mut model_chooser(&novel_spec)),
         oracle: run_drift(seed, budget, drift, &off, &mut oracle),
     }
 }

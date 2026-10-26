@@ -990,3 +990,38 @@ fn adaptation_code_reads_only_the_log_not_the_schedule_or_hidden_parameters() {
         assert!(!src.contains(b), "state.rs mentions {b}");
     }
 }
+
+#[test]
+fn measured_adaptation_is_close_to_the_oracle_does_not_cost_much_and_detects_the_degradation() {
+    // floors set below the measured values (docs/measured.md); report seeds 1..6 of the 20, budget 6000
+    use super::measure::{schedule_energy, ScheduleOracle};
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    let (mut off, mut full, mut ucb, mut oracle, mut stat_off, mut stat_full) = (vec![], vec![], vec![], vec![], vec![], vec![]);
+    let (mut detected, mut stationary_alarms) = (0, 0);
+    for seed in 1..=6u64 {
+        let w = World::with_drift(seed, false, Some(DRIFT_BUDGET));
+        let mut orc = ScheduleOracle { before: super::measure::truth_flag(&w, &[], false), after: super::measure::truth_flag(&w, &[], true), degrade_at: w.drift.as_ref().unwrap().at[2] };
+        let mk = |sp: &AdaptSpec| ModelChooser { novelty: sp.novelty, ..ModelChooser::new(DEFAULT_BETA) };
+        let (o, f) = (AdaptSpec::off(), AdaptSpec::full());
+        let r_off = run_drift(seed, DRIFT_BUDGET, true, &o, &mut mk(&o));
+        let r_full = run_drift(seed, DRIFT_BUDGET, true, &f, &mut mk(&f));
+        off.push(r_off.per_budget());
+        full.push(r_full.per_budget());
+        ucb.push(run_drift(seed, DRIFT_BUDGET, true, &o, &mut super::chooser::UcbMenu::new(seed, super::chooser::DEFAULT_EXPLORE_C)).per_budget());
+        oracle.push(run_drift(seed, DRIFT_BUDGET, true, &o, &mut orc).per_budget());
+        let at = schedule_energy(seed, DRIFT_BUDGET);
+        detected += r_full.alarms.iter().any(|a| a.energy >= at[2] && a.strategy == Strategy::Fast && a.drop) as u32;
+        let (s_off, s_full) = (run_drift(seed, DRIFT_BUDGET, false, &o, &mut mk(&o)), run_drift(seed, DRIFT_BUDGET, false, &f, &mut mk(&f)));
+        stat_off.push(s_off.per_budget());
+        stat_full.push(s_full.per_budget());
+        stationary_alarms += s_full.alarms.len();
+    }
+    println!("off {:.3} full {:.3} ucb {:.3} oracle {:.3} | stationary off {:.3} full {:.3} | detected {detected} of 6, stationary alarms {stationary_alarms}", mean(&off), mean(&full), mean(&ucb), mean(&oracle), mean(&stat_off), mean(&stat_full));
+    assert!(mean(&full) > mean(&ucb) + 1.0, "adaptive {} ucb {}", mean(&full), mean(&ucb));
+    assert!(mean(&off) > mean(&ucb) + 1.0);
+    assert!(mean(&oracle) - mean(&full) < 0.5, "regret {}", mean(&oracle) - mean(&full));
+    assert!(mean(&full) > mean(&off) - 0.3, "adaptation must not cost much in the drifting world");
+    assert!(mean(&stat_full) > mean(&stat_off) - 0.3, "adaptation must not cost much in the stationary world");
+    assert!(detected >= 2, "the degradation of fast is flagged in {detected} of 6 worlds");
+    assert!(stationary_alarms <= 2, "false alarms: {stationary_alarms}");
+}

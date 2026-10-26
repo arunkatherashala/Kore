@@ -305,12 +305,13 @@ fn drift_report(label: &str, seeds: std::ops::RangeInclusive<u64>, budget: i64, 
     println!("Changes happen after about {:.0} (new domain), {:.0} (profile shift) and {:.0} (fast degrades) energy units of {budget}.\n", mean_at[0], mean_at[1], mean_at[2]);
     println!("| policy | mean reward per energy unit | 95% interval of the mean |");
     println!("|---|---|---|");
-    let pols: [(&str, P); 7] = [
+    let pols: [(&str, P); 8] = [
         ("random", |r| &r.random),
         ("greedy by listed reward per cost", |r| &r.greedy),
         ("UCB1 domain chooser", |r| &r.ucb),
         ("B1 model learner (no adaptation)", |r| &r.off),
         ("B1 + forgetting only", |r| &r.forget),
+        ("B1 + cold-start bonus only (no forgetting, no detector)", |r| &r.novel),
         ("adaptive learner (forgetting + change detection + cold start)", |r| &r.full),
         ("oracle that knows the schedule", |r| &r.oracle),
     ];
@@ -336,14 +337,16 @@ fn drift_report(label: &str, seeds: std::ops::RangeInclusive<u64>, budget: i64, 
     println!("\nRegret per energy unit against the oracle, and paired comparisons (reward per energy):\n");
     println!("| quantity | mean | 95% interval of the mean | first minus second: wins / losses / ties |");
     println!("|---|---|---|---|");
-    for (nm, f) in &pols[..6] {
+    for (nm, f) in &pols[..7] {
         let (m, lo, hi) = dcol(&rows, |r| r.oracle.per_budget() - f(r).per_budget());
         println!("| regret of {nm} | {m:.3} | [{lo:.3}, {hi:.3}] | |");
     }
-    let pairs: [(&str, P, P); 7] = [
+    let pairs: [(&str, P, P); 9] = [
         ("adaptive minus B1", |r| &r.full, |r| &r.off),
         ("adaptive minus forgetting only", |r| &r.full, |r| &r.forget),
         ("forgetting only minus B1", |r| &r.forget, |r| &r.off),
+        ("cold-start bonus only minus B1", |r| &r.novel, |r| &r.off),
+        ("adaptive minus cold-start bonus only", |r| &r.full, |r| &r.novel),
         ("adaptive minus UCB1", |r| &r.full, |r| &r.ucb),
         ("adaptive minus greedy", |r| &r.full, |r| &r.greedy),
         ("B1 minus UCB1", |r| &r.off, |r| &r.ucb),
@@ -429,11 +432,13 @@ fn stationary_report(label: &str, seeds: std::ops::RangeInclusive<u64>, budget: 
     dl("UCB1 domain chooser", &rows, |r| r.ucb.per_budget());
     dl("B1 model learner (no adaptation)", &rows, |r| r.off.per_budget());
     dl("B1 + forgetting only", &rows, |r| r.forget.per_budget());
+    dl("B1 + cold-start bonus only", &rows, |r| r.novel.per_budget());
     dl("adaptive learner", &rows, |r| r.full.per_budget());
     dl("oracle", &rows, |r| r.oracle.per_budget());
     println!("\n| paired difference | mean | 95% interval of the mean | wins / losses / ties |");
     println!("|---|---|---|---|");
-    let pairs: [(&str, fn(&DriftRow) -> f64, fn(&DriftRow) -> f64); 2] = [
+    let pairs: [(&str, fn(&DriftRow) -> f64, fn(&DriftRow) -> f64); 3] = [
+        ("cold-start bonus only minus B1", |r| r.novel.per_budget(), |r| r.off.per_budget()),
         ("forgetting only minus B1", |r| r.forget.per_budget(), |r| r.off.per_budget()),
         ("adaptive minus B1", |r| r.full.per_budget(), |r| r.off.per_budget()),
     ];
@@ -487,7 +492,7 @@ fn drift_tune(second: bool) {
 }
 
 fn drift_main() {
-    let (forget, full) = (AdaptSpec::forget(), AdaptSpec::full());
+    let (forget, full) = (AdaptSpec { half_life: 300.0, ..AdaptSpec::forget() }, AdaptSpec::full());
     for budget in [6000i64] {
         drift_report("tuning seeds 101..120", 101..=120, budget, &forget, &full);
         drift_report("report seeds 1..20", 1..=20, budget, &forget, &full);
