@@ -461,6 +461,79 @@ Measured (`docs/measured.md`, 20 simulated worlds, seeds 1..20, budget 6000; set
 
 Does NOT do: it does not show that adaptation helps (the interval of its gain over B1 contains 0, and the gain is explained by the cold-start bonus alone); forgetting by itself hurts, and the tuning picked a half-life of 5000 attempts, which is almost no forgetting in a life of about 2500 attempts; it does not adapt to a change that hides in the visible features or to a change whose stale belief is expensive (neither was tested; the one hidden change here, `fast` degrading, costs little because `careful` is almost as good); the detector missed the degradation in 7 of 20 worlds and has a delay of about 100 steps; the schedule has three changes in a fixed order, one world family and one seed range; the oracle never skips, so it is not an upper bound on reward; it uses no real data and no language model; it makes no claim of understanding, thinking or intelligence, only the measured numbers above.
 
+### Track B4: advice as an input
+
+Research question: can an outside knowledge source (for example a language model) be ONE INPUT to a mind that learns from its own experience, does it help, and how far should the being trust it? B4 gives the menu-world being (`chooser: "model"`) an optional advisor and makes the being learn, from its own logged outcomes, how far to trust it. In every measurement and test the advisor is SIMULATED (a program with a quality knob); no real model is called and this crate contains no network code.
+
+Creation-time options of `being_run` (fixed once the being exists, default off, so every earlier result is bit-identical):
+* `advisor`: `"none"`, `"simulated"` (needs `advisor_quality`, 0 to 1: the probability that the simulated advisor names the oracle-correct option; a property of the simulation) or `"command"` (the program in `advisor.txt`).
+* `trust`: `true` (default with an advisor) learns trust per (advisor, domain) from the log and mixes advice with the being's own model by it; `false` follows advice blindly (the comparison arm).
+
+What the being does. Each step it sends the advisor only the visible task features (domain, difficulty, listed cost and reward of the 4 offers, strategy names; for sequence tasks the visible terms). The advisor names an option (slot and strategy, optionally a stated success probability) and, in the extended pattern world, may propose a rule of the B2 grammar. Everything is logged as events of source `advisor` (request, reply, what happened afterwards, with ids derived from the content). The advice is an extra input to the planner: with the learned trust weight `w` the advised option's score is lifted towards 1.1 times the best score by the fraction `w` (formula in `being/planner.rs` and `being/trust.rs`); a proposed rule is used only if the B2 verified search (training and held-out exact reproduction, never applicable-and-wrong) accepts that form on the being's own logged examples. Trust is the Beta posterior of "advice that was followed against the model's own choice earned at least the reward per energy the model alone had predicted"; it is folded from the log, so a replay re-derives every decision including the advice part. A new advisor is tried (optimism of one standard deviation), a useless one stops being followed as the tests accumulate, and a cumulative-sum detector flags an advisor that gets worse.
+
+Authorization. Every `being_run` that asks an advisor first goes through `authorize` with the tool name `advisor_query` (level L1, default deny, audited, only the being loop may use it, the kill switch stops it). The owner allows it by hand in `autonomy_policy.txt`:
+
+```
+[L1]
+advisor_query
+```
+
+(The check is made once per run, before the log is opened, not once per step: every authorization decision is an audit event.)
+
+The command advisor (`advisor.txt`). Only for an owner who wants to try a program as advisor. The file `<owner dir>/advisor.txt` is written by hand (reserved: no tool can read or write it), same format and same safety rules as `thinker.txt`:
+
+```
+# one setting per line: key = value
+command = C:\tools\my_advisor.exe      # absolute path, required
+arg = --json                           # repeat for each argument, in order
+timeout_secs = 30                      # 1..=600, default 30
+max_output_bytes = 65536               # 1024..=4194304, default 65536
+env_allow = MY_API_KEY                 # names of variables to pass through (the environment is otherwise cleared)
+```
+
+The program is run without a shell, with an absolute path, working directory `<owner dir>/scratch`, a cleared environment, no stderr, a timeout and an output cap. It gets ONE JSON request on stdin (the shareable features above, passed through the redactor first, so `redact_patterns.txt` applies) and must print ONE JSON object: `{"slot": 2, "strategy": "careful", "p_success": 0.8, "rule": {"signature": 3, "form": "poly.2"}, "note": "..."}` where `slot`+`strategy` go together, `rule` is optional and only for signatures the request asks for (`form` is a code like `lin.12.c` or the DSL text `next = a1*t[-1] + ...`), and every field is validated. The prompt and the reply go into the advice event (redacted). A failed request (timeout, bad JSON, over the cap, non-zero exit, invalid option) is logged as an error and the being goes on without advice; after 3 failures in a row the advisor is not asked again in that run. It is tested only with the helper example program `chat_helper` (modes `advise_best`, `advise_echo`, `advise_rule`, `sleep`, `flood`, `badjson`, `exit1`), never with a real model.
+
+Real output (from `cargo test -p kore-self --offline --test e2e_advisor -- --nocapture`, the real binary on a temp root):
+
+```
+being_run with advisor simulated, no autonomy_policy.txt
+advisor_query was not allowed (deny): no autonomy_policy.txt: default deny. The being will not ask its advisor. To allow it, list advisor_query under [L1] in autonomy_policy.txt (edit that file by hand)
+
+being_run {steps:300, seed:1, world_seed:3, budget:3000, chooser:"model", advisor:"simulated", advisor_quality:0.9, trust:true}   (after allowing advisor_query)
+  "advisor": "simulated", "advisor_quality": 0.9, "steps_run": 300, "total_reward": 3032, "trust_learning": true,
+  "advice": [ { "advisor": "simulated:q0.90", "kind": "algebra", "advice_given": 78, "tests_followed_against_model": 17, "tests_won": 12, "trust_mean": 0.684, "trust_sd": 0.104, "mixing_weight_now": 0.576 },
+              { "kind": "arithmetic", "advice_given": 122, "tests_followed_against_model": 3, "tests_won": 2, "trust_mean": 0.6 },
+              { "kind": "pattern", "advice_given": 90, "tests_followed_against_model": 20, "tests_won": 14, "trust_mean": 0.682 },
+              { "kind": "physics", "advice_given": 10, "tests_followed_against_model": 0, "trust_mean": 0.5 } ]
+
+being_explain on the first decision, where the being followed advice against its own model:
+  "decision": "step 0: chose slot 2 (algebra difficulty 4, listed cost 8 reward 16) with strategy careful by model-ucb (advice 593908f6a2 moved the choice from 2:fast to 2:careful (mode trust, weight 0.58); ...",
+  "how_advice_changed_the_decision": { "advised": "2:careful", "model_alone_would_choose": "2:fast", "model_alone_predicted_reward_per_energy": 1.0,
+      "decision_equals_model_alone": false, "advice_followed": true, "mixing_weight": 0.577, "trust_mean": 0.5, "trust_sd": 0.289, "mode": "trust" },
+  "advice_for_this_step": [ { "kind": "advice", "text": "{... request, advice {slot 2, strategy careful, p_success 0.84} ...}" },
+      { "kind": "result", "text": "advice 593908f6a2cc of simulated:q0.90 at step 0: followed advice 2:careful against the model's own choice 2:fast (the model alone predicted 1.000 reward per energy for it); realized 2.000 reward per energy, outcome correct (reward 16 for energy 8) ..." } ],
+  "replay_check": { "equal_to_recorded": true, "re_derived_domain": "2:careful|adv f1 a0 r1.000000 w0.577" }
+
+self_verify -> OK: 24 version(s), latest 23, head hash ffce4b05...
+self_verify after flipping a byte -> VERIFY FAILED: checksum mismatch in segment: events/0000000023.kore
+
+command advisor, helper program, first logged failure per mode (6 steps each, the run goes on without advice):
+  sleep (timeout_secs = 1): {"advice":{"error":"the external command timed out after 1s ...
+  flood (max_output_bytes = 1024): {"advice":{"error":"the external command printed more than 1024 bytes and was killed ...
+  badjson: {"advice":{"error":"the reply is not valid JSON: ...
+  exit1: {"advice":{"error":"the external command exited with exit code: 1 ...
+  echo: {"advice":{"error":"the reply names no option, no rule and has no note ...
+```
+
+Measured (docs/measured.md, "Track B4": synthetic world, SIMULATED advisor; seeds 1..20, tuning seeds 101..120; mean reward per energy, paired against the B1 learner without advisor):
+* Following advice blindly loses unless the advisor is almost perfect: at `q = 0.9` it is 0.18 (budget 600) and 0.39 (budget 3000) below no advisor, at `q = 0.5` 1.3 and 1.6 below, for the confidently wrong advisor (`q = 0.2`, states 0.95) 1.8 and 2.1 below; only at `q = 1.0` does it win (+0.38 [+0.11, +0.64] and +0.16 [-0.05, +0.37]). Break-even about `q` = 0.93 to 0.97.
+* The trust learner is not significantly worse than no advisor at any `q` (every difference within noise of zero below `q = 0.9`; confidently wrong advisor +0.01 and +0.07; an advisor that degrades from 0.9 to 0.3 mid-life +0.09 and +0.13). Testing a useless advisor costs about 1% to 4% of the steps.
+* Good advice helps modestly and mainly early: `q = 0.9` gives +0.15 [-0.02, +0.32] and +0.17 [-0.02, +0.36]; `q = 1.0` +0.23 [+0.02, +0.43] and +0.20 [+0.00, +0.39]; the step at which the being reaches 90% of the oracle's rate falls from 61 to 43 (budget 3000). The B1 learner alone already reaches 3.38 against the oracle's 3.54 at budget 3000.
+* Learned trust ranks the advisors perfectly by quality (rank correlation 1.00) but is not a calibrated estimate of `q` (0.49 at `q` = 0 to 0.82 at `q` = 1).
+* Rule proposals: every accepted rule passed the verified search (0 wrong rules), none arrived faster than discovery (median first rule at step 46 against 20).
+
+What B4 does NOT do. It does not measure any real language model: the advisor in every number is simulated, and how good a real model is as an advisor on real tasks is unknown and would have to be measured separately through `advisor: "command"` on real tasks. It does not show that advice helps in general: the gains are small, early, and in one synthetic world with an author-defined reward. It does not separate the information in advice from the exploration a wrong suggestion causes. The command advisor can use the network, the disk and your account if the program you configure does (there is no sandbox); only configure a program you trust. A real model's reply can only choose among the options in the request and propose rules that the verified search then checks; it cannot execute anything. No claim of understanding, life or intelligence is made.
+
 ### Talking to the being (A1)
 
 A chat scaffold with a pluggable thinker, off by default. You talk with `chat_say`; the reply comes from a thinker; the tool calls a thinker proposes run only if a policy file you wrote by hand allows them. Messages, the exact prompt and reply, every authorization decision and every tool result are events in the being's own log, so a conversation survives restarts and is queryable with `self_sql`. There is no model in this crate and the chat code makes no outgoing connections (there is no HTTP client in the crate): to use a model, you point `thinker.txt` at a program you trust (a local model CLI, or a script of your own that calls whatever service you choose).

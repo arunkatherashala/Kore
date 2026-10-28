@@ -182,7 +182,7 @@ pub(crate) fn run_program(cfg: &ThinkerConfig, scratch: &Path, input: &str) -> R
     for (k, v) in build_env(cfg, scratch) {
         cmd.env(k, v);
     }
-    let mut child = cmd.spawn().map_err(|e| format!("cannot start the thinker command: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| format!("cannot start the external command: {e}"))?;
     let mut stdin = child.stdin.take().ok_or("no stdin")?;
     let data = input.as_bytes().to_vec();
     // writer thread: a program that never reads must not block us
@@ -205,22 +205,22 @@ pub(crate) fn run_program(cfg: &ThinkerConfig, scratch: &Path, input: &str) -> R
     };
     while !reader.is_finished() {
         if Instant::now() >= deadline {
-            return fail(&mut child, format!("the thinker command timed out after {}s and was killed", cfg.timeout_secs));
+            return fail(&mut child, format!("the external command timed out after {}s and was killed", cfg.timeout_secs));
         }
         std::thread::sleep(Duration::from_millis(10));
     }
     let out = reader.join().map_err(|_| "reader thread failed".to_string())?;
     if out.len() > cap {
-        return fail(&mut child, format!("the thinker command printed more than {cap} bytes and was killed"));
+        return fail(&mut child, format!("the external command printed more than {cap} bytes and was killed"));
     }
     loop {
         match child.try_wait() {
             Ok(Some(st)) => {
-                return if st.success() { Ok(out) } else { Err(format!("the thinker command exited with {st}")) };
+                return if st.success() { Ok(out) } else { Err(format!("the external command exited with {st}")) };
             }
-            Ok(None) if Instant::now() >= deadline => return fail(&mut child, format!("the thinker command did not exit within {}s and was killed", cfg.timeout_secs)),
+            Ok(None) if Instant::now() >= deadline => return fail(&mut child, format!("the external command did not exit within {}s and was killed", cfg.timeout_secs)),
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(e) => return Err(format!("cannot wait for the thinker command: {e}")),
+            Err(e) => return Err(format!("cannot wait for the external command: {e}")),
         }
     }
 }

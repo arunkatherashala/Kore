@@ -520,7 +520,306 @@ Honest reading.
 
 Test floors (`measured_adaptation_is_close_to_the_oracle_does_not_cost_much_and_detects_the_degradation`, report seeds 1..6, below the measured values): adaptive and B1 each beat UCB1 by more than 1.0; adaptive within 0.5 of the oracle; adaptive not more than 0.3 below B1 in the drifting and in the stationary world; the degradation flagged in at least 2 of the 6 worlds; at most 2 false alarms in the 6 stationary worlds. Measured on those seeds: B1 4.228, adaptive 4.201, UCB1 1.995, oracle 4.034; stationary B1 3.716, adaptive 3.712; degradation flagged in 6 of 6; no false alarm.
 
+## Track B4: advice as an input, trust learned from outcomes (synthetic world, SIMULATED advisor)
+
+Read this first. Everything here is a simulation written by one author: the world, the rewards, and the advisor. The advisor is a program with a quality knob `q` (with probability `q` it names the oracle-correct option, otherwise a plausible wrong one). These numbers say how a being should use advice of a GIVEN quality. They do NOT say how good any real language model is: no real model was called, the crate has no network code, and a real model's quality on real tasks is unmeasured and has to be measured separately through the command advisor (`advisor.txt`) on real tasks.
+
+Question (the owner's): can an outside knowledge source be ONE INPUT to a mind that learns from its own experience, does it help, and how far should the being trust it? Measured with `cargo run -p kore-self --example measure_being --offline --release -- advice` (menu world) and `-- advice ext` (extended pattern world), 2026-10-28, branch self-b4 on commit c6be05e3 (self-b3) plus the B4 commits. Tuning runs: `-- advice tune`, `-- advice tune-detector`. Report seeds 1..20, tuning seeds 101..120 only; budgets 600 (about 154 attempts per world) and 3000 (about 723).
+
+What is new.
+* `being/advice.rs`: an `Advisor` trait; a request that carries only visible task features (domain, difficulty, listed cost and reward, strategy names, the visible terms of sequence tasks) and has no field for anything hidden; a structured reply (an option = slot + strategy, optional stated success probability; or a proposed rule of the B2 grammar). Every request, reply and what happened afterwards is a logged event (source `advisor`, ids derived from the content).
+* `being/trust.rs`: trust per (advisor, domain) learned from the log. A TEST happens when the being followed advice although its own model alone preferred something else; it is won when the realized reward per energy reaches what the model alone had predicted for its own choice. Trust is the Beta(1+wins, 1+losses) posterior of the win rate. Rule proposals are factual: accepted by the verified search = win, contradicted by the being's own examples = loss, merely not yet supported = no verdict.
+* Mixing (`planner.rs`): with the optimistic weight `w = clamp((mean + 1.0*sd - 0.5)/0.5, 0, 1)` the advised option's score becomes `s' = s + w*((1+0.1)*M - s)` (`M` = best own score); the best mixed score wins; the skip rule applies to it. `w = 0` is the being's own decision. The optimism is the exploration that learns trust: a new advisor is tried, and the cost of testing a useless one shrinks as 1/sqrt(tests). `trust: false` follows advice blindly (the comparison arm).
+* Degradation: a one-sided CUSUM on the test residuals (k 0.5, h 6) cuts the advisor's evidence to 20% and is logged.
+* Advice is never executed blindly in the trusting configuration, and a proposed rule enters the rule book only if the B2 search (training and held-out exact reproduction, never applicable-and-wrong) accepts that very form on the being's own logged examples.
+* With no advisor every number is the B1 number bit for bit (a test checks it).
+
+Arms, on the same worlds and seeds: the B1 learner without advisor; follow-advice-blindly; the trust-weighted learner; the oracle; each with simulated advisors of `q` in 0 to 1 (steps of 0.1; 0.5, 0.7, 0.9, 1.0 named), a confidently wrong advisor (`q = 0.2`, always states success probability 0.95) and an advisor that degrades from 0.9 to 0.3 at one eighth of the budget in steps (step 75 / 375).
+
+Chosen on the tuning seeds only. Trust optimism `beta_trust` (paired mean difference of the trust arm against no advisor, averaged over q in 0, 0.3, 0.5, 0.7, 0.9, 1.0):
+
+```
+budget 600:  beta 0.5: -0.027  beta 1.0: +0.064  beta 1.5: -0.034  beta 2.0: -0.090
+budget 3000: beta 0.5: -0.010  beta 1.0: +0.106  beta 1.5: +0.100  beta 2.0: +0.114
+```
+
+Chosen 1.0 (best at 600, within noise of the best at 3000; larger values test useless advisors for longer). Detector settings on the degrading advisor (tuning seeds, budget 3000): the reward is the same for every setting, including no detector at all (h = 100: +0.134 whole run, same as h 4 to 6), so the detector settings were chosen only for few false alarms: k 0.5, h 6, keep 0.2 (detected 5 of 20, 5 false alarms in 40 runs; h 4 detected 8 of 20 with 24 false alarms; k 1, h 4 detected 2 of 20 with 3).
+
+#### Advice, simulated advisor, report seeds 1..20 (budget 3000, beta_trust 1, n = 20 worlds)
+
+| arm | mean reward per energy | 95% interval of the mean |
+|---|---|---|
+| B1 learner, no advisor | 3.377 [3.057, 3.697] |
+| follow advice blindly, q = 0.5 | 1.825 [1.694, 1.956] |
+| follow advice blindly, q = 0.7 | 2.307 [2.142, 2.473] |
+| follow advice blindly, q = 0.9 | 2.991 [2.765, 3.217] |
+| follow advice blindly, q = 1 | 3.535 [3.253, 3.818] |
+| trust-weighted learner, q = 0.5 | 3.507 [3.208, 3.807] |
+| trust-weighted learner, q = 0.7 | 3.531 [3.232, 3.831] |
+| trust-weighted learner, q = 0.9 | 3.548 [3.244, 3.852] |
+| trust-weighted learner, q = 1 | 3.575 [3.270, 3.879] |
+| blind, confidently wrong (q = 0.2, states 0.95) | 1.310 [1.208, 1.411] |
+| trust-weighted, confidently wrong | 3.448 [3.119, 3.776] |
+| blind, degrades 0.9 -> 0.3 at step 375 | 2.244 [2.107, 2.380] |
+| trust-weighted, degrades 0.9 -> 0.3 at step 375 | 3.506 [3.210, 3.803] |
+| oracle (knows hidden success rates) | 3.535 [3.253, 3.818] |
+
+Key curve: benefit of advice versus advisor quality q (paired difference in reward per energy against the B1 learner without advisor, same worlds; wins / losses / ties out of 20):
+
+| q | blind minus none | blind w/l/t | trust minus none | trust w/l/t | trust minus blind |
+|---|---|---|---|---|---|
+| 0 | -2.320 [-2.620, -2.019] | 0 / 20 / 0 | +0.044 [-0.112, +0.201] | 6 / 14 / 0 | +2.364 [+2.075, +2.653] |
+| 0.1 | -2.206 [-2.503, -1.909] | 0 / 20 / 0 | +0.028 [-0.162, +0.218] | 6 / 14 / 0 | +2.234 [+1.935, +2.533] |
+| 0.2 | -2.067 [-2.349, -1.785] | 0 / 20 / 0 | +0.071 [-0.144, +0.286] | 10 / 10 / 0 | +2.138 [+1.870, +2.406] |
+| 0.3 | -1.910 [-2.190, -1.630] | 0 / 20 / 0 | +0.108 [-0.080, +0.295] | 9 / 11 / 0 | +2.018 [+1.796, +2.240] |
+| 0.4 | -1.746 [-2.024, -1.469] | 0 / 20 / 0 | +0.110 [-0.082, +0.301] | 8 / 12 / 0 | +1.856 [+1.642, +2.070] |
+| 0.5 | -1.552 [-1.821, -1.283] | 0 / 20 / 0 | +0.130 [-0.059, +0.320] | 9 / 11 / 0 | +1.683 [+1.478, +1.887] |
+| 0.6 | -1.328 [-1.591, -1.065] | 0 / 20 / 0 | +0.134 [-0.059, +0.327] | 9 / 11 / 0 | +1.462 [+1.275, +1.649] |
+| 0.7 | -1.070 [-1.320, -0.819] | 2 / 18 / 0 | +0.154 [-0.037, +0.346] | 11 / 9 / 0 | +1.224 [+1.059, +1.389] |
+| 0.8 | -0.772 [-1.008, -0.536] | 2 / 18 / 0 | +0.163 [-0.031, +0.357] | 14 / 6 / 0 | +0.934 [+0.790, +1.079] |
+| 0.9 | -0.386 [-0.607, -0.165] | 2 / 18 / 0 | +0.171 [-0.022, +0.364] | 15 / 5 / 0 | +0.557 [+0.443, +0.671] |
+| 1 | +0.158 [-0.054, +0.371] | 16 / 4 / 0 | +0.198 [+0.003, +0.393] | 18 / 2 / 0 | +0.039 [-0.038, +0.117] |
+
+Break-even (mean paired difference against no advisor crosses zero): blind following about q = 0.97; trust-weighted never below zero in the grid (advice never hurt on average).
+
+Calibration: learned trust against the true quality (trust arms; mean over worlds; trust = posterior mean of the win rate of followed-against-model advice, weight = optimistic mixing weight at the end of life):
+
+| true q | learned trust | mixing weight at end | tests per world | tests as share of steps | test win rate | energy spent on tests (share) |
+|---|---|---|---|---|---|---|
+| 0 | 0.485 | 0.338 | 11.4 | 0.011 | 0.469 | 0.018 |
+| 0.1 | 0.533 | 0.385 | 20.1 | 0.019 | 0.575 | 0.026 |
+| 0.2 | 0.572 | 0.427 | 30.0 | 0.027 | 0.638 | 0.036 |
+| 0.3 | 0.612 | 0.482 | 34.6 | 0.031 | 0.655 | 0.041 |
+| 0.4 | 0.628 | 0.504 | 43.8 | 0.040 | 0.689 | 0.053 |
+| 0.5 | 0.658 | 0.531 | 61.8 | 0.054 | 0.718 | 0.067 |
+| 0.6 | 0.696 | 0.568 | 76.1 | 0.070 | 0.733 | 0.085 |
+| 0.7 | 0.708 | 0.589 | 89.5 | 0.080 | 0.751 | 0.097 |
+| 0.8 | 0.733 | 0.617 | 107.1 | 0.100 | 0.773 | 0.120 |
+| 0.9 | 0.773 | 0.673 | 128.8 | 0.124 | 0.799 | 0.147 |
+| 1 | 0.819 | 0.744 | 160.0 | 0.160 | 0.845 | 0.189 |
+
+Rank correlation between true q and learned trust over the grid: 1.000
+
+Cost of testing advice that is useless or bad (trust-weighted learner against the B1 learner, and against blind following):
+
+| q | trust minus none | tests per world | steps lost to tests (share of steps) | blind minus none |
+|---|---|---|---|---|
+| 0 | +0.044 [-0.112, +0.201] | 11.4 | 0.011 | -2.320 [-2.620, -2.019] |
+| 0.2 | +0.071 [-0.144, +0.286] | 30.0 | 0.027 | -2.067 [-2.349, -1.785] |
+| 0.4 | +0.110 [-0.082, +0.301] | 43.8 | 0.040 | -1.746 [-2.024, -1.469] |
+| 0.5 | +0.130 [-0.059, +0.320] | 61.8 | 0.054 | -1.552 [-1.821, -1.283] |
+
+Learning curve, reward per energy by quarter of the run (mean over worlds; speed = first step where the trailing 40 steps reach 90% of the oracle's overall rate):
+
+| arm | first quarter | second quarter | second half | median step of 90% of oracle |
+|---|---|---|---|---|
+| no advisor | 3.239 | 3.478 | 3.408 | 61 (18 of 20 reached) |
+| blind q = 0.9 | 2.953 | 3.074 | 2.975 | 73 (20 of 20 reached) |
+| trust q = 0.9 | 3.383 | 3.673 | 3.579 | 43 (20 of 20 reached) |
+| trust q = 0.7 | 3.352 | 3.647 | 3.582 | 52 (20 of 20 reached) |
+| trust q = 0.5 | 3.318 | 3.653 | 3.550 | 61 (20 of 20 reached) |
+| oracle | 3.505 | 3.598 | 3.520 | - |
+
+Bad advisors and a degrading advisor (paired differences against the B1 learner without advisor):
+
+| scenario | blind minus none | blind w/l/t | trust minus none | trust w/l/t |
+|---|---|---|---|---|
+| confidently wrong (q = 0.2, states 0.95) | -2.067 [-2.349, -1.785] | 0 / 20 / 0 | +0.071 [-0.144, +0.286] | 10 / 10 / 0 |
+| degrades 0.9 -> 0.3 at step 375, whole run | -1.133 [-1.393, -0.874] | 1 / 19 / 0 | +0.129 [-0.060, +0.319] | 9 / 11 / 0 |
+| degrades 0.9 -> 0.3, steps after the degradation only | -1.969 [-2.248, -1.690] | 0 / 20 / 0 | +0.119 [-0.075, +0.312] | 7 / 13 / 0 |
+
+Degradation detector (trust arm, degrading advisor): flagged after the degradation in 3 of 20 worlds, median delay 157 steps; alarms before the degradation: 0 in total; alarms in the constant q = 0.9 trust arm: 1.
+Attempts per world without advisor: 722.9
+Share of steps where advice was followed (trust arm q = 0.9): 0.650; (blind q = 0.9): 1.000
+
+
+#### Advice, simulated advisor, report seeds 1..20 (budget 600, beta_trust 1, n = 20 worlds)
+
+| arm | mean reward per energy | 95% interval of the mean |
+|---|---|---|
+| B1 learner, no advisor | 3.117 [2.757, 3.477] |
+| follow advice blindly, q = 0.5 | 1.808 [1.656, 1.960] |
+| follow advice blindly, q = 0.7 | 2.274 [2.090, 2.458] |
+| follow advice blindly, q = 0.9 | 2.940 [2.713, 3.166] |
+| follow advice blindly, q = 1 | 3.492 [3.207, 3.777] |
+| trust-weighted learner, q = 0.5 | 3.166 [2.827, 3.505] |
+| trust-weighted learner, q = 0.7 | 3.196 [2.851, 3.541] |
+| trust-weighted learner, q = 0.9 | 3.268 [2.937, 3.599] |
+| trust-weighted learner, q = 1 | 3.342 [2.996, 3.688] |
+| blind, confidently wrong (q = 0.2, states 0.95) | 1.338 [1.228, 1.448] |
+| trust-weighted, confidently wrong | 3.127 [2.783, 3.470] |
+| blind, degrades 0.9 -> 0.3 at step 75 | 2.231 [2.090, 2.373] |
+| trust-weighted, degrades 0.9 -> 0.3 at step 75 | 3.209 [2.876, 3.543] |
+| oracle (knows hidden success rates) | 3.494 [3.208, 3.779] |
+
+Key curve: benefit of advice versus advisor quality q (paired difference in reward per energy against the B1 learner without advisor, same worlds; wins / losses / ties out of 20):
+
+| q | blind minus none | blind w/l/t | trust minus none | trust w/l/t | trust minus blind |
+|---|---|---|---|---|---|
+| 0 | -2.029 [-2.381, -1.676] | 0 / 20 / 0 | -0.022 [-0.142, +0.097] | 4 / 15 / 1 | +2.006 [+1.668, +2.344] |
+| 0.1 | -1.911 [-2.263, -1.560] | 0 / 20 / 0 | -0.043 [-0.183, +0.097] | 4 / 15 / 1 | +1.868 [+1.521, +2.215] |
+| 0.2 | -1.779 [-2.127, -1.431] | 0 / 20 / 0 | +0.010 [-0.149, +0.168] | 6 / 14 / 0 | +1.789 [+1.480, +2.097] |
+| 0.3 | -1.665 [-2.009, -1.320] | 0 / 20 / 0 | +0.002 [-0.163, +0.166] | 6 / 14 / 0 | +1.666 [+1.368, +1.964] |
+| 0.4 | -1.504 [-1.843, -1.165] | 0 / 20 / 0 | +0.004 [-0.177, +0.184] | 6 / 14 / 0 | +1.508 [+1.220, +1.795] |
+| 0.5 | -1.309 [-1.632, -0.986] | 1 / 19 / 0 | +0.049 [-0.111, +0.209] | 5 / 15 / 0 | +1.358 [+1.095, +1.621] |
+| 0.6 | -1.088 [-1.408, -0.769] | 2 / 18 / 0 | +0.049 [-0.119, +0.216] | 5 / 15 / 0 | +1.137 [+0.885, +1.388] |
+| 0.7 | -0.843 [-1.157, -0.530] | 2 / 18 / 0 | +0.079 [-0.088, +0.245] | 7 / 13 / 0 | +0.922 [+0.679, +1.166] |
+| 0.8 | -0.562 [-0.860, -0.264] | 3 / 17 / 0 | +0.111 [-0.069, +0.292] | 9 / 11 / 0 | +0.673 [+0.459, +0.888] |
+| 0.9 | -0.178 [-0.466, +0.111] | 7 / 13 / 0 | +0.151 [-0.015, +0.318] | 14 / 6 / 0 | +0.329 [+0.129, +0.529] |
+| 1 | +0.375 [+0.108, +0.643] | 16 / 4 / 0 | +0.225 [+0.018, +0.433] | 14 / 6 / 0 | -0.150 [-0.299, -0.002] |
+
+Break-even (mean paired difference against no advisor crosses zero): blind following about q = 0.93; trust-weighted about q = 0.18.
+
+Calibration: learned trust against the true quality (trust arms; mean over worlds; trust = posterior mean of the win rate of followed-against-model advice, weight = optimistic mixing weight at the end of life):
+
+| true q | learned trust | mixing weight at end | tests per world | tests as share of steps | test win rate | energy spent on tests (share) |
+|---|---|---|---|---|---|---|
+| 0 | 0.443 | 0.311 | 6.2 | 0.035 | 0.382 | 0.057 |
+| 0.1 | 0.452 | 0.317 | 7.5 | 0.044 | 0.436 | 0.062 |
+| 0.2 | 0.493 | 0.379 | 9.1 | 0.053 | 0.500 | 0.071 |
+| 0.3 | 0.523 | 0.425 | 10.7 | 0.063 | 0.526 | 0.085 |
+| 0.4 | 0.560 | 0.473 | 13.7 | 0.080 | 0.580 | 0.103 |
+| 0.5 | 0.578 | 0.483 | 16.8 | 0.094 | 0.624 | 0.116 |
+| 0.6 | 0.608 | 0.530 | 18.9 | 0.107 | 0.661 | 0.129 |
+| 0.7 | 0.641 | 0.576 | 23.1 | 0.129 | 0.704 | 0.152 |
+| 0.8 | 0.677 | 0.626 | 25.6 | 0.144 | 0.725 | 0.168 |
+| 0.9 | 0.701 | 0.652 | 28.1 | 0.157 | 0.749 | 0.175 |
+| 1 | 0.735 | 0.700 | 33.1 | 0.183 | 0.784 | 0.192 |
+
+Rank correlation between true q and learned trust over the grid: 1.000
+
+Cost of testing advice that is useless or bad (trust-weighted learner against the B1 learner, and against blind following):
+
+| q | trust minus none | tests per world | steps lost to tests (share of steps) | blind minus none |
+|---|---|---|---|---|
+| 0 | -0.022 [-0.142, +0.097] | 6.2 | 0.035 | -2.029 [-2.381, -1.676] |
+| 0.2 | +0.010 [-0.149, +0.168] | 9.1 | 0.053 | -1.779 [-2.127, -1.431] |
+| 0.4 | +0.004 [-0.177, +0.184] | 13.7 | 0.080 | -1.504 [-1.843, -1.165] |
+| 0.5 | +0.049 [-0.111, +0.209] | 16.8 | 0.094 | -1.309 [-1.632, -0.986] |
+
+Learning curve, reward per energy by quarter of the run (mean over worlds; speed = first step where the trailing 40 steps reach 90% of the oracle's overall rate):
+
+| arm | first quarter | second quarter | second half | median step of 90% of oracle |
+|---|---|---|---|---|
+| no advisor | 2.736 | 3.176 | 3.318 | 53 (18 of 20 reached) |
+| blind q = 0.9 | 2.958 | 2.868 | 2.984 | 65 (19 of 20 reached) |
+| trust q = 0.9 | 2.978 | 3.292 | 3.429 | 43 (20 of 20 reached) |
+| trust q = 0.7 | 2.886 | 3.250 | 3.360 | 51 (20 of 20 reached) |
+| trust q = 0.5 | 2.765 | 3.258 | 3.369 | 61 (20 of 20 reached) |
+| oracle | 3.499 | 3.520 | 3.484 | - |
+
+Bad advisors and a degrading advisor (paired differences against the B1 learner without advisor):
+
+| scenario | blind minus none | blind w/l/t | trust minus none | trust w/l/t |
+|---|---|---|---|---|
+| confidently wrong (q = 0.2, states 0.95) | -1.779 [-2.127, -1.431] | 0 / 20 / 0 | +0.010 [-0.149, +0.168] | 6 / 14 / 0 |
+| degrades 0.9 -> 0.3 at step 75, whole run | -0.886 [-1.201, -0.570] | 2 / 18 / 0 | +0.092 [-0.080, +0.265] | 9 / 11 / 0 |
+| degrades 0.9 -> 0.3, steps after the degradation only | -1.803 [-2.152, -1.454] | 0 / 20 / 0 | +0.000 [-0.161, +0.161] | 9 / 11 / 0 |
+
+Degradation detector (trust arm, degrading advisor): flagged after the degradation in 1 of 20 worlds, median delay 29 steps; alarms before the degradation: 0 in total; alarms in the constant q = 0.9 trust arm: 0.
+Attempts per world without advisor: 154.1
+Share of steps where advice was followed (trust arm q = 0.9): 0.698; (blind q = 0.9): 0.995
+
+
+### Extended pattern world (rule proposals), report seeds 1..20
+
+Here the advisor also proposes rules in the B2 grammar every 5 steps for the first signature it is asked about (the simulated advisor knows the correct forms; it gets them right with probability `q`). The menu advice is limited to the three fixed strategies (the advisor knows nothing about the being's discovered rules).
+
+#### Advice in the extended pattern world, simulated advisor, report seeds 1..20 (budget 3000, n = 20 worlds)
+
+| arm | mean reward per energy [95% interval of the mean] | rules held at end | expressible families covered (of 6) | wrong rules | proposals accepted / rejected per world | median first accepted rule (step) |
+|---|---|---|---|---|---|---|
+| B2 learner: discovery pass every 10 steps, no advisor | 3.943 [3.583, 4.303] | 4.95 | 3.10 | 0 | 0.0 / 0.0 | 20 (16 of 20) |
+| no discovery, no advisor | 3.781 [3.412, 4.150] | 0.00 | 0.00 | 0 | 0.0 / 0.0 | - |
+| trust, q = 0.5 (rule proposals + menu advice, no discovery pass) | 3.947 [3.598, 4.296] | 4.90 | 3.10 | 0 | 4.9 / 0.0 | 61 (17 of 20) |
+| trust, q = 0.9 (no discovery pass) | 3.978 [3.603, 4.354] | 4.75 | 2.95 | 0 | 4.8 / 0.0 | 46 (18 of 20) |
+| trust, q = 1.0 (no discovery pass) | 4.016 [3.636, 4.396] | 4.90 | 3.15 | 0 | 4.9 / 0.0 | 46 (18 of 20) |
+| blind, q = 0.9 (no discovery pass) | 3.281 [3.020, 3.542] | 4.15 | 2.15 | 0 | 4.2 / 0.0 | 51 (20 of 20) |
+| trust, q = 0.9 + discovery pass every 10 steps | 3.998 [3.616, 4.381] | 4.80 | 2.90 | 0 | 0.1 / 0.0 | 20 (18 of 20) |
+| oracle with perfect rules (knows rules and success rates) | 4.272 [3.920, 4.624] | 9.00 | 6.00 | 0 | 0.0 / 0.0 | - |
+
+Paired differences in reward per energy (wins / losses / ties out of 20):
+
+| comparison | mean difference | 95% interval | wins / losses / ties |
+|---|---|---|---|
+| trust q = 0.9 minus B2 discovery | +0.035 [-0.059, +0.129] | 11 / 9 / 0 |
+| trust q = 0.5 minus no discovery | +0.166 [-0.002, +0.335] | 13 / 7 / 0 |
+| trust q = 0.9 minus no discovery | +0.197 [+0.027, +0.368] | 12 / 8 / 0 |
+| trust q = 1.0 minus no discovery | +0.235 [+0.061, +0.409] | 14 / 6 / 0 |
+| blind q = 0.9 minus no discovery | -0.500 [-0.678, -0.322] | 1 / 19 / 0 |
+| trust q = 0.9 + discovery minus B2 discovery | +0.055 [-0.041, +0.151] | 14 / 6 / 0 |
+| oracle minus trust q = 0.9 | +0.293 [+0.153, +0.434] | 17 / 3 / 0 |
+
+Learning curve by quarter (reward per energy):
+
+| arm | first quarter | second quarter | second half |
+|---|---|---|---|
+| B2 learner: discovery pass every 10 steps, no advisor | 3.429 | 4.123 | 4.168 |
+| no discovery, no advisor | 3.425 | 3.947 | 3.945 |
+| trust, q = 0.5 (rule proposals + menu advice, no discovery pass) | 3.404 | 4.116 | 4.169 |
+| trust, q = 0.9 (no discovery pass) | 3.521 | 4.097 | 4.183 |
+| trust, q = 1.0 (no discovery pass) | 3.561 | 4.137 | 4.201 |
+| blind, q = 0.9 (no discovery pass) | 3.222 | 3.365 | 3.279 |
+| trust, q = 0.9 + discovery pass every 10 steps | 3.540 | 4.141 | 4.192 |
+| oracle with perfect rules (knows rules and success rates) | 4.280 | 4.319 | 4.245 |
+
+
+#### Advice in the extended pattern world, simulated advisor, report seeds 1..20 (budget 600, n = 20 worlds)
+
+| arm | mean reward per energy [95% interval of the mean] | rules held at end | expressible families covered (of 6) | wrong rules | proposals accepted / rejected per world | median first accepted rule (step) |
+|---|---|---|---|---|---|---|
+| B2 learner: discovery pass every 10 steps, no advisor | 3.142 [2.773, 3.512] | 3.75 | 2.25 | 0 | 0.0 / 0.0 | 20 (16 of 20) |
+| no discovery, no advisor | 3.178 [2.801, 3.556] | 0.00 | 0.00 | 0 | 0.0 / 0.0 | - |
+| trust, q = 0.5 (rule proposals + menu advice, no discovery pass) | 3.197 [2.832, 3.562] | 2.25 | 0.90 | 0 | 2.2 / 0.0 | 61 (16 of 20) |
+| trust, q = 0.9 (no discovery pass) | 3.341 [2.999, 3.682] | 2.25 | 0.90 | 0 | 2.2 / 0.0 | 46 (18 of 20) |
+| trust, q = 1.0 (no discovery pass) | 3.392 [3.052, 3.732] | 2.70 | 1.35 | 0 | 2.7 / 0.0 | 46 (18 of 20) |
+| blind, q = 0.9 (no discovery pass) | 3.230 [2.949, 3.511] | 1.95 | 0.50 | 0 | 1.9 / 0.0 | 51 (19 of 20) |
+| trust, q = 0.9 + discovery pass every 10 steps | 3.353 [3.003, 3.703] | 3.50 | 1.85 | 0 | 0.1 / 0.0 | 20 (18 of 20) |
+| oracle with perfect rules (knows rules and success rates) | 4.270 [3.901, 4.639] | 9.00 | 6.00 | 0 | 0.0 / 0.0 | - |
+
+Paired differences in reward per energy (wins / losses / ties out of 20):
+
+| comparison | mean difference | 95% interval | wins / losses / ties |
+|---|---|---|---|
+| trust q = 0.9 minus B2 discovery | +0.198 [+0.021, +0.376] | 15 / 5 / 0 |
+| trust q = 0.5 minus no discovery | +0.019 [-0.108, +0.146] | 7 / 13 / 0 |
+| trust q = 0.9 minus no discovery | +0.163 [+0.010, +0.315] | 13 / 7 / 0 |
+| trust q = 1.0 minus no discovery | +0.214 [+0.083, +0.345] | 16 / 4 / 0 |
+| blind q = 0.9 minus no discovery | +0.052 [-0.220, +0.324] | 11 / 9 / 0 |
+| trust q = 0.9 + discovery minus B2 discovery | +0.211 [+0.034, +0.387] | 15 / 5 / 0 |
+| oracle minus trust q = 0.9 | +0.930 [+0.696, +1.163] | 18 / 2 / 0 |
+
+Learning curve by quarter (reward per energy):
+
+| arm | first quarter | second quarter | second half |
+|---|---|---|---|
+| B2 learner: discovery pass every 10 steps, no advisor | 2.485 | 3.154 | 3.539 |
+| no discovery, no advisor | 2.477 | 3.211 | 3.600 |
+| trust, q = 0.5 (rule proposals + menu advice, no discovery pass) | 2.603 | 3.267 | 3.525 |
+| trust, q = 0.9 (no discovery pass) | 2.862 | 3.461 | 3.559 |
+| trust, q = 1.0 (no discovery pass) | 2.832 | 3.544 | 3.629 |
+| blind, q = 0.9 (no discovery pass) | 3.222 | 3.197 | 3.280 |
+| trust, q = 0.9 + discovery pass every 10 steps | 2.857 | 3.504 | 3.562 |
+| oracle with perfect rules (knows rules and success rates) | 4.275 | 4.264 | 4.277 |
+
+
+### What the numbers say (verdict)
+
+1. Following advice blindly is only worth it for an almost perfect advisor. Against the B1 learner without advisor, blind following loses at every `q` below about 0.93 (budget 600) / 0.97 (budget 3000): at `q = 0.9` it is 0.18 / 0.39 reward per energy worse; at `q = 0.5`, 1.31 / 1.55 worse (a loss in 19 of 20 and 20 of 20 worlds); the confidently wrong advisor costs 1.78 / 2.07. Only at `q = 1.0` (always the oracle's choice, so it plays exactly like the oracle) does it win: +0.38 [+0.11, +0.64] at 600 and +0.16 [-0.05, +0.37] at 3000. That is the break-even: roughly `q` of 0.93 to 0.97 for blind following in this world.
+2. The trust learner protects against bad advice. Its paired difference against no advisor stays within noise of zero for every `q` below 0.9 (all intervals contain 0; for `q` from 0 to 0.5 it is -0.04 to +0.13), including the confidently wrong advisor (+0.01 [-0.15, +0.17] at 600, +0.07 at 3000) and the degrading one (+0.09 / +0.13 whole run, +0.00 / +0.12 after the degradation). Blind following of the same advisors loses 1.8 to 2.3. I found no `q` at which the trust arm is significantly worse than no advisor. The price of testing a useless advisor is small: for `q = 0` about 6 tests per world at 600 (3.5% of the steps, 5.7% of the energy) and 11 at 3000 (1.1%, 1.8%), the reward difference being -0.02 / +0.04 (not distinguishable from 0).
+3. How much good advice helps is modest here. The B1 learner already reaches 3.377 at budget 3000 against the oracle's 3.535, so a perfect advisor can add at most 0.16. The trust learner with `q = 0.9` gains +0.15 [-0.02, +0.32] at 600 and +0.17 [-0.02, +0.36] at 3000; with `q = 1.0` +0.23 [+0.02, +0.43] and +0.20 [+0.00, +0.39] (14 and 18 wins of 20). The gain comes early in life: the median step at which the trailing 40 steps reach 90% of the oracle's rate falls from 53 to 43 (600) and from 61 to 43 (3000); in the first quarter of the run `q = 0.9` earns 2.98 against 2.74 (600), 3.38 against 3.24 (3000). Gains for `q` between 0.5 and 0.8 are positive on average (+0.05 to +0.16) but their intervals contain zero. Only `q = 1.0` has an interval that excludes zero at both budgets, and just barely at 3000. The trust learner with a perfect advisor does not reach the oracle (3.342 / 3.575 against 3.494 / 3.535 at 600; it is -0.15 [-0.30, -0.00] below blind following at 600): learning trust costs a little when the advice is perfect.
+4. Calibration. The learned trust orders the advisors perfectly (rank correlation 1.00 between true `q` and learned trust over the 11 qualities, both budgets) but the level is compressed: at budget 3000 trust goes from 0.49 (`q` 0) to 0.82 (`q` 1) and the end-of-life mixing weight from 0.34 to 0.74. The reason is the definition of the test: it asks whether the followed advice beat the model's own prediction, not whether it was the oracle's choice, and a wrong option can still beat a modest prediction. So the trust is a monotone, not a calibrated, estimate of `q`, and even a useless advisor keeps a mixing weight of about 0.3 (its advice changes the choice rarely enough for this to cost little).
+5. A caution on what helps. A wrong but plausible suggestion makes the being try an option it would not have tried, which is also exploration. The small positive differences at low `q` at budget 3000 (+0.04 to +0.13, all intervals contain 0) may come from that rather than from information. This experiment cannot separate the two.
+6. The degradation detector contributes nothing measurable. It flagged the degradation in 1 of 20 worlds (median delay 29 steps) at 600 and in 3 of 20 (median delay 157 steps) at 3000, with no alarm before the degradation and 1 in the constant `q = 0.9` arm at 3000. The optimistic weight and the posterior already stop trusting the advisor; the reward is the same with the detector switched off on the tuning seeds.
+7. Rule proposals add nothing the verified search does not already find. In the extended world every accepted rule came through the B2 acceptance (0 wrong rules in all arms, all re-derived from the log); about 4.8 proposals per world were accepted at 3000. They were not faster than discovery: the median first accepted rule is at step 46 with a `q = 0.9` advisor against step 20 for the discovery pass every 10 steps. The trust arm with `q = 0.9` and no discovery pass equals the B2 learner (+0.035 [-0.059, +0.129] at 3000, +0.198 [+0.021, +0.376] at 600, which comes from the menu advice early in life, not from the rules). Following a `q = 0.9` advisor blindly in this world loses 0.50 [-0.68, -0.32] against no advisor at 3000 and is worse than the B2 learner, because the advisor does not know the `discovered` strategy. The oracle with perfect rules stays 0.29 above the trust arm.
+
+Honest summary: in this synthetic world advice is useful only when it is close to perfect, and even then it saves some early-life learning rather than raising the final level; a being that follows it blindly is badly hurt by anything less; a being that learns trust from its own outcomes is not hurt (no `q` where it was significantly worse) and gains a little from good advice. Whether a real model ever reaches the useful range for a real task is not known from this.
+
+Test floors (`measured_trust_protects_against_bad_advice_and_blind_following_does_not`, report seeds 1..8, budget 600): blind following of the confidently wrong advisor is more than 1.0 below no advisor; the trust learner is within 0.5 below no advisor and more than 1.0 above blind; for `q = 0.9` the trust learner is more than 0.3 above blind following. Another test checks that blind following of a `q = 1.0` advisor reproduces the oracle's reward and energy exactly on seeds 1 to 3.
+
+Not measured by B4: any real model; real tasks; an advisor whose errors are correlated with task difficulty or domain (`q` by domain exists in the simulated advisor but was not measured); advice in the drifting world; very long lives; other mixing formulas.
+
 ## Not measured
 
 Real-life data of any kind (the free-text section above is also synthetic); the ledger's probabilities (nothing is scored yet); behaviour with
-the being loop in any world other than the author-defined simulation (no real tasks, no language-model thinker); very large logs; sensitivity to the synthetic generator's choices (150 days, Poisson counts).
+the being loop in any world other than the author-defined simulation (no real tasks, no language-model thinker or advisor: the B4 advisor is simulated, a real model's quality as an advisor is unmeasured); very large logs; sensitivity to the synthetic generator's choices (150 days, Poisson counts).
