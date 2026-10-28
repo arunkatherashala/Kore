@@ -11,6 +11,7 @@
 //! No model is built in and this crate has no network code. The quality of the
 //! replies depends entirely on the thinker you plug in and is not measured here.
 
+pub mod advisor_cmd;
 pub mod scripted;
 pub mod thinker_cmd;
 
@@ -169,7 +170,7 @@ pub fn build_context(owner: &str, session: &str, user_text: &str) -> Result<Chat
         .map(|v| format!("{} {}: {} (confidence {:.2})", v.entity_type, r(&v.key), r(&v.stance), v.confidence))
         .collect();
     let tools = match authorize::load_policy(owner) {
-        authorize::PolicyState::Ok(m) => m.keys().map(|n| (n.clone(), tool_desc(n).to_string())).collect(),
+        authorize::PolicyState::Ok(m) => m.keys().filter(|n| authorize::CHAT_TOOLS.iter().any(|(c, _)| c == n)).map(|n| (n.clone(), tool_desc(n).to_string())).collect(),
         _ => vec![],
     };
     let mut ctx = ChatContext { session: session.into(), user_text: r(user_text), messages: msgs, facts, tools };

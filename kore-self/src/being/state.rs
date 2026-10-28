@@ -7,7 +7,9 @@
 //! replay tests check that both routes give the same state and therefore the
 //! same next decision.
 
+use super::advice::{decision_from_tags, pending_from_tags, AdviceSetup, AdvisorKind, DecisionAdvice, PendingAdvice, ADVISOR_SOURCE, RULE_KIND};
 use super::discover::{example_from_event, rule_from_event, Example, Rule};
+use super::trust::{TrustAlarm, TrustTable};
 use super::model::{AdaptMode, Alarm, Model, Obs, DEFAULT_HALF_LIFE};
 use super::solver::Strategy;
 use super::world::{iso_at, Domain, DOMAINS, N_DOM};
@@ -83,6 +85,8 @@ pub struct Genesis {
     pub drift: bool,
     /// How the world model treats old evidence. Fixed once the being exists.
     pub adapt: AdaptMode,
+    /// Which advisor (if any) the being takes advice from and whether it learns trust. Fixed once the being exists.
+    pub advice: AdviceSetup,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -131,6 +135,14 @@ pub struct BeingState {
     pub rules: Vec<Rule>,
     /// Changes the model's detector has flagged, in order (adaptive learner only).
     pub changes: Vec<Change>,
+    /// Advice read from the log for the step in progress (set by the advice event, consumed by the outcome).
+    pub advice: Option<PendingAdvice>,
+    /// What the decision did with that advice (set by the decision event, consumed by the outcome).
+    pub decision_advice: Option<DecisionAdvice>,
+    /// Learned reliability of each advisor, folded from advice, decision and outcome events.
+    pub trust: TrustTable,
+    /// Degradations of an advisor flagged so far: (step, alarm).
+    pub advice_alarms: Vec<(u64, TrustAlarm)>,
     /// Latest outcome event ids per (domain, strategy), oldest first: the evidence a detected change cites.
     group_recent: [[VecDeque<String>; 4]; N_DOM],
 }
@@ -169,7 +181,51 @@ impl BeingState {
         self.genesis_event = event;
     }
 
+    /// Advice for the step in progress (from its advice event, live or replayed).
+    pub fn note_advice(&mut self, a: PendingAdvice) {
+        self.advice = Some(a);
+    }
+
+    /// What the planner did with it (from the decision event, live or replayed).
+    pub fn note_decision_advice(&mut self, d: DecisionAdvice) {
+        self.decision_advice = Some(d);
+    }
+
+    /// Verdict of the verified search on a proposed rule (factual advice: accepted = right).
+    pub fn note_rule_verdict(&mut self, advisor: &str, accepted: bool) {
+        self.trust.note_given(advisor, RULE_KIND);
+        if let Some(al) = self.trust.observe(advisor, RULE_KIND, accepted, false) {
+            self.advice_alarms.push((self.step, al));
+        }
+    }
+
+    /// Judge the advice of the step that just ended against its outcome and update trust.
+    /// A test happens only when the advice was followed although the model alone preferred something
+    /// else; it is won when the realized reward per energy reaches what the model alone predicted for
+    /// its own choice (see `trust.rs`).
+    fn settle_advice(&mut self, o: &Outcome) {
+        let (adv, dec) = (self.advice.take(), self.decision_advice.take());
+        let (Some(a), Some(d)) = (adv, dec) else {
+            return;
+        };
+        let Some(m) = &a.menu else {
+            return;
+        };
+        if a.step != o.step || d.id != a.id {
+            return;
+        }
+        self.trust.note_given(&a.advisor, m.domain.name());
+        if o.skipped || !d.followed || d.agree {
+            return;
+        }
+        let x = o.reward as f64 / o.cost.max(1) as f64;
+        if let Some(al) = self.trust.observe(&a.advisor, m.domain.name(), x >= d.ref_score, true) {
+            self.advice_alarms.push((o.step, al));
+        }
+    }
+
     pub fn apply(&mut self, o: &Outcome) {
+        self.settle_advice(o);
         self.model.note_step(o.reward, o.cost);
         if o.skipped {
             self.total_cost += o.cost;
@@ -243,18 +299,48 @@ impl BeingState {
 
     pub fn from_events(rows: &[EventRow]) -> BeingState {
         let mut st = BeingState::default();
-        for e in rows.iter().filter(|e| e.source == SOURCE) {
+        for e in rows.iter().filter(|e| e.source == SOURCE || e.source == ADVISOR_SOURCE) {
             st.fold_event(e);
         }
         st
     }
 
+    /// One event of source `advisor`: advice and verdicts feed the state; results and alarms are derived records and are ignored.
+    pub fn fold_advisor(&mut self, kind: &str, tags: &str, event_id: &str) {
+        match kind {
+            "advice" => {
+                if let Some(p) = pending_from_tags(event_id, tags) {
+                    self.note_advice(p);
+                }
+            }
+            "verdict" => {
+                let accepted = match tag(tags, "verdict") {
+                    Some("accepted") => true,
+                    Some("rejected") => false,
+                    _ => return,
+                };
+                if let Some(who) = tag(tags, "advisor") {
+                    self.note_rule_verdict(&who.to_string(), accepted);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Apply one logged event (genesis, refill or outcome); others are ignored.
     pub fn fold_event(&mut self, e: &EventRow) {
+        if e.source == ADVISOR_SOURCE {
+            self.fold_advisor(&e.kind, &e.tags, &e.event_id);
+            return;
+        }
         if e.source != SOURCE {
             return;
         }
-        if e.kind == "note" && has_tag(&e.tags, "genesis") {
+        if e.kind == "decision" {
+            if let Some(d) = decision_from_tags(&e.tags) {
+                self.note_decision_advice(d);
+            }
+        } else if e.kind == "note" && has_tag(&e.tags, "genesis") {
             if let Some(g) = genesis_from_tags(&e.tags) {
                 if self.genesis.is_none() {
                     self.start(g, e.event_id.clone());
@@ -289,6 +375,11 @@ fn genesis_from_tags(tags: &str) -> Option<Genesis> {
         extended: tag(tags, "pattern_families") == Some("extended"),
         drift: tag(tags, "drift") == Some("on"),
         adapt: tag(tags, "adapt").and_then(AdaptMode::parse).unwrap_or(AdaptMode::Off),
+        advice: AdviceSetup {
+            kind: tag(tags, "advisor").and_then(AdvisorKind::parse).unwrap_or(AdvisorKind::None),
+            quality: tag(tags, "advisor_quality").and_then(|q| q.parse().ok()).unwrap_or(0.0),
+            trust: tag(tags, "trust") != Some("off"),
+        },
     })
 }
 
@@ -327,8 +418,13 @@ pub fn genesis_event(g: &Genesis) -> (NewEvent, String) {
     let ext = if g.extended { "; pattern families extended (author-defined hidden sequence families, strategy discovered added)" } else { "" };
     let drift = if g.drift { "; the world changes at scheduled times that the being is not told about" } else { "" };
     let adapt = match g.adapt { AdaptMode::Off => "", AdaptMode::Forget => "; the model forgets old evidence exponentially", AdaptMode::Full => "; the model forgets old evidence exponentially and flags changes with a CUSUM detector" };
+    let advice = match g.advice.kind {
+        AdvisorKind::None => String::new(),
+        AdvisorKind::Simulated => format!("; takes advice from a simulated advisor of quality {} and {}", g.advice.quality, if g.advice.trust { "learns how far to trust it" } else { "follows its advice blindly" }),
+        AdvisorKind::Command => format!("; takes advice from the owner's advisor command and {}", if g.advice.trust { "learns how far to trust it" } else { "follows its advice blindly" }),
+    };
     let text = format!(
-        "being genesis: a deterministic simulation world and loop start; world_seed {} loop_seed {} budget {} energy units; {policy}{ext}{drift}{adapt}",
+        "being genesis: a deterministic simulation world and loop start; world_seed {} loop_seed {} budget {} energy units; {policy}{ext}{drift}{adapt}{advice}",
         g.world_seed, g.loop_seed, g.budget
     );
     let at = iso_at(0);
@@ -355,6 +451,13 @@ pub fn genesis_event(g: &Genesis) -> (NewEvent, String) {
     }
     if g.adapt != AdaptMode::Off {
         tags.push(format!("adapt:{}", g.adapt.name()));
+    }
+    if g.advice.kind != AdvisorKind::None {
+        tags.push(format!("advisor:{}", g.advice.kind.name()));
+        if g.advice.kind == AdvisorKind::Simulated {
+            tags.push(format!("advisor_quality:{}", g.advice.quality));
+        }
+        tags.push(format!("trust:{}", if g.advice.trust { "on" } else { "off" }));
     }
     let ev = NewEvent { source: SOURCE.into(), occurred_at: at, kind: "note".into(), text, tags, redacted: false };
     (ev, id)

@@ -62,7 +62,7 @@ impl RunResult {
 pub fn run_policy(world_seed: u64, budget: i64, picker: &mut dyn DomainPicker) -> RunResult {
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: super::state::Chooser::Ucb, extended: false, drift: false, adapt: Default::default() }, String::new());
+    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: super::state::Chooser::Ucb, extended: false, drift: false, adapt: Default::default(), advice: Default::default() }, String::new());
     let mut e = Engine::new(World::new(world_seed), st, &th);
     let mut picks = vec![];
     while let Ok(o) = e.step(picker) {
@@ -203,7 +203,7 @@ fn oracle_choice(truth: &Truth, strategies: &[Strategy], st: &BeingState, offers
         }
     }
     let (v, slot, strategy) = best?;
-    Some(Choice { action: Action::Attempt { slot, strategy }, policy: name.into(), why: "knows hidden truth".into(), p: 0.0, sd: 0.0, cost_est: 0.0, score: v, rationale: serde_json::json!({}) })
+    Some(Choice { action: Action::Attempt { slot, strategy }, policy: name.into(), why: "knows hidden truth".into(), p: 0.0, sd: 0.0, cost_est: 0.0, score: v, rationale: serde_json::json!({}), advice: None })
 }
 
 /// Oracle for a drifting world: knows the hidden success rates before and after the degradation of
@@ -260,7 +260,7 @@ impl MenuRun {
 pub fn run_menu(world_seed: u64, budget: i64, chooser: &mut dyn MenuChooser) -> MenuRun {
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: false, drift: false, adapt: Default::default() }, String::new());
+    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: false, drift: false, adapt: Default::default(), advice: Default::default() }, String::new());
     let mut e = Engine::new(World::new(world_seed), st, &th);
     let (mut recs, mut skips, mut strategies) = (vec![], 0, [0u64; 4]);
     while let Ok(o) = e.step_menu(chooser) {
@@ -301,7 +301,7 @@ pub fn menu_row(seed: u64, budget: i64, beta: f64, skip_frac: f64) -> MenuRow {
         greedy_deep: run_menu(seed, budget, &mut GreedyMenu { strategy: Strategy::Deep }),
         ucb: run_menu(seed, budget, &mut UcbMenu::new(seed, super::chooser::DEFAULT_EXPLORE_C)),
         model: run_menu(seed, budget, &mut m),
-        model_noskip: run_menu(seed, budget, &mut ModelChooser { beta, skip_frac: 0.0, no_discovered: false, curiosity: 0.0, novelty: super::planner::DEFAULT_NOVELTY }),
+        model_noskip: run_menu(seed, budget, &mut ModelChooser { beta, skip_frac: 0.0, no_discovered: false, curiosity: 0.0, novelty: super::planner::DEFAULT_NOVELTY, advice: Default::default() }),
         oracle: run_menu(seed, budget, &mut OracleMenu { truth: truth(seed), strategies: STRATEGIES.to_vec() }),
     }
 }
@@ -379,7 +379,7 @@ pub fn run_menu_ext(world: World, budget: i64, chooser: &mut dyn MenuChooser, di
     let world_seed = world.seed;
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: true, drift: false, adapt: Default::default() }, String::new());
+    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: true, drift: false, adapt: Default::default(), advice: Default::default() }, String::new());
     for r in preload {
         st.apply_rule(r.clone());
     }
@@ -530,7 +530,7 @@ pub fn disc_row(seed: u64, budget: i64, beta: f64, every: u64, bonus: i64, curio
     DiscRow {
         seed,
         random: run_menu_ext(mk(), budget, &mut RandomMenu::new(seed), 0, &[]),
-        nodisc: run_menu_ext(mk(), budget, &mut ModelChooser { beta, skip_frac: DEFAULT_SKIP_FRAC, no_discovered: true, curiosity: 0.0, novelty: super::planner::DEFAULT_NOVELTY }, 0, &[]),
+        nodisc: run_menu_ext(mk(), budget, &mut ModelChooser { beta, skip_frac: DEFAULT_SKIP_FRAC, no_discovered: true, curiosity: 0.0, novelty: super::planner::DEFAULT_NOVELTY, advice: Default::default() }, 0, &[]),
         oracle_rules: run_menu_ext(mk(), budget, &mut OracleMenu { truth: truth_in(&w, &perfect), strategies: STRATEGIES_EXT.to_vec() }, 0, &perfect),
         oracle_fixed: run_menu_ext(mk(), budget, &mut OracleMenu { truth: truth_in(&w, &[]), strategies: STRATEGIES.to_vec() }, 0, &[]),
         disc,
@@ -610,7 +610,7 @@ impl DriftRun {
 pub fn run_drift(seed: u64, budget: i64, drift: bool, spec: &AdaptSpec, chooser: &mut dyn MenuChooser) -> DriftRun {
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed: seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: false, drift, adapt: spec.mode }, String::new());
+    st.start(Genesis { world_seed: seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: false, drift, adapt: spec.mode, advice: Default::default() }, String::new());
     st.model.set_mode(spec.mode, spec.half_life);
     st.model.cusum_k = spec.k;
     st.model.cusum_h = spec.h;
@@ -717,4 +717,30 @@ pub fn units_competence(run: &DriftRun, oracle: &DriftRun, from: i64, frac: f64)
         }
     }
     None
+}
+
+// ---- Track B4: advice ----
+
+use super::advice::{AdviceRequest, Ranked, Ranker};
+
+/// A ranker for the simulated advisor: every (offer, strategy) of a request ordered best first by true
+/// reward per energy. Uses the hidden truth, as the simulated advisor is supposed to.
+pub fn truth_ranker(truth: Truth, strategies: Vec<Strategy>) -> Ranker {
+    Box::new(move |req: &AdviceRequest| {
+        let mut v = vec![];
+        for o in &req.offers {
+            let Some(d) = Domain::parse(&o.domain) else { continue };
+            for &s in &strategies {
+                let p = truth.p[d.idx()][(o.difficulty.clamp(1, 5) - 1) as usize][s.idx()];
+                v.push(Ranked { slot: o.slot, strategy: s, value: o.listed_reward as f64 * p / s.energy(o.listed_cost) as f64, p });
+            }
+        }
+        v.sort_by(|a, b| b.value.partial_cmp(&a.value).unwrap().then(a.slot.cmp(&b.slot)).then(a.strategy.cmp(&b.strategy)));
+        v
+    })
+}
+
+/// (signature, form code) of the rules a perfect discoverer would hold; what a simulated advisor knows about rules.
+pub fn rule_table() -> Vec<(u8, String)> {
+    perfect_rules().iter().map(|r| (r.sig, r.form.code())).collect()
 }

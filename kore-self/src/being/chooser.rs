@@ -180,7 +180,7 @@ use super::solver::{Strategy, STRATEGIES};
 use serde_json::json as j;
 
 fn plain_choice(policy: &str, why: &str, action: Action, rationale: Value) -> Choice {
-    Choice { action, policy: policy.into(), why: why.into(), p: 0.0, sd: 0.0, cost_est: 0.0, score: 0.0, rationale }
+    Choice { action, policy: policy.into(), why: why.into(), p: 0.0, sd: 0.0, cost_est: 0.0, score: 0.0, rationale, advice: None }
 }
 
 fn best_ratio<'a>(offers: impl Iterator<Item = &'a Offer>) -> Option<&'a Offer> {

@@ -6,6 +6,7 @@
 //! chooser is asked again. The result must equal what the loop recorded. This
 //! is the check that preferences live in the log and nowhere else.
 
+use super::advice::{suffix_of_tags, suffix_of_trace, ADVISOR_SOURCE};
 use super::chooser::{DomainPicker, Pick, Ucb1};
 use super::discover::{rule_from_event, rule_id, search};
 use super::planner::{MenuChooser, ModelChooser};
@@ -57,7 +58,11 @@ fn action_for(st: &BeingState) -> Option<String> {
         Chooser::Ucb => pick_for(st).map(|p| p.domain.name().to_string()),
         Chooser::Model => {
             let offers = offers_of(&world_for(g).offers_at(st.step, st.clock));
-            ModelChooser::new(g.explore_c).choose(st, &offers).map(|c| c.action.label())
+            // the advice part (followed, agreed, yardstick, weight) is re-derived too and compared with the decision's tags
+            ModelChooser::for_genesis(g).choose(st, &offers).map(|c| match &c.advice {
+                Some(t) => format!("{}{}", c.action.label(), suffix_of_trace(t)),
+                None => c.action.label(),
+            })
         }
     }
 }
@@ -80,14 +85,15 @@ pub fn rederive_rules(rows: &[EventRow]) -> Vec<(String, bool)> {
 pub fn replay_decisions(rows: &[EventRow]) -> Vec<Replayed> {
     let mut st = BeingState::default();
     let mut out = vec![];
-    for e in rows.iter().filter(|e| e.source == SOURCE) {
-        if e.kind == "decision" {
+    for e in rows.iter().filter(|e| e.source == SOURCE || e.source == ADVISOR_SOURCE) {
+        if e.source == SOURCE && e.kind == "decision" {
             let menu = st.genesis.as_ref().map_or(false, |g| g.chooser == Chooser::Model);
-            let recorded = if menu { tag(&e.tags, "action").map(|s| s.to_string()) } else { tag(&e.tags, "domain").map(|s| s.to_string()) };
+            let recorded = if menu { tag(&e.tags, "action").map(|s| format!("{}{}", s, suffix_of_tags(&e.tags).unwrap_or_default())) } else { tag(&e.tags, "domain").map(|s| s.to_string()) };
             let step = tag(&e.tags, "step").and_then(|s| s.parse().ok());
             if let (Some(recorded), Some(step), Some(a)) = (recorded, step, action_for(&st)) {
                 out.push(Replayed { step, event_id: e.event_id.clone(), recorded, rederived: a });
             }
+            st.fold_event(e);
         } else {
             st.fold_event(e);
         }

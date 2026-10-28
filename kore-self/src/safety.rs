@@ -135,15 +135,15 @@ pub fn safe_path(owner: &str, user_path: &str) -> Result<PathBuf, String> {
 }
 
 /// Files in the owner directory that only the human edits or creates by hand:
-/// the chat policy, the thinker command and the kill switch.
-pub const HAND_EDITED_FILES: [&str; 3] = ["autonomy_policy.txt", "thinker.txt", "KILL"];
+/// the chat policy, the thinker command, the advisor command and the kill switch.
+pub const HAND_EDITED_FILES: [&str; 4] = ["autonomy_policy.txt", "thinker.txt", "advisor.txt", "KILL"];
 
 /// True if a lower-cased file name (as found in the owner directory) is one of
 /// `HAND_EDITED_FILES` or a variant that Windows would resolve to it (trailing
 /// dots or spaces, an NTFS stream suffix) or an editor backup of the policy files.
 pub fn is_hand_edited_name(lower: &str) -> bool {
     let base = lower.split(':').next().unwrap_or("").trim_end_matches(|c| c == '.' || c == ' ');
-    base == "kill" || base.starts_with("autonomy_policy") || base.starts_with("thinker")
+    base == "kill" || base.starts_with("autonomy_policy") || base.starts_with("thinker") || base.starts_with("advisor")
 }
 
 /// Like `safe_path` but returns a user-presentable error value for tool results.

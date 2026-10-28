@@ -9,6 +9,7 @@
 //! numbers in docs/measured.md.
 #![allow(dead_code)]
 
+pub mod advice;
 pub mod chooser;
 pub mod discover;
 pub mod measure;
@@ -18,6 +19,7 @@ pub mod policy;
 pub mod replay;
 pub mod solver;
 pub mod state;
+pub mod trust;
 pub mod world;
 #[path = "loop.rs"]
 pub mod run_loop;
@@ -26,7 +28,7 @@ mod tests;
 
 pub use chooser::{DomainPicker, Ucb1};
 pub use policy::{Policy, StopReason};
-pub use run_loop::{run, RunCfg};
+pub use run_loop::{run, run_advised, RunCfg};
 pub use solver::{Context, Proposal, ScriptedThinker, Thinker};
 pub use state::BeingState;
 pub use world::{Domain, World};

@@ -484,3 +484,11 @@ pub fn evaluate(form: &Form, examples: &[Example]) -> (u32, u32, u32) {
     }
     (r, w, n)
 }
+
+/// Acceptance of a PROPOSED form (from an outside advisor) for one signature: exactly the acceptance
+/// of the search above. The form is accepted only if the full search over the being's own logged
+/// examples accepts that very form for that signature, with the same minimum support, the same
+/// held-out split and the same never-applicable-and-wrong condition. A proposal cannot lower any bar.
+pub fn verify_proposal(examples: &[Example], sig: u8, form: &Form) -> Option<Found> {
+    search(examples).into_iter().find(|f| f.sig == sig && f.form == *form)
+}

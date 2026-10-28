@@ -47,13 +47,18 @@ const MAX_POLICY_BYTES: u64 = 64 * 1024;
 
 /// Tools a thinker may propose in A1, with their built-in tier (1 read-only, 2 note into own log).
 pub const CHAT_TOOLS: [(&str, u8); 4] = [("self_sql", 1), ("self_belief_history", 1), ("being_status", 1), ("self_event_add", 2)];
+/// Tools that only the being loop itself requests (never the chat thinker): asking the configured advisor
+/// for advice (L1: it sends the visible task features to a program the owner chose; it changes nothing in the world).
+pub const INTERNAL_TOOLS: [(&str, u8); 1] = [("advisor_query", 1)];
+/// The actor name the being loop uses for its own requests.
+pub const BEING_ACTOR: &str = "being";
 /// Tools only the human actor may use.
 pub const HUMAN_ONLY: [&str; 4] = ["chat_say", "chat_approve", "chat_history", "chat_pending"];
 /// What still works while the kill switch file exists (read-only).
 const KILL_ALLOWED: [&str; 3] = ["being_status", "chat_history", "chat_pending"];
 
 pub fn is_reserved_source(source: &str) -> bool {
-    source == SOURCE || source == "thinker" || source.starts_with("chat:")
+    source == SOURCE || source == "thinker" || source == "advisor" || source.starts_with("chat:")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +96,7 @@ pub enum PolicyState {
 }
 
 fn builtin_tier(tool: &str) -> Option<u8> {
-    CHAT_TOOLS.iter().find(|(n, _)| *n == tool).map(|(_, t)| *t)
+    CHAT_TOOLS.iter().chain(INTERNAL_TOOLS.iter()).find(|(n, _)| *n == tool).map(|(_, t)| *t)
 }
 
 /// Parse the policy text. Any problem is an error (the caller then denies everything).
@@ -117,7 +122,7 @@ pub fn parse_policy(text: &str) -> Result<BTreeMap<String, u8>, String> {
             return Err(format!("line {n}: tool '{l}' appears before any [L1]/[L2]/[L3] section"));
         };
         let Some(min) = builtin_tier(l) else {
-            return Err(format!("line {n}: '{}' is not a tool the chat can invoke (allowed names: {})", safety::trunc(l, 60), CHAT_TOOLS.map(|c| c.0).join(", ")));
+            return Err(format!("line {n}: '{}' is not a tool the chat can invoke (allowed names: {}, {})", safety::trunc(l, 60), CHAT_TOOLS.map(|c| c.0).join(", "), INTERNAL_TOOLS.map(|c| c.0).join(", ")));
         };
         if t < min {
             return Err(format!("line {n}: {l} needs at least tier L{min} but is listed under L{t}"));
@@ -188,6 +193,9 @@ fn decide(owner: &str, actor: &str, tool: &str, args: &serde_json::Value, approv
     }
     if builtin_tier(tool).is_none() {
         return decision(Outcome::Deny, format!("'{}' is not a tool the chat can invoke (default deny)", safety::trunc(tool, 60)));
+    }
+    if INTERNAL_TOOLS.iter().any(|(n, _)| *n == tool) && actor != BEING_ACTOR {
+        return decision(Outcome::Deny, format!("{tool} is requested by the being loop only; actor '{actor}' may not use it"));
     }
     match load_policy(owner) {
         PolicyState::Missing => decision(Outcome::Deny, format!("no {POLICY_FILE}: default deny")),

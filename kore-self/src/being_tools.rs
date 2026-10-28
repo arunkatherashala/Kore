@@ -5,9 +5,12 @@
 //! The owner directory holds the being's log. It is a deterministic simulation
 //! with author-defined rewards, measured in docs/measured.md.
 
+use crate::authorize::{self, Outcome, BEING_ACTOR};
+use crate::being::advice::{Advisor, AdvisorKind, SimulatedAdvisor, ADVISOR_SOURCE};
 use crate::being::replay::{rederive_rules, replay_decisions};
-use crate::being::run_loop::{domain_json, RunCfg};
-use crate::being::state::{tag, BeingState, Chooser, SOURCE};
+use crate::being::run_loop::{domain_json, run_advised, trust_json, world_for, RunCfg};
+use crate::being::solver::{STRATEGIES, STRATEGIES_EXT};
+use crate::being::state::{tag, BeingState, Chooser, Genesis, SOURCE};
 use crate::being::{self, Policy, ScriptedThinker};
 use crate::log_tools::{err, log_err, open, req_str, text};
 use crate::versioned::{CauseRow, EventRow, RevisionRow};
@@ -82,7 +85,19 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
             Some(_) => Err(err(format!("'{k}' must be a boolean"))),
         }
     };
+    let advisor_kind = match args.get("advisor") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(AdvisorKind::parse(s).ok_or_else(|| err("'advisor' must be \"none\", \"simulated\" or \"command\""))?),
+        Some(_) => return Err(err("'advisor' must be \"none\", \"simulated\" or \"command\"")),
+    };
+    let advisor_quality = match args.get("advisor_quality") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_f64().filter(|q| (0.0..=1.0).contains(q)).ok_or_else(|| err("'advisor_quality' must be a number within 0..1"))?),
+    };
     let cfg = RunCfg {
+        advisor: advisor_kind,
+        advisor_quality,
+        trust: flag("trust")?,
         drift: flag("drift")?,
         adapt: flag("adapt")?,
         extended,
@@ -95,13 +110,57 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         steps,
         refill_when_exhausted: !stop_after_budget,
     };
+    // which advisor will be asked: the one the being already has, else the one requested for a new being
+    let existing = {
+        let (_, rows) = load(owner)?;
+        BeingState::from_events(&rows).genesis
+    };
+    let kind = existing.as_ref().map_or(cfg.advisor.unwrap_or(AdvisorKind::None), |g| g.advice.kind);
+    let advisor: Option<Box<dyn Advisor>> = if kind == AdvisorKind::None {
+        None
+    } else {
+        // every run that asks an advisor is authorized (and audited) first, BEFORE the log is opened: default deny
+        let d = authorize::authorize(owner, BEING_ACTOR, "advisor_query", &json!({ "advisor": kind.name(), "steps": steps }));
+        if d.outcome != Outcome::Allow {
+            return Err(err(format!("advisor_query was not allowed ({}): {}. The being will not ask its advisor. To allow it, list advisor_query under [L1] in autonomy_policy.txt (edit that file by hand)", d.outcome.name(), d.reason)));
+        }
+        Some(make_advisor(kind, &cfg, existing.as_ref(), owner)?)
+    };
     let mut log = open(owner)?;
     let mut policy = Policy::new(steps);
     policy.refill_when_exhausted = cfg.refill_when_exhausted;
-    let s = being::run(&mut log, &cfg, &ScriptedThinker, &policy).map_err(log_err)?;
+    let s = run_advised(&mut log, &cfg, &ScriptedThinker, &policy, advisor.as_deref()).map_err(log_err)?;
     let mut out = s.to_json();
     out["note"] = json!("deterministic simulation loop: a seeded world with author-defined rewards and a scripted solver; the preference comes from those rewards. See docs/measured.md");
     Ok(text(out))
+}
+
+/// The advisor object for a being: simulated (seeded by the being's loop seed, truth supplied by the
+/// measurement helpers) or the owner's command.
+fn make_advisor(kind: AdvisorKind, cfg: &RunCfg, existing: Option<&Genesis>, owner: &str) -> Result<Box<dyn Advisor>, Value> {
+    match kind {
+        AdvisorKind::None => Err(err("no advisor")),
+        AdvisorKind::Command => {
+            let c = crate::chat::advisor_cmd::load_config(owner).map_err(|e| err(format!("advisor.txt problem, nothing was run: {e}")))?;
+            let a = crate::chat::advisor_cmd::CommandAdvisor::new(c, owner).map_err(err)?;
+            Ok(Box::new(a))
+        }
+        AdvisorKind::Simulated => {
+            let (world_seed, loop_seed, extended, drift, budget, q) = match existing {
+                Some(g) => (g.world_seed, g.loop_seed, g.extended, g.drift, g.budget, g.advice.quality),
+                None => (cfg.world_seed.unwrap_or(1), cfg.loop_seed.unwrap_or(1), cfg.extended.unwrap_or(false), cfg.drift.unwrap_or(false), cfg.budget.unwrap_or(being::run_loop::DEFAULT_BUDGET), cfg.advisor_quality.unwrap_or(0.0)),
+            };
+            let g = Genesis { world_seed, loop_seed, budget, explore_c: 0.0, chooser: Chooser::Model, extended, drift, adapt: Default::default(), advice: Default::default() };
+            let w = world_for(&g);
+            let strategies: Vec<being::solver::Strategy> = if extended { STRATEGIES_EXT.to_vec() } else { STRATEGIES.to_vec() };
+            let ranker = being::measure::truth_ranker(being::measure::truth_in(&w, &[]), strategies.iter().copied().filter(|s| *s != being::solver::Strategy::Discovered).collect());
+            let mut a = SimulatedAdvisor::new(loop_seed, q, ranker);
+            if extended {
+                a = a.with_rules(being::measure::rule_table());
+            }
+            Ok(Box::new(a))
+        }
+    }
 }
 
 fn rules(owner: &str) -> Result<Value, Value> {
@@ -170,6 +229,9 @@ fn status(owner: &str) -> Result<Value, Value> {
         "exists": true,
         "world_seed": g.world_seed, "loop_seed": g.loop_seed, "initial_budget": g.budget, "explore_c": g.explore_c, "chooser": g.chooser.name(),
         "drift": g.drift, "adapt": g.adapt.name(), "changes_detected": changes_json(&rows, &revs, &snap.rows::<CauseRow>()),
+        "advisor": g.advice.kind.name(), "advisor_quality": if g.advice.kind == AdvisorKind::Simulated { json!(g.advice.quality) } else { Value::Null },
+        "trust_learning": g.advice.kind != AdvisorKind::None && g.advice.trust,
+        "advice": advice_status(&st, &rows),
         "model_attempts": st.model.attempts(), "pattern_families": if g.extended { "extended" } else { "standard" }, "rules_discovered": st.rules.len(),
         "steps": st.step, "budget_left": st.budget_left, "refills": st.refills, "world_clock_seconds": st.clock,
         "total_reward": st.total_reward, "total_energy_spent": st.total_cost,
@@ -179,6 +241,23 @@ fn status(owner: &str) -> Result<Value, Value> {
         "replay_check": { "decisions": rep.len(), "re_derived_from_log_and_equal": ok },
         "note": "deterministic simulation; preferences are produced by the defined rewards",
     })))
+}
+
+/// What the log says about advice: trust per (advisor, kind), counts, degradations and the latest advice records.
+fn advice_status(st: &BeingState, rows: &[EventRow]) -> Value {
+    let ev: Vec<&EventRow> = rows.iter().filter(|e| e.source == ADVISOR_SOURCE).collect();
+    if ev.is_empty() {
+        return json!({ "advice_events": 0 });
+    }
+    let n = |k: &str| ev.iter().filter(|e| e.kind == k).count();
+    let latest: Vec<Value> = ev.iter().rev().filter(|e| e.kind == "result" || e.kind == "verdict" || e.kind == "alarm").take(3).map(|e| json!({ "event_id": e.event_id, "kind": e.kind, "text": e.text })).collect();
+    json!({
+        "advice_events": n("advice"), "results_logged": n("result"), "rule_verdicts": n("verdict"), "degradations_flagged": n("alarm"),
+        "failed_requests": ev.iter().filter(|e| e.kind == "advice" && tag(&e.tags, "error").is_some()).count(),
+        "trust": trust_json(st),
+        "trust_note": "trust = Beta posterior of 'advice followed against the being's own model beat what the model alone predicted'; it is folded from the log, never stored elsewhere",
+        "latest": latest,
+    })
 }
 
 /// The changes the being's detector flagged: the logged note, its revision and how many outcome events it cites.
@@ -195,6 +274,16 @@ fn changes_json(rows: &[EventRow], revs: &HashMap<String, RevisionRow>, causes: 
             })
         })
         .collect()
+}
+
+/// The advisor events of one step: the advice (request and reply), any verdict on a proposed rule, and what happened afterwards.
+fn advice_for_step(rows: &[EventRow], step: Option<&str>) -> Value {
+    let evs: Vec<Value> = rows
+        .iter()
+        .filter(|e| e.source == ADVISOR_SOURCE && tag(&e.tags, "step") == step && step.is_some())
+        .map(|e| json!({ "event_id": e.event_id, "kind": e.kind, "text": crate::safety::trunc(&e.text, 1500) }))
+        .collect();
+    json!(evs)
 }
 
 fn explain(args: &Value, owner: &str) -> Result<Value, Value> {
@@ -221,6 +310,7 @@ fn explain(args: &Value, owner: &str) -> Result<Value, Value> {
         cited = c.iter().take(40).map(|e| json!({ "event_id": e.event_id, "occurred_at": e.occurred_at, "kind": e.kind, "text": e.text })).collect();
     }
     let step = tag(&d.tags, "step");
+    let reasons = reasons.clone();
     let result = rows.iter().find(|e| e.source == SOURCE && e.kind == "outcome" && tag(&e.tags, "step") == step).map(|e| json!({ "event_id": e.event_id, "text": e.text }));
     let rep = replay_decisions(&rows).into_iter().find(|r| r.event_id == d.event_id);
     // the discovered rule that produced the answer of this step, if one did
@@ -249,6 +339,8 @@ fn explain(args: &Value, owner: &str) -> Result<Value, Value> {
         "evidence_note": "the cited events are the genesis event and the latest outcomes per domain; the counts and means used come from all outcomes before this step",
         "outcome_of_this_step": result,
         "discovered_rule_used": rule_used,
+        "advice_for_this_step": advice_for_step(&rows, step),
+        "how_advice_changed_the_decision": reasons.get("advice").cloned(),
         "changes_flagged_before_this_decision": changes_before,
         "replay_check": rep.map(|r| json!({ "re_derived_domain": r.rederived, "equal_to_recorded": r.matches() })),
     })))
@@ -269,6 +361,9 @@ pub fn tool_defs() -> Vec<Value> {
             "adapt": { "type": "boolean", "description": "Default false. true (needs chooser model): the world model discounts old evidence exponentially and a detector flags changes in the success rate of a (domain, strategy) group; every flagged change is logged with the outcomes it rests on and shown by being_status. Fixed once the being exists" },
             "discover": { "type": "boolean", "description": "Run rule discovery during this run (needs a being created with pattern_families extended): every discover_every steps the being searches a small author-defined grammar of sequence rules over its own revealed examples and logs accepted rules" },
             "discover_every": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "With discover: steps between discovery passes. Default 10" },
+            "advisor": { "type": "string", "enum": ["none", "simulated", "command"], "description": "Default none (needs chooser model). simulated: a deterministic simulated advisor of quality advisor_quality advises each step; command: the program in advisor.txt (hand-edited by the owner) is asked. Advice is ONE input to the planner, never executed blindly; proposed rules must pass the verified search. Every run that asks an advisor is authorized (tool advisor_query, default deny, list it under [L1]) and audited. Fixed once the being exists" },
+            "advisor_quality": { "type": "number", "minimum": 0, "maximum": 1, "description": "Simulated advisor only, required with it: probability that its suggestion is the oracle-correct one. A property of the simulation, not of any real model. Fixed once the being exists" },
+            "trust": { "type": "boolean", "description": "With an advisor, default true: the being learns from logged outcomes how far to trust the advisor per domain and mixes advice with its own model by that trust. false: it follows advice blindly. Fixed once the being exists" },
             "stop_after_budget": { "type": "boolean", "description": "Default true: stop when no task is affordable. False: the world refills the budget at the next world day (logged) and the run continues" }
           }, "required": ["steps"] } }),
         json!({ "name": "being_status",

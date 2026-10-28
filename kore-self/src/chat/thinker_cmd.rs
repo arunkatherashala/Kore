@@ -106,27 +106,32 @@ pub fn parse_config(text: &str) -> Result<ThinkerConfig, String> {
 
 /// Load the owner's configuration. `Ok(None)`: no thinker.txt (the scripted thinker is used).
 pub fn load_config(owner: &str) -> Result<Option<ThinkerConfig>, String> {
-    let p = safety::owner_dir(owner).join(THINKER_FILE);
+    load_config_file(owner, THINKER_FILE)
+}
+
+/// As `load_config` for another file of the same format in the owner directory (the advisor command uses `advisor.txt`).
+pub fn load_config_file(owner: &str, file: &str) -> Result<Option<ThinkerConfig>, String> {
+    let p = safety::owner_dir(owner).join(file);
     let meta = match std::fs::metadata(&p) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("cannot read {THINKER_FILE}: {e}")),
+        Err(e) => return Err(format!("cannot read {file}: {e}")),
     };
     if meta.len() > MAX_CONFIG_BYTES {
-        return Err(format!("{THINKER_FILE} is larger than {MAX_CONFIG_BYTES} bytes"));
+        return Err(format!("{file} is larger than {MAX_CONFIG_BYTES} bytes"));
     }
     if let Some(e) = crate::authorize::perm_problem(&p) {
         return Err(e);
     }
-    let bytes = std::fs::read(&p).map_err(|e| format!("cannot read {THINKER_FILE}: {e}"))?;
-    let text = String::from_utf8(bytes).map_err(|_| format!("{THINKER_FILE} is not valid UTF-8"))?;
-    let cfg = parse_config(&text).map_err(|e| format!("{THINKER_FILE}: {e}"))?;
-    let md = std::fs::metadata(&cfg.command).map_err(|e| format!("{THINKER_FILE}: command '{}' not found: {e}", cfg.command.display()))?;
+    let bytes = std::fs::read(&p).map_err(|e| format!("cannot read {file}: {e}"))?;
+    let text = String::from_utf8(bytes).map_err(|_| format!("{file} is not valid UTF-8"))?;
+    let cfg = parse_config(&text).map_err(|e| format!("{file}: {e}"))?;
+    let md = std::fs::metadata(&cfg.command).map_err(|e| format!("{file}: command '{}' not found: {e}", cfg.command.display()))?;
     if !md.is_file() {
-        return Err(format!("{THINKER_FILE}: command '{}' is not a file", cfg.command.display()));
+        return Err(format!("{file}: command '{}' is not a file", cfg.command.display()));
     }
     if let Some(e) = crate::authorize::perm_problem(&cfg.command) {
-        return Err(format!("{THINKER_FILE}: {e}"));
+        return Err(format!("{file}: {e}"));
     }
     Ok(Some(cfg))
 }
@@ -168,7 +173,7 @@ pub fn build_env(cfg: &ThinkerConfig, scratch: &Path) -> Vec<(String, String)> {
     env
 }
 
-fn run_program(cfg: &ThinkerConfig, scratch: &Path, input: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn run_program(cfg: &ThinkerConfig, scratch: &Path, input: &str) -> Result<Vec<u8>, String> {
     if !cfg.command.is_absolute() {
         return Err("command path is not absolute".into());
     }
