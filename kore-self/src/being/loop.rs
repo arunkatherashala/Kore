@@ -48,6 +48,8 @@ pub struct StepOut {
     pub changes: Vec<(NewEvent, NewRevision)>,
     /// Rules accepted on an advisor's proposal this step (their events are already in `events`; these carry the revisions).
     pub rules: Vec<NewRule>,
+    /// What the planner did with this step's advice (menu mode with an advisor).
+    pub advice: Option<advice::AdviceTrace>,
 }
 
 /// The world a being lives in, from its genesis event.
@@ -287,7 +289,7 @@ impl<'a> Engine<'a> {
             example: None,
         };
         self.state.apply(&outcome);
-        Ok(StepOut { outcome, pick: Some(pick), action: None, predicted_p: None, decision_event_id: dev_id, events: vec![dev, aev, oev], revision, prediction: Some(prediction), resolved: Some(resolved), changes: vec![], rules: vec![] })
+        Ok(StepOut { outcome, pick: Some(pick), action: None, predicted_p: None, decision_event_id: dev_id, events: vec![dev, aev, oev], revision, prediction: Some(prediction), resolved: Some(resolved), changes: vec![], rules: vec![], advice: None })
     }
 
     /// Menu mode: one step over `MENU_SIZE` offered tasks. The chooser picks
@@ -523,7 +525,7 @@ impl<'a> Engine<'a> {
         for (_, al) in &self.state.advice_alarms[alarms_before..] {
             events.push(advice::alarm_event(iso_at(t1), step, al));
         }
-        Ok(StepOut { outcome, pick: None, action: Some(label), predicted_p, decision_event_id: dev_id, events, revision, prediction, resolved, changes, rules: new_rules })
+        Ok(StepOut { outcome, pick: None, action: Some(label), predicted_p, decision_event_id: dev_id, events, revision, prediction, resolved, changes, rules: new_rules, advice: ch.advice.clone() })
     }
 
     /// In words, with the numbers the being has now: what happened to the advice of one step.
@@ -587,12 +589,18 @@ impl<'a> Engine<'a> {
             None => {
                 let ex: Vec<discover::Example> = self.state.examples.iter().filter(|e| e.sig == sig).cloned().collect();
                 let (r, w, n) = discover::evaluate(&form, &ex);
-                self.state.note_rule_verdict(who, false);
-                let detail = format!(
-                    "Rejected: on the {} logged examples of this signature it is right on {r}, wrong on {w} and not applicable on {n}; acceptance needs no wrong application and at least {} training and {} held-out exact reproductions. The proposal was not used.",
-                    ex.len(), discover::K_TRAIN, discover::K_VAL
-                );
-                (vec![advice::verdict_event(who, at, advice_id, sig, &form, "rejected", &detail)], vec![])
+                if w > 0 {
+                    self.state.note_rule_verdict(who, false);
+                    let detail = format!("Rejected: on the {} logged examples of this signature it is right on {r}, wrong on {w} and not applicable on {n}; a rule that is ever applicable-and-wrong is never accepted. The proposal was not used.", ex.len());
+                    (vec![advice::verdict_event(who, at, advice_id, sig, &form, "rejected", &detail)], vec![])
+                } else {
+                    // no contradiction, but not enough exact support yet: no verdict on the advisor, the proposal is not used
+                    let detail = format!(
+                        "Not accepted yet: on the {} logged examples of this signature it is right on {r}, never wrong, not applicable on {n}; acceptance needs at least {} training and {} held-out exact reproductions. The proposal was not used and counts neither for nor against the advisor.",
+                        ex.len(), discover::K_TRAIN, discover::K_VAL
+                    );
+                    (vec![advice::verdict_event(who, at, advice_id, sig, &form, "pending", &detail)], vec![])
+                }
             }
         }
     }

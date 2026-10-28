@@ -744,3 +744,90 @@ pub fn truth_ranker(truth: Truth, strategies: Vec<Strategy>) -> Ranker {
 pub fn rule_table() -> Vec<(u8, String)> {
     perfect_rules().iter().map(|r| (r.sig, r.form.code())).collect()
 }
+
+#[derive(Debug, Clone, Copy)]
+pub struct StepInfo {
+    pub has_advice: bool,
+    /// Advice was followed although the model alone preferred something else.
+    pub tested: bool,
+    pub followed: bool,
+    /// Test outcome (Some only for a test).
+    pub win: Option<bool>,
+    pub cost: i64,
+}
+
+pub struct AdvRun {
+    pub run: MenuRun,
+    pub state: BeingState,
+    pub info: Vec<StepInfo>,
+    /// (step count when accepted, rule), rules from discovery passes and from advisor proposals alike.
+    pub accepted: Vec<(u64, Rule)>,
+    pub alarms: Vec<(u64, super::trust::TrustAlarm)>,
+}
+
+/// Settings of the trust learner under test (the logged being uses the defaults).
+#[derive(Debug, Clone, Copy)]
+pub struct TrustSpec {
+    pub beta: f64,
+    pub k: f64,
+    pub h: f64,
+    pub keep: f64,
+}
+
+impl Default for TrustSpec {
+    fn default() -> TrustSpec {
+        TrustSpec { beta: super::trust::DEFAULT_TRUST_BETA, k: super::trust::CUSUM_K, h: super::trust::CUSUM_H, keep: super::trust::KEEP_AFTER_ALARM }
+    }
+}
+
+/// A simulated advisor of quality `q` for a world, consulting the hidden truth (`truth` from `truth_in(world, &[])`).
+pub fn sim_advisor(truth: &Truth, extended: bool, seed: u64, q: f64) -> super::advice::SimulatedAdvisor {
+    let a = super::advice::SimulatedAdvisor::new(seed, q, truth_ranker(truth.clone(), STRATEGIES.to_vec()));
+    if extended { a.with_rules(rule_table()) } else { a }
+}
+
+/// One in-memory menu run with an advisor (None: no advice), `mode` deciding how advice is used.
+/// `discover_every` 0: no discovery pass.
+pub fn run_adv(world: World, budget: i64, mode: super::planner::AdviceMode, spec: &TrustSpec, advisor: Option<&dyn super::advice::Advisor>, discover_every: u64, no_discovered: bool) -> AdvRun {
+    let extended = world.extended;
+    let world_seed = world.seed;
+    let th = ScriptedThinker;
+    let mut st = BeingState::default();
+    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended, drift: false, adapt: Default::default(), advice: Default::default() }, String::new());
+    st.trust.cusum_k = spec.k;
+    st.trust.cusum_h = spec.h;
+    st.trust.keep = spec.keep;
+    let mut chooser = ModelChooser { advice: super::planner::AdviceCfg { mode, trust_beta: spec.beta, lift: super::trust::LIFT }, no_discovered, ..ModelChooser::new(super::planner::DEFAULT_BETA) };
+    let mut e = Engine::new(world, st, &th).with_advisor(advisor);
+    let (mut recs, mut skips, mut strategies, mut info, mut accepted) = (vec![], 0, [0u64; 4], vec![], vec![]);
+    while let Ok(o) = e.step_menu(&mut chooser) {
+        let a = o.outcome;
+        for nr in &o.rules {
+            accepted.push((e.state.step, nr.rule.clone()));
+        }
+        let (has_advice, followed, tested, win) = match &o.advice {
+            Some(t) => {
+                let tested = t.followed && !t.agree;
+                let win = if tested && !a.skipped { Some(a.reward as f64 / a.cost.max(1) as f64 >= t.ref_score) } else { None };
+                (true, t.followed, tested, win)
+            }
+            None => (false, false, false, None),
+        };
+        info.push(StepInfo { has_advice, tested, followed, win, cost: a.cost });
+        if o.predicted_p.is_some() || a.skipped {
+            if a.skipped {
+                skips += 1;
+            } else if let Some(s) = a.strategy {
+                strategies[s.idx()] += 1;
+            }
+            recs.push(Rec { reward: a.reward, cost: a.cost, attempted: !a.skipped, correct: a.correct, pred: o.predicted_p });
+        }
+        if discover_every > 0 && e.state.step % discover_every == 0 {
+            for nr in e.discover_pass() {
+                accepted.push((e.state.step, nr.rule));
+            }
+        }
+    }
+    let alarms = e.state.advice_alarms.clone();
+    AdvRun { run: MenuRun { reward: e.state.total_reward, cost: e.state.total_cost, recs, skips, strategies }, state: e.state, info, accepted, alarms }
+}

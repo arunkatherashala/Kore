@@ -18,7 +18,8 @@
 //! is useful only above it.
 //!
 //! Rule advice is factual: a proposed rule is verified by the same search that accepts discovered
-//! rules, and accepted = win, rejected = loss. This is recorded under the kind `rule`; it never
+//! rules. Accepted = win; contradicted by the being's own logged examples (applicable and wrong) =
+//! loss; merely not supported by enough examples yet = no verdict. This is recorded under the kind `rule`; it never
 //! changes a decision (the verified search is the only gate), it is reported.
 //!
 //! ## How trust is used (mixing weight)
@@ -48,7 +49,7 @@ pub const LIFT: f64 = 0.1;
 /// CUSUM reference value and threshold for the degradation detector, and the share of evidence kept after an alarm.
 /// Chosen on tuning seeds 101..120 only (see docs/measured.md).
 pub const CUSUM_K: f64 = 0.5;
-pub const CUSUM_H: f64 = 4.0;
+pub const CUSUM_H: f64 = 6.0;
 pub const KEEP_AFTER_ALARM: f64 = 0.2;
 /// A cell needs at least this much evidence before it feeds the detector.
 pub const MIN_EVIDENCE: f64 = 6.0;
@@ -97,9 +98,19 @@ pub struct TrustAlarm {
     pub tests: u64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TrustTable {
     cells: BTreeMap<(String, String), TrustCell>,
+    /// Detector settings (defaults are the constants above; the measurement tunes them on the tuning seeds).
+    pub cusum_k: f64,
+    pub cusum_h: f64,
+    pub keep: f64,
+}
+
+impl Default for TrustTable {
+    fn default() -> Self {
+        TrustTable { cells: BTreeMap::new(), cusum_k: CUSUM_K, cusum_h: CUSUM_H, keep: KEEP_AFTER_ALARM }
+    }
 }
 
 impl TrustTable {
@@ -119,16 +130,17 @@ impl TrustTable {
     /// One test (advice followed against the model, or a verified rule): win or loss.
     /// Returns an alarm when the degradation detector fires.
     pub fn observe(&mut self, advisor: &str, kind: &str, win: bool, against_model: bool) -> Option<TrustAlarm> {
+        let (ck, ch, keep) = (self.cusum_k, self.cusum_h, self.keep);
         let c = self.at(advisor, kind);
         let mean = c.mean();
         let mut alarm = None;
         if c.wins + c.losses >= MIN_EVIDENCE {
             let z = (win as u8 as f64 - mean) / (mean * (1.0 - mean)).max(VAR_FLOOR).sqrt();
-            c.down = (c.down - z - CUSUM_K).max(0.0);
-            if c.down > CUSUM_H {
+            c.down = (c.down - z - ck).max(0.0);
+            if c.down > ch {
                 alarm = Some(TrustAlarm { advisor: advisor.to_string(), kind: kind.to_string(), statistic: c.down, mean_before: mean, tests: c.tests + 1 });
-                c.wins *= KEEP_AFTER_ALARM;
-                c.losses *= KEEP_AFTER_ALARM;
+                c.wins *= keep;
+                c.losses *= keep;
                 c.down = 0.0;
                 c.alarms += 1;
             }

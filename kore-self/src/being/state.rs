@@ -320,7 +320,7 @@ impl BeingState {
                     _ => return,
                 };
                 if let Some(who) = tag(tags, "advisor") {
-                    self.note_rule_verdict(&who.to_string(), accepted);
+                    self.note_rule_verdict(who, accepted);
                 }
             }
             _ => {}
@@ -330,7 +330,7 @@ impl BeingState {
     /// Apply one logged event (genesis, refill or outcome); others are ignored.
     pub fn fold_event(&mut self, e: &EventRow) {
         if e.source == ADVISOR_SOURCE {
-            self.fold_advisor(&e.kind, &e.tags, &e.event_id);
+            self.fold_advisor(tag(&e.tags, "ev").unwrap_or(""), &e.tags, &e.event_id);
             return;
         }
         if e.source != SOURCE {

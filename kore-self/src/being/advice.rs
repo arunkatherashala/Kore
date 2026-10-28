@@ -422,10 +422,16 @@ pub fn advice_event(advisor: &str, at: String, req: &AdviceRequest, advice: &Adv
     if advice.error.is_some() {
         tags.push("error:1".into());
     }
-    let ev = NewEvent { source: ADVISOR_SOURCE.into(), occurred_at: at, kind: "advice".into(), text: body.to_string(), tags, redacted: false };
+    tags.push("ev:advice".into());
+    let ev = NewEvent { source: ADVISOR_SOURCE.into(), occurred_at: at, kind: "statement".into(), text: body.to_string(), tags, redacted: false };
     let id = event_id(&ev.source, &ev.occurred_at, &ev.text);
     let pending = pending_from_tags(&id, &ev.tags.join(",")).expect("advice event tags are well formed");
     (ev, id, pending)
+}
+
+/// The advisor event type (advice, verdict, result, alarm) of an event of source `advisor`; the log kinds are only note/statement.
+pub fn ev_kind(tags: &str) -> Option<&str> {
+    tag(tags, "ev")
 }
 
 /// Read the pending advice back from the tags of an advice event.
@@ -534,13 +540,13 @@ pub fn verdict_event(advisor: &str, at: String, advice_id: &str, sig: u8, form: 
     NewEvent {
         source: ADVISOR_SOURCE.into(),
         occurred_at: at,
-        kind: "verdict".into(),
+        kind: "note".into(),
         text: format!(
             "advisor {advisor} proposed for sequence tasks of difficulty {sig} the rule `{}` ({}); the being's verified search over its own logged examples says: {verdict}. {detail}",
             form.dsl(),
             form.code()
         ),
-        tags: vec![format!("advice:{advice_id}"), format!("advisor:{advisor}"), format!("verdict:{verdict}"), format!("sig:{sig}"), format!("form:{}", form.code())],
+        tags: vec!["ev:verdict".into(), format!("advice:{advice_id}"), format!("advisor:{advisor}"), format!("verdict:{verdict}"), format!("sig:{sig}"), format!("form:{}", form.code())],
         redacted: false,
     }
 }
@@ -550,9 +556,9 @@ pub fn result_event(at: String, trace: &AdviceTrace, step: u64, text: String, re
     NewEvent {
         source: ADVISOR_SOURCE.into(),
         occurred_at: at,
-        kind: "result".into(),
+        kind: "note".into(),
         text,
-        tags: vec![format!("advice:{}", trace.id), format!("advisor:{}", trace.advisor), format!("step:{step}"), format!("result:{result}")],
+        tags: vec!["ev:result".into(), format!("advice:{}", trace.id), format!("advisor:{}", trace.advisor), format!("step:{step}"), format!("result:{result}")],
         redacted: false,
     }
 }
@@ -561,12 +567,12 @@ pub fn alarm_event(at: String, step: u64, a: &super::trust::TrustAlarm) -> NewEv
     NewEvent {
         source: ADVISOR_SOURCE.into(),
         occurred_at: at,
-        kind: "alarm".into(),
+        kind: "note".into(),
         text: format!(
             "advisor {} looks less reliable than before for {} advice (step {step}): its advice beat the being's own model in fewer tests than expected (trust was {:.2} after {} tests; CUSUM statistic {:.2}); the older evidence is cut to {:.0}% of its weight and the advisor will be tested again",
             a.advisor, a.kind, a.mean_before, a.tests, a.statistic, 100.0 * super::trust::KEEP_AFTER_ALARM
         ),
-        tags: vec![format!("advisor:{}", a.advisor), format!("kind:{}", a.kind), format!("step:{step}"), "advisor_alarm".into()],
+        tags: vec!["ev:alarm".into(), format!("advisor:{}", a.advisor), format!("kind:{}", a.kind), format!("step:{step}"), "advisor_alarm".into()],
         redacted: false,
     }
 }

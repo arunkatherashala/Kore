@@ -1025,3 +1025,285 @@ fn measured_adaptation_is_close_to_the_oracle_does_not_cost_much_and_detects_the
     assert!(detected >= 2, "the degradation of fast is flagged in {detected} of 6 worlds");
     assert!(stationary_alarms <= 2, "false alarms: {stationary_alarms}");
 }
+
+// ---- Track B4: advice as an input ----
+
+use super::advice::{Advice, AdviceRequest, Advisor, AdvisorKind, MenuAdvice, RuleAdvice, ADVISOR_SOURCE};
+use super::measure::{run_adv, sim_advisor, truth_in, TrustSpec};
+use super::planner::AdviceMode;
+use super::run_loop::run_advised;
+
+fn is_ev(e: &EventRow, k: &str) -> bool {
+    e.source == ADVISOR_SOURCE && super::advice::ev_kind(&e.tags) == Some(k)
+}
+
+struct FnAdvisor<F: Fn(&AdviceRequest) -> Advice>(F);
+impl<F: Fn(&AdviceRequest) -> Advice> Advisor for FnAdvisor<F> {
+    fn id(&self) -> String {
+        "scripted-test".into()
+    }
+    fn advise(&self, r: &AdviceRequest) -> Advice {
+        (self.0)(r)
+    }
+}
+
+fn cfg_adv(world: u64, seed: u64, steps: u64, budget: i64, q: f64, trust: bool) -> RunCfg {
+    RunCfg { advisor: Some(AdvisorKind::Simulated), advisor_quality: Some(q), trust: Some(trust), ..cfg_model(world, seed, steps, budget) }
+}
+
+fn run_advised_logged(root: &std::path::Path, world: u64, seed: u64, steps: u64, budget: i64, q: f64, trust: bool) -> (VersionedLog, super::run_loop::RunSummary) {
+    let mut log = open(root);
+    let a = sim_advisor(&truth_in(&World::new(world), &[]), false, seed, q);
+    let s = run_advised(&mut log, &cfg_adv(world, seed, steps, budget, q, trust), &ScriptedThinker, &Policy::new(steps), Some(&a)).unwrap();
+    (log, s)
+}
+
+#[test]
+fn no_advisor_reproduces_the_b1_learner_bit_for_bit_and_advice_mode_off_ignores_advice() {
+    let spec = TrustSpec::default();
+    let base = run_menu(5, 600, &mut ModelChooser::new(DEFAULT_BETA));
+    let none = run_adv(World::new(5), 600, AdviceMode::Off, &spec, None, 0, false);
+    assert_eq!((base.reward, base.cost, base.recs.len()), (none.run.reward, none.run.cost, none.run.recs.len()));
+    assert!(base.recs.iter().zip(&none.run.recs).all(|(a, b)| a.correct == b.correct && a.cost == b.cost && a.pred == b.pred));
+    // an advisor is asked and logged, but with the mode off nothing changes
+    let a = sim_advisor(&truth_in(&World::new(5), &[]), false, 5, 0.5);
+    let off = run_adv(World::new(5), 600, AdviceMode::Off, &spec, Some(&a), 0, false);
+    assert_eq!((base.reward, base.cost), (off.run.reward, off.run.cost));
+    assert!(off.state.trust.cells().next().is_none());
+}
+
+#[test]
+fn advised_run_is_deterministic_replays_exactly_and_trust_is_derived_from_the_log() {
+    let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (log1, s1) = run_advised_logged(d1.path(), 7, 3, 250, 5000, 0.8, true);
+    let (log2, s2) = run_advised_logged(d2.path(), 7, 3, 250, 5000, 0.8, true);
+    let (r1, r2): (Vec<EventRow>, Vec<EventRow>) = (log1.open_latest().rows(), log2.open_latest().rows());
+    assert_eq!(r1.iter().map(|e| e.event_id.clone()).collect::<Vec<_>>(), r2.iter().map(|e| e.event_id.clone()).collect::<Vec<_>>(), "same inputs, same log");
+    assert_eq!(s1.state.trust, s2.state.trust);
+    // trust and model folded from the log equal the live state
+    let st = BeingState::from_events(&r1);
+    assert_eq!(st.trust, s1.state.trust, "trust is a function of the log");
+    assert_eq!(st.model, s1.state.model);
+    assert!(st.trust.cells().any(|(_, c)| c.tests > 3), "advice was tested against the model");
+    // every decision, including the advice part (followed, agreed, yardstick, weight), is re-derived from the log
+    let rep = replay_decisions(&r1);
+    assert_eq!(rep.len(), 250);
+    assert!(rep.iter().all(|r| r.matches()), "{:?}", rep.iter().find(|r| !r.matches()));
+    assert!(rep.iter().any(|r| r.recorded.contains("|adv ")), "advice appears in the replayed decisions");
+    // one advice event per step, each result logged; ids derived from content
+    let adv: Vec<&EventRow> = r1.iter().filter(|e| is_ev(e, "advice")).collect();
+    assert_eq!(adv.len(), 250);
+    assert!(r1.iter().filter(|e| is_ev(e, "result")).count() >= 240);
+    assert_eq!(crate::versioned::event_id(&adv[0].source, &adv[0].occurred_at, &adv[0].text), adv[0].event_id);
+    // dropping the advisor events from the log leaves no trust: it is not stored anywhere else
+    let without: Vec<EventRow> = r1.iter().filter(|e| e.source != ADVISOR_SOURCE).cloned().collect();
+    assert!(BeingState::from_events(&without).trust.cells().next().is_none());
+}
+
+#[test]
+fn the_request_carries_only_visible_features_and_the_log_shows_the_request_and_the_advice() {
+    let dir = tempfile::tempdir().unwrap();
+    let (log, _) = run_advised_logged(dir.path(), 4, 1, 40, 3000, 0.7, true);
+    let rows: Vec<EventRow> = log.open_latest().rows();
+    let adv = rows.iter().find(|e| is_ev(e, "advice")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&adv.text).unwrap();
+    let req = v["request"].as_object().unwrap();
+    for k in req.keys() {
+        assert!(["task", "version", "instructions", "step", "offers", "strategies", "rule_signatures_wanted", "rule_grammar"].contains(&k.as_str()), "{k}");
+    }
+    for o in v["request"]["offers"].as_array().unwrap() {
+        let mut keys: Vec<&str> = o.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        keys.sort();
+        assert_eq!(keys, ["difficulty", "domain", "listed_cost", "listed_reward", "slot"]);
+    }
+    assert!(v["advice"]["slot"].is_u64() && v["advice"]["strategy"].is_string());
+    let text = adv.text.to_lowercase();
+    for hidden in ["expected", "reward_scale", "profile", "world_seed", "loop_seed", "budget_left", "answer"] {
+        assert!(!text.contains(hidden), "the advice event mentions {hidden}");
+    }
+}
+
+#[test]
+fn advice_sources_name_no_hidden_world_fields() {
+    let forbidden = ["Profile", "profile", "reward_scale", "cost_base", "diff_bias", ".expected(", "noise(", "task_forced", "task_of_kind", "truth", "World", "generate", "Kind::Pat", "Kind::Ext", "Kind::Neg", "pattern_bonus", "offers_at", "schedule", "degraded", "Drift"];
+    let dir_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("being");
+    for f in ["advice.rs", "trust.rs", "planner.rs", "model.rs"] {
+        let src = std::fs::read_to_string(dir_src.join(f)).unwrap();
+        // the tests module of a file may name them; the code above it may not
+        let code = src.split("#[cfg(test)]").next().unwrap();
+        for b in forbidden {
+            assert!(!code.contains(b), "{f} mentions {b}");
+        }
+    }
+    // the request type has exactly the shareable fields
+    let src = std::fs::read_to_string(dir_src.join("advice.rs")).unwrap().replace("\r\n", "\n");
+    let a = src.find("pub struct AdviceRequest {").unwrap();
+    let body = &src[a..src[a..].find("\n}\n").unwrap() + a];
+    for f in ["step:", "offers:", "strategies:", "rule_sigs_wanted:"] {
+        assert!(body.contains(f), "{f}");
+    }
+    assert_eq!(body.matches("pub ").count(), 5, "AdviceRequest is a struct with exactly four public fields: {body}");
+}
+
+#[test]
+fn trust_false_follows_advice_blindly_and_trust_true_does_not() {
+    let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (l1, _) = run_advised_logged(d1.path(), 5, 2, 120, 4000, 0.0, false);
+    let (l2, _) = run_advised_logged(d2.path(), 5, 2, 120, 4000, 0.0, true);
+    let followed = |log: &VersionedLog| -> (usize, usize) {
+        let rows: Vec<EventRow> = log.open_latest().rows();
+        let dec: Vec<&EventRow> = rows.iter().filter(|e| e.source == SOURCE && e.kind == "decision").collect();
+        (dec.iter().filter(|e| e.tags.contains("adv_followed:1")).count(), dec.len())
+    };
+    let (f1, n1) = followed(&l1);
+    let (f2, n2) = followed(&l2);
+    assert!(f1 as f64 > 0.95 * n1 as f64, "blind: {f1} of {n1}");
+    assert!((f2 as f64) < 0.6 * n2 as f64, "a useless advisor (q = 0) is followed in {f2} of {n2} steps by the trusting being");
+    // the trust cells say the advisor is no good
+    let st = BeingState::from_events(&l2.open_latest().rows());
+    let (w, t): (u64, u64) = st.trust.cells().fold((0, 0), |a, (_, c)| (a.0 + c.test_wins, a.1 + c.tests));
+    assert!(t >= 5 && (w as f64) < 0.5 * t as f64, "tests {t} wins {w}");
+}
+
+#[test]
+fn advice_settings_are_fixed_once_the_being_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut log, _) = run_advised_logged(dir.path(), 3, 1, 10, 2000, 0.7, true);
+    let a = sim_advisor(&truth_in(&World::new(3), &[]), false, 1, 0.7);
+    let go = |log: &mut VersionedLog, c: RunCfg| run_advised(log, &c, &ScriptedThinker, &Policy::new(1), Some(&a));
+    assert!(go(&mut log, cfg_adv(3, 1, 1, 2000, 0.9, true)).is_err());
+    assert!(go(&mut log, cfg_adv(3, 1, 1, 2000, 0.7, false)).is_err());
+    assert!(go(&mut log, RunCfg { advisor: Some(AdvisorKind::None), ..cfg_model(3, 1, 1, 2000) }).is_err());
+    assert!(go(&mut log, cfg_adv(3, 1, 1, 2000, 0.7, true)).is_ok());
+    // a being created without an advisor cannot be given one
+    let d2 = tempfile::tempdir().unwrap();
+    let mut l2 = open(d2.path());
+    assert!(run_advised(&mut l2, &cfg_model(3, 1, 1, 2000), &ScriptedThinker, &Policy::new(1), Some(&a)).is_err());
+    let fresh = |c: RunCfg| {
+        let d = tempfile::tempdir().unwrap();
+        let mut l = open(d.path());
+        run(&mut l, &c, &ScriptedThinker, &Policy::new(1)).is_err()
+    };
+    assert!(fresh(RunCfg { advisor: Some(AdvisorKind::Simulated), ..cfg_model(3, 1, 1, 2000) }), "simulated needs a quality");
+    assert!(fresh(RunCfg { advisor: Some(AdvisorKind::Simulated), advisor_quality: Some(1.5), ..cfg_model(3, 1, 1, 2000) }));
+    assert!(fresh(RunCfg { advisor: Some(AdvisorKind::Simulated), advisor_quality: Some(0.5), ..cfg(3, 1, 1, 2000) }), "advisor needs chooser model");
+    assert!(fresh(RunCfg { trust: Some(false), ..cfg_model(3, 1, 1, 2000) }), "trust without advisor");
+}
+
+#[test]
+fn proposed_rules_only_enter_through_the_verified_search() {
+    // an advisor that proposes the forms of the grammar in turn, for the first wanted signature, right or wrong
+    let all = forms();
+    let adv = FnAdvisor(move |r: &AdviceRequest| {
+        let mut a = Advice::default();
+        if let Some(&sig) = r.rule_sigs_wanted.first() {
+            a.rule = Some(RuleAdvice { sig, form: all[(r.step as usize / 5 + sig as usize) % all.len()] });
+        }
+        a
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = open(dir.path());
+    let cfg = RunCfg { advisor: Some(AdvisorKind::Command), extended: Some(true), ..cfg_model(EXT_WORLD, 1, 700, EXT_BUDGET) };
+    let s = run_advised(&mut log, &cfg, &ScriptedThinker, &Policy::new(700), Some(&adv)).unwrap();
+    let rows: Vec<EventRow> = log.open_latest().rows();
+    let verdicts: Vec<&EventRow> = rows.iter().filter(|e| is_ev(e, "verdict")).collect();
+    let count = |v: &str| verdicts.iter().filter(|e| e.tags.contains(&format!("verdict:{v}"))).count();
+    println!("verdicts: accepted {} rejected {} pending {} held {}", count("accepted"), count("rejected"), count("pending"), count("held"));
+    assert!(count("accepted") >= 1, "some proposals were right and supported");
+    assert!(count("rejected") + count("pending") > count("accepted"), "most proposals were not accepted");
+    // every accepted rule is re-derived by the search over the examples logged before it, with the same support
+    let re = rederive_rules(&rows);
+    assert_eq!(re.len(), s.state.rules.len());
+    assert!(re.iter().all(|(_, ok)| *ok), "{re:?}");
+    // and each accepted rule is one the plain search accepts for that signature
+    for r in &s.state.rules {
+        assert!(discover::verify_proposal(&s.state.examples, r.sig, &r.form).is_some(), "{} {}", r.sig, r.form.code());
+    }
+    // accepted rules are not wrong on fresh tasks of their signature (same bar as discovered rules)
+    let w = World::with_extended(EXT_WORLD, true);
+    for r in &s.state.rules {
+        let bad = (0..200u64)
+            .filter(|j| {
+                let t = w.task_forced(20_000_000 + j, Domain::Pattern, r.sig);
+                predict(&r.form, &t.view.params).map_or(false, |v| !t.check(v))
+            })
+            .count();
+        assert!(bad <= 4, "rule {} {} is wrong on {bad} of 200 fresh tasks", r.sig, r.form.code());
+    }
+    // with no examples at all nothing can be accepted
+    assert!(discover::verify_proposal(&[], 2, &Form::Lin { mask: 1, constant: false }).is_none());
+    // the trust cell for rules counts only accepted and rejected verdicts
+    let cell = s.state.trust.cell("scripted-test", "rule");
+    assert_eq!(cell.tests as usize, count("accepted") + count("rejected"));
+}
+
+#[test]
+fn a_failed_or_unusable_advisor_is_logged_and_the_being_goes_on_alone() {
+    let adv = FnAdvisor(|r: &AdviceRequest| {
+        if r.step % 2 == 0 {
+            Advice { error: Some("boom".into()), ..Default::default() }
+        } else {
+            Advice { menu: Some(MenuAdvice { slot: 99, strategy: Strategy::Deep, p_success: None }), ..Default::default() }
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = open(dir.path());
+    let cfg = RunCfg { advisor: Some(AdvisorKind::Command), ..cfg_model(2, 1, 30, 3000) };
+    let s = run_advised(&mut log, &cfg, &ScriptedThinker, &Policy::new(30), Some(&adv)).unwrap();
+    let plain = run_menu(2, 3000, &mut ModelChooser::new(DEFAULT_BETA));
+    let rows: Vec<EventRow> = log.open_latest().rows();
+    assert_eq!(rows.iter().filter(|e| is_ev(e, "advice") && e.tags.contains("error:1")).count(), 30);
+    // the first 30 steps equal the unadvised learner's
+    let first30: i64 = plain.recs.iter().take(30).map(|r| r.reward).sum();
+    assert_eq!(s.state.total_reward, first30);
+    assert!(replay_decisions(&rows).iter().all(|r| r.matches()));
+}
+
+#[test]
+fn tamper_after_an_advised_run_fails_verify() {
+    let dir = tempfile::tempdir().unwrap();
+    let (log, _) = run_advised_logged(dir.path(), 6, 6, 80, 3000, 0.7, true);
+    verify_dir(log.dir()).unwrap();
+    let seg = std::fs::read_dir(log.dir().join("events")).unwrap().flatten().map(|f| f.path()).filter(|p| p.extension().map_or(false, |x| x == "kore")).last().unwrap();
+    let mut bytes = std::fs::read(&seg).unwrap();
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0xFF;
+    std::fs::write(&seg, bytes).unwrap();
+    assert!(verify_dir(log.dir()).is_err());
+}
+
+#[test]
+fn simulated_advisor_with_quality_one_is_the_oracle_and_blind_following_reaches_it() {
+    let spec = TrustSpec::default();
+    for seed in [1u64, 2, 3] {
+        let truth = truth_in(&World::new(seed), &[]);
+        let orc = run_menu(seed, 600, &mut super::measure::OracleMenu { truth: truth.clone(), strategies: STRATEGIES.to_vec() });
+        let a = sim_advisor(&truth, false, seed, 1.0);
+        let blind = run_adv(World::new(seed), 600, AdviceMode::Blind, &spec, Some(&a), 0, false);
+        assert_eq!((orc.reward, orc.cost), (blind.run.reward, blind.run.cost), "q = 1 advice followed blindly is the oracle's play");
+    }
+}
+
+#[test]
+fn measured_trust_protects_against_bad_advice_and_blind_following_does_not() {
+    // floors set below the measured values (docs/measured.md); seeds 1..8 of the 20, budget 600
+    let spec = TrustSpec::default();
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    let (mut none, mut blind_bad, mut trust_bad, mut trust_good, mut blind_good) = (vec![], vec![], vec![], vec![], vec![]);
+    for seed in 1..=8u64 {
+        let truth = truth_in(&World::new(seed), &[]);
+        none.push(run_adv(World::new(seed), 600, AdviceMode::Off, &spec, None, 0, false).run.per_budget());
+        let mut bad = sim_advisor(&truth, false, seed, 0.2);
+        bad.confidently_wrong = true;
+        blind_bad.push(run_adv(World::new(seed), 600, AdviceMode::Blind, &spec, Some(&bad), 0, false).run.per_budget());
+        trust_bad.push(run_adv(World::new(seed), 600, AdviceMode::Trust, &spec, Some(&bad), 0, false).run.per_budget());
+        let good = sim_advisor(&truth, false, seed, 0.9);
+        trust_good.push(run_adv(World::new(seed), 600, AdviceMode::Trust, &spec, Some(&good), 0, false).run.per_budget());
+        blind_good.push(run_adv(World::new(seed), 600, AdviceMode::Blind, &spec, Some(&good), 0, false).run.per_budget());
+    }
+    println!("none {:.3} blind bad {:.3} trust bad {:.3} blind q.9 {:.3} trust q.9 {:.3}", mean(&none), mean(&blind_bad), mean(&trust_bad), mean(&blind_good), mean(&trust_good));
+    assert!(mean(&blind_bad) < mean(&none) - 1.0, "following a bad advisor blindly hurts a lot");
+    assert!(mean(&trust_bad) > mean(&none) - 0.5, "the trust learner limits the damage of a bad advisor");
+    assert!(mean(&trust_bad) > mean(&blind_bad) + 1.0);
+    assert!(mean(&trust_good) > mean(&blind_good) + 0.3, "trust beats blind following of a good but imperfect advisor");
+}

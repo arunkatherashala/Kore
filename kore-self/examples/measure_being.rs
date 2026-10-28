@@ -9,6 +9,9 @@ mod versioned;
 #[path = "../src/being/mod.rs"]
 mod being;
 
+#[path = "measure_being_parts/advice.rs"]
+mod advice_mode;
+
 use being::chooser::DEFAULT_EXPLORE_C;
 use being::measure::*;
 use being::world::{Domain, DOMAINS};
@@ -504,6 +507,10 @@ fn drift_main() {
 }
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|a| a == "advice").unwrap_or(false) {
+        advice_mode::main_advice(&args);
+        return;
+    }
     if args.get(1).map(|a| a == "drift-tune").unwrap_or(false) {
         drift_tune(args.get(2).map_or(false, |a| a == "2"));
         return;

@@ -6,7 +6,7 @@
 //! with author-defined rewards, measured in docs/measured.md.
 
 use crate::authorize::{self, Outcome, BEING_ACTOR};
-use crate::being::advice::{Advisor, AdvisorKind, SimulatedAdvisor, ADVISOR_SOURCE};
+use crate::being::advice::{ev_kind, Advisor, AdvisorKind, SimulatedAdvisor, ADVISOR_SOURCE};
 use crate::being::replay::{rederive_rules, replay_decisions};
 use crate::being::run_loop::{domain_json, run_advised, trust_json, world_for, RunCfg};
 use crate::being::solver::{STRATEGIES, STRATEGIES_EXT};
@@ -249,11 +249,11 @@ fn advice_status(st: &BeingState, rows: &[EventRow]) -> Value {
     if ev.is_empty() {
         return json!({ "advice_events": 0 });
     }
-    let n = |k: &str| ev.iter().filter(|e| e.kind == k).count();
-    let latest: Vec<Value> = ev.iter().rev().filter(|e| e.kind == "result" || e.kind == "verdict" || e.kind == "alarm").take(3).map(|e| json!({ "event_id": e.event_id, "kind": e.kind, "text": e.text })).collect();
+    let n = |k: &str| ev.iter().filter(|e| ev_kind(&e.tags) == Some(k)).count();
+    let latest: Vec<Value> = ev.iter().rev().filter(|e| matches!(ev_kind(&e.tags), Some("result" | "verdict" | "alarm"))).take(3).map(|e| json!({ "event_id": e.event_id, "kind": ev_kind(&e.tags), "text": e.text })).collect();
     json!({
         "advice_events": n("advice"), "results_logged": n("result"), "rule_verdicts": n("verdict"), "degradations_flagged": n("alarm"),
-        "failed_requests": ev.iter().filter(|e| e.kind == "advice" && tag(&e.tags, "error").is_some()).count(),
+        "failed_requests": ev.iter().filter(|e| ev_kind(&e.tags) == Some("advice") && tag(&e.tags, "error").is_some()).count(),
         "trust": trust_json(st),
         "trust_note": "trust = Beta posterior of 'advice followed against the being's own model beat what the model alone predicted'; it is folded from the log, never stored elsewhere",
         "latest": latest,
@@ -281,7 +281,7 @@ fn advice_for_step(rows: &[EventRow], step: Option<&str>) -> Value {
     let evs: Vec<Value> = rows
         .iter()
         .filter(|e| e.source == ADVISOR_SOURCE && tag(&e.tags, "step") == step && step.is_some())
-        .map(|e| json!({ "event_id": e.event_id, "kind": e.kind, "text": crate::safety::trunc(&e.text, 1500) }))
+        .map(|e| json!({ "event_id": e.event_id, "kind": ev_kind(&e.tags), "text": crate::safety::trunc(&e.text, 1500) }))
         .collect();
     json!(evs)
 }
