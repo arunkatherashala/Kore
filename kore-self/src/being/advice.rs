@@ -400,7 +400,9 @@ pub struct PendingAdvice {
 pub fn advice_event(advisor: &str, at: String, req: &AdviceRequest, advice: &Advice, task_ids: &[String]) -> (NewEvent, String, PendingAdvice) {
     let mut body = json!({ "advisor": advisor, "step": req.step, "request": req.to_json(), "advice": advice.to_json() });
     if let Some((p, r)) = &advice.transcript {
-        body["transcript"] = json!({ "prompt": p, "reply": r });
+        // what was really sent (redacted) replaces the request as built; the reply is kept
+        body["request"] = serde_json::from_str(p).unwrap_or_else(|_| json!(p));
+        body["transcript"] = json!({ "reply": r });
     }
     let mut tags = vec![format!("step:{}", req.step), format!("advisor:{advisor}")];
     if let Some(m) = &advice.menu {

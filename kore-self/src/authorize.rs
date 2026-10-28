@@ -227,6 +227,11 @@ pub fn tag_safe(s: &str) -> String {
 /// Returns (event_id, created).
 pub fn append_event(owner: &str, source: &str, kind: &str, text: &str, tags: Vec<String>) -> Result<(String, bool), String> {
     let _g = crate::log_tools::LOG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    append_event_locked(owner, source, kind, text, tags)
+}
+
+/// Same as the unlocked append, for a caller that already holds the process log lock (a log tool running under it).
+pub fn append_event_locked(owner: &str, source: &str, kind: &str, text: &str, tags: Vec<String>) -> Result<(String, bool), String> {
     let mut log = crate::log_tools::open(owner).map_err(|v| v["content"][0]["text"].as_str().unwrap_or("log error").to_string())?;
     let red = Redactor::load(&safety::owner_dir(owner)).redact(text);
     let ev = NewEvent { source: source.into(), occurred_at: vl::now_iso(), kind: kind.into(), text: red.text.clone(), tags, redacted: red.changed() };
@@ -234,22 +239,26 @@ pub fn append_event(owner: &str, source: &str, kind: &str, text: &str, tags: Vec
     Ok((info.event_ids.first().cloned().unwrap_or_default(), info.created))
 }
 
-fn audit(owner: &str, actor: &str, tool: &str, args: &serde_json::Value, d: &Decision) -> Result<(), String> {
+fn audit(owner: &str, actor: &str, tool: &str, args: &serde_json::Value, d: &Decision, locked: bool) -> Result<(), String> {
     let a = safety::trunc(&args.to_string(), 300).to_string();
     let body = serde_json::json!({
         "actor": safety::trunc(actor, 40), "tool": safety::trunc(tool, 60), "decision": d.outcome.name(),
         "reason": safety::trunc(&d.reason, 300), "args": a, "nonce": nonce(),
     });
     let tags = vec![format!("decision:{}", d.outcome.name()), format!("tool:{}", tag_safe(tool)), format!("actor:{}", tag_safe(actor))];
-    append_event(owner, SOURCE, "decision", &body.to_string(), tags).map(|_| ())
+    if locked {
+        append_event_locked(owner, SOURCE, "decision", &body.to_string(), tags).map(|_| ())
+    } else {
+        append_event(owner, SOURCE, "decision", &body.to_string(), tags).map(|_| ())
+    }
 }
 
-fn finish(owner: &str, actor: &str, tool: &str, args: &serde_json::Value, d: Decision) -> Decision {
+fn finish(owner: &str, actor: &str, tool: &str, args: &serde_json::Value, d: Decision, locked: bool) -> Decision {
     let read_only_human = actor == HUMAN && matches!(tool, "chat_history" | "chat_pending") && d.outcome == Outcome::Allow;
     if read_only_human {
         return d;
     }
-    match audit(owner, actor, tool, args, &d) {
+    match audit(owner, actor, tool, args, &d, locked) {
         Ok(()) => d,
         // no audit row, no action
         Err(e) => decision(Outcome::Deny, format!("audit event could not be written ({e}): denied")),
@@ -259,14 +268,20 @@ fn finish(owner: &str, actor: &str, tool: &str, args: &serde_json::Value, d: Dec
 /// Decide, and write the audit row. Fails closed if the row cannot be written.
 pub fn authorize(owner: &str, actor: &str, tool: &str, args: &serde_json::Value) -> Decision {
     let d = decide(owner, actor, tool, args, false);
-    finish(owner, actor, tool, args, d)
+    finish(owner, actor, tool, args, d, false)
+}
+
+/// Same as the plain check, for a caller that already holds the process log lock (the being loop runs inside a log tool).
+pub fn authorize_locked(owner: &str, actor: &str, tool: &str, args: &serde_json::Value) -> Decision {
+    let d = decide(owner, actor, tool, args, false);
+    finish(owner, actor, tool, args, d, true)
 }
 
 /// Same, for a tool call whose NeedsApproval item the human has approved (checked by the caller).
 /// The kill switch and the policy are checked again.
 pub fn authorize_approved(owner: &str, actor: &str, tool: &str, args: &serde_json::Value) -> Decision {
     let d = decide(owner, actor, tool, args, true);
-    finish(owner, actor, tool, args, d)
+    finish(owner, actor, tool, args, d, false)
 }
 
 #[cfg(test)]
@@ -383,5 +398,50 @@ mod tests {
         assert!(!safety::is_hand_edited_name("killer.txt") && !safety::is_hand_edited_name("notes.txt"));
         assert!(is_reserved_source("authorize") && is_reserved_source("thinker") && is_reserved_source("chat:user"));
         assert!(!is_reserved_source("mcp"));
+    }
+
+    #[test]
+    fn advisor_query_is_denied_by_default_audited_and_only_for_the_being_loop() {
+        let o = setup("auth-advisor");
+        let args = json!({"advisor": "simulated", "steps": 10});
+        let d = authorize(&o, BEING_ACTOR, "advisor_query", &args);
+        assert_eq!(d.outcome, Outcome::Deny);
+        assert!(d.reason.contains("default deny"), "{}", d.reason);
+        write_policy(&o, "[L1]
+self_sql
+");
+        assert_eq!(authorize(&o, BEING_ACTOR, "advisor_query", &args).outcome, Outcome::Deny, "not listed");
+        write_policy(&o, "[L1]
+advisor_query
+");
+        assert_eq!(authorize(&o, BEING_ACTOR, "advisor_query", &args).outcome, Outcome::Allow);
+        // the chat thinker can never use it, even when listed
+        let d = authorize(&o, "thinker", "advisor_query", &args);
+        assert_eq!(d.outcome, Outcome::Deny);
+        assert!(d.reason.contains("being loop only"), "{}", d.reason);
+        // listed higher: needs approval, which the loop does not take as an allow
+        write_policy(&o, "[L3]
+advisor_query
+");
+        assert_eq!(authorize(&o, BEING_ACTOR, "advisor_query", &args).outcome, Outcome::NeedsApproval);
+        // kill switch
+        write_policy(&o, "[L1]
+advisor_query
+");
+        std::fs::write(safety::owner_dir(&o).join(KILL_FILE), "").unwrap();
+        assert_eq!(authorize(&o, BEING_ACTOR, "advisor_query", &args).outcome, Outcome::Deny);
+        std::fs::remove_file(safety::owner_dir(&o).join(KILL_FILE)).unwrap();
+        // every decision is a row in the audit trail, with the tool name
+        let rows = audit_rows(&o);
+        assert_eq!(rows.len(), 6);
+        assert!(rows.iter().all(|r| r.tags.contains("tool:advisor_query")));
+        assert!(rows.iter().filter(|r| r.tags.contains("decision:deny")).count() >= 4);
+        // not a tool a policy line may misspell, and the chat tool list does not include it
+        assert!(parse_policy("[L1]
+advisor_querry
+").is_err());
+        assert!(!CHAT_TOOLS.iter().any(|(n, _)| *n == "advisor_query"));
+        assert!(is_reserved_source("advisor"));
+        assert!(safety::is_hand_edited_name("advisor.txt") && safety::is_hand_edited_name("advisor.txt.") && safety::is_hand_edited_name("advisor.TXT".to_lowercase().as_str()));
     }
 }

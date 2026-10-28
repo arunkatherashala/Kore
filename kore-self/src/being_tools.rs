@@ -120,7 +120,7 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         None
     } else {
         // every run that asks an advisor is authorized (and audited) first, BEFORE the log is opened: default deny
-        let d = authorize::authorize(owner, BEING_ACTOR, "advisor_query", &json!({ "advisor": kind.name(), "steps": steps }));
+        let d = authorize::authorize_locked(owner, BEING_ACTOR, "advisor_query", &json!({ "advisor": kind.name(), "steps": steps }));
         if d.outcome != Outcome::Allow {
             return Err(err(format!("advisor_query was not allowed ({}): {}. The being will not ask its advisor. To allow it, list advisor_query under [L1] in autonomy_policy.txt (edit that file by hand)", d.outcome.name(), d.reason)));
         }
