@@ -25,6 +25,8 @@ pub mod world;
 pub mod run_loop;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_b5;
 
 pub use chooser::{DomainPicker, Ucb1};
 pub use policy::{Policy, StopReason};

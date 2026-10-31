@@ -54,7 +54,13 @@ pub struct StepOut {
 
 /// The world a being lives in, from its genesis event.
 pub fn world_for(g: &Genesis) -> World {
-    World::with_drift(g.world_seed, g.extended, if g.drift { Some(g.budget) } else { None })
+    let mut w = World::with_drift(g.world_seed, g.extended, if g.drift { Some(g.budget) } else { None });
+    if g.ext2 {
+        let d = w.drift.take();
+        w = World::with_ext2(g.world_seed, if g.rule_drift { Some(g.budget) } else { None });
+        w.drift = d;
+    }
+    w
 }
 
 /// The log records of one detected change.
@@ -287,6 +293,7 @@ impl<'a> Engine<'a> {
             listed_cost: v.cost,
             skipped: false,
             example: None,
+            rule_used: None,
         };
         self.state.apply(&outcome);
         Ok(StepOut { outcome, pick: Some(pick), action: None, predicted_p: None, decision_event_id: dev_id, events: vec![dev, aev, oev], revision, prediction: Some(prediction), resolved: Some(resolved), changes: vec![], rules: vec![], advice: None })
@@ -511,6 +518,7 @@ impl<'a> Engine<'a> {
             listed_cost: listed,
             skipped: !attempted,
             example,
+            rule_used: done.rule.clone(),
         };
         let before = self.state.changes.len();
         let pending_advice = self.state.advice.clone();
@@ -686,6 +694,10 @@ pub struct RunCfg {
     pub refill_when_exhausted: bool,
     /// `Some(true)` creates a being in the extended pattern world (menu world only); fixed once created.
     pub extended: Option<bool>,
+    /// `Some(true)` creates a being in the extended2 pattern world (implies extended); fixed once created.
+    pub ext2: Option<bool>,
+    /// `Some(true)` creates an extended2 being whose sequence rule of one family changes halfway through the budget; fixed once created.
+    pub rule_drift: Option<bool>,
     /// Run a discovery pass after every N-th step of the being (None or 0: never).
     pub discover_every: Option<u64>,
     /// `Some(true)` creates a being in a world with scheduled hidden changes (menu world only); fixed once created.
@@ -853,7 +865,11 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
             if !c.is_finite() || !(0.0..=10.0).contains(&c) {
                 return Err(LogError::Invalid("explore_c must be within 0..=10".into()));
             }
-            let extended = cfg.extended.unwrap_or(false);
+            let ext2 = cfg.ext2.unwrap_or(false);
+            let extended = cfg.extended.unwrap_or(false) || ext2;
+            if cfg.rule_drift == Some(true) && !ext2 {
+                return Err(LogError::Invalid("rule_drift needs pattern_families extended2".into()));
+            }
             if extended && chooser != Chooser::Model {
                 return Err(LogError::Invalid("pattern_families extended needs chooser model (the menu world)".into()));
             }
@@ -875,7 +891,7 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
                 (_, None) => 0.0,
             };
             let advice = AdviceSetup { kind, quality, trust: cfg.trust.unwrap_or(true) };
-            let g = Genesis { world_seed: cfg.world_seed.unwrap_or(1), loop_seed: cfg.loop_seed.unwrap_or(1), budget, explore_c: c, chooser, extended, drift, adapt: if adapt { AdaptMode::Full } else { AdaptMode::Off }, advice };
+            let g = Genesis { world_seed: cfg.world_seed.unwrap_or(1), loop_seed: cfg.loop_seed.unwrap_or(1), budget, explore_c: c, chooser, extended: extended || ext2, ext2, rule_drift: cfg.rule_drift.unwrap_or(false), drift, adapt: if adapt { AdaptMode::Full } else { AdaptMode::Off }, advice };
             let (ev, id) = genesis_event(&g);
             log.append_events(&[ev])?;
             state.start(g, id);

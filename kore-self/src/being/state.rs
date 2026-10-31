@@ -14,7 +14,7 @@ use super::model::{AdaptMode, Alarm, Model, Obs, DEFAULT_HALF_LIFE};
 use super::solver::Strategy;
 use super::world::{iso_at, Domain, DOMAINS, N_DOM};
 use crate::versioned::{event_id, EventRow, NewEvent, Snapshot};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 pub const SOURCE: &str = "being:loop";
 /// A decision cites at most this many of the latest outcome events per domain
@@ -81,6 +81,10 @@ pub struct Genesis {
     pub chooser: Chooser,
     /// Pattern tasks come from the extended hidden families and the `discovered` strategy exists (menu world only).
     pub extended: bool,
+    /// B5: pattern tasks come from the `extended2` families (implies `extended`).
+    pub ext2: bool,
+    /// B5: the sequence rule of one family changes halfway through the budget (extended2 only).
+    pub rule_drift: bool,
     /// The world has scheduled hidden changes (menu world only). Fixed once the being exists.
     pub drift: bool,
     /// How the world model treats old evidence. Fixed once the being exists.
@@ -110,7 +114,20 @@ pub struct Outcome {
     pub skipped: bool,
     /// Sequence attempts of the extended world: the prefix and the revealed next term.
     pub example: Option<Example>,
+    /// Id of the discovered rule that produced the answer of this attempt (B5 pruning statistics).
+    pub rule_used: Option<String>,
 }
+
+/// How often a rule was used and how it fared (folded from outcomes that carry `rule_used`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RuleUse {
+    pub uses: u32,
+    pub right: u32,
+    /// Latest uses, oldest first: (outcome event id, correct). At most `RULE_USE_KEEP`.
+    pub recent: VecDeque<(String, bool)>,
+}
+
+pub const RULE_USE_KEEP: usize = 24;
 
 #[derive(Debug, Clone, Default)]
 pub struct BeingState {
@@ -133,6 +150,8 @@ pub struct BeingState {
     pub examples: Vec<Example>,
     /// Rules accepted into the log, in acceptance order.
     pub rules: Vec<Rule>,
+    /// Use statistics per rule id (B5).
+    pub rule_use: BTreeMap<String, RuleUse>,
     /// Changes the model's detector has flagged, in order (adaptive learner only).
     pub changes: Vec<Change>,
     /// Advice read from the log for the step in progress (set by the advice event, consumed by the outcome).
@@ -237,6 +256,15 @@ impl BeingState {
         if let Some(ex) = &o.example {
             self.examples.push(ex.clone());
         }
+        if let Some(id) = &o.rule_used {
+            let u = self.rule_use.entry(id.clone()).or_default();
+            u.uses += 1;
+            u.right += o.correct as u32;
+            u.recent.push_back((o.event_id.clone(), o.correct));
+            while u.recent.len() > RULE_USE_KEEP {
+                u.recent.pop_front();
+            }
+        }
         if let Some(strategy) = o.strategy {
             let gq = &mut self.group_recent[o.domain.idx()][strategy.idx()];
             gq.push_back(o.event_id.clone());
@@ -275,6 +303,23 @@ impl BeingState {
         self.model.reset_cell(Domain::Pattern, r.sig, Strategy::Discovered);
         self.rules.push(r);
         true
+    }
+
+    /// Retire a rule (logged by a `rule_retired` note): it stays in the book but is never applied again.
+    /// False if unknown or already retired. The `discovered` estimates of its signature start over.
+    pub fn apply_retire(&mut self, id: &str) -> bool {
+        let Some(r) = self.rules.iter_mut().find(|r| r.id == id && !r.retired) else {
+            return false;
+        };
+        r.retired = true;
+        let sig = r.sig;
+        self.model.reset_cell(Domain::Pattern, sig, Strategy::Discovered);
+        true
+    }
+
+    /// Rules that are still applied.
+    pub fn live_rules(&self) -> usize {
+        self.rules.iter().filter(|r| !r.retired).count()
     }
 
     pub fn apply_refill(&mut self, budget_left: i64, clock: i64) {
@@ -350,6 +395,10 @@ impl BeingState {
             let left = tag(&e.tags, "budget_left").and_then(|v| v.parse().ok()).unwrap_or(0);
             let clock = tag(&e.tags, "clock").and_then(|v| v.parse().ok()).unwrap_or(self.clock);
             self.apply_refill(left, clock);
+        } else if e.kind == "note" && has_tag(&e.tags, "rule_retired") {
+            if let Some(id) = tag(&e.tags, "rule_id") {
+                self.apply_retire(id);
+            }
         } else if e.kind == "note" && has_tag(&e.tags, "rule") {
             if let Some(r) = rule_from_event(e) {
                 self.apply_rule(r);
@@ -372,7 +421,9 @@ fn genesis_from_tags(tags: &str) -> Option<Genesis> {
             Some(c) => Chooser::parse(c)?,
             None => Chooser::Ucb,
         },
-        extended: tag(tags, "pattern_families") == Some("extended"),
+        extended: matches!(tag(tags, "pattern_families"), Some("extended") | Some("extended2")),
+        ext2: tag(tags, "pattern_families") == Some("extended2"),
+        rule_drift: tag(tags, "rule_drift") == Some("on"),
         drift: tag(tags, "drift") == Some("on"),
         adapt: tag(tags, "adapt").and_then(AdaptMode::parse).unwrap_or(AdaptMode::Off),
         advice: AdviceSetup {
@@ -407,6 +458,7 @@ pub fn outcome_from_event(e: &EventRow) -> Option<Outcome> {
         listed_cost: tag(t, "listed").and_then(|v| v.parse().ok()).unwrap_or(cost),
         skipped,
         example: if skipped { None } else { example_from_event(e) },
+        rule_used: tag(t, "rule_used").map(|s| s.to_string()),
     })
 }
 
@@ -415,7 +467,14 @@ pub fn genesis_event(g: &Genesis) -> (NewEvent, String) {
         Chooser::Ucb => format!("choice policy ucb1 with exploration constant {}", g.explore_c),
         Chooser::Model => format!("menu world, choice policy model-ucb (learned world model, optimism beta {})", g.explore_c),
     };
-    let ext = if g.extended { "; pattern families extended (author-defined hidden sequence families, strategy discovered added)" } else { "" };
+    let ext = if g.ext2 {
+        "; pattern families extended2 (author-defined hidden sequence families, some only expressible by composing verified building blocks, plus negative controls; strategy discovered added)"
+    } else if g.extended {
+        "; pattern families extended (author-defined hidden sequence families, strategy discovered added)"
+    } else {
+        ""
+    };
+    let ext = format!("{ext}{}", if g.rule_drift { "; the sequence rule of one family changes halfway through the budget and the being is not told" } else { "" });
     let drift = if g.drift { "; the world changes at scheduled times that the being is not told about" } else { "" };
     let adapt = match g.adapt { AdaptMode::Off => "", AdaptMode::Forget => "; the model forgets old evidence exponentially", AdaptMode::Full => "; the model forgets old evidence exponentially and flags changes with a CUSUM detector" };
     let advice = match g.advice.kind {
@@ -443,8 +502,13 @@ pub fn genesis_event(g: &Genesis) -> (NewEvent, String) {
             tags.push("chooser:model".into());
         }
     }
-    if g.extended {
+    if g.ext2 {
+        tags.push("pattern_families:extended2".into());
+    } else if g.extended {
         tags.push("pattern_families:extended".into());
+    }
+    if g.rule_drift {
+        tags.push("rule_drift:on".into());
     }
     if g.drift {
         tags.push("drift:on".into());
