@@ -11,6 +11,7 @@
 
 pub mod advice;
 pub mod chooser;
+pub mod controller;
 pub mod discover;
 pub mod measure;
 pub mod model;

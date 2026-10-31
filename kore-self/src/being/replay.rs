@@ -74,7 +74,13 @@ pub fn rederive_rules(rows: &[EventRow]) -> Vec<(String, bool)> {
     let mut out = vec![];
     for e in rows.iter().filter(|e| e.source == SOURCE) {
         if let Some(r) = rule_from_event(e) {
-            let ok = search(&st.examples).iter().any(|f| rule_id(f.sig, &f.form) == r.id && f.train_ok == r.train_ok && f.val_ok == r.val_ok);
+            let ok = if r.xf.is_id() {
+                search(&st.examples).iter().any(|f| rule_id(f.sig, &f.form) == r.id && f.train_ok == r.train_ok && f.val_ok == r.val_ok)
+            } else {
+                // a composed rule: the same search with the first `nblocks` building blocks the being held at that time
+                let blocks: Vec<super::discover::Form> = st.blocks().into_iter().take(r.nblocks as usize).collect();
+                super::discover::search_composed(&st.examples, &blocks, usize::MAX).found.iter().any(|f| super::discover::rule_id_x(f.sig, f.xf, &f.form) == r.id && f.train_ok == r.train_ok && f.val_ok == r.val_ok)
+            };
             out.push((r.id.clone(), ok));
         }
         st.fold_event(e);

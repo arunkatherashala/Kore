@@ -109,6 +109,7 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         explore_c: None,
         steps,
         refill_when_exhausted: !stop_after_budget,
+        ..Default::default()
     };
     // which advisor will be asked: the one the being already has, else the one requested for a new being
     let existing = {

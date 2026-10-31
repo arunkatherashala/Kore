@@ -317,6 +317,17 @@ impl BeingState {
         true
     }
 
+    /// The building blocks: forms of the plain rules the being holds and has not retired, in acceptance order.
+    pub fn blocks(&self) -> Vec<super::discover::Form> {
+        let mut v: Vec<super::discover::Form> = vec![];
+        for r in self.rules.iter().filter(|r| r.xf.is_id() && !r.retired) {
+            if !v.contains(&r.form) {
+                v.push(r.form);
+            }
+        }
+        v
+    }
+
     /// Rules that are still applied.
     pub fn live_rules(&self) -> usize {
         self.rules.iter().filter(|r| !r.retired).count()
