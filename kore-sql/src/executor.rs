@@ -9637,12 +9637,13 @@ mod like_robust_tests {
 
     /// Reference with the current documented semantics: recursive over chars, `_` = one char,
     /// `\x` = literal x, a trailing lone `\` = literal backslash.
+    const BS: char = '\u{5c}';
     fn reference(s: &[char], p: &[char]) -> bool {
         match p {
             [] => s.is_empty(),
             ['%', rest @ ..] => (0..=s.len()).any(|k| reference(&s[k..], rest)),
             ['_', rest @ ..] => !s.is_empty() && reference(&s[1..], rest),
-            ['\', c, rest @ ..] => !s.is_empty() && s[0] == *c && reference(&s[1..], rest),
+            [&BS, c, rest @ ..] => !s.is_empty() && s[0] == *c && reference(&s[1..], rest),
             [c, rest @ ..] => !s.is_empty() && s[0] == *c && reference(&s[1..], rest),
         }
     }
@@ -9719,5 +9720,46 @@ mod like_robust_tests {
         let t = std::time::Instant::now();
         assert!(!like_match(&text, &pat));
         assert!(t.elapsed().as_secs() < 20, "took {:?}", t.elapsed());
+    }
+}
+
+#[cfg(test)]
+mod like_bench {
+    use super::like_match;
+    fn old_recursive(s: &[u8], p: &[u8]) -> bool {
+        match (s, p) {
+            (_, []) => s.is_empty(),
+            (_, [b'%', rest @ ..]) => {
+                if old_recursive(s, rest) { return true; }
+                if let [_, tail @ ..] = s { return old_recursive(tail, p); }
+                false
+            }
+            ([], _) => false,
+            ([_, st @ ..], [b'_', pt @ ..]) => old_recursive(st, pt),
+            ([sc, st @ ..], [pc, pt @ ..]) if sc == pc => old_recursive(st, pt),
+            _ => false,
+        }
+    }
+    /// `cargo test -p kore-sql --release --lib like_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_like_short_strings() {
+        let vals = ["Alice Johnson", "BOB", "special requests pending", "customer#000012345", "PROMO BURNISHED COPPER", "x", "", "forest green metallic"];
+        let pats = ["%son", "A%", "%special%requests%", "customer#_____%", "PROMO%COPPER", "%e%e%e%", "x", "%"];
+        let iters = 200_000usize;
+        let run = |f: &dyn Fn(&str, &str) -> bool| -> f64 {
+            let mut hits = 0usize;
+            let t = std::time::Instant::now();
+            for _ in 0..iters { for v in &vals { for p in &pats { if f(std::hint::black_box(v), std::hint::black_box(p)) { hits += 1; } } } }
+            std::hint::black_box(hits);
+            t.elapsed().as_nanos() as f64 / (iters * vals.len() * pats.len()) as f64
+        };
+        for (name, f) in [("old recursive", &(|v: &str, p: &str| old_recursive(v.as_bytes(), p.as_bytes())) as &dyn Fn(&str, &str) -> bool),
+                          ("iterative  ", &(|v: &str, p: &str| like_match(v, p)) as &dyn Fn(&str, &str) -> bool)] {
+            run(f);
+            let mut xs: Vec<f64> = (0..11).map(|_| run(f)).collect();
+            xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            println!("BENCH {name}: median {:.1} ns/match  min {:.1}  max {:.1}", xs[5], xs[0], xs[10]);
+        }
     }
 }
