@@ -39,6 +39,7 @@ struct Args {
     sql_lookups: usize,
     tamper_trials: usize,
     seed: u64,
+    size_only: bool,
 }
 
 fn parse_args() -> Args {
@@ -55,6 +56,7 @@ fn parse_args() -> Args {
         lookups: get("--lookups").map(|s| s.parse().unwrap()).unwrap_or(100),
         sql_lookups: get("--sql-lookups").map(|s| s.parse().unwrap()).unwrap_or(if n <= 100_000 { 100 } else { 20 }),
         tamper_trials: get("--tamper-trials").map(|s| s.parse().unwrap()).unwrap_or(40),
+        size_only: v.iter().any(|a| a == "--size-only"),
         seed: get("--seed").map(|s| s.parse().unwrap()).unwrap_or(7),
     }
 }
@@ -381,6 +383,31 @@ fn main() {
     fa["native_rust_check"] = json!(chk(&pyjson_rows(&rows, &[1])));
     res["fullagg"] = fa;
     eprintln!("[kore] range done");
+    if a.size_only {
+        // storage-efficiency mode: build + size + open + lookup + range only
+        res["size_only"] = json!(true);
+        // per-column encoded size of the events table, re-encoding each column on its own with the
+        // existing KoreWriter in 1000-row chunks (as the log stores them); includes ~30 B header per chunk-column
+        let mut colb = serde_json::Map::new();
+        let evrows = snap.raw(Table::Events);
+        let ncols = Table::Events.columns().len();
+        let mut tot = vec![0usize; ncols];
+        for chunk in evrows.chunks(BATCH) {
+            let blk = rows_to_block(Table::Events, chunk);
+            for ci in 0..ncols {
+                let one = kore_core::DataBlock::new(vec![blk.columns[ci].clone()]).unwrap();
+                tot[ci] += kore_store::KoreWriter::to_bytes(&one).len();
+            }
+        }
+        for (ci, (name, _)) in Table::Events.columns().iter().enumerate() {
+            colb.insert(name.to_string(), json!(tot[ci]));
+        }
+        res["events_column_bytes_single_column_reencode"] = Value::Object(colb);
+        std::fs::write(&a.out, serde_json::to_string_pretty(&res).unwrap()).unwrap();
+        drop(log);
+        let _ = std::fs::remove_dir_all(&a.work);
+        return;
+    }
 
     // ---- AS OF version
     let mut asof = serde_json::Map::new();
