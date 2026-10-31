@@ -101,6 +101,8 @@ This table is generated from the tool registry (`kore-self --tool-table`); a tes
 
 The versioned log lives in `<root>/<owner>/log/` (see `kore-self/docs/versioned_log.md`). Every call below is an MCP `tools/call`; shown here as tool name, arguments and the real output of the end-to-end test (`kore-self/tests/e2e_versioned.rs`, run from an empty temp data root). Events are added with a required past `occurred_at`; a belief revision cites event ids.
 
+Storage format: new logs use format 1 (unchanged). Format 2 (smaller segments, lazy open, id lookup, content-idempotent revisions) is opt-in per log through `LogFormat::V2`, `VersionedLog::upgrade_to_v2()` or `migrate_to_v2()`; it is never applied silently, and old logs keep opening, verifying and querying identically (fixture-tested). Measurements and limits: `docs/format_improvement.md`; format details: `kore-self/docs/versioned_log.md`.
+
 ```
 self_event_add {"text": "Reviewed a pull request that mixed tabs and spaces", "occurred_at": "2024-01-03", "source": "e2e", "kind": "note"}
   -> {"duplicate":false,"event_id":"c271b5ed...","version":1}

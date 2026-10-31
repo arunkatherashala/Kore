@@ -690,6 +690,28 @@ pub fn decode_segment(table: Table, bytes: &[u8]) -> Result<Vec<Vec<Cell>>, Stri
     Ok(rows)
 }
 
+/// Encoded bytes per column (block header included) of a v2 segment, for size reports.
+pub fn column_block_sizes(bytes: &[u8]) -> Result<Vec<(String, usize)>, String> {
+    let mut r = Rd::new(bytes);
+    if r.take(4)? != MAGIC || r.u16()? != SEG_VERSION {
+        return Err("not a v2 segment".into());
+    }
+    let ncols = r.u32()? as usize;
+    let _ = r.u64()?;
+    let mut names = vec![];
+    for _ in 0..ncols {
+        let l = r.u16()? as usize;
+        names.push(String::from_utf8_lossy(r.take(l)?).to_string());
+        r.u8()?;
+    }
+    let mut out = vec![];
+    for n in names {
+        let (_, d) = next_block(&mut r)?;
+        out.push((n, d.len() + 9));
+    }
+    Ok(out)
+}
+
 /// An id as stored: 32 raw bytes when it is canonical hex, else the string.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IdKey {

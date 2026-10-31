@@ -65,6 +65,45 @@ Segments from a crash before that point are not listed, are ignored by readers,
 and are deleted by `recover()` or the next commit. Before writing, a commit
 re-reads the manifest and fails with `Conflict` if another writer changed it.
 
+## Log format 2 (opt-in) and compatibility
+
+Two segment encodings exist; a manifest entry's segment records which one
+(`"enc":2` for v2, absent = v1, part of the hashed entry text).
+
+* **Format 1** (default for new logs): `kore-store` columns + LZ4. Unchanged;
+  every log written before format 2 existed opens, verifies and queries exactly
+  as before (`tests/data/vlog_v1/` is a fixture written by the old binary and
+  checked in `versioned/tests_v2.rs`).
+* **Format 2** (`LogFormat::V2`, implemented in `versioned/codec.rs` + `hz.rs`, no
+  new dependency, nothing changed in `kore-store`): the same `.kore` container
+  header but version 3, with per-column codecs: 64-hex ids as 32 raw bytes
+  (the API and SQL still show the same hex strings), timestamps as delta varints,
+  low-cardinality columns as dictionary + bit-packed codes, `tags` as a token
+  dictionary, and an `hz` LZ77+Huffman stage over each column body when smaller.
+  Old readers refuse these files (header version 3); they never misread them.
+  Format 2 also makes revision replay idempotent by content hash: a revision whose
+  content digest (type, key, stance, confidence, rationale, valid_from, author,
+  causes) already exists anywhere in the log is a no-op, not only when it equals
+  the current head. A deliberate revert to an earlier stance with an identical
+  `valid_from` and cause list is therefore also a no-op; give it a later
+  `valid_from` or an explicit `supersedes`.
+* **Upgrade is explicit, never silent.** `open_or_create*` never changes the format
+  of an existing log. `VersionedLog::upgrade_to_v2()` appends one commit with
+  `schema_meta.format_version = 2` (old segments and hashes untouched; later
+  segments are v2). `migrate_to_v2(src_root, dst_root, owner)` writes a fresh v2
+  copy of every version and checks `content_hash` equality for each version (the
+  chain hashes of the copy differ; forget records are carried over verbatim).
+* **Open and lookup.** When every events segment is v2, `open()` still reads and
+  sha256-verifies every segment (in parallel) but decodes only the event-id column;
+  `open_latest()` decodes the rows on first use. `get_event(id)` reads one segment.
+  Logs with any v1 events segment decode everything at open, as before.
+* **Commit cost.** A commit no longer clones the id index or re-parses/re-renders
+  the MANIFEST: the new MANIFEST is the previous bytes plus one line, still written
+  to `MANIFEST.tmp`, fsynced, renamed; the conflict check compares the on-disk
+  bytes with the bytes this handle last wrote.
+
+See `docs/format_improvement.md` for measurements and limits.
+
 ## Invariants (tested in `versioned/tests.rs`)
 
 * Time travel: `snapshot_hash(v)` and the row content of version `v` are
@@ -246,8 +285,9 @@ Not guaranteed:
   there is no cross-process lock.
 * fsync of the directory is best effort (not available on every platform).
 * Durability against hardware or OS faults beyond what fsync gives.
-* Whole log is loaded in memory when opened; fine for personal-scale data, not
-  tuned for large volumes.
+* A format 1 log is loaded in memory when opened; a format 2 log keeps only an id
+  index at open and loads rows on first snapshot use. Fine for personal-scale data,
+  not tuned for large volumes.
 * No automatic scheduling of learning, no prediction scoring yet, no encryption yet. Learning
   is rule-based and measured only on synthetic data (`docs/measured.md`). `forget` exists
   (see above) but only inside this log; redaction before storage is best-effort.

@@ -310,6 +310,14 @@ struct BitR<'a> {
 impl<'a> BitR<'a> {
     #[inline]
     fn refill(&mut self) {
+        if self.pos + 8 <= self.b.len() {
+            // branch-free 64-bit refill: bits above `n` are copies of the next bytes, which stay consistent
+            let v = u64::from_le_bytes(self.b[self.pos..self.pos + 8].try_into().unwrap());
+            self.acc |= v << self.n;
+            self.pos += ((63 - self.n) >> 3) as usize;
+            self.n |= 56;
+            return;
+        }
         while self.n <= 56 {
             let byte = if self.pos < self.b.len() { self.b[self.pos] } else { 0 };
             self.pos += 1;
@@ -453,9 +461,13 @@ pub fn decompress(inp: &[u8]) -> Result<Vec<u8>, String> {
                     return Err("hz: distance beyond output".into());
                 }
                 let start = out.len() - dist;
-                for j in 0..len {
-                    let b = out[start + j];
-                    out.push(b);
+                if dist >= len {
+                    out.extend_from_within(start..start + len);
+                } else {
+                    for j in 0..len {
+                        let b = out[start + j];
+                        out.push(b);
+                    }
                 }
             }
             if out.len() > olen {

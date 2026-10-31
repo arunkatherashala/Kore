@@ -286,6 +286,19 @@ fn main() {
     per_table.insert("MANIFEST".into(), json!(std::fs::metadata(logdir.join("MANIFEST")).unwrap().len()));
     res["size_bytes"] = json!(dir_size(&root));
     res["size_by_table"] = Value::Object(per_table);
+    if a.format == LogFormat::V2 {
+        // actual per-column bytes of the events segments (v2 only)
+        let mut cols = std::collections::BTreeMap::<String, usize>::new();
+        if let Ok(rd) = std::fs::read_dir(logdir.join("events")) {
+            for f in rd.flatten() {
+                let b = std::fs::read(f.path()).unwrap();
+                for (n, sz) in versioned::codec::column_block_sizes(&b).unwrap() {
+                    *cols.entry(n).or_default() += sz;
+                }
+            }
+        }
+        res["events_column_bytes_v2_actual"] = json!(cols);
+    }
     let mut fl = vec![];
     list_files(&root, &mut fl);
     res["file_count"] = json!(fl.len());
