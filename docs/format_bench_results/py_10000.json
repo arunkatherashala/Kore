@@ -1,0 +1,536 @@
+{
+ "meta": {
+  "n": 10000,
+  "revisions": 200,
+  "batches": 10,
+  "batch_size": 1000,
+  "data": "data_10000.jsonl",
+  "python": "3.14.5 (tags/v3.14.5:5607950, May 10 2026, 10:43:50) [MSC v.1944 64 bit (AMD64)]",
+  "sqlite": "3.50.4",
+  "platform": "Windows-11-10.0.26100-SP0",
+  "processor": "Intel64 Family 6 Model 189 Stepping 1, GenuineIntel",
+  "cpu_count": 8,
+  "reps": 5,
+  "build_reps": 5,
+  "lookups": 100,
+  "csv_lookups": 100,
+  "range": [
+   "2025-01-02T13:30:07Z",
+   "2025-01-02T21:50:01Z"
+  ],
+  "asof_versions": [
+   1,
+   5,
+   10
+  ],
+  "started": "2026-10-31T17:58:31Z",
+  "finished": "2026-10-31T17:58:58Z"
+ },
+ "systems": {
+  "sqlite": {
+   "build_b1000_s": {
+    "median": 0.21057199999631848,
+    "min": 0.20955089999188203,
+    "max": 0.28007680000155233,
+    "reps": 5
+   },
+   "build_b1000_events_per_s": {
+    "median": 47489.69473707252,
+    "min": 35704.492481864174,
+    "max": 47721.10260746863,
+    "reps": 5
+   },
+   "size_bytes": 3534848,
+   "cold_open_first_query_s": 0.0007140999950934201,
+   "lookup_per_op_s": {
+    "median": 8.033699996303766e-05,
+    "min": 4.672399998526089e-05,
+    "max": 0.00010978599995723925,
+    "reps": 5
+   },
+   "lookup_check": 11223,
+   "lookup_check_first": 11223,
+   "range_s": {
+    "median": 0.00733169999148231,
+    "min": 0.0036312000011093915,
+    "max": 0.008810600003926083,
+    "reps": 5
+   },
+   "range_check": "533109b96fbdc19e",
+   "fullagg_s": {
+    "median": 0.00595679999969434,
+    "min": 0.004688799992436543,
+    "max": 0.009218799998052418,
+    "reps": 5
+   },
+   "fullagg_check": "ac2273e0c3514529",
+   "asof": {
+    "1": {
+     "s": {
+      "median": 0.0036546000046655536,
+      "min": 0.0031457000004593283,
+      "max": 0.0060757000028388575,
+      "reps": 5
+     },
+     "check": "4a5955c5c2404e6c"
+    },
+    "5": {
+     "s": {
+      "median": 0.004576199993607588,
+      "min": 0.004030099997180514,
+      "max": 0.004972599999746308,
+      "reps": 5
+     },
+     "check": "dc3b12110cc3f78d"
+    },
+    "10": {
+     "s": {
+      "median": 0.005186399997910485,
+      "min": 0.005054599998402409,
+      "max": 0.006172200010041706,
+      "reps": 5
+     },
+     "check": "877a49220c1285eb"
+    }
+   },
+   "tamper": {
+    "trials": 40,
+    "detected_by_check": 17,
+    "detected_only_by_read_error": 1,
+    "silent_data_change": 21,
+    "harmless_no_change": 1
+   },
+   "reingest": {
+    "native": true,
+    "seconds": 0.03900080001039896,
+    "rows_before": 10000,
+    "rows_after": 10000,
+    "new_events": 0,
+    "size_delta_bytes": 0,
+    "note": "INSERT OR IGNORE on PRIMARY KEY event_id; id computed by the app"
+   },
+   "append": {
+    "b1_events_per_s": {
+     "median": 231.72200033227966,
+     "min": 211.69769484428434,
+     "max": 240.55253956238104,
+     "reps": 5
+    },
+    "b1_ms_per_commit": {
+     "median": 4.315516000060597,
+     "min": 4.157095999980811,
+     "max": 4.723717000015313,
+     "reps": 5
+    },
+    "b1000_events_per_s": {
+     "median": 31680.458227129056,
+     "min": 27642.8652444781,
+     "max": 36970.62682690766,
+     "reps": 5
+    },
+    "b1000_ms_per_batch": {
+     "median": 31.565199999022298,
+     "min": 27.048500007367693,
+     "max": 36.175699991872534,
+     "reps": 5
+    },
+    "b1_commits_per_rep": 100,
+    "config": "journal_mode=DELETE synchronous=FULL (sqlite default); 1 txn per commit"
+   }
+  },
+  "sqlite_idx": {
+   "build_b1000_s": {
+    "median": 0.23593940000864677,
+    "min": 0.22144169999228325,
+    "max": 0.30040190000727307,
+    "reps": 5
+   },
+   "build_b1000_events_per_s": {
+    "median": 42383.76464309698,
+    "min": 33288.73752049467,
+    "max": 45158.612855430925,
+    "reps": 5
+   },
+   "size_bytes": 3969024,
+   "cold_open_first_query_s": 0.001375499996356666,
+   "lookup_per_op_s": {
+    "median": 4.5577999990200625e-05,
+    "min": 4.1373999993084e-05,
+    "max": 0.00012010799997369759,
+    "reps": 5
+   },
+   "lookup_check": 11223,
+   "lookup_check_first": 11223,
+   "range_s": {
+    "median": 0.00025779999850783497,
+    "min": 0.0002491000050213188,
+    "max": 0.0003456000122241676,
+    "reps": 5
+   },
+   "range_check": "533109b96fbdc19e",
+   "fullagg_s": {
+    "median": 0.006093500007409602,
+    "min": 0.005301500001223758,
+    "max": 0.01057490000675898,
+    "reps": 5
+   },
+   "fullagg_check": "ac2273e0c3514529",
+   "asof": {
+    "1": {
+     "s": {
+      "median": 0.00031709999893791974,
+      "min": 0.00030620000325143337,
+      "max": 0.00034100000630132854,
+      "reps": 5
+     },
+     "check": "4a5955c5c2404e6c"
+    },
+    "5": {
+     "s": {
+      "median": 0.0013018999889027327,
+      "min": 0.0012744999985443428,
+      "max": 0.001742799999192357,
+      "reps": 5
+     },
+     "check": "dc3b12110cc3f78d"
+    },
+    "10": {
+     "s": {
+      "median": 0.0054788999987067655,
+      "min": 0.0053656999953091145,
+      "max": 0.0064087000064319,
+      "reps": 5
+     },
+     "check": "877a49220c1285eb"
+    }
+   },
+   "append": {
+    "b1_events_per_s": {
+     "median": 213.7571996055163,
+     "min": 121.26597800509919,
+     "max": 214.80094503728176,
+     "reps": 5
+    },
+    "b1_ms_per_commit": {
+     "median": 4.678205000091111,
+     "min": 4.65547300002072,
+     "max": 8.24633600001107,
+     "reps": 5
+    },
+    "b1000_events_per_s": {
+     "median": 31894.26413242704,
+     "min": 29496.871861249463,
+     "max": 33565.719997573775,
+     "reps": 5
+    },
+    "b1000_ms_per_batch": {
+     "median": 31.35360000305809,
+     "min": 29.792300003464334,
+     "max": 33.90189999481663,
+     "reps": 5
+    },
+    "b1_commits_per_rep": 100,
+    "config": "as sqlite + 3 secondary indexes"
+   }
+  },
+  "sqlite_cache": {
+   "build_b1000_s": {
+    "median": 0.22722020000219345,
+    "min": 0.20418240000435617,
+    "max": 0.3415007000003243,
+    "reps": 5
+   },
+   "build_b1000_events_per_s": {
+    "median": 44010.17163044248,
+    "min": 29282.516844007947,
+    "max": 48975.81769920744,
+    "reps": 5
+   },
+   "size_bytes": 3534848,
+   "cold_open_first_query_s": 0.0006817999965278432,
+   "lookup_per_op_s": {
+    "median": 6.421600002795458e-05,
+    "min": 4.562399990390986e-05,
+    "max": 0.00011037399992346763,
+    "reps": 5
+   },
+   "lookup_check": 11223,
+   "lookup_check_first": 11223,
+   "range_s": {
+    "median": 0.0007405999931506813,
+    "min": 0.000680199998896569,
+    "max": 0.0011460999958217144,
+    "reps": 5
+   },
+   "range_check": "533109b96fbdc19e",
+   "fullagg_s": {
+    "median": 0.0022555000032298267,
+    "min": 0.0021493999956874177,
+    "max": 0.0025412000104552135,
+    "reps": 5
+   },
+   "fullagg_check": "ac2273e0c3514529",
+   "asof": {
+    "1": {
+     "s": {
+      "median": 0.0016936000029090792,
+      "min": 0.0007779000006848946,
+      "max": 0.0019481000053929165,
+      "reps": 5
+     },
+     "check": "4a5955c5c2404e6c"
+    },
+    "5": {
+     "s": {
+      "median": 0.001445000001695007,
+      "min": 0.001339499998721294,
+      "max": 0.002193400010582991,
+      "reps": 5
+     },
+     "check": "dc3b12110cc3f78d"
+    },
+    "10": {
+     "s": {
+      "median": 0.0032386999955633655,
+      "min": 0.0025319999986095354,
+      "max": 0.004325399990193546,
+      "reps": 5
+     },
+     "check": "877a49220c1285eb"
+    }
+   },
+   "append": {
+    "b1_events_per_s": {
+     "median": 237.93485867013084,
+     "min": 188.86818473625098,
+     "max": 248.98017719497264,
+     "reps": 5
+    },
+    "b1_ms_per_commit": {
+     "median": 4.202831000002334,
+     "min": 4.016383999987738,
+     "max": 5.294698000070639,
+     "reps": 5
+    },
+    "b1000_events_per_s": {
+     "median": 32206.741514632187,
+     "min": 29488.434639485673,
+     "max": 37746.81698997653,
+     "reps": 5
+    },
+    "b1000_ms_per_batch": {
+     "median": 31.04940000048373,
+     "min": 26.492300006793812,
+     "max": 33.91159999591764,
+     "reps": 5
+    },
+    "b1_commits_per_rep": 100,
+    "config": "as sqlite (DELETE/FULL) with cache_size=256 MiB"
+   }
+  },
+  "csv": {
+   "build_b1000_s": {
+    "median": 0.07375900000624824,
+    "min": 0.07179259999247734,
+    "max": 0.08775920000334736,
+    "reps": 5
+   },
+   "build_b1000_events_per_s": {
+    "median": 135576.6753772812,
+    "min": 113948.16725333156,
+    "max": 139290.12183773582,
+    "reps": 5
+   },
+   "size_bytes": 2518076,
+   "lookup_per_op_s": {
+    "median": 0.012921425000095042,
+    "min": 0.0112271119999059,
+    "max": 0.014537018999981229,
+    "reps": 5
+   },
+   "lookup_n_ops": 100,
+   "lookup_check_first": 11223,
+   "lookup_check": 11223,
+   "lookup_expected_first": 11223,
+   "range_s": {
+    "median": 0.023153999994974583,
+    "min": 0.019718099996680394,
+    "max": 0.03025679998972919,
+    "reps": 5
+   },
+   "range_check": "533109b96fbdc19e",
+   "fullagg_s": {
+    "median": 0.025871499994536862,
+    "min": 0.020271200002753176,
+    "max": 0.028764799993950874,
+    "reps": 5
+   },
+   "fullagg_check": "ac2273e0c3514529",
+   "asof": {
+    "1": {
+     "s": {
+      "median": 0.021072200004709885,
+      "min": 0.020465699999476783,
+      "max": 0.029460599995218217,
+      "reps": 5
+     },
+     "check": "4a5955c5c2404e6c"
+    },
+    "5": {
+     "s": {
+      "median": 0.02374049999343697,
+      "min": 0.02060380000330042,
+      "max": 0.029700200000661425,
+      "reps": 5
+     },
+     "check": "dc3b12110cc3f78d"
+    },
+    "10": {
+     "s": {
+      "median": 0.02545010000176262,
+      "min": 0.0211402000131784,
+      "max": 0.04639679999672808,
+      "reps": 5
+     },
+     "check": "877a49220c1285eb"
+    }
+   },
+   "tamper": {
+    "trials": 40,
+    "detected_by_check": 8,
+    "detected_only_by_read_error": 0,
+    "silent_data_change": 32,
+    "harmless_no_change": 0
+   },
+   "reingest": {
+    "native": false,
+    "naive_seconds": 0.06651289999717847,
+    "rows_before": 10000,
+    "rows_after_naive": 20000,
+    "size_delta_bytes_naive": 2488989,
+    "emulated_dedup_seconds": 0.054272599998512305,
+    "emulated_new_events": 0,
+    "emulated_size_delta_bytes": 0
+   },
+   "append": {
+    "b1_events_per_s": {
+     "median": 1563.2963037570016,
+     "min": 1504.2593100749743,
+     "max": 1595.2296254032053,
+     "reps": 5
+    },
+    "b1_ms_per_commit": {
+     "median": 0.6396740001218859,
+     "min": 0.6268689999706112,
+     "max": 0.6647790000715759,
+     "reps": 5
+    },
+    "b1000_events_per_s": {
+     "median": 239698.9381294554,
+     "min": 138094.84377055828,
+     "max": 270438.3807498291,
+     "reps": 5
+    },
+    "b1000_ms_per_batch": {
+     "median": 4.171900000073947,
+     "min": 3.6976999981561676,
+     "max": 7.241399987833574,
+     "reps": 5
+    },
+    "b1_commits_per_rep": 100,
+    "config": "append + flush + os.fsync of each written file per commit"
+   }
+  },
+  "expected_lookup_check": 11223,
+  "sqlite_wal_full": {
+   "append": {
+    "b1_events_per_s": {
+     "median": 1631.6940244429986,
+     "min": 1375.315291074674,
+     "max": 1748.6338797102276,
+     "reps": 5
+    },
+    "b1_ms_per_commit": {
+     "median": 0.6128600001102313,
+     "min": 0.5718750000232831,
+     "max": 0.7271059999766294,
+     "reps": 5
+    },
+    "b1000_events_per_s": {
+     "median": 68237.9593968419,
+     "min": 22144.519559983666,
+     "max": 73200.5475118823,
+     "reps": 5
+    },
+    "b1000_ms_per_batch": {
+     "median": 14.65460000326857,
+     "min": 13.661100005265325,
+     "max": 45.157900007325225,
+     "reps": 5
+    },
+    "b1_commits_per_rep": 100,
+    "config": "journal_mode=WAL synchronous=FULL"
+   }
+  },
+  "sqlite_off": {
+   "append": {
+    "b1_events_per_s": {
+     "median": 342.959874038539,
+     "min": 284.4979351091314,
+     "max": 402.49919802654125,
+     "reps": 5
+    },
+    "b1_ms_per_commit": {
+     "median": 2.9157929999928456,
+     "min": 2.484476999961771,
+     "max": 3.51496400005999,
+     "reps": 5
+    },
+    "b1000_events_per_s": {
+     "median": 26217.198998826523,
+     "min": 16395.2971710286,
+     "max": 39341.11501284908,
+     "reps": 5
+    },
+    "b1000_ms_per_batch": {
+     "median": 38.14290001173504,
+     "min": 25.418699995498173,
+     "max": 60.993100007181056,
+     "reps": 5
+    },
+    "b1_commits_per_rep": 100,
+    "config": "journal_mode=DELETE synchronous=OFF"
+   }
+  },
+  "csv_nofsync": {
+   "append": {
+    "b1_events_per_s": {
+     "median": 17965.900695080683,
+     "min": 16209.557150300036,
+     "max": 41027.324099038444,
+     "reps": 5
+    },
+    "b1_ms_per_commit": {
+     "median": 0.05566100007854402,
+     "min": 0.02437400005874224,
+     "max": 0.061692000017501414,
+     "reps": 5
+    },
+    "b1000_events_per_s": {
+     "median": 258839.36372686806,
+     "min": 144751.31726228865,
+     "max": 304145.5039629571,
+     "reps": 5
+    },
+    "b1000_ms_per_batch": {
+     "median": 3.8634000084130093,
+     "min": 3.2878999918466434,
+     "max": 6.908399998792447,
+     "reps": 5
+    },
+    "b1_commits_per_rep": 100,
+    "config": "append + flush, no fsync"
+   }
+  }
+ }
+}
