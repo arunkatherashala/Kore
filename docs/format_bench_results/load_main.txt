@@ -1,0 +1,9 @@
+N=10000 cpu_load_before=80%
+N=10000 cpu_load_between=80%
+N=10000 cpu_load_after=72%
+N=100000 cpu_load_before=73%
+N=100000 cpu_load_between=80%
+N=100000 cpu_load_after=80%
+N=1000000 cpu_load_before=80%
+N=1000000 cpu_load_between=67%
+N=1000000 cpu_load_after=80%

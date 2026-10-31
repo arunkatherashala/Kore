@@ -1,0 +1,110 @@
+{
+ "n": 100000,
+ "raw_text_bytes": 36894311,
+ "raw_jsonl_bytes": 48499471,
+ "avg_text_bytes": 368.94311,
+ "csv_bytes": 51809238,
+ "sqlite_bytes": 68116480,
+ "sqlite_vacuum_s": 6.538224999996601,
+ "sqlite_vacuum_bytes": 67223552,
+ "gzip": {
+  "6": {
+   "bytes": 13805984,
+   "compress_s": 1.5072898999933386,
+   "full_decompress_s": 0.17888399999355897
+  },
+  "9": {
+   "bytes": 14243987,
+   "compress_s": 3.1294990999886068,
+   "full_decompress_s": 0.1980383000045549
+  }
+ },
+ "events_column_sizes": {
+  "event_id": {
+   "raw": 6500000,
+   "gzip6_whole_column": 3553079,
+   "gzip6_1000row_chunks": 3547345
+  },
+  "occurred_at": {
+   "raw": 2100000,
+   "gzip6_whole_column": 335822,
+   "gzip6_1000row_chunks": 342861
+  },
+  "source": {
+   "raw": 649586,
+   "gzip6_whole_column": 69019,
+   "gzip6_1000row_chunks": 89177
+  },
+  "kind": {
+   "raw": 779374,
+   "gzip6_whole_column": 55912,
+   "gzip6_1000row_chunks": 70992
+  },
+  "text": {
+   "raw": 36994311,
+   "gzip6_whole_column": 6657092,
+   "gzip6_1000row_chunks": 6960746
+  },
+  "tags": {
+   "raw": 1216202,
+   "gzip6_whole_column": 261369,
+   "gzip6_1000row_chunks": 289966
+  }
+ },
+ "sqlite_lookup_per_op_s": {
+  "median": 0.000120461000042269,
+  "min": 7.723600007011555e-05,
+  "max": 0.0004084169999987353,
+  "reps": 5
+ },
+ "sqlite_range_s": {
+  "median": 0.19503380000242032,
+  "min": 0.1638937999960035,
+  "max": 0.21472560000256635,
+  "reps": 5
+ },
+ "range_check": "190a32589916e12d",
+ "csv_lookup_one_s": {
+  "median": 0.5553805000090506,
+  "min": 0.5175184999970952,
+  "max": 0.5607366000040201,
+  "reps": 3
+ },
+ "csv_lookup_one_idx": 50000,
+ "csv_range_s": {
+  "median": 0.8262548000056995,
+  "min": 0.7797176000021864,
+  "max": 1.1965755999990506,
+  "reps": 3
+ },
+ "csv_range_result_rows": 5,
+ "gzip6_csv_lookup_one_s": {
+  "median": 0.815792399997008,
+  "min": 0.7847497999900952,
+  "max": 0.8598220999992918,
+  "reps": 3
+ },
+ "gzip6_csv_lookup_one_idx": 50000,
+ "gzip6_csv_range_s": {
+  "median": 1.5630676000000676,
+  "min": 1.2649557999975514,
+  "max": 1.6585016000026371,
+  "reps": 3
+ },
+ "gzip6_csv_range_result_rows": 5,
+ "gzip9_csv_lookup_one_s": {
+  "median": 0.4928390999994008,
+  "min": 0.47736569998960476,
+  "max": 0.49533320000045933,
+  "reps": 3
+ },
+ "gzip9_csv_lookup_one_idx": 50000,
+ "gzip9_csv_range_s": {
+  "median": 0.7818534999969415,
+  "min": 0.7442508999956772,
+  "max": 0.8621573999989778,
+  "reps": 3
+ },
+ "gzip9_csv_range_result_rows": 5,
+ "range_agree": true
+}

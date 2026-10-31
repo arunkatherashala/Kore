@@ -1,0 +1,275 @@
+{
+  "append": {
+    "b1000_events_per_s": {
+      "max": 36141.007755860264,
+      "median": 34005.8558083702,
+      "min": 28125.993199134846,
+      "reps": 5
+    },
+    "b1000_ms_per_batch": {
+      "max": 35.5543,
+      "median": 29.4067,
+      "min": 27.6694,
+      "reps": 5
+    },
+    "b1_commits_per_rep": 100,
+    "b1_events_per_s": {
+      "max": 40.67560057422559,
+      "median": 36.39178110547459,
+      "min": 34.19747269049677,
+      "reps": 5
+    },
+    "b1_ms_per_commit": {
+      "max": 29.241926999999997,
+      "median": 27.478731999999997,
+      "min": 24.584763,
+      "reps": 5
+    },
+    "config": "temp-file write + fsync per segment, rename, fsync MANIFEST.tmp, rename; one version per commit",
+    "verify_after": true
+  },
+  "asof": {
+    "1": {
+      "check": "4a5955c5c2404e6c",
+      "events_in_snapshot": 1000,
+      "open_at_s": {
+        "max": 0.0053507,
+        "median": 0.0017082,
+        "min": 0.0015885,
+        "reps": 5
+      },
+      "queries_s": {
+        "max": 0.0019198,
+        "median": 0.0008709,
+        "min": 0.0008397,
+        "reps": 5
+      },
+      "register_s": {
+        "max": 0.0010078,
+        "median": 0.0009153,
+        "min": 0.0004386,
+        "reps": 5
+      },
+      "snapshot_hash": "3f1108b1d51c7b69",
+      "total_s": {
+        "max": 0.0077091,
+        "median": 0.0034729,
+        "min": 0.0031950000000000004,
+        "reps": 5
+      }
+    },
+    "100": {
+      "check": "02d09458648e90d0",
+      "events_in_snapshot": 100000,
+      "open_at_s": {
+        "max": 0.3938556,
+        "median": 0.3474653,
+        "min": 0.2558485,
+        "reps": 5
+      },
+      "queries_s": {
+        "max": 0.1697258,
+        "median": 0.1564537,
+        "min": 0.1513807,
+        "reps": 5
+      },
+      "register_s": {
+        "max": 0.1324831,
+        "median": 0.1063525,
+        "min": 0.1055027,
+        "reps": 5
+      },
+      "snapshot_hash": "012da631bbd49a20",
+      "total_s": {
+        "max": 0.6877342,
+        "median": 0.6159641,
+        "min": 0.5186547,
+        "reps": 5
+      }
+    },
+    "50": {
+      "check": "3ae8c07e5133fefc",
+      "events_in_snapshot": 50000,
+      "open_at_s": {
+        "max": 0.1542144,
+        "median": 0.1410701,
+        "min": 0.1253641,
+        "reps": 5
+      },
+      "queries_s": {
+        "max": 0.1119165,
+        "median": 0.0788177,
+        "min": 0.0700153,
+        "reps": 5
+      },
+      "register_s": {
+        "max": 0.0522801,
+        "median": 0.050576,
+        "min": 0.0404987,
+        "reps": 5
+      },
+      "snapshot_hash": "2eb6fb39b4a3947d",
+      "total_s": {
+        "max": 0.3003328,
+        "median": 0.27046380000000003,
+        "min": 0.2448223,
+        "reps": 5
+      }
+    }
+  },
+  "asof_versions": [
+    1,
+    50,
+    100
+  ],
+  "batches": 100,
+  "build": "cargo --release; versioned log API (commit_batch)",
+  "build_b1000_events_per_s": {
+    "max": 32797.463234289695,
+    "median": 31146.323621888863,
+    "min": 28029.436177520398,
+    "reps": 5
+  },
+  "build_b1000_s": {
+    "max": 3.5676779,
+    "median": 3.2106518,
+    "min": 3.0490163,
+    "reps": 5
+  },
+  "build_clone_cost_s": 0.031085699999999997,
+  "build_reps": 5,
+  "file_count": 302,
+  "fullagg": {
+    "check": "b5bbdeb718ab955a",
+    "native_rust_check": "b5bbdeb718ab955a",
+    "native_rust_loop_s": {
+      "max": 0.0180107,
+      "median": 0.0130125,
+      "min": 0.010496,
+      "reps": 5
+    },
+    "sql_end_to_end_s": {
+      "max": 0.2056591,
+      "median": 0.1842271,
+      "min": 0.1772632,
+      "reps": 5
+    },
+    "sql_registered_ctx_s": {
+      "max": 0.1082038,
+      "median": 0.092665,
+      "min": 0.0874711,
+      "reps": 5
+    }
+  },
+  "lookup": {
+    "check": 10821,
+    "expected_check": 10821,
+    "has_event_existence_only_per_op_s": {
+      "max": 0.000072023,
+      "median": 3.6e-8,
+      "min": 3.4e-8,
+      "reps": 5
+    },
+    "native_scan_per_op_s": {
+      "max": 0.001375062,
+      "median": 0.001162249,
+      "min": 0.00100584,
+      "reps": 5
+    },
+    "sql_end_to_end_ops": 5,
+    "sql_end_to_end_run_readonly_sql_per_op_s": {
+      "max": 0.30548644,
+      "median": 0.2898233,
+      "min": 0.27778366,
+      "reps": 5
+    },
+    "sql_ops": 100,
+    "sql_registered_ctx_per_op_s": {
+      "max": 0.43316203799999997,
+      "median": 0.220554884,
+      "min": 0.131206963,
+      "reps": 5
+    }
+  },
+  "lookups": 100,
+  "n": 100000,
+  "open_s": {
+    "max": 0.415616,
+    "median": 0.3935067,
+    "min": 0.3330618,
+    "reps": 5
+  },
+  "range": {
+    "check": "b2cb6719324be81a",
+    "native_rust_check": "b2cb6719324be81a",
+    "native_rust_loop_s": {
+      "max": 0.0061345,
+      "median": 0.004626,
+      "min": 0.0034943,
+      "reps": 5
+    },
+    "sql_end_to_end_s": {
+      "max": 0.2362601,
+      "median": 0.2030061,
+      "min": 0.1824887,
+      "reps": 5
+    },
+    "sql_registered_ctx_s": {
+      "max": 0.1344628,
+      "median": 0.1150555,
+      "min": 0.0995819,
+      "reps": 5
+    }
+  },
+  "register_into_s": 0.096934,
+  "reingest_events": {
+    "event_ids_returned": 100000,
+    "events_rows_after": 100000,
+    "events_rows_before": 100000,
+    "new_versions_created": 0,
+    "seconds": 2.9916611,
+    "size_delta_bytes": 0,
+    "verify_ok": true,
+    "versions_after": 100,
+    "versions_before": 100
+  },
+  "reingest_revisions_replay": {
+    "new_versions": 100,
+    "note": "replaying an old revision with supersedes=None supersedes the CURRENT head, so it is recorded as a new revision unless identical to the head",
+    "revisions_after": 4000,
+    "revisions_before": 2000,
+    "versions_after": 200,
+    "versions_before": 100
+  },
+  "reps": 5,
+  "seed": 7,
+  "size_by_table": {
+    "MANIFEST": 64765,
+    "events": 15408127,
+    "outcomes": 0,
+    "predictions": 0,
+    "revision_causes": 280907,
+    "revisions": 423892,
+    "schema_meta": 108
+  },
+  "size_bytes": 16177799,
+  "sql_lookups": 100,
+  "tamper": {
+    "by_dir_and_outcome": {
+      "events:verify_detected": 39,
+      "revisions:verify_detected": 1
+    },
+    "check_used": "verify_dir (what log.verify()/self_verify runs); open() also reported",
+    "detected_by_check": 40,
+    "detected_only_by_open": 0,
+    "harmless_no_change": 0,
+    "silent_data_change": 0,
+    "trials": 40
+  },
+  "verify_s": {
+    "max": 0.3383236,
+    "median": 0.3032912,
+    "min": 0.2397739,
+    "reps": 5
+  }
+}

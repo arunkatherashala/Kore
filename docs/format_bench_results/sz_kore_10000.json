@@ -1,0 +1,137 @@
+{
+  "asof_versions": [
+    1,
+    5,
+    10
+  ],
+  "batches": 10,
+  "build": "cargo --release; versioned log API (commit_batch)",
+  "build_b1000_events_per_s": {
+    "max": 33129.74003755587,
+    "median": 33129.74003755587,
+    "min": 33129.74003755587,
+    "reps": 1
+  },
+  "build_b1000_s": {
+    "max": 0.3018436,
+    "median": 0.3018436,
+    "min": 0.3018436,
+    "reps": 1
+  },
+  "build_clone_cost_s": 0.0049929,
+  "build_reps": 1,
+  "events_column_bytes_single_column_reencode": {
+    "event_id": 683146,
+    "kind": 66127,
+    "occurred_at": 100282,
+    "recorded_at": 42980,
+    "redacted": 580,
+    "source": 65572,
+    "tags": 93070,
+    "text": 1154159
+  },
+  "file_count": 32,
+  "fullagg": {
+    "check": "e48840f2cf96e13e",
+    "native_rust_check": "e48840f2cf96e13e",
+    "native_rust_loop_s": {
+      "max": 0.0009115,
+      "median": 0.0008192,
+      "min": 0.0008012,
+      "reps": 5
+    },
+    "sql_end_to_end_s": {
+      "max": 0.094145,
+      "median": 0.0166657,
+      "min": 0.0158367,
+      "reps": 5
+    },
+    "sql_registered_ctx_s": {
+      "max": 0.0540674,
+      "median": 0.0090862,
+      "min": 0.0077816,
+      "reps": 5
+    }
+  },
+  "lookup": {
+    "check": 23217,
+    "expected_check": 23217,
+    "has_event_existence_only_per_op_s": {
+      "max": 4.5e-8,
+      "median": 4e-8,
+      "min": 4e-8,
+      "reps": 5
+    },
+    "native_scan_per_op_s": {
+      "max": 0.00011227,
+      "median": 0.000038929,
+      "min": 0.000023553,
+      "reps": 5
+    },
+    "sql_end_to_end_ops": 5,
+    "sql_end_to_end_run_readonly_sql_per_op_s": {
+      "max": 0.09511929999999999,
+      "median": 0.06388858,
+      "min": 0.05135858,
+      "reps": 5
+    },
+    "sql_ops": 5,
+    "sql_registered_ctx_per_op_s": {
+      "max": 0.0336007,
+      "median": 0.03140198,
+      "min": 0.02623134,
+      "reps": 5
+    }
+  },
+  "lookups": 100,
+  "n": 10000,
+  "open_s": {
+    "max": 0.0603864,
+    "median": 0.0518118,
+    "min": 0.0439514,
+    "reps": 5
+  },
+  "range": {
+    "check": "4ef82399f57b7786",
+    "native_rust_check": "4ef82399f57b7786",
+    "native_rust_loop_s": {
+      "max": 0.0002332,
+      "median": 0.0001668,
+      "min": 0.0001643,
+      "reps": 5
+    },
+    "sql_end_to_end_s": {
+      "max": 0.0923837,
+      "median": 0.0615304,
+      "min": 0.0289581,
+      "reps": 5
+    },
+    "sql_registered_ctx_s": {
+      "max": 0.044146,
+      "median": 0.0352968,
+      "min": 0.0170448,
+      "reps": 5
+    }
+  },
+  "register_into_s": 0.0116737,
+  "reps": 5,
+  "seed": 7,
+  "size_by_table": {
+    "MANIFEST": 6804,
+    "events": 2204656,
+    "outcomes": 0,
+    "predictions": 0,
+    "revision_causes": 28091,
+    "revisions": 36301,
+    "schema_meta": 108
+  },
+  "size_bytes": 2275960,
+  "size_only": true,
+  "sql_lookups": 5,
+  "verify_s": {
+    "max": 0.0550523,
+    "median": 0.0458766,
+    "min": 0.0378603,
+    "reps": 5
+  }
+}
