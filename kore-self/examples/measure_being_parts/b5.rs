@@ -115,21 +115,32 @@ pub fn compose_report(label: &str, seeds: std::ops::RangeInclusive<u64>, budget:
     println!("Attempts answered by a rule per world: B2 {:.1}, composition {:.1}", att(&b), att(&c));
 }
 
-pub fn prune_scenario(label: &str, seeds: std::ops::RangeInclusive<u64>, budget: i64, cfg: PruneCfg, cap: usize, print: bool) -> (f64, f64, f64, f64) {
+pub fn prune_scenario(label: &str, seeds: std::ops::RangeInclusive<u64>, budget: i64, cfg: PruneCfg, cap: usize, print: bool, wide: bool) -> (f64, f64, f64, f64) {
     let n = seeds.clone().count();
     let pol = || Policy::new(100_000);
     let lim = |prune: bool| Limits { compose: true, prune, prune_cfg: cfg, max_live_rules: cap, ..Default::default() };
     let t = drift_clock(budget);
     let (mut off, mut on, mut st_off, mut st_on) = (vec![], vec![], vec![], vec![]);
     for s in seeds.clone() {
-        off.push(run_b5(s, budget, true, Some(lim(false)), EVERY, &pol()));
-        on.push(run_b5(s, budget, true, Some(lim(true)), EVERY, &pol()));
+        off.push(run_b5w(s, budget, true, wide, Some(lim(false)), EVERY, &pol()));
+        on.push(run_b5w(s, budget, true, wide, Some(lim(true)), EVERY, &pol()));
         st_off.push(run_b5(s, budget, false, Some(lim(false)), EVERY, &pol()));
         st_on.push(run_b5(s, budget, false, Some(lim(true)), EVERY, &pol()));
     }
     // the world's rule change affects difficulty 2: the old rule is the plain affine form accepted before the change
     let drift_step = |r: &B5Out| r.trace.iter().position(|x| x.0 >= t).unwrap_or(r.trace.len()) as u64;
-    let live_old = |r: &B5Out| r.accepted.iter().any(|(st, ru)| ru.sig == 2 && ru.xf.is_id() && *st <= drift_step(r) && matches!(ru.form, super::being::discover::Form::Lin { mask: 1, constant: true }));
+    use super::being::discover::Form;
+    // a plain rule of a family that changes, accepted before the change: narrow = the affine-geometric rule; wide = also the cubic, second-order and tribonacci rules
+    let live_old = |r: &B5Out| {
+        r.accepted.iter().any(|(st, ru)| {
+            let fam = match (ru.sig, ru.form) {
+                (2, Form::Lin { mask: 1, constant: true }) => true,
+                (3, Form::Poly(3)) | (4, Form::Lin { mask: 3, constant: false }) | (4, Form::Lin { mask: 7, constant: false }) => wide,
+                _ => false,
+            };
+            fam && ru.xf.is_id() && *st <= drift_step(r)
+        })
+    };
     let aff: Vec<usize> = (0..n).filter(|i| live_old(&off[*i])).collect();
     let wrong = |v: &Vec<B5Out>, idx: &[usize]| -> Vec<f64> { idx.iter().map(|i| wrong_uses_after(&v[*i], t).1 as f64).collect() };
     let uses = |v: &Vec<B5Out>, idx: &[usize]| -> Vec<f64> { idx.iter().map(|i| wrong_uses_after(&v[*i], t).0 as f64).collect() };
@@ -142,8 +153,8 @@ pub fn prune_scenario(label: &str, seeds: std::ops::RangeInclusive<u64>, budget:
         println!("  tuning {cfg:?}: affected worlds {} of {n}; wrong rule uses after the change: no pruning {:.2}, pruning {:.2}; reward/energy after the change {:.3} vs {:.3}; retirements per stationary world {:.2}", aff.len(), result.0, result.1, result.2, result.3, fr);
         return result;
     }
-    println!("\n### Rule drift, pruning vs no pruning, {label} (budget {budget}, live-rule cap {}, retire below {:.2} after {} uses of the latest {}, n = {n} worlds)\n", if cap == usize::MAX { "none".to_string() } else { cap.to_string() }, cfg.threshold, cfg.min_n, cfg.window);
-    println!("The sequence rule of one family (difficulty 2, affine-geometric) changes at half the budget; the old rule then fits every prefix of that family and gives a wrong next term. The being is not told.\n");
+    println!("\n### Rule drift ({}), pruning vs no pruning, {label} (budget {budget}, live-rule cap {}, retire below {:.2} after {} uses of the latest {}, n = {n} worlds)\n", if wide { "wide" } else { "narrow" }, if cap == usize::MAX { "none".to_string() } else { cap.to_string() }, cfg.threshold, cfg.min_n, cfg.window);
+    println!("{}\n", if wide { "Wide drift: at half the budget the revealed next term of four families that have plain rules changes (affine-geometric, cubic, second-order recurrence, tribonacci-like); every old rule then fits its prefixes and gives a wrong next term. The being is not told." } else { "Narrow drift: at half the budget the revealed next term of one family (difficulty 2, affine-geometric) changes; the old rule then fits every prefix of that family and gives a wrong next term. The being is not told." });
     println!("Worlds where the old rule was live at the change: {} of {n}. Statistics below are over those worlds unless stated.\n", aff.len());
     println!("| measure (after the change) | no pruning | pruning | paired difference (pruning minus none) |");
     println!("|---|---|---|---|");
@@ -261,7 +272,7 @@ pub fn tune() {
         println!("budget {budget}:");
         for (window, min_n, threshold) in [(10usize, 6u32, 0.5f64), (10, 6, 0.3), (8, 5, 0.5), (10, 8, 0.5), (16, 8, 0.4), (6, 4, 0.5), (10, 4, 0.5)] {
             let cfg = PruneCfg { window, min_n, threshold, merge_min: 5 };
-            prune_scenario("tuning", 101..=120, budget, cfg, usize::MAX, false);
+            prune_scenario("tuning", 101..=120, budget, cfg, usize::MAX, false, false);
         }
     }
 }
@@ -281,9 +292,17 @@ pub fn main_b5(args: &[String]) {
     }
     if all || mode == "b5-prune" {
         for budget in [3000i64, 6000] {
-            prune_scenario("report seeds 1..20", 1..=20, budget, cfg, usize::MAX, true);
-            prune_scenario("report seeds 1..20, live-rule cap 8", 1..=20, budget, cfg, 8, true);
+            for wide in [false, true] {
+                prune_scenario("report seeds 1..20", 1..=20, budget, cfg, usize::MAX, true, wide);
+                prune_scenario("report seeds 1..20, live-rule cap 8", 1..=20, budget, cfg, 8, true, wide);
+            }
         }
+    }
+    if mode == "b5-prune-wide" {
+        for budget in [3000i64, 6000] {
+            prune_scenario("report seeds 1..20", 1..=20, budget, cfg, usize::MAX, true, true);
+        }
+        prune_scenario("report seeds 1..20, live-rule cap 8", 1..=20, 3000, cfg, 8, true, true);
     }
     if all || mode == "b5-caps" {
         caps_report(1..=20, 3000);
