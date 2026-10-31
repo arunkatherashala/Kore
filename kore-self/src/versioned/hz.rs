@@ -509,7 +509,7 @@ mod tests {
         let c = compress(&mixed);
         assert!(c.len() < mixed.len() / 4);
         // more than one block
-        let big: Vec<u8> = (0..1_500_000u32).map(|i| ((i * 2654435761u32) >> 24) as u8 & 0x3f).collect();
+        let big: Vec<u8> = (0..1_500_000u32).map(|i| (i.wrapping_mul(2654435761u32) >> 24) as u8 & 0x3f).collect();
         rt(&big);
     }
 

@@ -17,6 +17,11 @@ pub struct SegRef {
     pub file: String,
     pub sha256: String,
     pub rows: u64,
+    /// Segment encoding: absent = v1 (kore-store columns, as written by every
+    /// version before log format 2), `Some(2)` = v2 (`codec.rs`). Part of the
+    /// hashed entry text, so it cannot be changed without breaking the chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enc: Option<u8>,
 }
 
 /// Written by `forget`: what was removed, by event-id hash only (never content).
@@ -47,6 +52,10 @@ impl Entry {
         let mut s = format!("v={v}\nat={recorded_at}\n");
         for g in segments {
             s.push_str(&format!("{}\t{}\t{}\t{}\n", g.table, g.file, g.sha256, g.rows));
+            if let Some(e) = g.enc {
+                // v1 entries keep their original hashed text byte for byte.
+                s.push_str(&format!("enc\t{e}\n"));
+            }
         }
         s
     }

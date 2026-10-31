@@ -145,7 +145,8 @@ pub fn recover_pending(dir: &Path) -> Result<bool, LogError> {
 impl VersionedLog {
     /// Ids of all stored events whose source starts with `prefix`.
     pub fn event_ids_by_source_prefix(&self, prefix: &str) -> Vec<String> {
-        let mut v: Vec<String> = self.head.raw(Table::Events).iter().filter(|r| r[3].s().starts_with(prefix)).map(|r| r[0].s()).collect();
+        let snap = self.open_latest();
+        let mut v: Vec<String> = snap.raw(Table::Events).iter().filter(|r| r[3].s().starts_with(prefix)).map(|r| r[0].s()).collect();
         v.sort();
         v
     }
@@ -161,18 +162,11 @@ impl VersionedLog {
         if ids.is_empty() {
             return inv("no event ids to forget");
         }
-        match read_manifest(&self.dir) {
-            Ok(on_disk) => {
-                if on_disk.last().map(|e| &e.hash) != self.entries.last().map(|e| &e.hash) || on_disk.len() != self.entries.len() {
-                    return Err(LogError::Conflict("MANIFEST changed on disk since this log was opened".into()));
-                }
-            }
-            Err(e) => return Err(e.into()),
-        }
+        self.check_manifest_unchanged()?;
         let mut set: BTreeSet<String> = BTreeSet::new();
         let mut already = 0usize;
         for id in ids {
-            if self.index.events.contains(id) {
+            if self.index.ev_has(id) {
                 set.insert(id.clone());
             } else if self.index.forgotten.contains(&forget_hash(id)) {
                 already += 1;
@@ -259,7 +253,7 @@ impl VersionedLog {
             if rows.is_empty() {
                 deletes.push(g.file.clone());
             } else {
-                let bytes = kore_store::KoreWriter::to_bytes(&rows_to_block(table, rows));
+                let bytes = encode_seg(g.enc, table, rows);
                 let seg = &mut entries[*ei].segments[*si];
                 seg.sha256 = sha256_hex(&[&bytes]);
                 seg.rows = rows.len() as u64;
@@ -315,11 +309,7 @@ impl VersionedLog {
         apply(&self.dir, &pending, stop)?;
 
         // Committed: refresh memory from what is now on disk.
-        self.head = snapshot_from(&self.dir, &entries, entries.len() - 1)?;
-        let mut index = Index::build(&self.head.tables);
-        index.forgotten = forgotten_set(&entries);
-        self.index = index;
-        self.entries = entries;
+        self.reload()?;
         report.version = self.latest_version();
         Ok(report)
     }

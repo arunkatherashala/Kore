@@ -12,24 +12,74 @@
 //! rows into a single atomic version.
 #![allow(dead_code)]
 
+pub mod codec;
 pub mod forget;
+pub mod hz;
 pub mod manifest;
 pub mod model;
 pub mod sql;
 pub use forget::{forget_hash, recover_pending, ForgetReport};
+pub mod upgrade;
 pub use sql::{register_into, run_readonly_sql};
+pub use upgrade::{migrate_to_v2, MigrateReport};
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_v2;
 
 use manifest::{Entry, SegRef, ZERO_HASH};
 pub use model::*;
+use codec::IdKey;
+use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
+/// Log format 1: the original segment encoding (kore-store columns + LZ4).
+/// Still the default for newly created logs.
 pub const FORMAT_VERSION: i64 = 1;
+/// Log format 2: `codec.rs` segments (raw 32-byte ids, delta timestamps,
+/// dictionaries, hz entropy stage) and content-hash idempotent revisions.
+/// Reached only by creating a log with `LogFormat::V2` or by an explicit
+/// `upgrade_to_v2` / `migrate_to_v2`; never silently.
+pub const FORMAT_V2: i64 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogFormat {
+    V1,
+    V2,
+}
+impl LogFormat {
+    pub fn number(self) -> i64 {
+        match self {
+            LogFormat::V1 => FORMAT_VERSION,
+            LogFormat::V2 => FORMAT_V2,
+        }
+    }
+    fn enc(self) -> Option<u8> {
+        match self {
+            LogFormat::V1 => None,
+            LogFormat::V2 => Some(2),
+        }
+    }
+    fn from_number(n: i64) -> LogFormat {
+        if n >= FORMAT_V2 {
+            LogFormat::V2
+        } else {
+            LogFormat::V1
+        }
+    }
+}
+
+fn encode_seg(enc: Option<u8>, t: Table, rows: &[Vec<Cell>]) -> Vec<u8> {
+    match enc {
+        Some(2) => codec::encode_segment(t, rows),
+        _ => kore_store::KoreWriter::to_bytes(&rows_to_block(t, rows)),
+    }
+}
 
 // ─── Errors ──────────────────────────────────────────────────────────────────
 
@@ -153,7 +203,7 @@ pub struct Snapshot {
     pub manifest_hash: String,
     /// Valid-time cut-off used by the `beliefs_asof` view. Default: `recorded_at`.
     pub valid_at: String,
-    tables: Vec<Vec<Vec<Cell>>>,
+    tables: Arc<Vec<Vec<Vec<Cell>>>>,
 }
 
 impl Snapshot {
@@ -185,21 +235,83 @@ impl Snapshot {
 
 #[derive(Clone, Default)]
 struct Index {
-    events: HashSet<String>,
+    /// event id (32 raw bytes) -> ordinal of its row among all event rows, in log order
+    events: HashMap<[u8; 32], u32>,
+    /// ids that are not canonical 64-char lowercase hex (cannot be produced by the API)
+    events_odd: HashMap<String, u32>,
+    /// number of event rows in the latest version
+    next_ord: u32,
     revs: HashMap<String, (String, String)>,
     /// (entity_type, key) -> (head rev_id, content digest of that revision)
     heads: HashMap<(String, String), (String, String)>,
+    /// content digest -> rev_id of the first revision with that content
+    content_ids: HashMap<String, String>,
+    /// Log format 2: a revision whose content digest already exists is a no-op.
+    content_idem: bool,
     preds: HashMap<String, Vec<String>>,
     outcomes: HashSet<String>,
     /// `forget_hash` of every event id removed by `forget`.
     forgotten: HashSet<String>,
 }
 
+enum Undo {
+    Event(IdKey),
+    Rev { rev_id: String, hk: (String, String), prev_head: Option<(String, String)>, digest: String, added_content: bool },
+    Pred(String),
+    Outcome(String),
+}
+
 impl Index {
-    fn build(tables: &[Vec<Vec<Cell>>]) -> Index {
+    fn ev_has(&self, id: &str) -> bool {
+        self.ev_ord(id).is_some()
+    }
+    fn ev_ord(&self, id: &str) -> Option<u32> {
+        match codec::hex64_to_bytes(id) {
+            Some(b) => self.events.get(&b).copied(),
+            None => self.events_odd.get(id).copied(),
+        }
+    }
+    /// Register the next event row. Returns false (and keeps the first ordinal) if the id exists.
+    fn ev_add(&mut self, k: IdKey) -> bool {
+        let ord = self.next_ord;
+        use std::collections::hash_map::Entry as E;
+        let fresh = match k {
+            IdKey::Hex(b) => match self.events.entry(b) {
+                E::Vacant(v) => {
+                    v.insert(ord);
+                    true
+                }
+                E::Occupied(_) => false,
+            },
+            IdKey::Other(s) => match self.events_odd.entry(s) {
+                E::Vacant(v) => {
+                    v.insert(ord);
+                    true
+                }
+                E::Occupied(_) => false,
+            },
+        };
+        self.next_ord += 1;
+        fresh
+    }
+    fn ev_remove_last(&mut self, k: &IdKey) {
+        match k {
+            IdKey::Hex(b) => {
+                self.events.remove(b);
+            }
+            IdKey::Other(s) => {
+                self.events_odd.remove(s);
+            }
+        }
+        self.next_ord -= 1;
+    }
+
+    /// `event_ids`: ids of all event rows in log order. `tables`: every other table (Events is ignored).
+    fn build_with_ids(event_ids: Vec<IdKey>, tables: &[Vec<Vec<Cell>>]) -> Index {
         let mut ix = Index::default();
-        for r in &tables[Table::Events.idx()] {
-            ix.events.insert(r[0].s());
+        ix.events.reserve(event_ids.len());
+        for k in event_ids {
+            ix.ev_add(k);
         }
         let mut causes: HashMap<String, Vec<String>> = HashMap::new();
         for r in &tables[Table::RevisionCauses.idx()] {
@@ -211,6 +323,7 @@ impl Index {
             c.sort();
             let digest = revision_content(&rv.entity_type, &rv.key, &rv.stance, &format!("{:?}", rv.confidence), &rv.rationale, &rv.valid_from, &rv.author, &c);
             ix.revs.insert(rv.rev_id.clone(), (rv.entity_type.clone(), rv.key.clone()));
+            ix.content_ids.entry(digest.clone()).or_insert_with(|| rv.rev_id.clone());
             ix.heads.insert((rv.entity_type, rv.key), (rv.rev_id, digest));
         }
         for r in &tables[Table::Predictions.idx()] {
@@ -223,13 +336,52 @@ impl Index {
         }
         ix
     }
+
+    fn build(tables: &[Vec<Vec<Cell>>]) -> Index {
+        let ids = tables[Table::Events.idx()].iter().map(|r| IdKey::from_str(&r[0].s())).collect();
+        Self::build_with_ids(ids, tables)
+    }
+
+    fn rollback(&mut self, undo: Vec<Undo>) {
+        for u in undo.into_iter().rev() {
+            match u {
+                Undo::Event(k) => self.ev_remove_last(&k),
+                Undo::Rev { rev_id, hk, prev_head, digest, added_content } => {
+                    self.revs.remove(&rev_id);
+                    match prev_head {
+                        Some(h) => {
+                            self.heads.insert(hk, h);
+                        }
+                        None => {
+                            self.heads.remove(&hk);
+                        }
+                    }
+                    if added_content {
+                        self.content_ids.remove(&digest);
+                    }
+                }
+                Undo::Pred(id) => {
+                    self.preds.remove(&id);
+                }
+                Undo::Outcome(id) => {
+                    self.outcomes.remove(&id);
+                }
+            }
+        }
+    }
 }
 
 pub struct VersionedLog {
     dir: PathBuf,
     entries: Vec<Entry>,
-    head: Snapshot,
+    /// Exact bytes of the MANIFEST as last written or read (header + one line per entry).
+    manifest_raw: Vec<u8>,
+    /// Latest snapshot, decoded lazily for all-v2 logs (see `open_latest`).
+    head: Mutex<Option<Snapshot>>,
     index: Index,
+    /// (first event ordinal, entry index, segment index) of every events segment, in log order.
+    ev_segs: Vec<(u32, usize, usize)>,
+    format: LogFormat,
     clock: Box<dyn Fn() -> String + Send>,
 }
 
@@ -250,7 +402,8 @@ fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     f.sync_all()
 }
 
-fn load_segment(dir: &Path, seg: &SegRef) -> Result<Vec<Vec<Cell>>, VerifyError> {
+/// Read a segment file and check its sha256 against the manifest entry.
+fn read_verified(dir: &Path, seg: &SegRef) -> Result<Vec<u8>, VerifyError> {
     let path = dir.join(&seg.file);
     let bytes = match fs::read(&path) {
         Ok(b) => b,
@@ -260,24 +413,62 @@ fn load_segment(dir: &Path, seg: &SegRef) -> Result<Vec<Vec<Cell>>, VerifyError>
     if sha256_hex(&[&bytes]) != seg.sha256 {
         return Err(VerifyError::ChecksumMismatch { file: seg.file.clone() });
     }
-    let table = Table::from_name(&seg.table)
-        .ok_or_else(|| VerifyError::SegmentUnreadable { file: seg.file.clone(), detail: format!("unknown table {}", seg.table) })?;
-    let block = kore_store::KoreReader::from_bytes(&bytes)
-        .map_err(|e| VerifyError::SegmentUnreadable { file: seg.file.clone(), detail: e.to_string() })?;
-    let rows = block_to_rows(table, &block).map_err(|d| VerifyError::SegmentUnreadable { file: seg.file.clone(), detail: d })?;
+    Ok(bytes)
+}
+
+fn seg_table(seg: &SegRef) -> Result<Table, VerifyError> {
+    Table::from_name(&seg.table).ok_or_else(|| VerifyError::SegmentUnreadable { file: seg.file.clone(), detail: format!("unknown table {}", seg.table) })
+}
+
+fn unreadable(seg: &SegRef, detail: impl Into<String>) -> VerifyError {
+    VerifyError::SegmentUnreadable { file: seg.file.clone(), detail: detail.into() }
+}
+
+fn decode_seg_bytes(seg: &SegRef, table: Table, bytes: &[u8]) -> Result<Vec<Vec<Cell>>, VerifyError> {
+    let rows = match seg.enc {
+        Some(2) => codec::decode_segment(table, bytes).map_err(|d| unreadable(seg, d))?,
+        None => {
+            let block = kore_store::KoreReader::from_bytes(bytes).map_err(|e| unreadable(seg, e.to_string()))?;
+            block_to_rows(table, &block).map_err(|d| unreadable(seg, d))?
+        }
+        Some(x) => return Err(unreadable(seg, format!("unknown segment encoding {x}"))),
+    };
     if rows.len() as u64 != seg.rows {
         return Err(VerifyError::RowCountMismatch { file: seg.file.clone() });
     }
     Ok(rows)
 }
 
+fn load_segment(dir: &Path, seg: &SegRef) -> Result<Vec<Vec<Cell>>, VerifyError> {
+    let bytes = read_verified(dir, seg)?;
+    let table = seg_table(seg)?;
+    decode_seg_bytes(seg, table, &bytes)
+}
+
+/// Verified read of just the id column of a v2 events segment.
+fn load_ids(dir: &Path, seg: &SegRef) -> Result<Vec<IdKey>, VerifyError> {
+    let bytes = read_verified(dir, seg)?;
+    let table = seg_table(seg)?;
+    if seg.enc != Some(2) {
+        return Err(unreadable(seg, "id-only read needs a v2 segment"));
+    }
+    let ids = codec::decode_first_col_ids(table, &bytes).map_err(|d| unreadable(seg, d))?;
+    if ids.len() as u64 != seg.rows {
+        return Err(VerifyError::RowCountMismatch { file: seg.file.clone() });
+    }
+    Ok(ids)
+}
+
+fn read_manifest_raw(dir: &Path) -> Result<Vec<u8>, VerifyError> {
+    match fs::read(dir.join("MANIFEST")) {
+        Ok(r) => Ok(r),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(VerifyError::ManifestMissing),
+        Err(e) => Err(VerifyError::Io(e.to_string())),
+    }
+}
+
 fn read_manifest(dir: &Path) -> Result<Vec<Entry>, VerifyError> {
-    let raw = match fs::read(dir.join("MANIFEST")) {
-        Ok(r) => r,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(VerifyError::ManifestMissing),
-        Err(e) => return Err(VerifyError::Io(e.to_string())),
-    };
-    manifest::parse(&raw).map_err(VerifyError::ManifestCorrupt)
+    manifest::parse(&read_manifest_raw(dir)?).map_err(VerifyError::ManifestCorrupt)
 }
 
 fn check_chain(entries: &[Entry]) -> Result<(), VerifyError> {
@@ -321,14 +512,18 @@ fn stray_files(dir: &Path, entries: &[Entry]) -> Vec<String> {
     out
 }
 
-/// Full integrity check of a log directory, straight from disk.
+fn all_segs(entries: &[Entry]) -> Vec<(usize, usize)> {
+    entries.iter().enumerate().flat_map(|(ei, e)| (0..e.segments.len()).map(move |si| (ei, si))).collect()
+}
+
+/// Full integrity check of a log directory, straight from disk. Every segment is
+/// read, checksummed and decoded (in parallel); the first failure in log order is reported.
 pub fn verify_dir(dir: &Path) -> Result<(), VerifyError> {
     let entries = read_manifest(dir)?;
     check_chain(&entries)?;
-    for e in &entries {
-        for g in &e.segments {
-            load_segment(dir, g)?;
-        }
+    let results: Vec<Result<(), VerifyError>> = all_segs(&entries).par_iter().map(|&(ei, si)| load_segment(dir, &entries[ei].segments[si]).map(|_| ())).collect();
+    for r in results {
+        r?;
     }
     if let Some(f) = stray_files(dir, &entries).into_iter().next() {
         return Err(VerifyError::ExtraSegment { file: f });
@@ -336,23 +531,100 @@ pub fn verify_dir(dir: &Path) -> Result<(), VerifyError> {
     Ok(())
 }
 
-fn snapshot_from(dir: &Path, entries: &[Entry], upto: usize) -> Result<Snapshot, VerifyError> {
+fn assemble(entries: &[Entry], upto: usize, parts: Vec<Vec<Vec<Cell>>>, skip_events: bool) -> Vec<Vec<Vec<Cell>>> {
+    let _ = skip_events;
     let mut tables: Vec<Vec<Vec<Cell>>> = vec![Vec::new(); ALL_TABLES.len()];
+    let mut it = parts.into_iter();
     for e in &entries[..=upto] {
         for g in &e.segments {
-            let rows = load_segment(dir, g)?;
-            let t = Table::from_name(&g.table).expect("checked by load_segment");
+            let rows = it.next().expect("one part per segment");
+            let t = Table::from_name(&g.table).expect("checked by load");
             tables[t.idx()].extend(rows);
         }
     }
+    tables
+}
+
+fn snapshot_from(dir: &Path, entries: &[Entry], upto: usize) -> Result<Snapshot, VerifyError> {
+    let segs = all_segs(&entries[..=upto]);
+    let results: Vec<Result<Vec<Vec<Cell>>, VerifyError>> = segs.par_iter().map(|&(ei, si)| load_segment(dir, &entries[ei].segments[si])).collect();
+    let mut parts = Vec::with_capacity(results.len());
+    for r in results {
+        parts.push(r?);
+    }
+    let tables = assemble(entries, upto, parts, false);
     let e = &entries[upto];
-    Ok(Snapshot { version: e.v, recorded_at: e.recorded_at.clone(), manifest_hash: e.hash.clone(), valid_at: e.recorded_at.clone(), tables })
+    Ok(Snapshot { version: e.v, recorded_at: e.recorded_at.clone(), manifest_hash: e.hash.clone(), valid_at: e.recorded_at.clone(), tables: Arc::new(tables) })
+}
+
+/// Everything `open` derives from the segments.
+struct State {
+    head: Option<Snapshot>,
+    index: Index,
+    ev_segs: Vec<(u32, usize, usize)>,
+    format: LogFormat,
+}
+
+enum Part {
+    Rows(Vec<Vec<Cell>>),
+    Ids(Vec<IdKey>),
+}
+
+/// Read and verify every segment. If all events segments are v2, only their id
+/// column is decoded (the text etc. is decoded later, on first use of the
+/// snapshot); otherwise everything is decoded now, as before.
+fn load_state(dir: &Path, entries: &[Entry]) -> Result<State, VerifyError> {
+    let segs = all_segs(entries);
+    let lazy = entries.iter().flat_map(|e| e.segments.iter()).filter(|g| g.table == "events").all(|g| g.enc == Some(2));
+    let results: Vec<Result<Part, VerifyError>> = segs
+        .par_iter()
+        .map(|&(ei, si)| {
+            let g = &entries[ei].segments[si];
+            if lazy && g.table == "events" {
+                load_ids(dir, g).map(Part::Ids)
+            } else {
+                load_segment(dir, g).map(Part::Rows)
+            }
+        })
+        .collect();
+    let mut tables: Vec<Vec<Vec<Cell>>> = vec![Vec::new(); ALL_TABLES.len()];
+    let mut ids: Vec<IdKey> = Vec::new();
+    let mut ev_segs = Vec::new();
+    for (&(ei, si), r) in segs.iter().zip(results) {
+        let g = &entries[ei].segments[si];
+        let t = seg_table(g)?;
+        match r? {
+            Part::Rows(rows) => {
+                if t == Table::Events {
+                    ev_segs.push((tables[Table::Events.idx()].len() as u32, ei, si));
+                }
+                tables[t.idx()].extend(rows);
+            }
+            Part::Ids(v) => {
+                ev_segs.push((ids.len() as u32, ei, si));
+                ids.extend(v);
+            }
+        }
+    }
+    let format = tables[Table::SchemaMeta.idx()].iter().map(|r| LogFormat::from_number(MetaRow::from_cells(r).format_version)).fold(LogFormat::V1, |a, b| if b == LogFormat::V2 { b } else { a });
+    let last = entries.len() - 1;
+    let mut index = if lazy { Index::build_with_ids(ids, &tables) } else { Index::build(&tables) };
+    index.forgotten = forget::forgotten_set(entries);
+    index.content_idem = format == LogFormat::V2;
+    let e = &entries[last];
+    let head = if lazy {
+        None
+    } else {
+        Some(Snapshot { version: e.v, recorded_at: e.recorded_at.clone(), manifest_hash: e.hash.clone(), valid_at: e.recorded_at.clone(), tables: Arc::new(tables) })
+    };
+    Ok(State { head, index, ev_segs, format })
 }
 
 impl VersionedLog {
     /// Open `<root>/<owner>/log`, creating it (version 0 = genesis with
     /// `schema_meta`) if no MANIFEST exists. Does not delete anything when the
     /// log already exists; call `recover()` or just commit to clean leftovers.
+    /// New logs use format 1 (see `open_or_create_with_format` for format 2).
     pub fn open_or_create(root: &Path, owner: &str) -> Result<VersionedLog, LogError> {
         Self::open_or_create_with_clock(root, owner, now_iso)
     }
@@ -360,6 +632,13 @@ impl VersionedLog {
     /// Like `open_or_create` but with an explicit time source, which also
     /// stamps the genesis version (tests, replays, imports).
     pub fn open_or_create_with_clock(root: &Path, owner: &str, clock: impl Fn() -> String + Send + 'static) -> Result<VersionedLog, LogError> {
+        Self::open_or_create_with_format(root, owner, clock, LogFormat::V1)
+    }
+
+    /// Like `open_or_create_with_clock`; `format` applies only when the log is
+    /// created here. An existing log keeps the format it has (upgrade is explicit:
+    /// `upgrade_to_v2`).
+    pub fn open_or_create_with_format(root: &Path, owner: &str, clock: impl Fn() -> String + Send + 'static, format: LogFormat) -> Result<VersionedLog, LogError> {
         if !valid_owner(owner) {
             return inv("owner must be 1-64 chars of [A-Za-z0-9_-]");
         }
@@ -372,14 +651,17 @@ impl VersionedLog {
             let mut log = VersionedLog {
                 dir: dir.clone(),
                 entries: vec![],
-                head: Snapshot { version: 0, recorded_at: String::new(), manifest_hash: String::new(), valid_at: String::new(), tables: vec![Vec::new(); ALL_TABLES.len()] },
-                index: Index::default(),
+                manifest_raw: format!("{}\n", manifest::HEADER).into_bytes(),
+                head: Mutex::new(Some(Snapshot { version: 0, recorded_at: String::new(), manifest_hash: String::new(), valid_at: String::new(), tables: Arc::new(vec![Vec::new(); ALL_TABLES.len()]) })),
+                index: Index { content_idem: format == LogFormat::V2, ..Index::default() },
+                ev_segs: vec![],
+                format,
                 clock: Box::new(clock),
             };
             log.recover()?;
             let now = (log.clock)();
-            let meta = MetaRow { format_version: FORMAT_VERSION, created_at: now.clone() };
-            log.write_commit(vec![(Table::SchemaMeta, vec![meta.to_cells()])], now)?;
+            let meta = MetaRow { format_version: format.number(), created_at: now.clone() };
+            log.write_commit(vec![(Table::SchemaMeta, vec![meta.to_cells()])], now, format, None)?;
             return Ok(log);
         }
         let mut log = Self::open_existing(dir)?;
@@ -398,15 +680,29 @@ impl VersionedLog {
     fn open_existing(dir: PathBuf) -> Result<VersionedLog, LogError> {
         // Finish (or discard) a forget that was interrupted by a crash.
         recover_pending(&dir)?;
-        let entries = read_manifest(&dir)?;
+        let raw = read_manifest_raw(&dir)?;
+        let entries = manifest::parse(&raw).map_err(VerifyError::ManifestCorrupt)?;
         check_chain(&entries)?;
         if entries.is_empty() {
             return Err(VerifyError::ManifestCorrupt("no entries".into()).into());
         }
-        let head = snapshot_from(&dir, &entries, entries.len() - 1)?;
-        let mut index = Index::build(&head.tables);
-        index.forgotten = forget::forgotten_set(&entries);
-        Ok(VersionedLog { dir, entries, head, index, clock: Box::new(now_iso) })
+        let st = load_state(&dir, &entries)?;
+        Ok(VersionedLog { dir, entries, manifest_raw: raw, head: Mutex::new(st.head), index: st.index, ev_segs: st.ev_segs, format: st.format, clock: Box::new(now_iso) })
+    }
+
+    /// Re-derive all in-memory state from disk (used after `forget`).
+    fn reload(&mut self) -> Result<(), LogError> {
+        let raw = read_manifest_raw(&self.dir)?;
+        let entries = manifest::parse(&raw).map_err(VerifyError::ManifestCorrupt)?;
+        check_chain(&entries)?;
+        let st = load_state(&self.dir, &entries)?;
+        self.entries = entries;
+        self.manifest_raw = raw;
+        *self.head.get_mut().unwrap_or_else(|e| e.into_inner()) = st.head;
+        self.index = st.index;
+        self.ev_segs = st.ev_segs;
+        self.format = st.format;
+        Ok(())
     }
 
     /// Replace the time source (tests / replays). `recorded_at` is still forced
@@ -422,7 +718,32 @@ impl VersionedLog {
 
     /// True if an event with this id is stored (latest version).
     pub fn has_event(&self, id: &str) -> bool {
-        self.index.events.contains(id)
+        self.index.ev_has(id)
+    }
+
+    /// Number of event rows in the latest version.
+    pub fn event_count(&self) -> usize {
+        self.index.next_ord as usize
+    }
+
+    /// The stored row for this event id (latest version), if any. Uses the id
+    /// index: at most one segment is read (and its checksum verified) when the
+    /// snapshot is not already in memory; no scan over all events.
+    pub fn get_event(&self, id: &str) -> Result<Option<EventRow>, LogError> {
+        let ord = match self.index.ev_ord(id) {
+            Some(o) => o,
+            None => return Ok(None),
+        };
+        {
+            let g = self.head.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(s) = g.as_ref() {
+                return Ok(s.tables[Table::Events.idx()].get(ord as usize).map(|r| EventRow::from_cells(r)));
+            }
+        }
+        let k = self.ev_segs.partition_point(|s| s.0 <= ord) - 1;
+        let (start, ei, si) = self.ev_segs[k];
+        let rows = load_segment(&self.dir, &self.entries[ei].segments[si])?;
+        Ok(rows.get((ord - start) as usize).map(|r| EventRow::from_cells(r)))
     }
 
     /// True if this event id was removed by `forget` (ingest of it is refused).
@@ -432,6 +753,11 @@ impl VersionedLog {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// The write format of this log (the newest `schema_meta.format_version`).
+    pub fn format(&self) -> LogFormat {
+        self.format
     }
 
     pub fn latest_version(&self) -> u64 {
@@ -446,6 +772,19 @@ impl VersionedLog {
         }
         let _ = fs::remove_file(self.dir.join("MANIFEST.tmp"));
         Ok(strays)
+    }
+
+    /// Cheap per-commit cleanup: only the file names a crashed commit could have
+    /// left for the next two versions (full scan: `recover`).
+    fn recover_next(&self, v: u64) {
+        for t in ALL_TABLES {
+            for k in [v, v + 1] {
+                let p = self.dir.join(t.name()).join(format!("{k:010}.kore"));
+                let _ = fs::remove_file(&p);
+                let _ = fs::remove_file(p.with_extension("kore.tmp"));
+            }
+        }
+        let _ = fs::remove_file(self.dir.join("MANIFEST.tmp"));
     }
 
     pub fn verify(&self) -> Result<(), VerifyError> {
@@ -481,8 +820,21 @@ impl VersionedLog {
         self.entries.get(v as usize).map(|e| e.hash.clone()).ok_or_else(|| LogError::NotFound(format!("version {v}")))
     }
 
+    /// The latest snapshot. For an all-v2 log the rows are decoded on the first
+    /// call (open only indexes ids) and then kept; a clone is cheap (shared rows).
+    /// Fails only if the files changed on disk since `open`.
+    pub fn try_open_latest(&self) -> Result<Snapshot, LogError> {
+        let mut g = self.head.lock().unwrap_or_else(|e| e.into_inner());
+        if g.is_none() {
+            *g = Some(snapshot_from(&self.dir, &self.entries, self.entries.len() - 1)?);
+        }
+        Ok(g.as_ref().expect("just set").clone())
+    }
+
+    /// Like `try_open_latest`; panics if the log files were modified after `open`
+    /// (the old code could not observe that; use `try_open_latest` to handle it).
     pub fn open_latest(&self) -> Snapshot {
-        self.head.clone()
+        self.try_open_latest().unwrap_or_else(|e| panic!("versioned log changed on disk after open: {e}"))
     }
 
     pub fn open_at(&self, at: AsOf) -> Result<Snapshot, LogError> {
@@ -546,74 +898,59 @@ impl VersionedLog {
         self.commit_batch(Batch { outcomes: vec![o], ..Default::default() })
     }
 
-    /// Validate everything, then write at most one new version atomically.
-    /// Within a batch, revisions may cite events of the same batch, and
-    /// outcomes may reference predictions of the same batch.
-    pub fn commit_batch(&mut self, batch: Batch) -> Result<CommitInfo, LogError> {
-        // Detect a concurrent writer / on-disk tampering of the head.
-        match read_manifest(&self.dir) {
-            Ok(on_disk) => {
-                if on_disk.last().map(|e| &e.hash) != self.entries.last().map(|e| &e.hash) || on_disk.len() != self.entries.len() {
-                    return Err(LogError::Conflict("MANIFEST changed on disk since this log was opened".into()));
-                }
-            }
-            Err(e) => return Err(e.into()),
+    /// Detect a concurrent writer / on-disk tampering of the MANIFEST: the file
+    /// must still be byte-identical to what this handle last wrote or read.
+    fn check_manifest_unchanged(&self) -> Result<(), LogError> {
+        let on_disk = read_manifest_raw(&self.dir)?;
+        if on_disk != self.manifest_raw {
+            return Err(LogError::Conflict("MANIFEST changed on disk since this log was opened".into()));
         }
+        Ok(())
+    }
+
+    /// Explicit, one-way upgrade of this log to format 2: one new commit records
+    /// `schema_meta.format_version = 2`; every later segment is written in the
+    /// v2 encoding and revisions become content-hash idempotent. Existing
+    /// segments, versions and hashes are untouched (a mixed-encoding log). Old
+    /// binaries cannot read the new segments. Returns false if already format 2.
+    pub fn upgrade_to_v2(&mut self) -> Result<bool, LogError> {
+        if self.format == LogFormat::V2 {
+            return Ok(false);
+        }
+        self.check_manifest_unchanged()?;
         let last_at = self.entries.last().map(|e| e.recorded_at.clone()).unwrap_or_default();
         let mut now = (self.clock)();
         if now < last_at {
             now = last_at;
         }
-        let mut ix = self.index.clone();
-        let mut new: Vec<(Table, Vec<Vec<Cell>>)> = Vec::new();
-        let (mut ev, mut rv, mut ca, mut pr, mut oc) = (vec![], vec![], vec![], vec![], vec![]);
-        let (mut event_ids, mut rev_ids, mut pred_ids) = (vec![], vec![], vec![]);
-        let mut suppressed = 0usize;
+        let meta = MetaRow { format_version: FORMAT_V2, created_at: now.clone() };
+        self.write_commit(vec![(Table::SchemaMeta, vec![meta.to_cells()])], now, LogFormat::V2, None)?;
+        self.format = LogFormat::V2;
+        self.index.content_idem = true;
+        Ok(true)
+    }
 
-        for e in &batch.events {
-            let row = validate_event(e, &now)?;
-            if ix.forgotten.contains(&forget_hash(&row.event_id)) {
-                suppressed += 1;
-                continue;
-            }
-            event_ids.push(row.event_id.clone());
-            if ix.events.insert(row.event_id.clone()) {
-                ev.push(row.to_cells());
-            }
+    /// Validate everything, then write at most one new version atomically.
+    /// Within a batch, revisions may cite events of the same batch, and
+    /// outcomes may reference predictions of the same batch.
+    pub fn commit_batch(&mut self, batch: Batch) -> Result<CommitInfo, LogError> {
+        self.check_manifest_unchanged()?;
+        let last_at = self.entries.last().map(|e| e.recorded_at.clone()).unwrap_or_default();
+        let mut now = (self.clock)();
+        if now < last_at {
+            now = last_at;
         }
-        for r in &batch.revisions {
-            let (row, causes, digest) = validate_revision(r, &ix, &now)?;
-            rev_ids.push(row.rev_id.clone());
-            if ix.revs.contains_key(&row.rev_id) {
-                continue;
+        let mut undo: Vec<Undo> = Vec::new();
+        let staged = self.stage_batch(&batch, &now, &mut undo);
+        let (new, event_ids, rev_ids, pred_ids, suppressed) = match staged {
+            Ok(x) => x,
+            Err(e) => {
+                self.index.rollback(undo);
+                return Err(e);
             }
-            ix.revs.insert(row.rev_id.clone(), (row.entity_type.clone(), row.key.clone()));
-            ix.heads.insert((row.entity_type.clone(), row.key.clone()), (row.rev_id.clone(), digest));
-            for c in causes {
-                ca.push(CauseRow { rev_id: row.rev_id.clone(), event_id: c }.to_cells());
-            }
-            rv.push(row.to_cells());
-        }
-        for p in &batch.predictions {
-            let row = validate_prediction(p, &ix)?;
-            pred_ids.push(row.pred_id.clone());
-            if !ix.preds.contains_key(&row.pred_id) {
-                ix.preds.insert(row.pred_id.clone(), p.options.clone());
-                pr.push(row.to_cells());
-            }
-        }
-        for o in &batch.outcomes {
-            let row = validate_outcome(o, &ix)?;
-            if ix.outcomes.insert(row.pred_id.clone()) {
-                oc.push(row.to_cells());
-            }
-        }
-        for (t, rows) in [(Table::Events, ev), (Table::Revisions, rv), (Table::RevisionCauses, ca), (Table::Predictions, pr), (Table::Outcomes, oc)] {
-            if !rows.is_empty() {
-                new.push((t, rows));
-            }
-        }
+        };
         if new.is_empty() {
+            self.index.rollback(undo);
             return Ok(CommitInfo {
                 version: self.latest_version(),
                 created: false,
@@ -626,20 +963,104 @@ impl VersionedLog {
             });
         }
         let new_rows: BTreeMap<String, usize> = new.iter().map(|(t, r)| (t.name().to_string(), r.len())).collect();
+        let ev_rows = new.iter().find(|(t, _)| *t == Table::Events).map(|(_, r)| r.len()).unwrap_or(0);
+        let ev_seg_pos = new.iter().position(|(t, _)| *t == Table::Events);
+        let ev_start = self.index.next_ord - ev_rows as u32;
+        let fmt = self.format;
+        let v = self.entries.len();
         // Stamp recorded_at into rows that carry it (done in validate_*), then write.
-        self.write_commit(new, now.clone())?;
-        self.index = ix;
+        if let Err(e) = self.write_commit(new, now.clone(), fmt, None) {
+            self.index.rollback(undo);
+            return Err(e);
+        }
+        if let Some(si) = ev_seg_pos {
+            self.ev_segs.push((ev_start, v, si));
+        }
         Ok(CommitInfo { version: self.latest_version(), created: true, recorded_at: now, new_rows, event_ids, rev_ids, pred_ids, suppressed })
     }
 
-    /// Write segments, then atomically replace the MANIFEST. The commit exists
-    /// only once the rename succeeds.
-    fn write_commit(&mut self, new: Vec<(Table, Vec<Vec<Cell>>)>, recorded_at: String) -> Result<(), LogError> {
-        self.recover()?;
+    /// Validate the batch and register its ids in the index (recorded in `undo`).
+    #[allow(clippy::type_complexity)]
+    fn stage_batch(&mut self, batch: &Batch, now: &str, undo: &mut Vec<Undo>) -> Result<(Vec<(Table, Vec<Vec<Cell>>)>, Vec<String>, Vec<String>, Vec<String>, usize), LogError> {
+        let mut new: Vec<(Table, Vec<Vec<Cell>>)> = Vec::new();
+        let (mut ev, mut rv, mut ca, mut pr, mut oc) = (vec![], vec![], vec![], vec![], vec![]);
+        let (mut event_ids, mut rev_ids, mut pred_ids) = (vec![], vec![], vec![]);
+        let mut suppressed = 0usize;
+        let ix = &mut self.index;
+
+        for e in &batch.events {
+            let row = validate_event(e, now)?;
+            if ix.forgotten.contains(&forget_hash(&row.event_id)) {
+                suppressed += 1;
+                continue;
+            }
+            event_ids.push(row.event_id.clone());
+            let key = IdKey::from_str(&row.event_id);
+            if ix.ev_add(key.clone()) {
+                undo.push(Undo::Event(key));
+                ev.push(row.to_cells());
+            } else {
+                // duplicate: the ordinal counter was bumped by ev_add; undo that
+                ix.next_ord -= 1;
+            }
+        }
+        for r in &batch.revisions {
+            let (row, causes, digest) = validate_revision(r, ix, now)?;
+            rev_ids.push(row.rev_id.clone());
+            if ix.revs.contains_key(&row.rev_id) {
+                continue;
+            }
+            let hk = (row.entity_type.clone(), row.key.clone());
+            let prev_head = ix.heads.get(&hk).cloned();
+            ix.revs.insert(row.rev_id.clone(), hk.clone());
+            ix.heads.insert(hk.clone(), (row.rev_id.clone(), digest.clone()));
+            let added_content = !ix.content_ids.contains_key(&digest);
+            if added_content {
+                ix.content_ids.insert(digest.clone(), row.rev_id.clone());
+            }
+            undo.push(Undo::Rev { rev_id: row.rev_id.clone(), hk, prev_head, digest, added_content });
+            for c in causes {
+                ca.push(CauseRow { rev_id: row.rev_id.clone(), event_id: c }.to_cells());
+            }
+            rv.push(row.to_cells());
+        }
+        for p in &batch.predictions {
+            let row = validate_prediction(p, ix)?;
+            pred_ids.push(row.pred_id.clone());
+            if !ix.preds.contains_key(&row.pred_id) {
+                ix.preds.insert(row.pred_id.clone(), p.options.clone());
+                undo.push(Undo::Pred(row.pred_id.clone()));
+                pr.push(row.to_cells());
+            }
+        }
+        for o in &batch.outcomes {
+            let row = validate_outcome(o, ix)?;
+            if ix.outcomes.insert(row.pred_id.clone()) {
+                undo.push(Undo::Outcome(row.pred_id.clone()));
+                oc.push(row.to_cells());
+            }
+        }
+        for (t, rows) in [(Table::Events, ev), (Table::Revisions, rv), (Table::RevisionCauses, ca), (Table::Predictions, pr), (Table::Outcomes, oc)] {
+            if !rows.is_empty() {
+                new.push((t, rows));
+            }
+        }
+        Ok((new, event_ids, rev_ids, pred_ids, suppressed))
+    }
+
+    /// Write segments, then atomically replace the MANIFEST (temp file, fsync,
+    /// rename). The commit exists only once the rename succeeds. The new MANIFEST
+    /// is the previous bytes plus one line; nothing is re-parsed or re-rendered.
+    fn write_commit(&mut self, new: Vec<(Table, Vec<Vec<Cell>>)>, recorded_at: String, fmt: LogFormat, forget: Option<manifest::ForgetRecord>) -> Result<(), LogError> {
         let v = self.entries.len() as u64;
+        if v == 0 {
+            self.recover()?;
+        } else {
+            self.recover_next(v);
+        }
         let mut segs = Vec::new();
         for (t, rows) in &new {
-            let bytes = kore_store::KoreWriter::to_bytes(&rows_to_block(*t, rows));
+            let bytes = encode_seg(fmt.enc(), *t, rows);
             let rel = format!("{}/{:010}.kore", t.name(), v);
             let tdir = self.dir.join(t.name());
             fs::create_dir_all(&tdir)?;
@@ -647,28 +1068,36 @@ impl VersionedLog {
             write_synced(&tmp, &bytes)?;
             fs::rename(&tmp, self.dir.join(&rel))?;
             sync_dir(&tdir);
-            segs.push(SegRef { table: t.name().to_string(), file: rel, sha256: sha256_hex(&[&bytes]), rows: rows.len() as u64 });
+            segs.push(SegRef { table: t.name().to_string(), file: rel, sha256: sha256_hex(&[&bytes]), rows: rows.len() as u64, enc: fmt.enc() });
         }
         let prev = self.entries.last().map(|e| e.hash.clone()).unwrap_or_else(|| ZERO_HASH.to_string());
-        let entry = Entry::new(v, recorded_at, segs, &prev);
-        let mut all = self.entries.clone();
-        all.push(entry);
+        let mut entry = Entry::new(v, recorded_at, segs, &prev);
+        if forget.is_some() {
+            entry.forget = forget;
+            entry.reseal(&prev);
+        }
+        let line = serde_json::to_string(&entry).expect("entry serialises");
+        let mut raw = Vec::with_capacity(self.manifest_raw.len() + line.len() + 1);
+        raw.extend_from_slice(&self.manifest_raw);
+        raw.extend_from_slice(line.as_bytes());
+        raw.push(b'\n');
         let tmp = self.dir.join("MANIFEST.tmp");
-        write_synced(&tmp, manifest::render(&all).as_bytes())?;
+        write_synced(&tmp, &raw)?;
         fs::rename(&tmp, self.dir.join("MANIFEST"))?;
         sync_dir(&self.dir);
         // Commit point passed: update memory.
-        for (t, rows) in new {
-            self.head.tables[t.idx()].extend(rows);
-        }
-        self.entries = all;
+        self.manifest_raw = raw;
+        self.entries.push(entry);
         let e = self.entries.last().expect("just pushed");
-        self.head.version = e.v;
-        self.head.recorded_at = e.recorded_at.clone();
-        self.head.manifest_hash = e.hash.clone();
-        self.head.valid_at = e.recorded_at.clone();
-        if v == 0 {
-            self.index = Index::build(&self.head.tables);
+        if let Some(h) = self.head.get_mut().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            let t = Arc::make_mut(&mut h.tables);
+            for (tb, rows) in new {
+                t[tb.idx()].extend(rows);
+            }
+            h.version = e.v;
+            h.recorded_at = e.recorded_at.clone();
+            h.manifest_hash = e.hash.clone();
+            h.valid_at = e.recorded_at.clone();
         }
         Ok(())
     }
@@ -680,7 +1109,7 @@ impl VersionedLog {
         let v = self.entries.len() as u64;
         let now = (self.clock)();
         let ev: Vec<Vec<Cell>> = batch.events.iter().map(|e| validate_event(e, &now).map(|r| r.to_cells())).collect::<Result<_, _>>()?;
-        let bytes = kore_store::KoreWriter::to_bytes(&rows_to_block(Table::Events, &ev));
+        let bytes = encode_seg(self.format.enc(), Table::Events, &ev);
         let tdir = self.dir.join("events");
         write_synced(&tdir.join(format!("{v:010}.kore")), &bytes)?;
         write_synced(&tdir.join(format!("{:010}.kore.tmp", v + 1)), b"partial")?;
@@ -760,7 +1189,7 @@ fn validate_revision(r: &NewRevision, ix: &Index, now: &str) -> Result<(Revision
         return inv("rule-authored revisions require at least one cited event (caused_by)");
     }
     for c in &causes {
-        if !ix.events.contains(c) {
+        if !ix.ev_has(c) {
             return Err(LogError::NotFound(format!("caused_by event {c}")));
         }
     }
@@ -789,6 +1218,17 @@ fn validate_revision(r: &NewRevision, ix: &Index, now: &str) -> Result<(Revision
                 return Ok((row, causes, digest));
             }
         }
+        // Format 2: identical content anywhere in the log is a no-op (replays are idempotent).
+        if ix.content_idem {
+            if let Some(existing) = ix.content_ids.get(&digest) {
+                let row = RevisionRow {
+                    rev_id: existing.clone(), entity_type: r.entity_type.clone(), key: r.key.clone(), stance: r.stance.clone(),
+                    confidence: r.confidence, rationale: r.rationale.clone(), supersedes: None, valid_from, author: r.author.clone(),
+                    recorded_at: now.to_string(),
+                };
+                return Ok((row, causes, digest));
+            }
+        }
     }
     let rev_id = sha256_hex(&[
         b"rev1", &[0x1f], r.entity_type.as_bytes(), &[0x1f], r.key.as_bytes(), &[0x1f], r.stance.as_bytes(), &[0x1f],
@@ -807,7 +1247,7 @@ fn validate_revision(r: &NewRevision, ix: &Index, now: &str) -> Result<(Revision
 
 fn validate_prediction(p: &NewPrediction, ix: &Index) -> Result<PredictionRow, LogError> {
     for c in &p.features_cite {
-        if !ix.events.contains(c) {
+        if !ix.ev_has(c) {
             return Err(LogError::NotFound(format!("features_cite event {c}")));
         }
     }
@@ -862,7 +1302,7 @@ fn validate_outcome(o: &NewOutcome, ix: &Index) -> Result<OutcomeRow, LogError> 
         return inv("actual must be one of the prediction's options");
     }
     if let Some(e) = &o.outcome_event_id {
-        if !ix.events.contains(e) {
+        if !ix.ev_has(e) {
             return Err(LogError::NotFound(format!("outcome_event_id {e}")));
         }
     }
