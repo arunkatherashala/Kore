@@ -57,6 +57,12 @@ struct Parser {
 /// Stack the recursive-descent parser may use before it gives up with an error instead of overflowing
 /// (and aborting the whole process) on deeply nested parentheses / functions / CASE / NOT chains / subqueries.
 /// Debug frames are about 10x larger, so the budget is larger there; both stay inside a 2 MB thread stack.
+/// Longest left-associative operator chain (`a AND b AND c ...`, `x + 1 + 1 ...`, `s || 'x' || ...`) accepted.
+/// The parser builds it in a loop, but binding / rewriting / evaluating the left-deep tree recurses once per
+/// link (about 2 MB of stack at ~3000 links in release, ~300 in debug). Long membership lists belong in `IN (...)`,
+/// which is not a chain and is unlimited.
+const MAX_OPERATOR_CHAIN: usize = if cfg!(debug_assertions) { 250 } else { 1000 };
+
 const PARSER_STACK_BUDGET: usize = if cfg!(debug_assertions) { 1_200_000 } else { 400_000 };
 
 impl Parser {
@@ -1221,6 +1227,7 @@ impl Parser {
     fn parse_expr(&mut self, min_prec: u8) -> Result<Expr, KoreError> {
         self.check_depth()?;
         let mut lhs = self.parse_unary()?;
+        let mut chain = 0usize;
         loop {
             // postfix field access on a struct-valued expression: f(..).field
             if self.peek() == &Token::Dot && !matches!(lhs, Expr::Col(_) | Expr::QualCol(..) | Expr::Int(_) | Expr::Float(_)) && !matches!(self.peek2(), Token::Star) && matches!(self.peek2(), Token::Ident(_) | Token::End) {
@@ -1377,6 +1384,10 @@ impl Parser {
                     lhs = Expr::QuantSubquery { expr: Box::new(lhs), op: tok_to_binop(&op_tok)?, all, subquery: Box::new(sub) };
                     continue;
                 }
+            }
+            chain += 1;
+            if chain > MAX_OPERATOR_CHAIN {
+                return Err(KoreError::InvalidArgument(format!("expression has more than {MAX_OPERATOR_CHAIN} chained operators (AND/OR/+/||...); use IN (...) for long lists")));
             }
             let rhs = self.parse_expr(prec + 1)?;
             if op_tok == Token::NullSafeEq {

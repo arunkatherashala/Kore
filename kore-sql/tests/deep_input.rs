@@ -83,12 +83,13 @@ fn deep_input_report() {
     if std::env::var("KORE_PROBE_ASSERT").is_ok() { assert!(crashed.is_empty(), "stack overflow / abort on: {crashed:?}"); }
 }
 
-/// Regression (fixed in parser.rs by a stack-budget guard): deep nesting returns a clean error instead of aborting.
+/// Regression (fixed in parser.rs by a stack-budget guard and an operator-chain cap): deep nesting / long chains return a clean error instead of aborting.
 #[test]
 fn nesting_returns_error_not_abort() {
     if std::env::var("KORE_PROBE").is_ok() { return; }
     let mut crashed = vec![];
-    for p in ["parens_5000", "parens_select_5000", "notchain_5000", "negchain_5000", "func_5000", "case_5000", "subq_5000", "subq_in_5000"] {
+    for p in ["parens_5000", "parens_select_5000", "notchain_5000", "negchain_5000", "func_5000", "case_5000", "subq_5000", "subq_in_5000",
+              "andchain_5000", "orchain_5000", "addchain_5000", "concatchain_5000", "likechain_5000", "andchain_100000"] {
         let (ok, line) = run_probe(p);
         println!("{p:22} {} | {line}", if ok { "OK" } else { "CRASH" });
         if !ok { crashed.push(p); }
