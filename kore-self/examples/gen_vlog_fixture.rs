@@ -14,6 +14,7 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use versioned::sql::block_strings;
 use versioned::*;
 
 fn ev(source: &str, at: &str, kind: &str, text: &str, tags: &[&str]) -> NewEvent {
