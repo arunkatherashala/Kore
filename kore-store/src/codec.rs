@@ -41,7 +41,7 @@ pub enum Transform {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
-    /// writer-side: choose among None, Lz4 and Hz (Zstd only when requested explicitly)
+    /// writer-side: choose among None, Lz4, Hz and Zstd
     Auto,
     None,
     Lz4,
@@ -475,17 +475,21 @@ pub fn encode_column(data: &ColumnData, codec: ColumnCodec) -> Result<(u8, u8, V
         t => vec![t],
     };
     let stages: Vec<Stage> = match codec.stage {
-        Stage::Auto => vec![Stage::None, Stage::Lz4, Stage::Hz],
+        Stage::Auto => vec![Stage::None, Stage::Lz4, Stage::Hz, Stage::Zstd],
         s => vec![s],
     };
     let mut best: Option<(u8, u8, Vec<u8>)> = None;
     for t in transforms {
         let raw = encode_transform(data, t)?;
-        let cands: Vec<Vec<u8>> = stages.par_iter().map(|&s| encode_stage(&raw, s)).collect();
-        for (s, payload) in stages.iter().zip(cands) {
-            if best.as_ref().map_or(true, |b| payload.len() < b.2.len()) {
-                best = Some((t.id().unwrap(), s.id().unwrap(), payload));
-            }
+        // the unstaged candidate is compared by length only (no copy of a possibly huge payload)
+        let staged: Vec<(Stage, Option<Vec<u8>>)> = stages.par_iter()
+            .map(|&s| (s, if s == Stage::None { None } else { Some(encode_stage(&raw, s)) })).collect();
+        let size_of = |c: &(Stage, Option<Vec<u8>>)| c.1.as_ref().map_or(raw.len(), |p| p.len());
+        let mut win = 0;
+        for i in 1..staged.len() { if size_of(&staged[i]) < size_of(&staged[win]) { win = i; } }
+        if best.as_ref().map_or(true, |b| size_of(&staged[win]) < b.2.len()) {
+            let (s, p) = staged.into_iter().nth(win).unwrap();
+            best = Some((t.id().unwrap(), s.id().unwrap(), p.unwrap_or(raw)));
         }
     }
     best.ok_or_else(|| bad("no codec candidate"))

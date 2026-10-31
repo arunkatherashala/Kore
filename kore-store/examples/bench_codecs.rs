@@ -25,11 +25,20 @@ const WORDS: &[&str] = &["the", "request", "failed", "with", "status", "retrying
 
 pub fn generate(n: usize, seed: u64) -> DataBlock {
     let mut rng = Rng(seed | 1);
-    // recurring sentence pool
-    let pool: Vec<String> = (0..300).map(|_| {
+    // vocabulary: the fixed words plus 4000 random lowercase pseudo-words; recurring sentence pool of 30000
+    let mut vocab: Vec<String> = WORDS.iter().map(|w| w.to_string()).collect();
+    for _ in 0..4000 {
+        let l = 3 + rng.below(7);
+        vocab.push((0..l).map(|_| (b'a' + rng.below(26) as u8) as char).collect());
+    }
+    let pool: Vec<String> = (0..30000).map(|_| {
         let len = 4 + rng.below(12);
         let mut s = String::new();
-        for k in 0..len { if k > 0 { s.push(' '); } s.push_str(WORDS[rng.below(WORDS.len() as u64) as usize]); }
+        for k in 0..len {
+            if k > 0 { s.push(' '); }
+            let a = rng.below(vocab.len() as u64); let b = rng.below(vocab.len() as u64);
+            s.push_str(&vocab[a.min(b) as usize]);
+        }
         s.push('.');
         s
     }).collect();
@@ -60,7 +69,8 @@ pub fn generate(n: usize, seed: u64) -> DataBlock {
         while s.len() < target {
             let sent = &pool[z(&mut rng, pool.len())];
             s.push_str(sent);
-            if rng.below(4) == 0 { s.push_str(&format!(" [{}]", rng.below(1_000_000))); }
+            if rng.below(2) == 0 { s.push_str(&format!(" [{}]", rng.below(1_000_000))); }
+            if rng.below(8) == 0 { s.push_str(&format!(" #{:08x}", rng.next() as u32)); }
             s.push(' ');
         }
         s.truncate(target);
@@ -94,7 +104,7 @@ fn main() {
     type W<'a> = Box<dyn Fn() -> Vec<u8> + 'a>;
     let writers: Vec<(&str, W)> = vec![
         ("v2 (legacy writer)", Box::new(|| KoreWriter::to_bytes(&block))),
-        ("v3 auto (lz4|hz)", Box::new(|| KoreWriter::to_bytes_with(&block, &v3_auto).unwrap())),
+        ("v3 auto (lz4|hz|zstd)", Box::new(|| KoreWriter::to_bytes_with(&block, &v3_auto).unwrap())),
         ("v3 transforms+lz4", Box::new(|| KoreWriter::to_bytes_with(&block, &v3_lz4).unwrap())),
         ("v3 transforms+zstd", Box::new(|| KoreWriter::to_bytes_with(&block, &v3_zstd).unwrap())),
     ];
