@@ -9643,7 +9643,7 @@ mod like_robust_tests {
             [] => s.is_empty(),
             ['%', rest @ ..] => (0..=s.len()).any(|k| reference(&s[k..], rest)),
             ['_', rest @ ..] => !s.is_empty() && reference(&s[1..], rest),
-            [&BS, c, rest @ ..] => !s.is_empty() && s[0] == *c && reference(&s[1..], rest),
+            [BS, c, rest @ ..] => !s.is_empty() && s[0] == *c && reference(&s[1..], rest),
             [c, rest @ ..] => !s.is_empty() && s[0] == *c && reference(&s[1..], rest),
         }
     }
@@ -9689,7 +9689,7 @@ mod like_robust_tests {
         for p in all(&["a", "é", "%", "_", "\\"], 5) { for v in &vals { check(v, &p); } }
         // edge cases named explicitly
         for (v, p) in [("", ""), ("", "%"), ("", "%%"), ("", "_"), ("a", ""), ("é", "_"), ("é", "__"), ("日本", "_%"), ("😀", "_"),
-                       ("a%b", "a\%b"), ("axb", "a\%b"), ("a", "a\\"), ("a\\", "a\\"), ("abc", "%%%c"), ("abc", "a%%%"), ("abc", "%%b%%")] {
+                       ("a%b", r"a\%b"), ("axb", r"a\%b"), ("a", "a\\"), ("a\\", "a\\"), ("abc", "%%%c"), ("abc", "a%%%"), ("abc", "%%b%%")] {
             check(v, p);
         }
     }
@@ -9761,5 +9761,33 @@ mod like_bench {
             xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
             println!("BENCH {name}: median {:.1} ns/match  min {:.1}  max {:.1}", xs[5], xs[0], xs[10]);
         }
+    }
+}
+
+#[cfg(test)]
+mod like_repro {
+    /// Documents the original bug: the pre-fix recursive matcher aborts the process (stack overflow) on long text.
+    /// Ignored because it kills the test binary by design. Run: KORE_OLD_LIKE_LEN=10000 cargo test ... like_repro -- --ignored
+    #[test]
+    #[ignore]
+    fn old_recursive_matcher_overflows() {
+        fn old_recursive(s: &[u8], p: &[u8]) -> bool {
+            match (s, p) {
+                (_, []) => s.is_empty(),
+                (_, [b'%', rest @ ..]) => {
+                    if old_recursive(s, rest) { return true; }
+                    if let [_, tail @ ..] = s { return old_recursive(tail, p); }
+                    false
+                }
+                ([], _) => false,
+                ([_, st @ ..], [b'_', pt @ ..]) => old_recursive(st, pt),
+                ([sc, st @ ..], [pc, pt @ ..]) if sc == pc => old_recursive(st, pt),
+                _ => false,
+            }
+        }
+        let n: usize = std::env::var("KORE_OLD_LIKE_LEN").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000);
+        let s = "a".repeat(n);
+        println!("old matcher on {n} bytes: {}", old_recursive(s.as_bytes(), b"%b"));
+        println!("new matcher on {n} bytes: {}", super::like_match(&s, "%b"));
     }
 }
