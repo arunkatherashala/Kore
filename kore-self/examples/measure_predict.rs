@@ -67,8 +67,8 @@ fn tune() {
     for h in [5.0, 10.0, 20.0, 30.0, 50.0, 100.0] {
         println!("| recency | half_life | {h} | {:.4} |", eval(&Config { half_life: h, ..Config::default() }, "recency"));
     }
-    for e in [0.05, 0.1, 0.2, 0.3, 0.5, 0.7] {
-        println!("| last-choice | last_eps | {e} | {:.4} |", eval(&Config { last_eps: e, ..Config::default() }, "last-choice"));
+    for w in [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.7, 0.9] {
+        println!("| last-choice | last_w | {w} | {:.4} |", eval(&Config { last_w: w, ..Config::default() }, "last-choice"));
     }
     for m in [0.5, 1.0, 2.0, 5.0, 10.0, 20.0] {
         println!("| context-count | ctx_m | {m} | {:.4} |", eval(&Config { ctx_m: m, ..Config::default() }, "context-count"));
@@ -121,21 +121,22 @@ fn report(cfg: &Config) {
                 println!("| {} vs {} | {} | {} | {better} | {worse} | {none} |", k.id(), b.id(), ci(&score::mean_ci(&gb, 7)), ci(&score::mean_ci(&gl, 8)));
             }
         }
-        // recency vs frequency is the drift question; list it for every scenario for symmetry
-        {
-            let (i, j) = (bts[0].index("recency").unwrap(), bts[0].index("frequency").unwrap());
-            let (mut gb, mut better, mut worse, mut none) = (Vec::new(), 0, 0, 0);
-            for (si, bt) in bts.iter().enumerate() {
-                let (pp, bp) = bt.common(i, j);
-                let c = score::paired(&pp, &bp, 2000 + si as u64);
-                gb.push(c.d_brier.mean);
-                match c.verdict {
-                    Verdict::Better => better += 1,
-                    Verdict::Worse => worse += 1,
-                    _ => none += 1,
+        if s == Scenario::Noise {
+            let (mut vs_uniform, mut vs_freq) = (0, 0);
+            for bt in &bts {
+                for (base, cnt) in [("uniform", &mut vs_uniform), ("frequency", &mut vs_freq)] {
+                    let j = bt.index(base).unwrap();
+                    let wins = ["frequency", "last-choice", "recency", "context-count"].iter().filter(|x| **x != base).any(|x| {
+                        let i = bt.index(x).unwrap();
+                        let (pp, bp) = bt.common(i, j);
+                        score::paired(&pp, &bp, 31).verdict == Verdict::Better
+                    });
+                    if wins {
+                        *cnt += 1;
+                    }
                 }
             }
-            println!("| recency vs frequency | {} | | {better} | {worse} | {none} |", ci(&score::mean_ci(&gb, 9)));
+            println!("\nFalse-win check (pure noise): seeds in which at least one other predictor was significantly better than uniform: {vs_uniform} of 20; than frequency: {vs_freq} of 20.");
         }
         println!("\nCalibration (top label, forecasts pooled over the 20 seeds, 10 bins):\n");
         for id in ["frequency", "context-count"] {

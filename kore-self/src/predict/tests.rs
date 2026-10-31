@@ -425,3 +425,51 @@ fn tools_are_registered_and_not_chat_tools() {
         assert!(crate::authorize::parse_policy(&format!("[L3]\n{n}\n")).is_err(), "{n} must not be grantable to the chat");
     }
 }
+
+// ── measured floors (synthetic data only; set after measuring, see docs/measured.md) ──
+
+fn bt_seed(s: Scenario, seed: u64) -> backtest::Backtest {
+    rolling_origin(&baselines::all(&Config::default()), &scenarios::generate(s, seed, 400), 20)
+}
+
+fn verdict(bt: &backtest::Backtest, x: &str, base: &str, seed: u64) -> Verdict {
+    let (pp, bp) = bt.common(bt.index(x).unwrap(), bt.index(base).unwrap());
+    score::paired(&pp, &bp, seed).verdict
+}
+
+#[test]
+fn measured_context_count_beats_frequency_where_context_matters() {
+    for seed in 1..=8 {
+        let bt = bt_seed(Scenario::Context, seed);
+        assert_eq!(verdict(&bt, "context-count", "frequency", seed), Verdict::Better, "seed {seed}");
+        assert_eq!(verdict(&bt, "context-count", "uniform", seed), Verdict::Better, "seed {seed}");
+        let s = score::summarize(&bt.answered(bt.index("context-count").unwrap()));
+        assert!(s.accuracy > 0.70 && s.brier < 0.5, "seed {seed}: {s:?}");
+    }
+}
+
+#[test]
+fn measured_no_predictor_wins_on_pure_noise() {
+    for seed in 1..=8 {
+        let bt = bt_seed(Scenario::Noise, seed);
+        for x in ["frequency", "last-choice", "recency", "context-count"] {
+            for base in ["uniform", "frequency"] {
+                if x != base {
+                    assert_ne!(verdict(&bt, x, base, seed), Verdict::Better, "{x} claimed a win over {base} on noise, seed {seed}");
+                }
+            }
+        }
+        // the frequency forecasts stay close to the diagonal
+        let s = score::summarize(&bt.answered(bt.index("frequency").unwrap()));
+        assert!(s.ece < 0.12, "seed {seed}: ece {}", s.ece);
+    }
+}
+
+#[test]
+fn measured_recency_beats_frequency_under_drift() {
+    for seed in 1..=8 {
+        let bt = bt_seed(Scenario::Drift, seed);
+        assert_eq!(verdict(&bt, "recency", "frequency", seed), Verdict::Better, "seed {seed}");
+        assert_eq!(verdict(&bt, "recency", "uniform", seed), Verdict::Better, "seed {seed}");
+    }
+}
