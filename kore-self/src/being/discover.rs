@@ -272,6 +272,117 @@ pub fn predict(form: &Form, t: &[i64]) -> Option<i64> {
     i64::try_from(acc.n).ok()
 }
 
+// ---- building blocks: transforms of the prefix (Track B5, composition) ----
+
+/// One primitive transform of a prefix. Each has an exact inverse for the predicted next term.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Op {
+    /// First differences: u[i] = t[i+1] - t[i]; next = last + predicted difference.
+    Diff,
+    /// Running sums: u[i] = t[0] + ... + t[i]; next = predicted sum - sum of the prefix.
+    Cum,
+    /// The subsequence of terms whose index has the same parity as the index of the next term.
+    Par,
+}
+
+/// The transforms the search may put in front of a form (depth at most 2), simplest first.
+pub const XFORMS: [(&str, &[Op]); 7] = [
+    ("id", &[]),
+    ("d", &[Op::Diff]),
+    ("s", &[Op::Cum]),
+    ("p", &[Op::Par]),
+    ("dd", &[Op::Diff, Op::Diff]),
+    ("dp", &[Op::Diff, Op::Par]),
+    ("pd", &[Op::Par, Op::Diff]),
+];
+
+/// A chain of transforms (index into `XFORMS`); `Xf::ID` is the plain grammar of B2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Xf(pub u8);
+
+impl Xf {
+    pub const ID: Xf = Xf(0);
+    pub fn ops(self) -> &'static [Op] {
+        XFORMS[self.0 as usize % XFORMS.len()].1
+    }
+    pub fn code(self) -> &'static str {
+        XFORMS[self.0 as usize % XFORMS.len()].0
+    }
+    pub fn parse(code: &str) -> Option<Xf> {
+        XFORMS.iter().position(|x| x.0 == code).map(|i| Xf(i as u8))
+    }
+    /// Number of primitive transforms (0 for the identity).
+    pub fn cost(self) -> usize {
+        self.ops().len()
+    }
+    pub fn is_id(self) -> bool {
+        self.0 == 0
+    }
+    /// In words, for the rule text.
+    pub fn words(self) -> String {
+        self.ops()
+            .iter()
+            .map(|o| match o {
+                Op::Diff => "first differences",
+                Op::Cum => "running sums",
+                Op::Par => "the subsequence at the parity of the next index",
+            })
+            .collect::<Vec<_>>()
+            .join(", then ")
+    }
+}
+
+fn fwd(op: Op, s: &[i64]) -> Option<Vec<i64>> {
+    match op {
+        Op::Diff => {
+            if s.len() < 2 {
+                return None;
+            }
+            s.windows(2).map(|w| w[1].checked_sub(w[0])).collect()
+        }
+        Op::Cum => {
+            let mut acc = 0i64;
+            s.iter()
+                .map(|x| {
+                    acc = acc.checked_add(*x)?;
+                    Some(acc)
+                })
+                .collect()
+        }
+        Op::Par => {
+            let len = s.len();
+            Some(s.iter().enumerate().filter(|(i, _)| i % 2 == len % 2).map(|(_, x)| *x).collect())
+        }
+    }
+}
+
+fn inv(op: Op, before: &[i64], pred: i64) -> Option<i64> {
+    match op {
+        Op::Diff => before.last()?.checked_add(pred),
+        Op::Cum => pred.checked_sub(before.iter().try_fold(0i64, |a, x| a.checked_add(*x))?),
+        Op::Par => Some(pred),
+    }
+}
+
+/// Apply the transforms to the prefix, fit `form` on the transformed sequence (same applicability
+/// rules as `predict`), and map the predicted next term back. None = not applicable.
+pub fn predict_x(xf: Xf, form: &Form, t: &[i64]) -> Option<i64> {
+    if xf.is_id() {
+        return predict(form, t);
+    }
+    let ops = xf.ops();
+    let mut seqs: Vec<Vec<i64>> = vec![t.to_vec()];
+    for op in ops {
+        let n = fwd(*op, seqs.last()?)?;
+        seqs.push(n);
+    }
+    let mut v = predict(form, seqs.last()?)?;
+    for (k, op) in ops.iter().enumerate().rev() {
+        v = inv(*op, &seqs[k], v)?;
+    }
+    Some(v)
+}
+
 // ---- examples, rules ----
 
 /// One revealed example: the prefix the being was shown and the exact next term the checker later revealed.
@@ -312,17 +423,45 @@ pub struct Rule {
     pub step: u64,
     /// The `rule` note event in the log (empty until written).
     pub event_id: String,
+    /// Transform put in front of the form (`Xf::ID` for a plain B2 rule).
+    pub xf: Xf,
+    /// Number of verified building blocks the search had when it accepted a composed rule (0 for plain rules).
+    pub nblocks: u32,
+    /// Retired (or merged into a simpler rule) by a logged revision: kept in the book, never applied again.
+    pub retired: bool,
 }
 
 pub fn rule_id(sig: u8, form: &Form) -> String {
     sha256_hex(&[b"being-rule-v1", &[0x1f], form.code().as_bytes(), &[0x1f], &[sig]])[..12].to_string()
 }
 
+/// Id of a rule with a transform; identical to `rule_id` for the identity transform (older logs stay valid).
+pub fn rule_id_x(sig: u8, xf: Xf, form: &Form) -> String {
+    if xf.is_id() {
+        return rule_id(sig, form);
+    }
+    sha256_hex(&[b"being-rule-v2", &[0x1f], xf.code().as_bytes(), &[0x1f], form.code().as_bytes(), &[0x1f], &[sig]])[..12].to_string()
+}
+
 impl Rule {
     pub fn new(sig: u8, form: Form, train_ok: u32, val_ok: u32, step: u64) -> Rule {
-        Rule { id: rule_id(sig, &form), sig, form, train_ok, val_ok, step, event_id: String::new() }
+        Rule { id: rule_id(sig, &form), sig, form, train_ok, val_ok, step, event_id: String::new(), xf: Xf::ID, nblocks: 0, retired: false }
+    }
+    pub fn new_x(sig: u8, xf: Xf, form: Form, train_ok: u32, val_ok: u32, step: u64, nblocks: u32) -> Rule {
+        Rule { id: rule_id_x(sig, xf, &form), xf, nblocks, ..Rule::new(sig, form, train_ok, val_ok, step) }
+    }
+    /// Sort key for "smallest applicable rule first".
+    pub fn key(&self) -> (usize, usize, u8, u8) {
+        let o = self.form.order();
+        (self.xf.cost(), o.0, o.1, o.2)
     }
     pub fn text(&self) -> String {
+        if !self.xf.is_id() {
+            return format!(
+                "being composed rule {} for pattern tasks of difficulty {}: take {} of the prefix, then {}; the form is a building block the being had already verified; coefficients are fitted per task from its own prefix; reproduced the revealed next term exactly on {} training and {} held-out logged examples and was never applicable-and-wrong on them (composition of verified blocks inside an author-defined space)",
+                self.id, self.sig, self.xf.words(), self.form.dsl(), self.train_ok, self.val_ok
+            );
+        }
         format!(
             "being discovered rule {} for pattern tasks of difficulty {}: {}; coefficients are fitted per task from its own prefix; reproduced the revealed next term exactly on {} training and {} held-out logged examples and was never applicable-and-wrong on them (search inside an author-defined grammar)",
             self.id, self.sig, self.form.dsl(), self.train_ok, self.val_ok
@@ -347,6 +486,11 @@ impl Rule {
             ],
             redacted: false,
         };
+        let mut ev = ev;
+        if !self.xf.is_id() {
+            ev.tags.push(format!("xf:{}", self.xf.code()));
+            ev.tags.push(format!("blocks:{}", self.nblocks));
+        }
         let id = crate::versioned::event_id(&ev.source, &ev.occurred_at, &ev.text);
         (ev, id)
     }
@@ -359,18 +503,23 @@ pub fn rule_from_event(e: &EventRow) -> Option<Rule> {
     let sig: u8 = tag(&e.tags, "sig")?.parse().ok()?;
     let form = Form::parse(tag(&e.tags, "form")?)?;
     let id = tag(&e.tags, "rule_id")?.to_string();
-    if id != rule_id(sig, &form) {
+    let xf = match tag(&e.tags, "xf") {
+        Some(c) => Xf::parse(c)?,
+        None => Xf::ID,
+    };
+    if id != rule_id_x(sig, xf, &form) {
         return None;
     }
-    Some(Rule { id, sig, form, train_ok: tag(&e.tags, "train")?.parse().ok()?, val_ok: tag(&e.tags, "val")?.parse().ok()?, step: tag(&e.tags, "at_step")?.parse().ok()?, event_id: e.event_id.clone() })
+    let nblocks = tag(&e.tags, "blocks").and_then(|b| b.parse().ok()).unwrap_or(0);
+    Some(Rule { id, sig, form, train_ok: tag(&e.tags, "train")?.parse().ok()?, val_ok: tag(&e.tags, "val")?.parse().ok()?, step: tag(&e.tags, "at_step")?.parse().ok()?, event_id: e.event_id.clone(), xf, nblocks, retired: false })
 }
 
 /// Apply the smallest applicable rule of signature `sig` to a prefix.
 pub fn apply<'a>(rules: &'a [Rule], sig: u8, t: &[i64]) -> Option<(i64, &'a Rule)> {
-    let mut best: Option<((usize, u8, u8), &str, i64, &Rule)> = None;
-    for r in rules.iter().filter(|r| r.sig == sig) {
-        if let Some(v) = predict(&r.form, t) {
-            let key = r.form.order();
+    let mut best: Option<((usize, usize, u8, u8), &str, i64, &Rule)> = None;
+    for r in rules.iter().filter(|r| r.sig == sig && !r.retired) {
+        if let Some(v) = predict_x(r.xf, &r.form, t) {
+            let key = r.key();
             if best.as_ref().map_or(true, |b| (key, r.id.as_str()) < (b.0, b.1)) {
                 best = Some((key, r.id.as_str(), v, r));
             }
@@ -384,6 +533,8 @@ pub fn apply<'a>(rules: &'a [Rule], sig: u8, t: &[i64]) -> Option<(i64, &'a Rule
 #[derive(Debug, Clone, PartialEq)]
 pub struct Found {
     pub sig: u8,
+    /// Transform in front of the form (`Xf::ID` for a plain grammar rule).
+    pub xf: Xf,
     pub form: Form,
     pub train_ok: u32,
     pub val_ok: u32,
@@ -412,18 +563,62 @@ pub fn search(examples: &[Example]) -> Vec<Found> {
 }
 
 pub fn search_with(examples: &[Example], k_train: u32, k_val: u32) -> Vec<Found> {
+    search_core(examples, k_train, k_val, &[], usize::MAX).found
+}
+
+/// Result of a search that may be cut short by a cap on candidates.
+#[derive(Debug, Clone)]
+pub struct SearchOut {
+    pub found: Vec<Found>,
+    /// Candidates (transform, form) evaluated against one signature each.
+    pub candidates: usize,
+    /// Candidates a complete search would evaluate.
+    pub wanted: usize,
+    /// The cap stopped the search before all candidates were tried.
+    pub truncated: bool,
+}
+
+/// Search with composition: after the plain grammar (exactly the B2 search, same order), the transforms
+/// of `XFORMS` are put in front of each building block in `blocks` (forms the being has already
+/// verified), simplest first. At most `max_candidates` (transform, form) pairs are evaluated in total,
+/// in a fixed order, so a capped search returns a prefix of what the uncapped one returns.
+pub fn search_composed(examples: &[Example], blocks: &[Form], max_candidates: usize) -> SearchOut {
+    search_core(examples, K_TRAIN, K_VAL, blocks, max_candidates)
+}
+
+fn candidates_for(blocks: &[Form]) -> Vec<(Xf, Form)> {
+    let mut v: Vec<(Xf, Form)> = forms().into_iter().map(|f| (Xf::ID, f)).collect();
+    let mut c: Vec<(Xf, Form)> = vec![];
+    for x in 1..XFORMS.len() {
+        for b in blocks {
+            c.push((Xf(x as u8), *b));
+        }
+    }
+    c.sort_by_key(|(x, f)| (x.cost(), f.order(), x.0));
+    v.extend(c);
+    v
+}
+
+fn search_core(examples: &[Example], k_train: u32, k_val: u32, blocks: &[Form], max_candidates: usize) -> SearchOut {
     let mut sigs: Vec<u8> = examples.iter().map(|e| e.sig).collect();
     sigs.sort_unstable();
     sigs.dedup();
-    let all_forms = forms();
+    let cands = candidates_for(blocks);
     let mut out = vec![];
-    for sig in sigs {
+    let (mut tried, mut truncated) = (0usize, false);
+    'sigs: for sig in &sigs {
+        let sig = *sig;
         let ex: Vec<&Example> = examples.iter().filter(|e| e.sig == sig).collect();
         let mut covered = vec![false; ex.len()];
-        for form in &all_forms {
+        for (xf, form) in &cands {
+            if tried >= max_candidates {
+                truncated = true;
+                break 'sigs;
+            }
+            tried += 1;
             let status: Vec<St> = ex
                 .iter()
-                .map(|e| match predict(form, &e.terms) {
+                .map(|e| match predict_x(*xf, form, &e.terms) {
                     None => St::NotApplicable,
                     Some(v) if v == e.next => St::Right,
                     Some(_) => St::Wrong,
@@ -465,11 +660,11 @@ pub fn search_with(examples: &[Example], k_train: u32, k_val: u32) -> Vec<Found>
                         covered[i] = true;
                     }
                 }
-                out.push(Found { sig, form: *form, train_ok: tr_ok, val_ok: va_ok, new_train: tr_new, new_val: va_new, cite });
+                out.push(Found { sig, xf: *xf, form: *form, train_ok: tr_ok, val_ok: va_ok, new_train: tr_new, new_val: va_new, cite });
             }
         }
     }
-    out
+    SearchOut { found: out, candidates: tried, wanted: sigs.len() * cands.len(), truncated }
 }
 
 /// Exactly how a form does on a set of examples: (right, wrong, not applicable).
@@ -485,10 +680,23 @@ pub fn evaluate(form: &Form, examples: &[Example]) -> (u32, u32, u32) {
     (r, w, n)
 }
 
+/// As `evaluate`, for a form behind a transform.
+pub fn evaluate_x(xf: Xf, form: &Form, examples: &[Example]) -> (u32, u32, u32) {
+    let (mut r, mut w, mut n) = (0, 0, 0);
+    for e in examples {
+        match predict_x(xf, form, &e.terms) {
+            None => n += 1,
+            Some(v) if v == e.next => r += 1,
+            Some(_) => w += 1,
+        }
+    }
+    (r, w, n)
+}
+
 /// Acceptance of a PROPOSED form (from an outside advisor) for one signature: exactly the acceptance
 /// of the search above. The form is accepted only if the full search over the being's own logged
 /// examples accepts that very form for that signature, with the same minimum support, the same
 /// held-out split and the same never-applicable-and-wrong condition. A proposal cannot lower any bar.
 pub fn verify_proposal(examples: &[Example], sig: u8, form: &Form) -> Option<Found> {
-    search(examples).into_iter().find(|f| f.sig == sig && f.form == *form)
+    search(examples).into_iter().find(|f| f.sig == sig && f.form == *form && f.xf.is_id())
 }
