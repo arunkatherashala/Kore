@@ -15,12 +15,14 @@ pub mod controller;
 pub mod discover;
 pub mod measure;
 pub mod measure_b5;
+pub mod measure_b6;
 pub mod model;
 pub mod planner;
 pub mod policy;
 pub mod replay;
 pub mod solver;
 pub mod state;
+pub mod transfer;
 pub mod trust;
 pub mod world;
 #[path = "loop.rs"]
@@ -31,6 +33,8 @@ mod tests;
 mod tests_b5;
 #[cfg(test)]
 mod tests_b5b;
+#[cfg(test)]
+mod tests_b6;
 
 pub use chooser::{DomainPicker, Ucb1};
 pub use policy::{Policy, StopReason};

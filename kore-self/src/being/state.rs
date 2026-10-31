@@ -12,7 +12,8 @@ use super::discover::{example_from_event, rule_from_event, Example, Rule};
 use super::trust::{TrustAlarm, TrustTable};
 use super::model::{AdaptMode, Alarm, Model, Obs, DEFAULT_HALF_LIFE};
 use super::solver::Strategy;
-use super::world::{iso_at, Domain, DOMAINS, N_DOM};
+use super::transfer::{self, XferKind, XferMode, XferRec, XferState};
+use super::world::{iso_at, Domain, ALL_DOMAINS_X, N_DOM};
 use crate::versioned::{event_id, EventRow, NewEvent, Snapshot};
 use std::collections::{BTreeMap, VecDeque};
 
@@ -91,6 +92,10 @@ pub struct Genesis {
     pub adapt: AdaptMode,
     /// Which advisor (if any) the being takes advice from and whether it learns trust. Fixed once the being exists.
     pub advice: AdviceSetup,
+    /// B6: the world has two phases and the domains `pattern_b` and `control` (needs `ext2`). Fixed once the being exists.
+    pub transfer: bool,
+    /// B6: the model links new domains to learned ones (transfer). Fixed once the being exists.
+    pub learn_transfer: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -164,6 +169,10 @@ pub struct BeingState {
     pub advice_alarms: Vec<(u64, TrustAlarm)>,
     /// Latest outcome event ids per (domain, strategy), oldest first: the evidence a detected change cites.
     group_recent: [[VecDeque<String>; 4]; N_DOM],
+    /// B6: transfer settings, links made and decisions not yet logged.
+    pub xfer: XferState,
+    /// Latest outcome event ids per (domain, difficulty), oldest first (evidence of a transfer link).
+    cell_recent: BTreeMap<(usize, u8), VecDeque<String>>,
 }
 
 /// A change flagged by the detector, with the logged outcomes it rests on.
@@ -196,6 +205,7 @@ impl BeingState {
     pub fn start(&mut self, g: Genesis, event: String) {
         self.budget_left = g.budget;
         self.model.set_mode(g.adapt, DEFAULT_HALF_LIFE);
+        self.xfer.cfg.mode = if g.learn_transfer { XferMode::On } else { XferMode::Off };
         self.genesis = Some(g);
         self.genesis_event = event;
     }
@@ -271,9 +281,32 @@ impl BeingState {
             while gq.len() > CHANGE_CITES {
                 gq.pop_front();
             }
+            let cq = self.cell_recent.entry((o.domain.idx(), o.difficulty)).or_default();
+            cq.push_back(o.event_id.clone());
+            while cq.len() > CHANGE_CITES {
+                cq.pop_front();
+            }
             if let Some(alarm) = self.model.observe(&Obs { domain: o.domain, difficulty: o.difficulty, strategy, correct: o.correct, listed_cost: o.listed_cost, spent: o.cost }) {
                 let cites: Vec<String> = self.group_recent[o.domain.idx()][strategy.idx()].iter().cloned().collect();
                 self.changes.push(Change { index: self.changes.len(), step: o.step, clock: o.clock, alarm, cites });
+            }
+            for rv in self.model.take_revoked() {
+                let src = self.model.link(rv.domain, rv.difficulty).map(|l| l.src);
+                let cites: Vec<String> = self.cell_recent.get(&(rv.domain.idx(), rv.difficulty)).map(|q| q.iter().cloned().collect()).unwrap_or_default();
+                let index = self.xfer.next_index;
+                self.xfer.next_index += 1;
+                let rec = XferRec {
+                    kind: XferKind::Revoke { delta: rv.delta, n: rv.n },
+                    index,
+                    step: o.step + 1,
+                    clock: o.clock,
+                    target: rv.domain,
+                    difficulty: rv.difficulty,
+                    src,
+                    evidence: serde_json::json!({ "log_likelihood_difference": rv.delta, "attempts_influenced": rv.n, "threshold_nats": self.model.guard_nats }),
+                    cites,
+                };
+                self.xfer.pending.push(rec);
             }
         }
         let s = &mut self.stats[o.domain.idx()];
@@ -300,7 +333,11 @@ impl BeingState {
         if self.rules.iter().any(|x| x.id == r.id) {
             return false;
         }
-        self.model.reset_cell(Domain::Pattern, r.sig, Strategy::Discovered);
+        let (dom, diff) = super::discover::sig_split(r.sig);
+        self.model.reset_cell(dom, diff, Strategy::Discovered);
+        if dom == Domain::PatternB {
+            self.model.set_disc_ready(dom, diff, true);
+        }
         self.rules.push(r);
         true
     }
@@ -313,8 +350,26 @@ impl BeingState {
         };
         r.retired = true;
         let sig = r.sig;
-        self.model.reset_cell(Domain::Pattern, sig, Strategy::Discovered);
+        let (dom, diff) = super::discover::sig_split(sig);
+        self.model.reset_cell(dom, diff, Strategy::Discovered);
+        if dom == Domain::PatternB && !self.rules.iter().any(|x| !x.retired && x.sig == sig) {
+            self.model.set_disc_ready(dom, diff, false);
+        }
         true
+    }
+
+    /// Take a transfer link into the model (the engine decided it, or a replayed `transfer_link` note says so).
+    pub fn apply_link(&mut self, target: Domain, difficulty: u8, src: Domain, guard: bool) -> bool {
+        let made = self.model.set_link(target, difficulty, src, guard);
+        if made {
+            self.xfer.made += 1;
+        }
+        made
+    }
+
+    /// Latest outcome event ids at (domain, difficulty), oldest first.
+    pub fn cell_recent(&self, d: Domain, difficulty: u8) -> Vec<String> {
+        self.cell_recent.get(&(d.idx(), difficulty)).map(|q| q.iter().cloned().collect()).unwrap_or_default()
     }
 
     /// The building blocks: forms of the plain rules the being holds and has not retired, in acceptance order.
@@ -342,7 +397,7 @@ impl BeingState {
     /// The events a decision made now would cite.
     pub fn evidence_ids(&self) -> Vec<String> {
         let mut v = vec![self.genesis_event.clone()];
-        for d in super::world::ALL_DOMAINS {
+        for d in ALL_DOMAINS_X {
             v.extend(self.recent[d.idx()].iter().cloned());
         }
         v
@@ -406,6 +461,10 @@ impl BeingState {
             let left = tag(&e.tags, "budget_left").and_then(|v| v.parse().ok()).unwrap_or(0);
             let clock = tag(&e.tags, "clock").and_then(|v| v.parse().ok()).unwrap_or(self.clock);
             self.apply_refill(left, clock);
+        } else if e.kind == "note" && has_tag(&e.tags, "transfer_link") {
+            if let Some((t, k, s, g)) = transfer::link_from_event(e) {
+                self.apply_link(t, k, s, g);
+            }
         } else if e.kind == "note" && has_tag(&e.tags, "rule_retired") {
             if let Some(id) = tag(&e.tags, "rule_id") {
                 self.apply_retire(id);
@@ -442,6 +501,8 @@ fn genesis_from_tags(tags: &str) -> Option<Genesis> {
             quality: tag(tags, "advisor_quality").and_then(|q| q.parse().ok()).unwrap_or(0.0),
             trust: tag(tags, "trust") != Some("off"),
         },
+        transfer: tag(tags, "transfer") == Some("on"),
+        learn_transfer: tag(tags, "learn_transfer") == Some("on"),
     })
 }
 
@@ -486,6 +547,8 @@ pub fn genesis_event(g: &Genesis) -> (NewEvent, String) {
         ""
     };
     let ext = format!("{ext}{}", if g.rule_drift { "; the sequence rule of one family changes halfway through the budget and the being is not told" } else { "" });
+    let ext = format!("{ext}{}", if g.transfer { "; two-phase life: from a hidden time the domains pattern_b (sequence families seen through a hidden map of the values) and control (unit conversions) are offered as well" } else { "" });
+    let ext = format!("{ext}{}", if g.learn_transfer { "; the model may start a new domain from the posterior of a similar learned domain (transfer, with a guard)" } else { "" });
     let drift = if g.drift { "; the world changes at scheduled times that the being is not told about" } else { "" };
     let adapt = match g.adapt { AdaptMode::Off => "", AdaptMode::Forget => "; the model forgets old evidence exponentially", AdaptMode::Full => "; the model forgets old evidence exponentially and flags changes with a CUSUM detector" };
     let advice = match g.advice.kind {
@@ -523,6 +586,12 @@ pub fn genesis_event(g: &Genesis) -> (NewEvent, String) {
     }
     if g.drift {
         tags.push("drift:on".into());
+    }
+    if g.transfer {
+        tags.push("transfer:on".into());
+    }
+    if g.learn_transfer {
+        tags.push("learn_transfer:on".into());
     }
     if g.adapt != AdaptMode::Off {
         tags.push(format!("adapt:{}", g.adapt.name()));

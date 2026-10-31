@@ -51,6 +51,7 @@
 //! set, so discovering twice is idempotent.
 
 use super::state::tag;
+use super::world::Domain;
 use crate::versioned::{sha256_hex, EventRow, NewEvent};
 
 pub const MIN_SLACK: usize = 3;
@@ -398,11 +399,27 @@ pub struct Example {
 
 /// Read the example out of an outcome event (tags `terms`, `next`, `domain:pattern`, `difficulty`).
 pub fn example_from_event(e: &EventRow) -> Option<Example> {
-    if e.kind != "outcome" || tag(&e.tags, "domain") != Some("pattern") {
+    if e.kind != "outcome" {
         return None;
     }
+    let dom = match tag(&e.tags, "domain") {
+        Some("pattern") => Domain::Pattern,
+        Some("pattern_b") => Domain::PatternB,
+        _ => return None,
+    };
     let terms: Option<Vec<i64>> = tag(&e.tags, "terms")?.split(';').map(|x| x.parse().ok()).collect();
-    Some(Example { event_id: e.event_id.clone(), sig: tag(&e.tags, "difficulty")?.parse().ok()?, terms: terms?, next: tag(&e.tags, "next")?.parse().ok()? })
+    let diff: u8 = tag(&e.tags, "difficulty")?.parse().ok()?;
+    Some(Example { event_id: e.event_id.clone(), sig: sig_of(dom, diff), terms: terms?, next: tag(&e.tags, "next")?.parse().ok()? })
+}
+
+/// Signature of the examples of a task: the difficulty, plus 10 for the B6 domain `pattern_b` (its rules are its own).
+pub fn sig_of(d: Domain, difficulty: u8) -> u8 {
+    if d == Domain::PatternB { difficulty + 10 } else { difficulty }
+}
+
+/// Inverse of `sig_of`: (domain, difficulty).
+pub fn sig_split(sig: u8) -> (Domain, u8) {
+    if sig >= 10 { (Domain::PatternB, sig - 10) } else { (Domain::Pattern, sig) }
 }
 
 pub fn terms_tag(terms: &[i64]) -> String {
@@ -458,14 +475,18 @@ impl Rule {
     pub fn text(&self) -> String {
         if !self.xf.is_id() {
             return format!(
-                "being composed rule {} for pattern tasks of difficulty {}: take {} of the prefix, then {}; the form is a building block the being had already verified; coefficients are fitted per task from its own prefix; reproduced the revealed next term exactly on {} training and {} held-out logged examples and was never applicable-and-wrong on them (composition of verified blocks inside an author-defined space)",
-                self.id, self.sig, self.xf.words(), self.form.dsl(), self.train_ok, self.val_ok
+                "being composed rule {} for {} tasks of difficulty {}: take {} of the prefix, then {}; the form is a building block the being had already verified; coefficients are fitted per task from its own prefix; reproduced the revealed next term exactly on {} training and {} held-out logged examples and was never applicable-and-wrong on them (composition of verified blocks inside an author-defined space)",
+                self.id, self.dom_name(), self.sig % 10, self.xf.words(), self.form.dsl(), self.train_ok, self.val_ok
             );
         }
         format!(
-            "being discovered rule {} for pattern tasks of difficulty {}: {}; coefficients are fitted per task from its own prefix; reproduced the revealed next term exactly on {} training and {} held-out logged examples and was never applicable-and-wrong on them (search inside an author-defined grammar)",
-            self.id, self.sig, self.form.dsl(), self.train_ok, self.val_ok
+            "being discovered rule {} for {} tasks of difficulty {}: {}; coefficients are fitted per task from its own prefix; reproduced the revealed next term exactly on {} training and {} held-out logged examples and was never applicable-and-wrong on them (search inside an author-defined grammar)",
+            self.id, self.dom_name(), self.sig % 10, self.form.dsl(), self.train_ok, self.val_ok
         )
+    }
+    /// `pattern` or (B6) `pattern_b`.
+    pub fn dom_name(&self) -> &'static str {
+        sig_split(self.sig).0.name()
     }
     /// The log event that carries the rule. Returns the event and its id.
     pub fn event(&self, occurred_at: String) -> (NewEvent, String) {
@@ -563,7 +584,7 @@ pub fn search(examples: &[Example]) -> Vec<Found> {
 }
 
 pub fn search_with(examples: &[Example], k_train: u32, k_val: u32) -> Vec<Found> {
-    search_core(examples, k_train, k_val, &[], usize::MAX).found
+    search_core(examples, k_train, k_val, &[], usize::MAX, &[]).found
 }
 
 /// Result of a search that may be cut short by a cap on candidates.
@@ -583,7 +604,24 @@ pub struct SearchOut {
 /// verified), simplest first. At most `max_candidates` (transform, form) pairs are evaluated in total,
 /// in a fixed order, so a capped search returns a prefix of what the uncapped one returns.
 pub fn search_composed(examples: &[Example], blocks: &[Form], max_candidates: usize) -> SearchOut {
-    search_core(examples, K_TRAIN, K_VAL, blocks, max_candidates)
+    search_core(examples, K_TRAIN, K_VAL, blocks, max_candidates, &[])
+}
+
+/// As `search_composed`, with transferred hypotheses (B6): for a signature, the candidates `(xf, form)` listed
+/// for it in `prefer` (rules already accepted in another domain) are tried FIRST, in the given order, then
+/// all the others in the usual order. Acceptance is exactly the same (same support, held-out split, spare
+/// equations, never applicable-and-wrong): only the order of trial changes, and with it which of two
+/// forms that explain the same examples is seen first. Hypotheses that are not among the candidates are ignored.
+pub fn search_transfer(examples: &[Example], blocks: &[Form], max_candidates: usize, prefer: &[(u8, Xf, Form)]) -> SearchOut {
+    search_core(examples, K_TRAIN, K_VAL, blocks, max_candidates, prefer)
+}
+
+/// The same form with the constant term toggled (a block that is shared up to an offset); None for polynomials.
+pub fn toggle_constant(f: &Form) -> Option<Form> {
+    match f {
+        Form::Lin { mask, constant } => Some(Form::Lin { mask: *mask, constant: !*constant }),
+        Form::Poly(_) => None,
+    }
 }
 
 fn candidates_for(blocks: &[Form]) -> Vec<(Xf, Form)> {
@@ -599,7 +637,7 @@ fn candidates_for(blocks: &[Form]) -> Vec<(Xf, Form)> {
     v
 }
 
-fn search_core(examples: &[Example], k_train: u32, k_val: u32, blocks: &[Form], max_candidates: usize) -> SearchOut {
+fn search_core(examples: &[Example], k_train: u32, k_val: u32, blocks: &[Form], max_candidates: usize, prefer: &[(u8, Xf, Form)]) -> SearchOut {
     let mut sigs: Vec<u8> = examples.iter().map(|e| e.sig).collect();
     sigs.sort_unstable();
     sigs.dedup();
@@ -610,7 +648,19 @@ fn search_core(examples: &[Example], k_train: u32, k_val: u32, blocks: &[Form], 
         let sig = *sig;
         let ex: Vec<&Example> = examples.iter().filter(|e| e.sig == sig).collect();
         let mut covered = vec![false; ex.len()];
-        for (xf, form) in &cands {
+        let ordered: Vec<&(Xf, Form)> = if prefer.iter().any(|p| p.0 == sig) {
+            let first: Vec<&(Xf, Form)> = prefer.iter().filter(|p| p.0 == sig).filter_map(|p| cands.iter().find(|c| c.0 == p.1 && c.1 == p.2)).fold(vec![], |mut v, c| {
+                if !v.iter().any(|x| std::ptr::eq(*x, c)) {
+                    v.push(c);
+                }
+                v
+            });
+            let rest = cands.iter().filter(|c| !first.iter().any(|x| std::ptr::eq(*x, *c)));
+            first.iter().copied().chain(rest).collect()
+        } else {
+            cands.iter().collect()
+        };
+        for (xf, form) in ordered {
             if tried >= max_candidates {
                 truncated = true;
                 break 'sigs;

@@ -25,6 +25,7 @@ use super::policy::{Policy, StopReason};
 use super::solver::{Context, Strategy, Thinker, STRATEGIES, STRATEGIES_EXT};
 use super::model::AdaptMode;
 use super::state::{genesis_event, refill_event, tag, BeingState, Change, Chooser, Genesis, Outcome, SOURCE};
+use super::transfer::{self, XferKind, XferMode, XferRec};
 use super::world::{iso_at, Domain, Task, World, DOMAINS, SECS_PER_ENERGY, SKIP_COST};
 use crate::versioned::{event_id, prediction_id, Batch, LogError, NewEvent, NewOutcome, NewPrediction, NewRevision, VersionedLog};
 use serde_json::{json, Value};
@@ -60,6 +61,9 @@ pub fn world_for(g: &Genesis) -> World {
         let d = w.drift.take();
         w = World::with_ext2(g.world_seed, if g.rule_drift { Some(g.budget) } else { None });
         w.drift = d;
+    }
+    if g.transfer {
+        w = World::with_transfer(g.world_seed, g.budget);
     }
     w
 }
@@ -470,7 +474,7 @@ impl<'a> Engine<'a> {
                     format!("strategy:{}", strategy.name()),
                     format!("slot:{slot}"),
                 ]);
-                if self.world.extended && v.domain == Domain::Pattern && (done.result == "correct" || done.result == "wrong") {
+                if self.world.extended && (v.domain == Domain::Pattern || v.domain == Domain::PatternB) && (done.result == "correct" || done.result == "wrong") {
                     // the checker's answer is revealed after the attempt and recorded: one example for the being's own search
                     otags.extend([format!("terms:{}", terms_tag(&v.params)), format!("next:{}", tasks[slot].expected())]);
                 }
@@ -532,7 +536,7 @@ impl<'a> Engine<'a> {
             None => (None, None),
         };
         let example = if oev.tags.iter().any(|t| t.starts_with("terms:")) {
-            done.view.map(|(slot, _)| discover::Example { event_id: oev_id.clone(), sig: tasks[slot].view.difficulty, terms: tasks[slot].view.params.clone(), next: tasks[slot].expected() })
+            done.view.map(|(slot, _)| discover::Example { event_id: oev_id.clone(), sig: discover::sig_of(tasks[slot].view.domain, tasks[slot].view.difficulty), terms: tasks[slot].view.params.clone(), next: tasks[slot].expected() })
         } else {
             None
         };
@@ -556,7 +560,8 @@ impl<'a> Engine<'a> {
         let before = self.state.changes.len();
         let pending_advice = self.state.advice.clone();
         self.state.apply(&outcome);
-        let changes: Vec<(NewEvent, NewRevision)> = self.state.changes[before..].iter().map(change_records).collect();
+        let mut changes: Vec<(NewEvent, NewRevision)> = self.state.changes[before..].iter().map(change_records).collect();
+        changes.extend(self.consider_transfer(domain, difficulty, attempted));
         let mut events = pre_events;
         events.extend([dev, aev, oev]);
         if let (Some(tr), Some(pa)) = (&ch.advice, &pending_advice) {
@@ -659,8 +664,10 @@ impl<'a> Engine<'a> {
     /// rule into the state. Pure function of the state; a second pass with no new examples adds nothing.
     pub fn discover_pass(&mut self) -> Vec<NewRule> {
         let mut out = vec![];
+        let prefer = self.transfer_hypotheses();
         let found = match self.limits.clone() {
-            None => discover::search(&self.state.examples),
+            None if prefer.is_empty() => discover::search(&self.state.examples),
+            None => discover::search_transfer(&self.state.examples, &[], usize::MAX, &prefer).found,
             Some(l) => {
                 let all = self.blocks();
                 let blocks: Vec<discover::Form> = if l.compose { all.iter().take(l.max_blocks).cloned().collect() } else { vec![] };
@@ -672,7 +679,7 @@ impl<'a> Engine<'a> {
                         format!("{} verified building blocks exist; only the first {} are used for composition", all.len(), l.max_blocks),
                     ));
                 }
-                let o = discover::search_composed(&self.state.examples, &blocks, l.max_candidates);
+                let o = if prefer.is_empty() { discover::search_composed(&self.state.examples, &blocks, l.max_candidates) } else { discover::search_transfer(&self.state.examples, &blocks, l.max_candidates, &prefer) };
                 if o.truncated {
                     self.refuse(Refusal::new(
                         "max_search_candidates",
@@ -691,6 +698,52 @@ impl<'a> Engine<'a> {
                 out.push(nr);
             }
         }
+        out
+    }
+
+    /// B6: the rules accepted in `pattern` become the first hypotheses tried for the same difficulty in `pattern_b`
+    /// (only with transfer on; empty otherwise, which leaves the search exactly as before).
+    fn transfer_hypotheses(&self) -> Vec<(u8, discover::Xf, discover::Form)> {
+        if self.state.xfer.cfg.mode != XferMode::On {
+            return vec![];
+        }
+        (1..=5u8).flat_map(|k| transfer::preferred(&self.state.rules, k, discover::sig_of(Domain::PatternB, k))).collect()
+    }
+
+    /// B6: write out the guard's revocations of this step and, for the cells of the outcome's (domain, difficulty),
+    /// decide whether to start a link now. Every decision is a note plus a revision citing the evidence.
+    fn consider_transfer(&mut self, d: Domain, k: u8, attempted: bool) -> Vec<(NewEvent, NewRevision)> {
+        let mut out: Vec<(NewEvent, NewRevision)> = vec![];
+        for rec in std::mem::take(&mut self.state.xfer.pending) {
+            self.state.xfer.log.push(rec.clone());
+            out.push(transfer::records(&rec));
+        }
+        if !attempted || self.state.xfer.cfg.mode == XferMode::Off || self.state.model.link(d, k).is_some() {
+            return out;
+        }
+        let Some(dec) = transfer::decide(&self.state, d, k) else {
+            return out;
+        };
+        if let Some(l) = self.limits.clone() {
+            if !l.transfer {
+                self.refuse(Refusal::new("transfer", 0, 1, "transfer between domains was asked for (the being was created with learn_transfer) but controller.txt does not allow it (transfer = off); no link was made"));
+                return out;
+            }
+            if self.state.xfer.made >= l.max_links {
+                let made = self.state.xfer.made as u64;
+                self.refuse(Refusal::new("max_transfer_links", l.max_links as u64, made + 1, format!("a transfer link is justified by the evidence but {made} links already exist; no new link was made")));
+                return out;
+            }
+        }
+        let guard = self.state.xfer.cfg.mode != XferMode::WrongSimNoGuard;
+        if !self.state.apply_link(d, k, dec.src, guard) {
+            return out;
+        }
+        let index = self.state.xfer.next_index;
+        self.state.xfer.next_index += 1;
+        let rec = XferRec { kind: XferKind::Link { guard }, index, step: self.state.step, clock: self.state.clock, target: d, difficulty: k, src: Some(dec.src), evidence: dec.evidence, cites: dec.cites };
+        self.state.xfer.log.push(rec.clone());
+        out.push(transfer::records(&rec));
         out
     }
 
@@ -751,7 +804,7 @@ impl<'a> Engine<'a> {
 
     fn retire(&mut self, rule: &Rule, why: &str, reason: &str, mut cites: Vec<String>, into: Option<String>, detail: Value) -> (NewEvent, NewRevision) {
         let at = iso_at(self.state.clock);
-        let text = format!("rule {} for pattern difficulty {} retired at step {}: {reason}; it stays in the log and is no longer applied", rule.id, rule.sig, self.state.step);
+        let text = format!("rule {} for {} difficulty {} retired at step {}: {reason}; it stays in the log and is no longer applied", rule.id, rule.dom_name(), rule.sig % 10, self.state.step);
         let mut tags = vec!["rule_retired".to_string(), format!("rule_id:{}", rule.id), format!("reason:{why}"), format!("at_step:{}", self.state.step), format!("sig:{}", rule.sig)];
         if let Some(i) = &into {
             tags.push(format!("into:{i}"));
@@ -763,7 +816,7 @@ impl<'a> Engine<'a> {
         let revision = NewRevision {
             entity_type: "rule".into(),
             key: format!("being/rule/{}", rule.id),
-            stance: format!("{}: pattern difficulty {}: {}", if into.is_some() { "merged" } else { "retired" }, rule.sig, rule.form.dsl()),
+            stance: format!("{}: {} difficulty {}: {}", if into.is_some() { "merged" } else { "retired" }, rule.dom_name(), rule.sig % 10, rule.form.dsl()),
             confidence: 0.9,
             rationale: rationale.to_string(),
             supersedes: None,
@@ -804,7 +857,7 @@ impl<'a> Engine<'a> {
             caused_by.push(aid.to_string());
         }
         let mut rationale = json!({
-            "rule_id": rule.id, "signature": format!("pattern difficulty {}", rule.sig), "form": rule.form.code(), "dsl": rule.form.dsl(),
+            "rule_id": rule.id, "signature": format!("{} difficulty {}", rule.dom_name(), rule.sig % 10), "form": rule.form.code(), "dsl": rule.form.dsl(),
             "training_examples_reproduced": f.train_ok, "held_out_examples_reproduced": f.val_ok,
             "new_training_support": f.new_train, "new_held_out_support": f.new_val,
             "min_training_support": discover::K_TRAIN, "min_held_out_support": discover::K_VAL,
@@ -822,7 +875,7 @@ impl<'a> Engine<'a> {
         let revision = NewRevision {
             entity_type: "rule".into(),
             key: format!("being/rule/{}", rule.id),
-            stance: format!("pattern difficulty {}: {}", rule.sig, rule.form.dsl()),
+            stance: format!("{} difficulty {}: {}", rule.dom_name(), rule.sig % 10, rule.form.dsl()),
             confidence: ((f.train_ok + f.val_ok + 1) as f64 / (f.train_ok + f.val_ok + 2) as f64).clamp(0.0, 1.0),
             rationale: rationale.to_string(),
             supersedes: None,
@@ -865,6 +918,10 @@ pub struct RunCfg {
     pub advisor_quality: Option<f64>,
     /// Creation-time: true (default with an advisor) learns trust, false follows advice blindly.
     pub trust: Option<bool>,
+    /// `Some(true)` creates a being in the two-phase B6 world (needs extended2); fixed once created.
+    pub transfer: Option<bool>,
+    /// `Some(true)` creates a being whose model may start new domains from similar learned ones (needs the transfer world); fixed once created.
+    pub learn_transfer: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -929,7 +986,7 @@ pub fn trust_json(st: &BeingState) -> Value {
 
 pub fn domain_json(st: &BeingState) -> Value {
     Value::Array(
-        super::world::ALL_DOMAINS
+        super::world::ALL_DOMAINS_X
             .iter()
             .filter(|d| d.idx() < 4 || st.stats[d.idx()].n > 0)
             .map(|d| {
@@ -1051,7 +1108,14 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
                 (_, None) => 0.0,
             };
             let advice = AdviceSetup { kind, quality, trust: cfg.trust.unwrap_or(true) };
-            let g = Genesis { world_seed: cfg.world_seed.unwrap_or(1), loop_seed: cfg.loop_seed.unwrap_or(1), budget, explore_c: c, chooser, extended: extended || ext2, ext2, rule_drift: cfg.rule_drift.unwrap_or(false), drift, adapt: if adapt { AdaptMode::Full } else { AdaptMode::Off }, advice };
+            let (transfer, learn_transfer) = (cfg.transfer.unwrap_or(false), cfg.learn_transfer.unwrap_or(false));
+            if transfer && (!ext2 || drift || cfg.rule_drift == Some(true)) {
+                return Err(LogError::Invalid("transfer needs pattern_families extended2 and no drift or rule_drift".into()));
+            }
+            if learn_transfer && !transfer {
+                return Err(LogError::Invalid("learn_transfer needs a being created with transfer".into()));
+            }
+            let g = Genesis { world_seed: cfg.world_seed.unwrap_or(1), loop_seed: cfg.loop_seed.unwrap_or(1), budget, explore_c: c, chooser, extended: extended || ext2, ext2, rule_drift: cfg.rule_drift.unwrap_or(false), drift, adapt: if adapt { AdaptMode::Full } else { AdaptMode::Off }, advice, transfer, learn_transfer };
             let (ev, id) = genesis_event(&g);
             log.append_events(&[ev])?;
             state.start(g, id);

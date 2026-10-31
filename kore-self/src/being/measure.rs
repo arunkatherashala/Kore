@@ -16,7 +16,7 @@ const ORACLE_SAMPLES: u64 = 3000;
 pub fn true_efficiency(world_seed: u64) -> [f64; 4] {
     let w = World::new(world_seed);
     let th = ScriptedThinker;
-    let st = [Default::default(); 5];
+    let st = [Default::default(); super::world::N_DOM];
     let mut out = [0.0; 4];
     for d in DOMAINS {
         let (mut r, mut c) = (0i64, 0i64);
@@ -62,7 +62,7 @@ impl RunResult {
 pub fn run_policy(world_seed: u64, budget: i64, picker: &mut dyn DomainPicker) -> RunResult {
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: super::state::Chooser::Ucb, extended: false, drift: false, adapt: Default::default(), advice: Default::default(), ext2: false, rule_drift: false }, String::new());
+    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: super::state::Chooser::Ucb, extended: false, drift: false, adapt: Default::default(), advice: Default::default(), ext2: false, rule_drift: false, transfer: false, learn_transfer: false }, String::new());
     let mut e = Engine::new(World::new(world_seed), st, &th);
     let mut picks = vec![];
     while let Ok(o) = e.step(picker) {
@@ -137,7 +137,7 @@ const TRUTH_SAMPLES: u64 = 400;
 /// Uses the generator and the noise source; only the oracle and the tests touch it.
 #[derive(Debug, Clone)]
 pub struct Truth {
-    pub p: [[[f64; 4]; 5]; 5],
+    pub p: [[[f64; 4]; 5]; super::world::N_DOM],
 }
 
 pub fn truth(world_seed: u64) -> Truth {
@@ -152,9 +152,9 @@ pub fn truth_in(w: &World, rules: &[Rule]) -> Truth {
 /// As `truth_in`, with the `fast` strategy degraded or not (drifting worlds).
 pub fn truth_flag(w: &World, rules: &[Rule], degraded: bool) -> Truth {
     let th = ScriptedThinker;
-    let st = [Default::default(); 5];
-    let mut t = Truth { p: [[[0.0; 4]; 5]; 5] };
-    let doms: Vec<Domain> = if w.drift.is_some() { super::world::ALL_DOMAINS.to_vec() } else { DOMAINS.to_vec() };
+    let st = [Default::default(); super::world::N_DOM];
+    let mut t = Truth { p: [[[0.0; 4]; 5]; super::world::N_DOM] };
+    let doms: Vec<Domain> = if w.transfer.is_some() { super::world::TRANSFER_DOMAINS.to_vec() } else if w.drift.is_some() { super::world::ALL_DOMAINS.to_vec() } else { DOMAINS.to_vec() };
     for d in doms {
         for k in 1..=5u8 {
             for s in if w.extended { STRATEGIES_EXT.to_vec() } else { STRATEGIES.to_vec() } {
@@ -260,7 +260,7 @@ impl MenuRun {
 pub fn run_menu(world_seed: u64, budget: i64, chooser: &mut dyn MenuChooser) -> MenuRun {
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: false, drift: false, adapt: Default::default(), advice: Default::default(), ext2: false, rule_drift: false }, String::new());
+    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: false, drift: false, adapt: Default::default(), advice: Default::default(), ext2: false, rule_drift: false, transfer: false, learn_transfer: false }, String::new());
     let mut e = Engine::new(World::new(world_seed), st, &th);
     let (mut recs, mut skips, mut strategies) = (vec![], 0, [0u64; 4]);
     while let Ok(o) = e.step_menu(chooser) {
@@ -379,7 +379,7 @@ pub fn run_menu_ext(world: World, budget: i64, chooser: &mut dyn MenuChooser, di
     let world_seed = world.seed;
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: true, drift: false, adapt: Default::default(), advice: Default::default(), ext2: false, rule_drift: false }, String::new());
+    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: true, drift: false, adapt: Default::default(), advice: Default::default(), ext2: false, rule_drift: false, transfer: false, learn_transfer: false }, String::new());
     for r in preload {
         st.apply_rule(r.clone());
     }
@@ -610,7 +610,7 @@ impl DriftRun {
 pub fn run_drift(seed: u64, budget: i64, drift: bool, spec: &AdaptSpec, chooser: &mut dyn MenuChooser) -> DriftRun {
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed: seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: false, drift, adapt: spec.mode, advice: Default::default(), ext2: false, rule_drift: false }, String::new());
+    st.start(Genesis { world_seed: seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: false, drift, adapt: spec.mode, advice: Default::default(), ext2: false, rule_drift: false, transfer: false, learn_transfer: false }, String::new());
     st.model.set_mode(spec.mode, spec.half_life);
     st.model.cusum_k = spec.k;
     st.model.cusum_h = spec.h;
@@ -793,7 +793,7 @@ pub fn run_adv(world: World, budget: i64, mode: super::planner::AdviceMode, spec
     let world_seed = world.seed;
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended, drift: false, adapt: Default::default(), advice: Default::default(), ext2: false, rule_drift: false }, String::new());
+    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended, drift: false, adapt: Default::default(), advice: Default::default(), ext2: false, rule_drift: false, transfer: false, learn_transfer: false }, String::new());
     st.trust.cusum_k = spec.k;
     st.trust.cusum_h = spec.h;
     st.trust.keep = spec.keep;

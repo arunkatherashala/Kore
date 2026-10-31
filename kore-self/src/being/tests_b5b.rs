@@ -171,7 +171,7 @@ fn composition_is_off_unless_asked_and_allowed() {
 fn merge_retires_a_rule_a_simpler_one_always_explains() {
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed: 1, loop_seed: 0, budget: 100, explore_c: 0.0, chooser: Chooser::Model, extended: true, ext2: true, rule_drift: false, drift: false, adapt: Default::default(), advice: Default::default() }, String::new());
+    st.start(Genesis { world_seed: 1, loop_seed: 0, budget: 100, explore_c: 0.0, chooser: Chooser::Model, extended: true, ext2: true, rule_drift: false, drift: false, adapt: Default::default(), advice: Default::default(), transfer: false, learn_transfer: false }, String::new());
     for i in 0..9i64 {
         let terms: Vec<i64> = (0..6).map(|n| 2 + (i + 1) * n).collect();
         st.examples.push(Example { event_id: format!("e{i}"), sig: 1, terms, next: 2 + (i + 1) * 6 });

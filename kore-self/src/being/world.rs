@@ -63,14 +63,22 @@ pub enum Domain {
     Pattern = 3,
     /// Unit conversion. Only exists in a world created with `drift`: it appears in the menu from a scheduled time.
     Units = 4,
+    /// Track B6 (`transfer` worlds only): sequences of the same families as `Pattern`, seen through a hidden affine map of the values.
+    PatternB = 5,
+    /// Track B6 (`transfer` worlds only): the control domain (unit conversions), sharing no sequence structure with `Pattern`.
+    Control = 6,
 }
 
 /// The four domains of every world from the start.
 pub const DOMAINS: [Domain; 4] = [Domain::Arithmetic, Domain::Algebra, Domain::Physics, Domain::Pattern];
 /// All domains that can ever exist (the fifth only appears in a drifting world).
 pub const ALL_DOMAINS: [Domain; 5] = [Domain::Arithmetic, Domain::Algebra, Domain::Physics, Domain::Pattern, Domain::Units];
+/// Every domain of every world kind, including the two of the B6 `transfer` world.
+pub const ALL_DOMAINS_X: [Domain; 7] = [Domain::Arithmetic, Domain::Algebra, Domain::Physics, Domain::Pattern, Domain::Units, Domain::PatternB, Domain::Control];
+/// The domains of a `transfer` world: phase 1 offers only the first, phase 2 all three.
+pub const TRANSFER_DOMAINS: [Domain; 3] = [Domain::Pattern, Domain::PatternB, Domain::Control];
 /// Number of domain slots in per-domain arrays.
-pub const N_DOM: usize = 5;
+pub const N_DOM: usize = 7;
 
 impl Domain {
     pub fn idx(self) -> usize {
@@ -83,10 +91,12 @@ impl Domain {
             Domain::Physics => "physics",
             Domain::Pattern => "pattern",
             Domain::Units => "units",
+            Domain::PatternB => "pattern_b",
+            Domain::Control => "control",
         }
     }
     pub fn parse(s: &str) -> Option<Domain> {
-        ALL_DOMAINS.iter().copied().find(|d| d.name() == s)
+        ALL_DOMAINS_X.iter().copied().find(|d| d.name() == s)
     }
 }
 
@@ -157,11 +167,11 @@ impl Kind {
         use Kind::*;
         let k = difficulty.clamp(1, 5) as usize - 1;
         match d {
-            Domain::Units => [UnitKm, UnitHm, UnitKmh, UnitHms, UnitTrip][k],
+            Domain::Units | Domain::Control => [UnitKm, UnitHm, UnitKmh, UnitHms, UnitTrip][k],
             Domain::Arithmetic => [ArithAdd, ArithAddSub, ArithMulSmall, ArithMulBig, ArithMulSum][k],
             Domain::Algebra => [AlgXPlusB, AlgAX, AlgAXPlusB, AlgBothSides, AlgParen][k],
             Domain::Physics => [PhysVelocity, PhysOhm, PhysDisplacement, PhysKinetic, PhysStopping][k],
-            Domain::Pattern => [PatArith, PatGeom, PatQuad, PatFib, PatAlt][k],
+            Domain::Pattern | Domain::PatternB => [PatArith, PatGeom, PatQuad, PatFib, PatAlt][k],
         }
     }
 
@@ -268,6 +278,12 @@ impl Profile {
         p.reward_scale[4] = ((1.0 + u.f64()) * 100.0).round() / 100.0;
         p.cost_base[4] = u.range(2, 4);
         p.diff_bias[4] = ((0.6 + u.f64() * 1.2) * 100.0).round() / 100.0;
+        // the two B6 domains copy an existing profile (no new random stream): `pattern_b` pays like `pattern`, `control` like `units`
+        for (to, from) in [(5usize, 3usize), (6, 4)] {
+            p.reward_scale[to] = p.reward_scale[from];
+            p.cost_base[to] = p.cost_base[from];
+            p.diff_bias[to] = p.diff_bias[from];
+        }
         p
     }
 
@@ -348,6 +364,27 @@ pub struct World {
     pub rule_drift_at: Option<i64>,
     /// Measurement only (not part of the logged genesis): the rule drift also changes the cubic, second-order and tribonacci families.
     pub drift_wide: bool,
+    /// Track B6: a two-phase life (None: the world is as before and every earlier result is unchanged).
+    pub transfer: Option<Xfer>,
+}
+
+/// Track B6: hidden schedule and hidden value map of a `transfer` world.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Xfer {
+    /// World-clock second at which `pattern_b` and `control` start to appear in the offers.
+    pub at: i64,
+    /// The values of every `pattern_b` task (terms and next term) are `a * value + b`.
+    pub a: i64,
+    pub b: i64,
+}
+
+impl Xfer {
+    pub fn new(world_seed: u64, budget: i64) -> Xfer {
+        let mut r = Rng::new(mix(&[world_seed, 0x7F3A_B6]));
+        let frac = 0.4 + (r.f64() * 2.0 - 1.0) * 0.03;
+        let at = (budget as f64 * frac).round() as i64 * SECS_PER_ENERGY;
+        Xfer { at, a: 2 + r.below(2), b: r.range(1, 9) }
+    }
 }
 
 /// In the extended world pattern puzzles pay this many times the usual reward (author-defined; it gives
@@ -356,7 +393,7 @@ pub const EXT_PATTERN_BONUS: i64 = 2;
 
 impl World {
     pub fn new(seed: u64) -> World {
-        World { seed, profile: Profile::from_seed(seed), extended: false, pattern_bonus: 1, drift: None, ext2: false, rule_drift_at: None, drift_wide: false }
+        World { seed, profile: Profile::from_seed(seed), extended: false, pattern_bonus: 1, drift: None, ext2: false, rule_drift_at: None, drift_wide: false, transfer: None }
     }
 
     /// The `extended2` pattern world (B5). `rule_drift_budget`: the sequence rules of difficulty 1 change
@@ -365,6 +402,14 @@ impl World {
         let mut w = World::with_extended(seed, true);
         w.ext2 = true;
         w.rule_drift_at = rule_drift_budget.map(|b| b / 2 * SECS_PER_ENERGY);
+        w
+    }
+
+    /// The B6 `transfer` world: the `extended2` families, a life of two phases. Phase 1 offers only `pattern`;
+    /// from a hidden time on (about 40% of `budget`) `pattern_b` and `control` appear as well.
+    pub fn with_transfer(seed: u64, budget: i64) -> World {
+        let mut w = World::with_ext2(seed, None);
+        w.transfer = Some(Xfer::new(seed, budget));
         w
     }
 
@@ -429,7 +474,13 @@ impl World {
         let n: u64 = if regime >= 1 { 5 } else { 4 };
         (0..MENU_SIZE as u64)
             .map(|j| {
-                let d = ALL_DOMAINS[(mix(&[self.seed, step, j, 0xD0_0D]) % n) as usize];
+                let d = match &self.transfer {
+                    Some(x) => {
+                        let list: &[Domain] = if clock >= x.at { &TRANSFER_DOMAINS } else { &TRANSFER_DOMAINS[..1] };
+                        list[(mix(&[self.seed, step, j, 0xD0_0D]) % list.len() as u64) as usize]
+                    }
+                    None => ALL_DOMAINS[(mix(&[self.seed, step, j, 0xD0_0D]) % n) as usize],
+                };
                 self.build_x(step, d, j + 1, None, None, format!("{step}-{j}-{}", d.name()), self.profile_at(clock), drifted)
             })
             .collect()
@@ -466,15 +517,22 @@ impl World {
         let difficulty = forced.unwrap_or_else(|| (1.0 + (u.powf(prof.diff_bias[d.idx()]) * 5.0).floor()).clamp(1.0, 5.0) as u8);
         let kind = if let Some(k) = force_kind {
             k
-        } else if self.extended && d == Domain::Pattern {
-            let opts = if self.ext2 { Kind::options_ext2w(d, difficulty, drifted, self.drift_wide) } else { Kind::options_ext(d, difficulty) };
+        } else if self.extended && (d == Domain::Pattern || d == Domain::PatternB) {
+            let opts = if self.ext2 { Kind::options_ext2w(Domain::Pattern, difficulty, drifted, self.drift_wide) } else { Kind::options_ext(Domain::Pattern, difficulty) };
             opts[r.below(opts.len() as u64) as usize]
         } else {
             Kind::of(d, difficulty)
         };
-        let (params, prompt, expected) = generate(kind, &mut r);
+        let (mut params, mut prompt, mut expected) = generate(kind, &mut r);
+        if d == Domain::PatternB {
+            if let Some(x) = &self.transfer {
+                params = params.iter().map(|v| x.a * v + x.b).collect();
+                expected = x.a * expected + x.b;
+                prompt = format!("Next term: {}", join(&params));
+            }
+        }
         let k = difficulty as i64;
-        let bonus = if d == Domain::Pattern { self.pattern_bonus as f64 } else { 1.0 };
+        let bonus = if d == Domain::Pattern || d == Domain::PatternB { self.pattern_bonus as f64 } else { 1.0 };
         let reward = ((prof.reward_scale[d.idx()] * (4.0 + 3.0 * k as f64) * bonus).round() as i64).max(1);
         let cost = prof.cost_base[d.idx()] + k;
         Task { view: TaskView { id, step, domain: d, difficulty, kind, params, prompt, cost, reward }, expected }

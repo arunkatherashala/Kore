@@ -236,7 +236,7 @@ fn make_advisor(kind: AdvisorKind, cfg: &RunCfg, existing: Option<&Genesis>, own
                 Some(g) => (g.world_seed, g.loop_seed, g.extended, g.drift, g.budget, g.advice.quality),
                 None => (cfg.world_seed.unwrap_or(1), cfg.loop_seed.unwrap_or(1), cfg.extended.unwrap_or(false), cfg.drift.unwrap_or(false), cfg.budget.unwrap_or(being::run_loop::DEFAULT_BUDGET), cfg.advisor_quality.unwrap_or(0.0)),
             };
-            let g = Genesis { world_seed, loop_seed, budget, explore_c: 0.0, chooser: Chooser::Model, extended, drift, adapt: Default::default(), advice: Default::default(), ext2: false, rule_drift: false };
+            let g = Genesis { world_seed, loop_seed, budget, explore_c: 0.0, chooser: Chooser::Model, extended, drift, adapt: Default::default(), advice: Default::default(), ext2: false, rule_drift: false, transfer: false, learn_transfer: false };
             let w = world_for(&g);
             let strategies: Vec<being::solver::Strategy> = if extended { STRATEGIES_EXT.to_vec() } else { STRATEGIES.to_vec() };
             let ranker = being::measure::truth_ranker(being::measure::truth_in(&w, &[]), strategies.iter().copied().filter(|s| *s != being::solver::Strategy::Discovered).collect());

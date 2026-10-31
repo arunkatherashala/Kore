@@ -17,6 +17,8 @@
 //! max_energy_per_run    = 100000  # energy units spent by one being_run (a step that starts below the cap may end above it)
 //! composition           = on      # may discovery compose verified blocks (default off)
 //! pruning               = on      # may the being retire and merge its own rules (default off)
+//! transfer              = on      # may the model start a new domain from a similar learned one (B6, default off)
+//! max_transfer_links    = 16      # (domain, difficulty) links that may exist at the same time (B6)
 //! ```
 //!
 //! * A key that is missing takes the SAFE DEFAULT above (the numbers in the example, composition and
@@ -43,12 +45,14 @@ pub const DEFAULT_BLOCKS: usize = 8;
 pub const DEFAULT_CANDIDATES: usize = 2000;
 pub const DEFAULT_STEPS: u64 = 2000;
 pub const DEFAULT_ENERGY: i64 = 100_000;
+pub const DEFAULT_LINKS: usize = 16;
 /// Hard maxima: a file that asks for more is unparseable.
 pub const HARD_LIVE_RULES: usize = 1000;
 pub const HARD_BLOCKS: usize = 100;
 pub const HARD_CANDIDATES: usize = 1_000_000;
 pub const HARD_STEPS: u64 = 5000;
 pub const HARD_ENERGY: i64 = 1_000_000;
+pub const HARD_LINKS: usize = 1000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Origin {
@@ -66,6 +70,8 @@ pub struct Controller {
     pub max_energy_per_run: i64,
     pub composition: bool,
     pub pruning: bool,
+    pub transfer: bool,
+    pub max_transfer_links: usize,
     pub origin: Origin,
 }
 
@@ -88,6 +94,8 @@ impl Controller {
             max_energy_per_run: 0,
             composition: false,
             pruning: false,
+            transfer: false,
+            max_transfer_links: 0,
             origin: Origin::FailClosed(reason.into()),
         }
     }
@@ -102,6 +110,8 @@ impl Controller {
             max_energy_per_run: DEFAULT_ENERGY,
             composition: false,
             pruning: false,
+            transfer: false,
+            max_transfer_links: DEFAULT_LINKS,
             origin: Origin::File,
         }
     }
@@ -138,6 +148,8 @@ impl Controller {
                 "max_energy_per_run" => c.max_energy_per_run = num(HARD_ENERGY as u64)? as i64,
                 "composition" => c.composition = parse_bool(v).ok_or_else(|| format!("line {n}: 'composition' needs on or off"))?,
                 "pruning" => c.pruning = parse_bool(v).ok_or_else(|| format!("line {n}: 'pruning' needs on or off"))?,
+                "transfer" => c.transfer = parse_bool(v).ok_or_else(|| format!("line {n}: 'transfer' needs on or off"))?,
+                "max_transfer_links" => c.max_transfer_links = num(HARD_LINKS as u64)? as usize,
                 _ => return Err(format!("line {n}: unknown key '{k}'")),
             }
             seen.push(k);
@@ -171,6 +183,8 @@ impl Controller {
             compose: want_compose && self.composition,
             prune: want_prune && self.pruning,
             prune_cfg: PruneCfg::default(),
+            transfer: self.transfer,
+            max_links: self.max_transfer_links,
         };
         (l, refusals)
     }
@@ -204,11 +218,14 @@ pub struct Limits {
     pub compose: bool,
     pub prune: bool,
     pub prune_cfg: PruneCfg,
+    /// B6: links between domains are allowed (default off), and at most this many may exist.
+    pub transfer: bool,
+    pub max_links: usize,
 }
 
 impl Default for Limits {
     fn default() -> Limits {
-        Limits { max_live_rules: usize::MAX, max_blocks: usize::MAX, max_candidates: usize::MAX, compose: false, prune: false, prune_cfg: PruneCfg::default() }
+        Limits { max_live_rules: usize::MAX, max_blocks: usize::MAX, max_candidates: usize::MAX, compose: false, prune: false, prune_cfg: PruneCfg::default(), transfer: false, max_links: usize::MAX }
     }
 }
 

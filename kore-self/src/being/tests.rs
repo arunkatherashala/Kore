@@ -42,7 +42,7 @@ fn world_is_deterministic_and_checker_is_exact() {
 fn scripted_thinker_is_exact_where_documented_and_imperfect_elsewhere() {
     let w = World::new(3);
     let th = ScriptedThinker;
-    let st = [Default::default(); 5];
+    let st = [Default::default(); super::world::N_DOM];
     let (mut exact_ok, mut exact_n, mut heur_ok, mut heur_n) = (0, 0, 0, 0);
     for step in 0..400 {
         for d in DOMAINS {
@@ -500,7 +500,7 @@ fn search_finds_every_expressible_family_and_accepts_nothing_for_unexpressible_o
     // the hidden families are not solved by any fixed strategy
     let w = World::with_extended(2, true);
     let th = ScriptedThinker;
-    let st = [Default::default(); 5];
+    let st = [Default::default(); super::world::N_DOM];
     for k in EXPRESSIBLE.iter().chain(UNEXPRESSIBLE.iter()) {
         for s in [Strategy::Fast, Strategy::Careful, Strategy::Deep] {
             let hits = (0..60u64)
@@ -857,7 +857,7 @@ fn drift_schedule_is_seeded_deterministic_and_hidden_from_the_being() {
 fn drift_has_a_new_domain_with_an_exact_checker_a_profile_shift_and_a_degrading_strategy() {
     let w = World::with_drift(7, false, Some(DRIFT_BUDGET));
     let d = w.drift.clone().unwrap();
-    let st = [Default::default(); 5];
+    let st = [Default::default(); super::world::N_DOM];
     let th = ScriptedThinker;
     for k in 1..=5u8 {
         for step in 0..60 {

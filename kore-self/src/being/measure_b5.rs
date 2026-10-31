@@ -77,7 +77,7 @@ pub fn run_b5w(seed: u64, budget: i64, rule_drift: bool, wide: bool, limits: Opt
     world.drift_wide = wide;
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed: seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: true, ext2: true, rule_drift, drift: false, adapt: Default::default(), advice: Default::default() }, String::new());
+    st.start(Genesis { world_seed: seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: true, ext2: true, rule_drift, drift: false, adapt: Default::default(), advice: Default::default(), transfer: false, learn_transfer: false }, String::new());
     let mut e = Engine::new(world, st, &th).with_limits(limits);
     let mut chooser = ModelChooser { curiosity: DEFAULT_CURIOSITY, ..ModelChooser::new(DEFAULT_BETA) };
     let (mut accepted, mut retired, mut live, mut uses, mut trace) = (vec![], vec![], vec![], vec![], vec![]);

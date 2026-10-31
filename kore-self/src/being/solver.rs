@@ -24,10 +24,10 @@
 
 use super::discover::{self, Rule};
 use super::state::DomainStat;
-use super::world::{Domain, Kind, TaskView};
+use super::world::{Domain, Kind, TaskView, N_DOM};
 
 /// Slip rate per mille by domain (arithmetic, algebra, physics, pattern).
-pub const SLIP_PER_MILLE: [u64; 5] = [80, 50, 100, 30, 60];
+pub const SLIP_PER_MILLE: [u64; 7] = [80, 50, 100, 30, 60, 30, 60];
 /// Self-reported confidence of the scripted thinker (author-set, not calibrated).
 pub const CONF_EXACT: f64 = 0.9;
 pub const CONF_HEURISTIC: f64 = 0.3;
@@ -39,7 +39,7 @@ pub struct Context<'a> {
     /// The world's per-attempt random source (execution slips).
     pub noise: u64,
     /// What the being has observed so far in each domain, from its own log.
-    pub stats: &'a [DomainStat; 5],
+    pub stats: &'a [DomainStat; N_DOM],
     /// The `fast` strategy has degraded (a scheduled change of a drifting world; false everywhere else).
     pub degraded: bool,
     /// Rules the being has accepted into its own log (empty unless discovery ran).
@@ -142,7 +142,7 @@ impl Thinker for ScriptedThinker {
         let mut rule_id = None;
         let (mut answer, exact, method) = match strategy {
             Strategy::Careful => solve(t),
-            Strategy::Discovered => match discover::apply(ctx.rules, t.difficulty, &t.params).filter(|_| t.domain == Domain::Pattern) {
+            Strategy::Discovered => match discover::apply(ctx.rules, discover::sig_of(t.domain, t.difficulty), &t.params).filter(|_| t.domain == Domain::Pattern || t.domain == Domain::PatternB) {
                 Some((v, r)) => {
                     rule_id = Some(r.id.clone());
                     (v, true, format!("rule:{}:{}", r.id, r.form.code()))

@@ -33,7 +33,7 @@
 //! same log twice gives the same model bit for bit.
 
 use super::solver::{Strategy, STRATEGIES, STRATEGIES_EXT};
-use super::world::{Domain, ALL_DOMAINS, N_DOM};
+use super::world::{Domain, ALL_DOMAINS_X, N_DOM};
 
 /// Pseudo-observations the parent level contributes to a child level.
 pub const PRIOR_K: f64 = 4.0;
@@ -173,6 +173,36 @@ struct Group {
     run_pred: f64,
 }
 
+/// Source cells with less (effective) evidence than this do not lend their posterior (B6).
+pub const XFER_SRC_MIN_N: f64 = 4.0;
+/// B6 guard: a link is revoked when, after at least `guard_min_n` observed attempts it influenced, the
+/// observations are less likely under the transferred prior than under the prior without transfer by more than `guard_nats` (log-likelihood).
+pub const GUARD_NATS: f64 = 2.0;
+pub const GUARD_MIN_N: u32 = 4;
+
+/// Track B6: the cells (domain, difficulty, *) of a target domain start from the posterior of the same
+/// difficulty and strategy in a source domain instead of from the strategy-wide estimate only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Link {
+    pub src: Domain,
+    /// Whether the predictive guard can revoke it (false only in the wrong-similarity control without a guard).
+    pub guard: bool,
+    pub active: bool,
+    /// Cumulative log-likelihood of the observed outcomes under the transferred prior minus under the plain prior.
+    pub delta: f64,
+    /// Attempts the link changed the prediction for.
+    pub n: u32,
+}
+
+/// A link switched off by the guard (drained by the state, which logs it).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Revoked {
+    pub domain: Domain,
+    pub difficulty: u8,
+    pub delta: f64,
+    pub n: u32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Model {
     cells: [[[Cell; 4]; 5]; N_DOM],
@@ -190,6 +220,14 @@ pub struct Model {
     /// Discounted reward and energy of recent steps (attempts and skips), for the skip rule.
     rw: f64,
     cw: f64,
+    /// B6 links per (target domain, difficulty).
+    links: [[Option<Link>; 5]; N_DOM],
+    /// B6: a rule exists for this (domain, difficulty), so the `discovered` strategy may borrow from a source.
+    disc_ready: [[bool; 5]; N_DOM],
+    /// Guard thresholds (B6).
+    pub guard_nats: f64,
+    pub guard_min_n: u32,
+    revoked: Vec<Revoked>,
 }
 
 impl Default for Model {
@@ -216,6 +254,11 @@ impl Model {
             t: 0,
             rw: 0.0,
             cw: 0.0,
+            links: Default::default(),
+            disc_ready: [[false; 5]; N_DOM],
+            guard_nats: GUARD_NATS,
+            guard_min_n: GUARD_MIN_N,
+            revoked: vec![],
         }
     }
 
@@ -250,6 +293,22 @@ impl Model {
     pub fn observe(&mut self, o: &Obs) -> Option<Alarm> {
         let (d, k, s) = (o.domain.idx(), (o.difficulty.clamp(1, 5) - 1) as usize, o.strategy.idx());
         let mut alarm = None;
+        if self.links[d][k].as_ref().map_or(false, |l| l.active && l.guard) {
+            let with = self.est(o.domain, o.difficulty, o.strategy, true).p;
+            let without = self.est(o.domain, o.difficulty, o.strategy, false).p;
+            if with != without {
+                let ll = |p: f64| if o.correct { p.ln() } else { (1.0 - p).ln() };
+                let (gn, gm) = (self.guard_nats, self.guard_min_n);
+                let l = self.links[d][k].as_mut().expect("checked above");
+                l.delta += ll(with) - ll(without);
+                l.n += 1;
+                if l.n >= gm && l.delta < -gn {
+                    l.active = false;
+                    let rv = Revoked { domain: o.domain, difficulty: o.difficulty, delta: l.delta, n: l.n };
+                    self.revoked.push(rv);
+                }
+            }
+        }
         if self.mode == AdaptMode::Full {
             let pre = self.estimate(o.domain, o.difficulty, o.strategy);
             let c = self.cell_tot(d, k, s);
@@ -349,28 +408,89 @@ impl Model {
     }
 
     pub fn estimate(&self, d: Domain, difficulty: u8, s: Strategy) -> Estimate {
+        self.est(d, difficulty, s, true)
+    }
+
+    /// Start (or restart) a transfer link for the cells of (`target`, `difficulty`). No-op if one exists.
+    pub fn set_link(&mut self, target: Domain, difficulty: u8, src: Domain, guard: bool) -> bool {
+        let slot = &mut self.links[target.idx()][(difficulty.clamp(1, 5) - 1) as usize];
+        if slot.is_some() || src == target {
+            return false;
+        }
+        *slot = Some(Link { src, guard, active: true, delta: 0.0, n: 0 });
+        true
+    }
+
+    pub fn link(&self, target: Domain, difficulty: u8) -> Option<&Link> {
+        self.links[target.idx()][(difficulty.clamp(1, 5) - 1) as usize].as_ref()
+    }
+
+    pub fn links_made(&self) -> usize {
+        self.links.iter().flatten().filter(|l| l.is_some()).count()
+    }
+
+    /// Mark whether the (domain, difficulty) has a live rule (gates the transfer into the `discovered` strategy).
+    pub fn set_disc_ready(&mut self, d: Domain, difficulty: u8, ready: bool) {
+        self.disc_ready[d.idx()][(difficulty.clamp(1, 5) - 1) as usize] = ready;
+    }
+
+    /// (effective attempts, successes) of one strategy pooled over the difficulties of a domain.
+    pub fn domain_strategy(&self, d: Domain, s: Strategy) -> (f64, f64) {
+        let t = self.domain_total(d, s);
+        (t.n, t.succ)
+    }
+
+    /// Effective attempts at (domain, difficulty) over all strategies.
+    pub fn cell_attempts(&self, d: Domain, difficulty: u8) -> f64 {
+        let k = (difficulty.clamp(1, 5) - 1) as usize;
+        (0..4).map(|s| self.cell_tot(d.idx(), k, s).n).sum()
+    }
+
+    /// Effective attempts in a domain over all strategies and difficulties.
+    pub fn domain_attempts(&self, d: Domain) -> f64 {
+        (0..5).map(|k| self.cell_attempts(d, k as u8 + 1)).sum()
+    }
+
+    /// Links the guard has switched off since the last call.
+    pub fn take_revoked(&mut self) -> Vec<Revoked> {
+        std::mem::take(&mut self.revoked)
+    }
+
+    /// Estimate, with (`use_link`) or without the transfer link. Without a link both are the B1 numbers bit for bit.
+    fn est(&self, d: Domain, difficulty: u8, s: Strategy, use_link: bool) -> Estimate {
+        let k = (difficulty.clamp(1, 5) - 1) as usize;
         let st = self.strategy_total(s);
         let dt = self.domain_total(d, s);
-        let c = self.cell_tot(d.idx(), (difficulty.clamp(1, 5) - 1) as usize, s.idx());
+        let c = self.cell_tot(d.idx(), k, s.idx());
         // success probability
-        let p_s = (st.succ + 1.0) / (st.n + 2.0);
+        let mut p_s = (st.succ + 1.0) / (st.n + 2.0);
+        let mut r_s = shrink(st.spent, st.listed, 1.0, COST_K);
+        if use_link {
+            if let Some(l) = self.links[d.idx()][k].as_ref().filter(|l| l.active && (s != Strategy::Discovered || self.disc_ready[d.idx()][k])) {
+                let src = self.cell_tot(l.src.idx(), k, s.idx());
+                if src.n >= XFER_SRC_MIN_N {
+                    let e = self.est(l.src, difficulty, s, false);
+                    p_s = e.p;
+                    r_s = e.cost_ratio;
+                }
+            }
+        }
         let p_d = shrink(dt.succ, dt.n, p_s, PRIOR_K);
         let a = c.succ + PRIOR_K * p_d;
         let b = (c.n - c.succ) + PRIOR_K * (1.0 - p_d);
         let p = a / (a + b);
         let sd = (p * (1.0 - p) / (a + b + 1.0)).sqrt();
         // cost ratio
-        let r_s = shrink(st.spent, st.listed, 1.0, COST_K);
         let r_d = shrink(dt.spent, dt.listed, r_s, COST_K);
         let cost_ratio = shrink(c.spent, c.listed, r_d, COST_K);
-        let n = if self.mode == AdaptMode::Off { self.cells[d.idx()][(difficulty.clamp(1, 5) - 1) as usize][s.idx()].n } else { c.n.round() as u64 };
+        let n = if self.mode == AdaptMode::Off { self.cells[d.idx()][k][s.idx()].n } else { c.n.round() as u64 };
         Estimate { n, p, sd, cost_ratio, group_n: dt.n }
     }
 
     /// Per (domain, strategy) attempt counts, for status output.
     pub fn counts(&self) -> Vec<(Domain, Strategy, u64, u64)> {
         let mut v = vec![];
-        for d in ALL_DOMAINS {
+        for d in ALL_DOMAINS_X {
             for s in STRATEGIES_EXT {
                 let mut n = 0;
                 let mut succ = 0;
