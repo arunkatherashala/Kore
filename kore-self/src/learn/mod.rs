@@ -34,6 +34,8 @@ pub const ACT_PREFIX: &str = "act:";
 pub const TOPIC_PREFIX: &str = "topic:";
 /// Events carrying this tag are the evolution loop's own records; learners ignore them.
 pub const EVOLVE_TAG: &str = "evolve";
+/// Events carrying this tag are logged prediction refusals; learners ignore them too.
+pub const PREDICT_TAG: &str = "predict_refusal";
 pub const NO_ACTION: &str = "(none)";
 
 /// A read-only view of one event, with the day number pre-computed.
@@ -75,7 +77,7 @@ impl Ev {
 /// Events the learners may read: everything except the evolution loop's own
 /// records, sorted by (time, id) so results do not depend on storage order.
 pub fn learnable(rows: &[EventRow]) -> Vec<Ev> {
-    let mut v: Vec<Ev> = rows.iter().filter_map(Ev::from_row).filter(|e| !e.has_tag(EVOLVE_TAG)).collect();
+    let mut v: Vec<Ev> = rows.iter().filter_map(Ev::from_row).filter(|e| !e.has_tag(EVOLVE_TAG) && !e.has_tag(PREDICT_TAG)).collect();
     v.sort_by(|a, b| (&a.ts, &a.id).cmp(&(&b.ts, &b.id)));
     v
 }
