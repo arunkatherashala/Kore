@@ -11,6 +11,8 @@ mod being;
 
 #[path = "measure_being_parts/advice.rs"]
 mod advice_mode;
+#[path = "measure_being_parts/b5.rs"]
+mod b5_mode;
 
 use being::chooser::DEFAULT_EXPLORE_C;
 use being::measure::*;
@@ -507,6 +509,13 @@ fn drift_main() {
 }
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|a| a.starts_with("b5")).unwrap_or(false) {
+        let mut a = args.clone();
+        a.insert(1, "x".into());
+        a[2] = args[1].clone();
+        b5_mode::main_b5(&a);
+        return;
+    }
     if args.get(1).map(|a| a == "advice").unwrap_or(false) {
         advice_mode::main_advice(&args);
         return;

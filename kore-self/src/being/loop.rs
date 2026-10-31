@@ -138,11 +138,13 @@ pub struct Engine<'a> {
     refused: std::collections::HashSet<String>,
     /// Number of verified building blocks the last composed search used.
     last_blocks: usize,
+    /// Most candidates a single capped discovery pass evaluated (for the cap checks of the measurement).
+    pub max_candidates_seen: usize,
 }
 
 impl<'a> Engine<'a> {
     pub fn new(world: World, state: BeingState, thinker: &'a dyn Thinker) -> Engine<'a> {
-        Engine { world, state, thinker, advisor: None, carry: vec![], carry_rules: vec![], limits: None, refusals: vec![], refusals_total: vec![], refused: Default::default(), last_blocks: 0 }
+        Engine { world, state, thinker, advisor: None, carry: vec![], carry_rules: vec![], limits: None, refusals: vec![], refusals_total: vec![], refused: Default::default(), last_blocks: 0, max_candidates_seen: 0 }
     }
 
     pub fn with_limits(mut self, limits: Option<Limits>) -> Engine<'a> {
@@ -680,6 +682,7 @@ impl<'a> Engine<'a> {
                     ));
                 }
                 self.last_blocks = blocks.len();
+                self.max_candidates_seen = self.max_candidates_seen.max(o.candidates);
                 o.found
             }
         };
@@ -960,7 +963,7 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
     let mut state = BeingState::from_snapshot(&log.open_latest());
     let mut created = false;
     // validated before anything is written, so a refused request never creates a being
-    if cfg.discover_every.unwrap_or(0) > 0 && !state.genesis.as_ref().map_or(cfg.extended == Some(true), |g| g.extended) {
+    if cfg.discover_every.unwrap_or(0) > 0 && !state.genesis.as_ref().map_or(cfg.extended == Some(true) || cfg.ext2 == Some(true), |g| g.extended) {
         return Err(LogError::Invalid("discovery needs a being created with pattern_families extended (only then are revealed examples logged)".into()));
     }
     match &state.genesis {

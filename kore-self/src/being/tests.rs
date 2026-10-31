@@ -226,7 +226,7 @@ fn being_sources_have_no_file_network_or_process_access() {
     let mut n = 0;
     for f in std::fs::read_dir(&dir).unwrap().flatten() {
         let name = f.file_name().to_string_lossy().to_string();
-        if name == "tests.rs" || !name.ends_with(".rs") {
+        if name.starts_with("tests") || !name.ends_with(".rs") {
             continue;
         }
         n += 1;

@@ -101,3 +101,4 @@ fn capped_search_is_a_prefix_of_the_full_search() {
         }
     }
 }
+
