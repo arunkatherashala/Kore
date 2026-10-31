@@ -145,6 +145,9 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
     for r in &req_refusals {
         refused.push((r.cap.clone(), r.limit, r.requested, r.what.clone()));
     }
+    if flag("learn_transfer")?.unwrap_or(false) && !ctl.transfer {
+        refused.push(("transfer".into(), 0, 1, "transfer between domains was requested but controller.txt does not allow it (transfer = off); the being will make no link".into()));
+    }
     let steps_eff = if steps > ctl.max_steps_per_run {
         refused.push(("max_steps_per_run".into(), ctl.max_steps_per_run, steps, format!("{steps} steps were requested, the controller allows {}; the run is cut to the cap", ctl.max_steps_per_run)));
         ctl.max_steps_per_run
@@ -158,6 +161,8 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         ctl: Some(limits),
         ext2,
         rule_drift: flag("rule_drift")?,
+        transfer: flag("transfer")?,
+        learn_transfer: flag("learn_transfer")?,
         advisor: advisor_kind,
         advisor_quality,
         trust: flag("trust")?,
@@ -214,7 +219,7 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
     let mut out = s.to_json();
     out["controller"] = json!({
         "origin": "controller.txt", "max_live_rules": ctl.max_live_rules, "max_building_blocks": ctl.max_building_blocks, "max_search_candidates": ctl.max_search_candidates,
-        "max_steps_per_run": ctl.max_steps_per_run, "max_energy_per_run": ctl.max_energy_per_run, "composition_allowed": ctl.composition, "pruning_allowed": ctl.pruning,
+        "max_steps_per_run": ctl.max_steps_per_run, "max_energy_per_run": ctl.max_energy_per_run, "composition_allowed": ctl.composition, "pruning_allowed": ctl.pruning, "transfer_allowed": ctl.transfer, "max_transfer_links": ctl.max_transfer_links,
         "refusals_audited": refused.iter().map(|r| json!({ "cap": r.0, "limit": r.1, "requested": r.2, "what": r.3 })).collect::<Vec<_>>(),
     });
     out["note"] = json!("deterministic simulation loop: a seeded world with author-defined rewards and a scripted solver; the preference comes from those rewards. See docs/measured.md");
@@ -452,6 +457,8 @@ pub fn tool_defs() -> Vec<Value> {
             "trust": { "type": "boolean", "description": "With an advisor, default true: the being learns from logged outcomes how far to trust the advisor per domain and mixes advice with its own model by that trust. false: it follows advice blindly. Fixed once the being exists" },
             "rule_drift": { "type": "boolean", "description": "B5, needs pattern_families extended2 at creation: halfway through the budget the sequence rule of one family changes (an accepted rule becomes wrong). Fixed once the being exists" },
             "compose": { "type": "boolean", "description": "B5, with discover: discovery may also build rules by composing building blocks it has already verified (differences, running sums, parity subsequence in front of a verified form). Only if controller.txt says composition = on; otherwise the request is refused and audited" },
+            "transfer": { "type": "boolean", "description": "B6, needs pattern_families extended2 at creation: a two-phase life. Phase 1 offers only sequence tasks; from a hidden time on a second sequence domain (the same families seen through a hidden map of the values) and a control domain (unit conversions) are offered too. Fixed once the being exists" },
+            "learn_transfer": { "type": "boolean", "description": "B6, needs transfer at creation: the model may start the cells of a new domain from the posterior of a learned domain whose accepted rules explain the new domain's logged examples, with a guard that switches a link off when it predicts worse, and the rule search tries rules accepted in the other domain first. Only if controller.txt says transfer = on (and at most max_transfer_links links); otherwise refused and audited. Fixed once the being exists" },
             "prune": { "type": "boolean", "description": "B5: the being may retire rules whose recent success rate fell below a threshold and merge rules a simpler one explains; every retirement is a logged revision, nothing is deleted. Only if controller.txt says pruning = on; otherwise refused and audited" },
             "stop_after_budget": { "type": "boolean", "description": "Default true: stop when no task is affordable. False: the world refills the budget at the next world day (logged) and the run continues" }
           }, "required": ["steps"] } }),

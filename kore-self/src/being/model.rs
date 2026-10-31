@@ -179,12 +179,16 @@ pub const XFER_SRC_MIN_N: f64 = 4.0;
 /// observations are less likely under the transferred prior than under the prior without transfer by more than `guard_nats` (log-likelihood).
 pub const GUARD_NATS: f64 = 2.0;
 pub const GUARD_MIN_N: u32 = 4;
+/// Pseudo-observations of the source posterior behind a linked cell. Chosen on tuning seeds 101..120 only.
+pub const XFER_K: f64 = 16.0;
 
 /// Track B6: the cells (domain, difficulty, *) of a target domain start from the posterior of the same
 /// difficulty and strategy in a source domain instead of from the strategy-wide estimate only.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Link {
     pub src: Domain,
+    /// Difficulty of the source cell that is lent (the same difficulty, except in the shifted-cells control).
+    pub src_k: u8,
     /// Whether the predictive guard can revoke it (false only in the wrong-similarity control without a guard).
     pub guard: bool,
     pub active: bool,
@@ -227,6 +231,8 @@ pub struct Model {
     /// Guard thresholds (B6).
     pub guard_nats: f64,
     pub guard_min_n: u32,
+    /// Pseudo-observations the source posterior contributes to a linked cell (B6).
+    pub xfer_k: f64,
     revoked: Vec<Revoked>,
 }
 
@@ -258,6 +264,7 @@ impl Model {
             disc_ready: [[false; 5]; N_DOM],
             guard_nats: GUARD_NATS,
             guard_min_n: GUARD_MIN_N,
+            xfer_k: XFER_K,
             revoked: vec![],
         }
     }
@@ -412,12 +419,12 @@ impl Model {
     }
 
     /// Start (or restart) a transfer link for the cells of (`target`, `difficulty`). No-op if one exists.
-    pub fn set_link(&mut self, target: Domain, difficulty: u8, src: Domain, guard: bool) -> bool {
+    pub fn set_link(&mut self, target: Domain, difficulty: u8, src: Domain, src_k: u8, guard: bool) -> bool {
         let slot = &mut self.links[target.idx()][(difficulty.clamp(1, 5) - 1) as usize];
         if slot.is_some() || src == target {
             return false;
         }
-        *slot = Some(Link { src, guard, active: true, delta: 0.0, n: 0 });
+        *slot = Some(Link { src, src_k, guard, active: true, delta: 0.0, n: 0 });
         true
     }
 
@@ -463,25 +470,33 @@ impl Model {
         let dt = self.domain_total(d, s);
         let c = self.cell_tot(d.idx(), k, s.idx());
         // success probability
-        let mut p_s = (st.succ + 1.0) / (st.n + 2.0);
-        let mut r_s = shrink(st.spent, st.listed, 1.0, COST_K);
+        let p_s = (st.succ + 1.0) / (st.n + 2.0);
+        let r_s = shrink(st.spent, st.listed, 1.0, COST_K);
+        // B6: an active link replaces the whole prior chain of the cell by the posterior of the source cell
+        let mut from_src: Option<(f64, f64)> = None;
         if use_link {
             if let Some(l) = self.links[d.idx()][k].as_ref().filter(|l| l.active && (s != Strategy::Discovered || self.disc_ready[d.idx()][k])) {
-                let src = self.cell_tot(l.src.idx(), k, s.idx());
+                let src = self.cell_tot(l.src.idx(), (l.src_k.clamp(1, 5) - 1) as usize, s.idx());
                 if src.n >= XFER_SRC_MIN_N {
-                    let e = self.est(l.src, difficulty, s, false);
-                    p_s = e.p;
-                    r_s = e.cost_ratio;
+                    let e = self.est(l.src, l.src_k, s, false);
+                    from_src = Some((e.p, e.cost_ratio));
                 }
             }
         }
-        let p_d = shrink(dt.succ, dt.n, p_s, PRIOR_K);
-        let a = c.succ + PRIOR_K * p_d;
-        let b = (c.n - c.succ) + PRIOR_K * (1.0 - p_d);
+        let p_d = match from_src {
+            Some((p, _)) => p,
+            None => shrink(dt.succ, dt.n, p_s, PRIOR_K),
+        };
+        let kc = if from_src.is_some() { self.xfer_k } else { PRIOR_K };
+        let a = c.succ + kc * p_d;
+        let b = (c.n - c.succ) + kc * (1.0 - p_d);
         let p = a / (a + b);
         let sd = (p * (1.0 - p) / (a + b + 1.0)).sqrt();
         // cost ratio
-        let r_d = shrink(dt.spent, dt.listed, r_s, COST_K);
+        let r_d = match from_src {
+            Some((_, r)) => r,
+            None => shrink(dt.spent, dt.listed, r_s, COST_K),
+        };
         let cost_ratio = shrink(c.spent, c.listed, r_d, COST_K);
         let n = if self.mode == AdaptMode::Off { self.cells[d.idx()][k][s.idx()].n } else { c.n.round() as u64 };
         Estimate { n, p, sd, cost_ratio, group_n: dt.n }

@@ -126,3 +126,40 @@ fn kill_file_refuses_a_run_and_stops_one_midway_within_one_step() {
     assert_eq!(s.steps_run, 7, "the file appeared at the 8th check: no step may start after it");
     assert_eq!(s.stopped, crate::being::StopReason::Killed);
 }
+
+fn transfer_args() -> Value {
+    json!({"steps": 330, "chooser": "model", "pattern_families": "extended2", "transfer": true, "learn_transfer": true, "discover": true, "compose": true, "world_seed": 4, "budget": 3000, "seed": 1})
+}
+
+#[test]
+fn transfer_is_refused_and_audited_when_controller_txt_does_not_allow_it() {
+    let o = "b6-transfer-off";
+    let dir = setup(o);
+    std::fs::write(dir.join("controller.txt"), "composition = on\n").unwrap();
+    let (e, t) = call(o, transfer_args());
+    assert!(!e, "{t}");
+    let v: Value = serde_json::from_str(&t).unwrap();
+    assert_eq!(v["transfer_links"], 0, "no link without transfer = on");
+    assert_eq!(v["learn_transfer"], true);
+    assert!(tools_of(&audit_rows(o)).contains(&"controller_transfer".to_string()), "{:?}", tools_of(&audit_rows(o)));
+}
+
+#[test]
+fn transfer_link_cap_from_controller_is_enforced_and_audited() {
+    let o = "b6-transfer-cap";
+    let dir = setup(o);
+    std::fs::write(dir.join("controller.txt"), "composition = on\ntransfer = on\nmax_transfer_links = 1\n").unwrap();
+    let (e, t) = call(o, transfer_args());
+    assert!(!e, "{t}");
+    let v: Value = serde_json::from_str(&t).unwrap();
+    assert_eq!(v["transfer_links"], 1, "never more links than the cap: {t}");
+    assert!(tools_of(&audit_rows(o)).contains(&"controller_max_transfer_links".to_string()), "{:?}", tools_of(&audit_rows(o)));
+    // with a larger cap the same world links more than one difficulty
+    let o = "b6-transfer-cap-big";
+    let dir = setup(o);
+    std::fs::write(dir.join("controller.txt"), "composition = on\ntransfer = on\nmax_transfer_links = 16\n").unwrap();
+    let (e, t) = call(o, transfer_args());
+    assert!(!e, "{t}");
+    let v: Value = serde_json::from_str(&t).unwrap();
+    assert!(v["transfer_links"].as_u64().unwrap() >= 2, "{t}");
+}

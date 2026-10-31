@@ -303,6 +303,7 @@ impl BeingState {
                     target: rv.domain,
                     difficulty: rv.difficulty,
                     src,
+                    src_k: rv.difficulty,
                     evidence: serde_json::json!({ "log_likelihood_difference": rv.delta, "attempts_influenced": rv.n, "threshold_nats": self.model.guard_nats }),
                     cites,
                 };
@@ -359,8 +360,8 @@ impl BeingState {
     }
 
     /// Take a transfer link into the model (the engine decided it, or a replayed `transfer_link` note says so).
-    pub fn apply_link(&mut self, target: Domain, difficulty: u8, src: Domain, guard: bool) -> bool {
-        let made = self.model.set_link(target, difficulty, src, guard);
+    pub fn apply_link(&mut self, target: Domain, difficulty: u8, src: Domain, src_k: u8, guard: bool) -> bool {
+        let made = self.model.set_link(target, difficulty, src, src_k, guard);
         if made {
             self.xfer.made += 1;
         }
@@ -462,8 +463,8 @@ impl BeingState {
             let clock = tag(&e.tags, "clock").and_then(|v| v.parse().ok()).unwrap_or(self.clock);
             self.apply_refill(left, clock);
         } else if e.kind == "note" && has_tag(&e.tags, "transfer_link") {
-            if let Some((t, k, s, g)) = transfer::link_from_event(e) {
-                self.apply_link(t, k, s, g);
+            if let Some((t, k, s, sk, g)) = transfer::link_from_event(e) {
+                self.apply_link(t, k, s, sk, g);
             }
         } else if e.kind == "note" && has_tag(&e.tags, "rule_retired") {
             if let Some(id) = tag(&e.tags, "rule_id") {

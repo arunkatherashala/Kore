@@ -561,7 +561,7 @@ impl<'a> Engine<'a> {
         let pending_advice = self.state.advice.clone();
         self.state.apply(&outcome);
         let mut changes: Vec<(NewEvent, NewRevision)> = self.state.changes[before..].iter().map(change_records).collect();
-        changes.extend(self.consider_transfer(domain, difficulty, attempted));
+        changes.extend(self.consider_transfer(domain, attempted));
         let mut events = pre_events;
         events.extend([dev, aev, oev]);
         if let (Some(tr), Some(pa)) = (&ch.advice, &pending_advice) {
@@ -704,7 +704,7 @@ impl<'a> Engine<'a> {
     /// B6: the rules accepted in `pattern` become the first hypotheses tried for the same difficulty in `pattern_b`
     /// (only with transfer on; empty otherwise, which leaves the search exactly as before).
     fn transfer_hypotheses(&self) -> Vec<(u8, discover::Xf, discover::Form)> {
-        if self.state.xfer.cfg.mode != XferMode::On {
+        if self.state.xfer.cfg.mode != XferMode::On || !self.state.xfer.cfg.reorder {
             return vec![];
         }
         (1..=5u8).flat_map(|k| transfer::preferred(&self.state.rules, k, discover::sig_of(Domain::PatternB, k))).collect()
@@ -712,38 +712,37 @@ impl<'a> Engine<'a> {
 
     /// B6: write out the guard's revocations of this step and, for the cells of the outcome's (domain, difficulty),
     /// decide whether to start a link now. Every decision is a note plus a revision citing the evidence.
-    fn consider_transfer(&mut self, d: Domain, k: u8, attempted: bool) -> Vec<(NewEvent, NewRevision)> {
+    fn consider_transfer(&mut self, d: Domain, attempted: bool) -> Vec<(NewEvent, NewRevision)> {
         let mut out: Vec<(NewEvent, NewRevision)> = vec![];
         for rec in std::mem::take(&mut self.state.xfer.pending) {
             self.state.xfer.log.push(rec.clone());
             out.push(transfer::records(&rec));
         }
-        if !attempted || self.state.xfer.cfg.mode == XferMode::Off || self.state.model.link(d, k).is_some() {
+        if !attempted || self.state.xfer.cfg.mode == XferMode::Off {
             return out;
         }
-        let Some(dec) = transfer::decide(&self.state, d, k) else {
-            return out;
-        };
-        if let Some(l) = self.limits.clone() {
-            if !l.transfer {
-                self.refuse(Refusal::new("transfer", 0, 1, "transfer between domains was asked for (the being was created with learn_transfer) but controller.txt does not allow it (transfer = off); no link was made"));
-                return out;
+        for (k, dec) in transfer::decide(&self.state, d) {
+            if let Some(l) = self.limits.clone() {
+                if !l.transfer {
+                    self.refuse(Refusal::new("transfer", 0, 1, "transfer between domains was asked for (the being was created with learn_transfer) but controller.txt does not allow it (transfer = off); no link was made"));
+                    break;
+                }
+                if self.state.xfer.made >= l.max_links {
+                    let made = self.state.xfer.made as u64;
+                    self.refuse(Refusal::new("max_transfer_links", l.max_links as u64, made + 1, format!("a transfer link is justified by the evidence but {made} links already exist; no new link was made")));
+                    break;
+                }
             }
-            if self.state.xfer.made >= l.max_links {
-                let made = self.state.xfer.made as u64;
-                self.refuse(Refusal::new("max_transfer_links", l.max_links as u64, made + 1, format!("a transfer link is justified by the evidence but {made} links already exist; no new link was made")));
-                return out;
+            let guard = !matches!(self.state.xfer.cfg.mode, XferMode::WrongSimNoGuard | XferMode::ShiftedNoGuard);
+            if !self.state.apply_link(d, k, dec.src, dec.src_k.unwrap_or(k), guard) {
+                continue;
             }
+            let index = self.state.xfer.next_index;
+            self.state.xfer.next_index += 1;
+            let rec = XferRec { kind: XferKind::Link { guard }, index, step: self.state.step, clock: self.state.clock, target: d, difficulty: k, src: Some(dec.src), src_k: dec.src_k.unwrap_or(k), evidence: dec.evidence, cites: dec.cites };
+            self.state.xfer.log.push(rec.clone());
+            out.push(transfer::records(&rec));
         }
-        let guard = self.state.xfer.cfg.mode != XferMode::WrongSimNoGuard;
-        if !self.state.apply_link(d, k, dec.src, guard) {
-            return out;
-        }
-        let index = self.state.xfer.next_index;
-        self.state.xfer.next_index += 1;
-        let rec = XferRec { kind: XferKind::Link { guard }, index, step: self.state.step, clock: self.state.clock, target: d, difficulty: k, src: Some(dec.src), evidence: dec.evidence, cites: dec.cites };
-        self.state.xfer.log.push(rec.clone());
-        out.push(transfer::records(&rec));
         out
     }
 
@@ -959,6 +958,7 @@ impl RunSummary {
             "advisor_quality": g.as_ref().and_then(|g| if g.advice.kind == AdvisorKind::Simulated { Some(g.advice.quality) } else { None }),
             "trust_learning": g.as_ref().map_or(false, |g| g.advice.kind != AdvisorKind::None && g.advice.trust),
             "advice": trust_json(&self.state),
+            "transfer_world": g.as_ref().map_or(false, |g| g.transfer), "learn_transfer": g.as_ref().map_or(false, |g| g.learn_transfer), "transfer_links": self.state.xfer.made,
             "rules_total": self.state.rules.len(), "rules_live": self.state.live_rules(), "rules_retired_this_run": self.retired,
             "controller_refusals_this_run": self.refusals.iter().map(|r| json!({ "cap": r.cap, "limit": r.limit, "requested": r.requested, "what": r.what })).collect::<Vec<_>>(), "rules_accepted_this_run": self.new_rules.iter().map(|r| json!({ "rule_id": r.id, "signature": format!("pattern difficulty {}", r.sig), "form": r.form.code() })).collect::<Vec<_>>(),
             "new_being": self.created, "version_before": self.version_before, "version_after": self.version_after,
