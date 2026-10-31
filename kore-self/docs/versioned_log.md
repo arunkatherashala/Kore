@@ -199,6 +199,8 @@ Code: `src/learn/` (pure detectors and writers), `src/learn_tools.rs` (tools),
 `measure_learning` example only). Tools: `self_learn`, `self_explain`, `self_evolve_rules`,
 `self_ledger_snapshot`, `self_ledger_outcome`. See the README section "Learning quick start".
 
+Prediction (`src/predict/`): `predict_make`, `predict_resolve`, `predict_score` write and score forecast rows in the same predictions/outcomes tables (model id `predict:<predictor>`, the model version ends with `cutoff-v<N>`); refusals are events tagged `predict_refusal`. See the README section "Predictions and calibration (S4)".
+
 * Rule-authored rows: `author` is `rule:habits-v1`, `rule:changes-v1`, `rule:stances-v1` or
   `rule:evolve-v1`; each cites at least one event (`revision_causes`). Only this code
   writes them; no tool argument selects an author.

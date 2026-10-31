@@ -20,6 +20,9 @@ be burstier, messier and phrased differently.
 | Change point date error (absolute, days) | detected changes of 20 seeds | none | median of per-seed means 1.0 day; per-seed range 0.0-4.0 | 2026-10-23 | f8440c8a |
 | Stance cue extraction precision, recall and topic-key accuracy, synthetic | 20 seeds x 6 planted statements + near-miss distractors | none | 1.00 / 1.00 / 1.00 at every seed and noise level | 2026-10-23 | f8440c8a |
 | min-n refusal: planted contexts with 3-4 occasions reported as insufficient data and not turned into habits | 20 seeds x 2 contexts per noise level | none | 1.00 at every seed; at min n = 1 half of those contexts (the 4-of-4 one) would have produced a habit | 2026-10-23 | f8440c8a |
+| Prediction: context-count vs frequency where context matters (Brier gain), synthetic | 20 seeds x 380 forecasts | frequency, uniform | +0.3936 [+0.3802, +0.4081] (mean over seeds, 95% bootstrap over seeds); better in 20 of 20 seeds | 2026-10-31 | c8fcade0 |
+| Prediction: any predictor beating uniform or frequency on pure noise, synthetic | 20 seeds x 380 forecasts | uniform, frequency | 0 of 20 seeds for either baseline; every learner slightly worse than uniform on average | 2026-10-31 | c8fcade0 |
+| Prediction: recency vs frequency under drift (Brier gain), synthetic | 20 seeds x 380 forecasts | frequency, uniform | +0.1937 [+0.1829, +0.2040]; better in 20 of 20 seeds | 2026-10-31 | c8fcade0 |
 
 ## How to reproduce
 
@@ -819,7 +822,228 @@ Test floors (`measured_trust_protects_against_bad_advice_and_blind_following_doe
 
 Not measured by B4: any real model; real tasks; an advisor whose errors are correlated with task difficulty or domain (`q` by domain exists in the simulated advisor but was not measured); advice in the drifting world; very long lives; other mixing formulas.
 
+## Prediction: baseline predictors and calibration (S4; synthetic sequences, author-defined processes)
+
+**Synthetic only.** These sequences come from `kore-self/src/predict/scenarios.rs`: four contexts, four choices, one observation per hour, with a known generating process. They say how the baselines behave when the process is exactly what the scenario describes. They say nothing about how well anything predicts a real person's choices, and no such number exists in this repository. The live ledger (`predict_make` / `predict_resolve` / `predict_score`) has not been run on real data for any period; its scoring report is only as good as the log it reads.
+
+What is measured: a rolling-origin backtest. At each origin `t` (20 to 399) a predictor sees only observations `0..t` and the context of observation `t`, outputs probabilities over the choices seen so far plus `(other)`, and is scored on what happened. Five predictors: `uniform` (equal mass on the seen choices, 1% on `(other)`), `frequency` (smoothed counts), `last-choice` (weight `w` on the last choice, rest uniform), `recency` (counts decayed with a half-life), `context-count` (counts in this context, smoothed toward the overall frequency; refuses below 5 observations in the context). Scores: Brier (multi-class, sum of squared errors over the options, 0 best; about 0.75 for a uniform guess when 4 choices are equally likely), log loss in nats, top-label accuracy, ECE (10 equal-width bins on the top label). Intervals: moving-block bootstrap (blocks of 10, 2000 resamples, seeded) for a single run; plain bootstrap over the 20 per-seed means when averaging over seeds. Paired comparisons use the forecasts both predictors made at the same origins; the per-seed verdict is "better" only if the 95% interval of the Brier gain is above zero.
+
+Seeds: report 1..20 (400 observations each). Parameters were chosen on seeds 101..120 only (`--tune`; mean log loss averaged over the three scenarios, one parameter at a time, the others at their defaults): `alpha` 0.1 (grid 0.1-2: log loss 1.4094-1.4166, a flat choice), `half_life` 20 (grid 5-100, best 1.3163), `last_w` 0.2 (grid 0.05-0.9, best 1.5639), `ctx_m` 5 (grid 0.5-20, 5 and 10 tie at 1.2238). The minimum-n values (10 observations; 5 in the context) are policy, not tuned.
+
+Reproduce: `cargo run -p kore-self --example measure_predict --offline --release` (about 11 s) and `... -- --tune`. Code commit `c8fcade0`, run on 2026-10-31.
+
+### What was wrong at first
+
+1. The first `uniform` baseline put 1/k on every option including `(other)`, which never occurs in these scenarios. Every learner then "beat" it in 20 of 20 noise seeds simply by learning that `(other)` has probability near zero (Brier gain about +0.044). That is a free win, not signal. The baseline now keeps 1% for `(other)` and shares the rest equally among seen choices; with that, no predictor beats it on noise. Numbers of the first version are not reported.
+2. The first `last-choice` was parameterised as "mass spread over the others". The tuning grid's best value was at the edge and, with 3 options, gave the last choice LESS mass than the others (an anti-predictor). It is now `p = (1 - w)/k + w` on the last choice, so the last choice never gets less than any other option, and the grid was extended until an interior optimum appeared (`w` = 0.2).
+
+### Actual output of the run (median [min-max] over the 20 seeds unless stated)
+
+```
+Config: Config { alpha: 0.1, half_life: 20.0, last_w: 0.2, ctx_m: 5.0, min_n: 10, min_ctx_n: 5 }
+N = 400 observations per run, forecasts from origin 20 (so 380 per run), seeds 1..20
+
+### context matters
+
+| predictor | coverage | Brier | log loss | accuracy | ECE |
+|---|---|---|---|---|---|
+| uniform | 1.000 | 0.750 [0.750-0.750] | 1.396 [1.396-1.396] | 0.253 [0.216-0.289] | 0.021 [0.000-0.042] |
+| frequency | 1.000 | 0.756 [0.750-0.760] | 1.399 [1.387-1.409] | 0.245 [0.211-0.308] | 0.044 [0.023-0.066] |
+| last-choice | 1.000 | 0.814 [0.794-0.831] | 1.633 [1.594-1.668] | 0.246 [0.203-0.295] | 0.114 [0.065-0.157] |
+| recency | 1.000 | 0.765 [0.757-0.768] | 1.422 [1.405-1.427] | 0.251 [0.211-0.289] | 0.075 [0.052-0.105] |
+| context-count | 0.993 | 0.361 [0.283-0.414] | 0.752 [0.609-0.844] | 0.802 [0.759-0.851] | 0.079 [0.059-0.108] |
+
+Paired comparison on forecasts both predictors made: gain = baseline Brier minus predictor Brier (positive = predictor better), mean over 20 seeds with a 95% bootstrap interval over the seeds, then the per-seed verdicts (block bootstrap, 95%).
+
+| predictor vs baseline | mean Brier gain [95% over seeds] | mean log-loss gain [95% over seeds] | seeds better | seeds worse | seeds no difference |
+|---|---|---|---|---|---|
+| uniform vs frequency | +0.0059 [+0.0049, +0.0068] | +0.0031 [+0.0009, +0.0051] | 9 | 0 | 11 |
+| uniform vs context-count | -0.3888 [-0.4034, -0.3756] | -0.6447 [-0.6719, -0.6213] | 0 | 20 | 0 |
+| frequency vs uniform | -0.0059 [-0.0068, -0.0049] | -0.0031 [-0.0051, -0.0009] | 0 | 9 | 11 |
+| frequency vs context-count | -0.3936 [-0.4081, -0.3802] | -0.6451 [-0.6725, -0.6215] | 0 | 20 | 0 |
+| last-choice vs uniform | -0.0635 [-0.0675, -0.0592] | -0.2368 [-0.2450, -0.2283] | 0 | 20 | 0 |
+| last-choice vs frequency | -0.0576 [-0.0616, -0.0534] | -0.2337 [-0.2420, -0.2255] | 0 | 20 | 0 |
+| last-choice vs context-count | -0.4521 [-0.4668, -0.4374] | -0.8810 [-0.9080, -0.8558] | 0 | 20 | 0 |
+| recency vs uniform | -0.0144 [-0.0156, -0.0131] | -0.0241 [-0.0265, -0.0215] | 0 | 15 | 5 |
+| recency vs frequency | -0.0085 [-0.0097, -0.0074] | -0.0210 [-0.0234, -0.0188] | 0 | 11 | 9 |
+| recency vs context-count | -0.4022 [-0.4168, -0.3884] | -0.6663 [-0.6931, -0.6425] | 0 | 20 | 0 |
+| context-count vs uniform | +0.3888 [+0.3756, +0.4034] | +0.6447 [+0.6213, +0.6719] | 20 | 0 | 0 |
+| context-count vs frequency | +0.3936 [+0.3802, +0.4081] | +0.6451 [+0.6215, +0.6725] | 20 | 0 | 0 |
+
+Calibration (top label, forecasts pooled over the 20 seeds, 10 bins):
+
+frequency: n = 7600, pooled ECE = 0.0417
+| bin | n | mean confidence | hit rate |
+|---|---|---|---|
+| 0.2-0.3 | 5389 | 0.278 | 0.248 |
+| 0.3-0.4 | 2131 | 0.326 | 0.262 |
+| 0.4-0.5 | 80 | 0.432 | 0.212 |
+
+context-count: n = 7550, pooled ECE = 0.0760
+| bin | n | mean confidence | hit rate |
+|---|---|---|---|
+| 0.3-0.4 | 30 | 0.362 | 0.600 |
+| 0.4-0.5 | 99 | 0.463 | 0.828 |
+| 0.5-0.6 | 354 | 0.559 | 0.805 |
+| 0.6-0.7 | 1606 | 0.662 | 0.786 |
+| 0.7-0.8 | 4238 | 0.753 | 0.805 |
+| 0.8-0.9 | 1192 | 0.824 | 0.808 |
+| 0.9-1.0 | 31 | 0.911 | 0.871 |
+
+### pure noise
+
+| predictor | coverage | Brier | log loss | accuracy | ECE |
+|---|---|---|---|---|---|
+| uniform | 1.000 | 0.750 [0.750-0.750] | 1.396 [1.396-1.396] | 0.247 [0.208-0.287] | 0.020 [0.002-0.040] |
+| frequency | 1.000 | 0.756 [0.753-0.760] | 1.400 [1.392-1.409] | 0.245 [0.216-0.271] | 0.046 [0.023-0.073] |
+| last-choice | 1.000 | 0.811 [0.801-0.828] | 1.628 [1.609-1.662] | 0.253 [0.211-0.276] | 0.107 [0.084-0.149] |
+| recency | 1.000 | 0.765 [0.761-0.769] | 1.422 [1.414-1.430] | 0.246 [0.200-0.292] | 0.073 [0.065-0.111] |
+| context-count | 0.992 | 0.767 [0.758-0.771] | 1.423 [1.406-1.433] | 0.250 [0.203-0.294] | 0.083 [0.048-0.099] |
+
+Paired comparison on forecasts both predictors made: gain = baseline Brier minus predictor Brier (positive = predictor better), mean over 20 seeds with a 95% bootstrap interval over the seeds, then the per-seed verdicts (block bootstrap, 95%).
+
+| predictor vs baseline | mean Brier gain [95% over seeds] | mean log-loss gain [95% over seeds] | seeds better | seeds worse | seeds no difference |
+|---|---|---|---|---|---|
+| uniform vs frequency | +0.0059 [+0.0052, +0.0066] | +0.0032 [+0.0017, +0.0048] | 7 | 0 | 13 |
+| uniform vs context-count | +0.0157 [+0.0142, +0.0169] | +0.0252 [+0.0221, +0.0279] | 17 | 0 | 3 |
+| frequency vs uniform | -0.0059 [-0.0066, -0.0052] | -0.0032 [-0.0048, -0.0017] | 0 | 7 | 13 |
+| frequency vs context-count | +0.0098 [+0.0084, +0.0110] | +0.0221 [+0.0194, +0.0243] | 7 | 0 | 13 |
+| last-choice vs uniform | -0.0623 [-0.0651, -0.0597] | -0.2345 [-0.2402, -0.2292] | 0 | 20 | 0 |
+| last-choice vs frequency | -0.0565 [-0.0592, -0.0538] | -0.2312 [-0.2368, -0.2263] | 0 | 20 | 0 |
+| last-choice vs context-count | -0.0467 [-0.0497, -0.0440] | -0.2093 [-0.2154, -0.2039] | 0 | 20 | 0 |
+| recency vs uniform | -0.0148 [-0.0158, -0.0138] | -0.0251 [-0.0273, -0.0231] | 0 | 19 | 1 |
+| recency vs frequency | -0.0089 [-0.0099, -0.0080] | -0.0219 [-0.0238, -0.0200] | 0 | 12 | 8 |
+| recency vs context-count | +0.0008 [-0.0008, +0.0023] | +0.0001 [-0.0034, +0.0032] | 0 | 0 | 20 |
+| context-count vs uniform | -0.0157 [-0.0169, -0.0142] | -0.0252 [-0.0279, -0.0221] | 0 | 17 | 3 |
+| context-count vs frequency | -0.0098 [-0.0110, -0.0084] | -0.0221 [-0.0243, -0.0194] | 0 | 7 | 13 |
+
+False-win check (pure noise): seeds in which at least one other predictor was significantly better than uniform: 0 of 20; than frequency: 0 of 20.
+
+Calibration (top label, forecasts pooled over the 20 seeds, 10 bins):
+
+frequency: n = 7600, pooled ECE = 0.0445
+| bin | n | mean confidence | hit rate |
+|---|---|---|---|
+| 0.2-0.3 | 5620 | 0.278 | 0.247 |
+| 0.3-0.4 | 1890 | 0.325 | 0.247 |
+| 0.4-0.5 | 88 | 0.434 | 0.250 |
+| 0.5-0.6 | 2 | 0.514 | 0.000 |
+
+context-count: n = 7536, pooled ECE = 0.0777
+| bin | n | mean confidence | hit rate |
+|---|---|---|---|
+| 0.2-0.3 | 2138 | 0.284 | 0.249 |
+| 0.3-0.4 | 4859 | 0.337 | 0.256 |
+| 0.4-0.5 | 495 | 0.430 | 0.226 |
+| 0.5-0.6 | 39 | 0.537 | 0.205 |
+| 0.6-0.7 | 5 | 0.628 | 0.000 |
+
+### drift
+
+| predictor | coverage | Brier | log loss | accuracy | ECE |
+|---|---|---|---|---|---|
+| uniform | 1.000 | 0.750 [0.747-0.752] | 1.396 [1.390-1.405] | 0.230 [0.203-0.255] | 0.026 [0.000-0.070] |
+| frequency | 1.000 | 0.768 [0.760-0.784] | 1.425 [1.408-1.458] | 0.243 [0.216-0.258] | 0.215 [0.162-0.251] |
+| last-choice | 1.000 | 0.708 [0.686-0.736] | 1.415 [1.374-1.476] | 0.508 [0.439-0.563] | 0.148 [0.079-0.206] |
+| recency | 1.000 | 0.574 [0.543-0.620] | 1.098 [1.048-1.174] | 0.599 [0.563-0.634] | 0.040 [0.013-0.058] |
+| context-count | 0.994 | 0.779 [0.770-0.794] | 1.463 [1.443-1.501] | 0.255 [0.241-0.296] | 0.210 [0.162-0.248] |
+
+Paired comparison on forecasts both predictors made: gain = baseline Brier minus predictor Brier (positive = predictor better), mean over 20 seeds with a 95% bootstrap interval over the seeds, then the per-seed verdicts (block bootstrap, 95%).
+
+| predictor vs baseline | mean Brier gain [95% over seeds] | mean log-loss gain [95% over seeds] | seeds better | seeds worse | seeds no difference |
+|---|---|---|---|---|---|
+| uniform vs frequency | +0.0185 [+0.0160, +0.0211] | +0.0302 [+0.0249, +0.0355] | 0 | 0 | 20 |
+| uniform vs context-count | +0.0301 [+0.0276, +0.0325] | +0.0694 [+0.0623, +0.0761] | 0 | 0 | 20 |
+| frequency vs uniform | -0.0185 [-0.0211, -0.0160] | -0.0302 [-0.0355, -0.0249] | 0 | 0 | 20 |
+| frequency vs context-count | +0.0094 [+0.0084, +0.0104] | +0.0356 [+0.0334, +0.0380] | 10 | 0 | 10 |
+| last-choice vs uniform | +0.0422 [+0.0367, +0.0469] | -0.0210 [-0.0318, -0.0104] | 19 | 0 | 1 |
+| last-choice vs frequency | +0.0607 [+0.0537, +0.0674] | +0.0093 [-0.0046, +0.0232] | 10 | 0 | 10 |
+| last-choice vs context-count | +0.0721 [+0.0654, +0.0782] | +0.0480 [+0.0335, +0.0623] | 18 | 0 | 2 |
+| recency vs uniform | +0.1752 [+0.1656, +0.1840] | +0.2967 [+0.2812, +0.3115] | 20 | 0 | 0 |
+| recency vs frequency | +0.1937 [+0.1829, +0.2040] | +0.3269 [+0.3084, +0.3446] | 20 | 0 | 0 |
+| recency vs context-count | +0.2044 [+0.1939, +0.2143] | +0.3647 [+0.3447, +0.3835] | 20 | 0 | 0 |
+| context-count vs uniform | -0.0301 [-0.0325, -0.0276] | -0.0694 [-0.0761, -0.0623] | 0 | 0 | 20 |
+| context-count vs frequency | -0.0094 [-0.0104, -0.0084] | -0.0356 [-0.0380, -0.0334] | 0 | 10 | 10 |
+
+Calibration (top label, forecasts pooled over the 20 seeds, 10 bins):
+
+frequency: n = 7600, pooled ECE = 0.2110
+| bin | n | mean confidence | hit rate |
+|---|---|---|---|
+| 0.2-0.3 | 1405 | 0.281 | 0.120 |
+| 0.3-0.4 | 2347 | 0.342 | 0.110 |
+| 0.4-0.5 | 1245 | 0.443 | 0.154 |
+| 0.5-0.6 | 806 | 0.550 | 0.242 |
+| 0.6-0.7 | 939 | 0.654 | 0.489 |
+| 0.7-0.8 | 792 | 0.740 | 0.663 |
+| 0.8-0.9 | 66 | 0.819 | 0.682 |
+
+context-count: n = 7552, pooled ECE = 0.2081
+| bin | n | mean confidence | hit rate |
+|---|---|---|---|
+| 0.2-0.3 | 744 | 0.284 | 0.172 |
+| 0.3-0.4 | 2709 | 0.345 | 0.140 |
+| 0.4-0.5 | 1530 | 0.445 | 0.192 |
+| 0.5-0.6 | 819 | 0.548 | 0.248 |
+| 0.6-0.7 | 832 | 0.650 | 0.460 |
+| 0.7-0.8 | 662 | 0.745 | 0.601 |
+| 0.8-0.9 | 222 | 0.832 | 0.644 |
+| 0.9-1.0 | 34 | 0.923 | 0.794 |
+```
+
+Tuning output (seeds 101..120, mean log loss over the three scenarios; the report above uses `alpha` 0.1, `half_life` 20, `last_w` 0.2, `ctx_m` 5):
+
+```
+Tuning on seeds 101..120 (mean log loss of answered forecasts, averaged over the three scenarios)
+| predictor | parameter | value | mean log loss |
+|---|---|---|---|
+| frequency | alpha | 0.1 | 1.4094 |
+| frequency | alpha | 0.25 | 1.4096 |
+| frequency | alpha | 0.5 | 1.4104 |
+| frequency | alpha | 1 | 1.4124 |
+| frequency | alpha | 2 | 1.4166 |
+| recency | half_life | 5 | 1.3755 |
+| recency | half_life | 10 | 1.3265 |
+| recency | half_life | 20 | 1.3163 |
+| recency | half_life | 30 | 1.3236 |
+| recency | half_life | 50 | 1.3407 |
+| recency | half_life | 100 | 1.3665 |
+| last-choice | last_w | 0.05 | 1.5830 |
+| last-choice | last_w | 0.1 | 1.5682 |
+| last-choice | last_w | 0.2 | 1.5639 |
+| last-choice | last_w | 0.3 | 1.5869 |
+| last-choice | last_w | 0.4 | 1.6348 |
+| last-choice | last_w | 0.5 | 1.7095 |
+| last-choice | last_w | 0.7 | 1.9731 |
+| last-choice | last_w | 0.9 | 2.6450 |
+| context-count | ctx_m | 0.5 | 1.2511 |
+| context-count | ctx_m | 1 | 1.2410 |
+| context-count | ctx_m | 2 | 1.2319 |
+| context-count | ctx_m | 5 | 1.2238 |
+| context-count | ctx_m | 10 | 1.2238 |
+| context-count | ctx_m | 20 | 1.2325 |
+```
+
+### What the numbers say (verdict)
+
+1. Context matters: context-count beats frequency and uniform in all 20 seeds. Brier 0.361 [0.283-0.414] against 0.756 and 0.750; accuracy 0.802 [0.759-0.851] against 0.245 (chance is 0.25). Paired Brier gain over frequency +0.3936 [+0.3802, +0.4081] (20 of 20 seeds better). This is the easy case by construction: each context has a favourite chosen with probability 0.8 and the overall choice frequencies are uniform, so frequency cannot see anything. It shows the machinery detects structure that is there; it does not show real choices have such structure. Coverage 0.993: context-count refused 0.7% of origins (fewer than 5 observations in the context, early in the run).
+2. In the same scenario frequency, recency and last-choice give nothing: frequency is slightly WORSE than uniform (gain -0.0059 [-0.0068, -0.0049], worse in 9 seeds, no difference in 11) because it pays for estimating a distribution that is flat; recency is worse than uniform in 15 seeds; last-choice is worse than everything (Brier 0.814).
+3. Pure noise: no predictor claims a win. In 0 of 20 seeds was any other predictor significantly better than uniform, and in 0 of 20 better than frequency. On average every learner is slightly worse than uniform, which is the right answer when the truth is uniform (frequency -0.0059 [-0.0066, -0.0052], recency -0.0148, context-count -0.0157 [-0.0169, -0.0142], last-choice -0.0623; the last two are worse in 17 and 20 seeds). The false-win rate of this procedure was therefore 0 of 20 seeds for the "any predictor" test; with a 95% interval per comparison a few false wins would not be surprising in other seeds.
+4. Calibration on noise is near the diagonal but not on it: frequency has pooled ECE 0.0445 (confidence 0.278 against a hit rate 0.247 in the 0.2-0.3 bin; 0.325 against 0.247 in the next, so it is over-confident by 3 to 8 points); context-count has pooled ECE 0.0777 and is more over-confident, because with four contexts and 5 observations it fits chance. Uniform's per-seed ECE (median 0.020) is the floor from having only 380 forecasts per run.
+5. Under context structure, context-count is under-confident: pooled ECE 0.0760, confidence 0.753 against a hit rate 0.805 in its busiest bin (smoothing toward the global frequency pulls it below the true 0.8). So it is the best predictor there but not a well calibrated one; a post-hoc recalibration was not tried.
+6. Drift: recency beats frequency in all 20 seeds. Brier 0.574 [0.543-0.620] against 0.768 [0.760-0.784], gain +0.1937 [+0.1829, +0.2040]; accuracy 0.599 against 0.243; median per-seed ECE 0.040 against 0.215 for frequency, whose confidence is high exactly when the dominant choice has just changed (bin 0.4-0.5: confidence 0.443, hit rate 0.154). Recency also beats uniform (+0.1752 [+0.1656, +0.1840], 20 of 20). Frequency and context-count are worse than uniform on average here (-0.0185 and -0.0301), though no single seed shows it. The half-life (20 observations) was tuned on drift-containing mixed data on seeds 101..120 and the drift period is 100 observations; a different period would need a different half-life.
+7. last-choice is metric dependent under drift: better than uniform on Brier (+0.0422 [+0.0367, +0.0469], 19 of 20 seeds) and on accuracy (0.508 against 0.230), worse on log loss (-0.0210 [-0.0318, -0.0104]), because it is confidently wrong right after each switch. It loses to recency everywhere.
+8. Every predictor wins only where its assumption matches the generator (context-count with context structure, recency with drift) and none wins elsewhere; that is what the synthetic ground truth was built to show, not evidence that either assumption holds for real logs.
+
+Caveats. All intervals are percentile bootstrap intervals, the block bootstrap is approximate, and per-seed verdicts at 95% produce about one false "better" per 20 seeds for a true tie, so single seeds should not be over-read. The generator is simple (4 choices, favourite probabilities 0.8 and 0.7, hourly steps, 400 observations); sequence length, number of choices and the strength of the structure were not varied. The choice universe is "seen so far plus `(other)`" and unseen choices are scored as `(other)`. Real logs have irregular timing, many contexts with few observations, and choices that depend on things not logged.
+
+### What is tested (not measured)
+
+* Leakage: for each predictor, in three scenarios and at origins 0, 9, 10, 50, 120 and 299, replacing everything after the origin by a shuffled and re-labelled future leaves every forecast up to the origin unchanged (`shuffling_future_events_does_not_change_past_predictions`); the same check run against a predictor that reads the next 20 observations reports a leak (`the_leakage_check_catches_a_predictor_that_peeks`), so the check can fail.
+* Ledger: forecasts are written before any outcome exists, with the log version they were computed from (`cutoff-v<N>` in the model version); a `made_at` earlier than events already in the log is refused; `predict_resolve` refuses an outcome dated before its forecast or citing an event that is not after it; `predict_score` excludes and lists pairs written around those guards (outcome dated before the forecast, outcome in the same commit as the forecast); below the minimum number of observations a predictor does not forecast and a refusal event is logged; fewer than 30 common questions give "insufficient data", never a verdict.
+* Floors (`measured_context_count_beats_frequency_where_context_matters`, `measured_no_predictor_wins_on_pure_noise`, `measured_recency_beats_frequency_under_drift`, seeds 1..8): context-count is "better" than frequency and uniform in every seed with accuracy above 0.70 and Brier below 0.5; no predictor is "better" than uniform or frequency on noise and frequency ECE stays below 0.12; recency is "better" than frequency and uniform under drift. These guard against regressions on synthetic data; they are not accuracy claims.
+
 ## Not measured
 
-Real-life data of any kind (the free-text section above is also synthetic); the ledger's probabilities (nothing is scored yet); behaviour with
+Real-life data of any kind (the free-text section above is also synthetic); the probabilities of the live ledger (`predict_make`/`predict_score` have not been run on real data; the S4 numbers above are synthetic sequences only; the older `self_ledger_snapshot` rows are not scored by any measurement); behaviour with
 the being loop in any world other than the author-defined simulation (no real tasks, no language-model thinker or advisor: the B4 advisor is simulated, a real model's quality as an advisor is unmeasured); very large logs; sensitivity to the synthetic generator's choices (150 days, Poisson counts).
