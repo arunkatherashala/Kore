@@ -265,6 +265,18 @@ fn finish(owner: &str, actor: &str, tool: &str, args: &serde_json::Value, d: Dec
     }
 }
 
+/// An attempt that the controller of the being refused (a cap exceeded, a request it does not allow,
+/// a run stopped by the KILL file): one audit row, actor `being`, decision `deny`. For a caller that
+/// holds the process log lock.
+pub fn audit_controller_locked(owner: &str, cap: &str, limit: u64, requested: u64, what: &str) -> Result<(), String> {
+    let body = serde_json::json!({
+        "actor": BEING_ACTOR, "tool": format!("controller:{}", safety::trunc(cap, 40)), "decision": "deny",
+        "reason": safety::trunc(what, 300), "args": format!("limit {limit}, requested {requested}"), "nonce": nonce(),
+    });
+    let tags = vec!["decision:deny".to_string(), format!("tool:controller_{}", tag_safe(cap)), format!("actor:{BEING_ACTOR}")];
+    append_event_locked(owner, SOURCE, "decision", &body.to_string(), tags).map(|_| ())
+}
+
 /// Decide, and write the audit row. Fails closed if the row cannot be written.
 pub fn authorize(owner: &str, actor: &str, tool: &str, args: &serde_json::Value) -> Decision {
     let d = decide(owner, actor, tool, args, false);

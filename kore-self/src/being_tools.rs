@@ -11,6 +11,8 @@ use crate::being::replay::{rederive_rules, replay_decisions};
 use crate::being::run_loop::{domain_json, run_advised, trust_json, world_for, RunCfg};
 use crate::being::solver::{STRATEGIES, STRATEGIES_EXT};
 use crate::being::state::{tag, BeingState, Chooser, Genesis, SOURCE};
+use crate::being::controller::{self, Controller, Origin};
+use crate::being::policy::KillCheck;
 use crate::being::{self, Policy, ScriptedThinker};
 use crate::log_tools::{err, log_err, open, req_str, text};
 use crate::versioned::{CauseRow, EventRow, RevisionRow};
@@ -27,6 +29,34 @@ pub fn handle(name: &str, args: &Value, owner: &str) -> Result<Value, Value> {
         "being_explain" => explain(args, owner),
         "being_rules" => rules(owner),
         _ => Err(err("unknown tool")),
+    }
+}
+
+/// Read `controller.txt` of the owner. Missing, too large, wrong permissions, not UTF-8 or unparseable:
+/// the most restrictive settings (fail closed).
+pub fn load_controller(owner: &str) -> Controller {
+    let p = crate::safety::owner_dir(owner).join(controller::FILE);
+    let meta = match std::fs::metadata(&p) {
+        Ok(m) => m,
+        Err(_) => return Controller::fail_closed(format!("{} is missing", controller::FILE)),
+    };
+    if meta.len() > 16 * 1024 {
+        return Controller::fail_closed(format!("{} is larger than 16 KB", controller::FILE));
+    }
+    if let Some(e) = authorize::perm_problem(&p) {
+        return Controller::fail_closed(e);
+    }
+    match std::fs::read(&p).map_err(|e| e.to_string()).and_then(|b| String::from_utf8(b).map_err(|_| "not valid UTF-8".to_string())) {
+        Ok(t) => Controller::parse_or_closed(&t),
+        Err(e) => Controller::fail_closed(format!("cannot read {}: {e}", controller::FILE)),
+    }
+}
+
+/// Every refusal of the controller (and every kill-switch stop) is a row of the audit trail
+/// (source `authorize`, actor `being`, decision deny). Called with the process log lock held.
+fn audit_refusals(owner: &str, refusals: &[(String, u64, u64, String)]) {
+    for (cap, limit, requested, what) in refusals {
+        let _ = authorize::audit_controller_locked(owner, cap, *limit, *requested, what);
     }
 }
 
@@ -57,11 +87,12 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         Some(Value::String(s)) => Some(Chooser::parse(s).ok_or_else(|| err("'chooser' must be \"ucb\" or \"model\""))?),
         Some(_) => return Err(err("'chooser' must be \"ucb\" or \"model\"")),
     };
-    let extended = match args.get("pattern_families") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(s)) if s == "standard" => Some(false),
-        Some(Value::String(s)) if s == "extended" => Some(true),
-        Some(_) => return Err(err("'pattern_families' must be \"standard\" or \"extended\"")),
+    let (extended, ext2) = match args.get("pattern_families") {
+        None | Some(Value::Null) => (None, None),
+        Some(Value::String(s)) if s == "standard" => (Some(false), None),
+        Some(Value::String(s)) if s == "extended" => (Some(true), None),
+        Some(Value::String(s)) if s == "extended2" => (Some(true), Some(true)),
+        Some(_) => return Err(err("'pattern_families' must be \"standard\", \"extended\" or \"extended2\"")),
     };
     let discover = match args.get("discover") {
         None | Some(Value::Null) => false,
@@ -94,7 +125,40 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         None | Some(Value::Null) => None,
         Some(v) => Some(v.as_f64().filter(|q| (0.0..=1.0).contains(q)).ok_or_else(|| err("'advisor_quality' must be a number within 0..1"))?),
     };
+    // the controller (hand-written controller.txt; missing or unparseable = most restrictive, fail closed)
+    let ctl = load_controller(owner);
+    let want_compose = flag("compose")?.unwrap_or(false);
+    let want_prune = flag("prune")?.unwrap_or(false);
+    if (want_compose || want_prune) && discover_every.is_none() && want_compose {
+        return Err(err("'compose' only applies with discover: true"));
+    }
+    let mut refused: Vec<(String, u64, u64, String)> = vec![];
+    if ctl.is_closed() {
+        let reason = match &ctl.origin {
+            Origin::FailClosed(r) => r.clone(),
+            Origin::File => String::new(),
+        };
+        audit_refusals(owner, &[("controller_closed".into(), 0, steps, reason.clone())]);
+        return Err(err(format!("controller refused the run (fail closed): {reason}. Create {} in the owner directory by hand (see README, Track B5); no tool can write it", controller::FILE)));
+    }
+    if authorize::kill_active(owner) {
+        audit_refusals(owner, &[("kill_switch".into(), 0, steps, "the KILL file exists: the run was refused before it started".into())]);
+        return Err(err("the KILL file exists in the owner directory: the being does not run. Delete the file by hand to allow runs"));
+    }
+    let (limits, req_refusals) = ctl.limits(want_compose, want_prune);
+    for r in &req_refusals {
+        refused.push((r.cap.clone(), r.limit, r.requested, r.what.clone()));
+    }
+    let steps_eff = if steps > ctl.max_steps_per_run {
+        refused.push(("max_steps_per_run".into(), ctl.max_steps_per_run, steps, format!("{steps} steps were requested, the controller allows {}; the run is cut to the cap", ctl.max_steps_per_run)));
+        ctl.max_steps_per_run
+    } else {
+        steps
+    };
     let cfg = RunCfg {
+        ctl: Some(limits),
+        ext2,
+        rule_drift: flag("rule_drift")?,
         advisor: advisor_kind,
         advisor_quality,
         trust: flag("trust")?,
@@ -107,7 +171,7 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         loop_seed: opt_u64(args, "seed")?,
         budget,
         explore_c: None,
-        steps,
+        steps: steps_eff,
         refill_when_exhausted: !stop_after_budget,
         ..Default::default()
     };
@@ -128,10 +192,26 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         Some(make_advisor(kind, &cfg, existing.as_ref(), owner)?)
     };
     let mut log = open(owner)?;
-    let mut policy = Policy::new(steps);
+    let mut policy = Policy::new(steps_eff);
     policy.refill_when_exhausted = cfg.refill_when_exhausted;
+    policy.max_energy = Some(ctl.max_energy_per_run);
+    let owner_k = owner.to_string();
+    policy.kill = Some(KillCheck(std::sync::Arc::new(move || authorize::kill_active(&owner_k))));
     let s = run_advised(&mut log, &cfg, &ScriptedThinker, &policy, advisor.as_deref()).map_err(log_err)?;
+    drop(log);
+    for r in &s.refusals {
+        refused.push((r.cap.clone(), r.limit, r.requested, r.what.clone()));
+    }
+    if s.stopped == being::StopReason::Killed {
+        refused.push(("kill_switch".into(), 0, s.steps_run, format!("the KILL file stopped the run after {} steps", s.steps_run)));
+    }
+    audit_refusals(owner, &refused);
     let mut out = s.to_json();
+    out["controller"] = json!({
+        "origin": "controller.txt", "max_live_rules": ctl.max_live_rules, "max_building_blocks": ctl.max_building_blocks, "max_search_candidates": ctl.max_search_candidates,
+        "max_steps_per_run": ctl.max_steps_per_run, "max_energy_per_run": ctl.max_energy_per_run, "composition_allowed": ctl.composition, "pruning_allowed": ctl.pruning,
+        "refusals_audited": refused.iter().map(|r| json!({ "cap": r.0, "limit": r.1, "requested": r.2, "what": r.3 })).collect::<Vec<_>>(),
+    });
     out["note"] = json!("deterministic simulation loop: a seeded world with author-defined rewards and a scripted solver; the preference comes from those rewards. See docs/measured.md");
     Ok(text(out))
 }
@@ -350,14 +430,14 @@ fn explain(args: &Value, owner: &str) -> Result<Value, Value> {
 pub fn tool_defs() -> Vec<Value> {
     vec![
         json!({ "name": "being_run",
-          "description": "Run the being loop for N steps in a deterministic simulated world (arithmetic, algebra, physics formulas, sequences) with a seeded budget; the being picks the domain by learned reward per energy (or, with chooser model, picks one of 4 offered tasks and a solver strategy from a world model learned from its own log) and every decision, action and outcome is appended to its own log. A simulation with author-defined rewards, not a real-world agent",
+          "description": "Hard limits come from controller.txt, a file only the owner writes by hand (caps on live rules, building blocks, search candidates, steps and energy per run; missing or unparseable file = the run is refused); a KILL file in the owner directory stops the loop within one step; every refusal is audited. Run the being loop for N steps in a deterministic simulated world (arithmetic, algebra, physics formulas, sequences) with a seeded budget; the being picks the domain by learned reward per energy (or, with chooser model, picks one of 4 offered tasks and a solver strategy from a world model learned from its own log) and every decision, action and outcome is appended to its own log. A simulation with author-defined rewards, not a real-world agent",
           "inputSchema": { "type": "object", "properties": {
             "steps": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum steps to run in this call" },
             "seed": { "type": "integer", "minimum": 0, "description": "Loop seed (order of first exploration). Default 1; fixed once the being exists" },
             "world_seed": { "type": "integer", "minimum": 0, "description": "World seed (hidden rewards and tasks). Default 1; fixed once the being exists" },
             "budget": { "type": "integer", "minimum": 1, "description": "Energy units for a new being. Default 2000" },
             "chooser": { "type": "string", "enum": ["ucb", "model"], "description": "Default ucb (single task per step, UCB1 over domains). model: a menu of 4 tasks per step; a world model learned from the log picks task and solver strategy. Fixed once the being exists" },
-            "pattern_families": { "type": "string", "enum": ["standard", "extended"], "description": "Default standard. extended (needs chooser model): sequence tasks also come from extra hidden families the fixed solvers cannot solve, revealed answers are logged and a fourth strategy, discovered, applies rules the being found itself. Fixed once the being exists" },
+            "pattern_families": { "type": "string", "enum": ["standard", "extended", "extended2"], "description": "Default standard. extended2 (B5): as extended plus families that only composition of verified building blocks can express, negative controls and (with rule_drift) a regime change. extended (needs chooser model): sequence tasks also come from extra hidden families the fixed solvers cannot solve, revealed answers are logged and a fourth strategy, discovered, applies rules the being found itself. Fixed once the being exists" },
             "drift": { "type": "boolean", "description": "Default false. true (needs chooser model): the world changes at scheduled times the being is not told about (a new domain, units, appears in the menu; one domain's rewards and costs shift; the fast strategy gets much less reliable). The times scale with the initial budget. Fixed once the being exists" },
             "adapt": { "type": "boolean", "description": "Default false. true (needs chooser model): the world model discounts old evidence exponentially and a detector flags changes in the success rate of a (domain, strategy) group; every flagged change is logged with the outcomes it rests on and shown by being_status. Fixed once the being exists" },
             "discover": { "type": "boolean", "description": "Run rule discovery during this run (needs a being created with pattern_families extended): every discover_every steps the being searches a small author-defined grammar of sequence rules over its own revealed examples and logs accepted rules" },
@@ -365,6 +445,9 @@ pub fn tool_defs() -> Vec<Value> {
             "advisor": { "type": "string", "enum": ["none", "simulated", "command"], "description": "Default none (needs chooser model). simulated: a deterministic simulated advisor of quality advisor_quality advises each step; command: the program in advisor.txt (hand-edited by the owner) is asked. Advice is ONE input to the planner, never executed blindly; proposed rules must pass the verified search. Every run that asks an advisor is authorized (tool advisor_query, default deny, list it under [L1]) and audited. Fixed once the being exists" },
             "advisor_quality": { "type": "number", "minimum": 0, "maximum": 1, "description": "Simulated advisor only, required with it: probability that its suggestion is the oracle-correct one. A property of the simulation, not of any real model. Fixed once the being exists" },
             "trust": { "type": "boolean", "description": "With an advisor, default true: the being learns from logged outcomes how far to trust the advisor per domain and mixes advice with its own model by that trust. false: it follows advice blindly. Fixed once the being exists" },
+            "rule_drift": { "type": "boolean", "description": "B5, needs pattern_families extended2 at creation: halfway through the budget the sequence rule of one family changes (an accepted rule becomes wrong). Fixed once the being exists" },
+            "compose": { "type": "boolean", "description": "B5, with discover: discovery may also build rules by composing building blocks it has already verified (differences, running sums, parity subsequence in front of a verified form). Only if controller.txt says composition = on; otherwise the request is refused and audited" },
+            "prune": { "type": "boolean", "description": "B5: the being may retire rules whose recent success rate fell below a threshold and merge rules a simpler one explains; every retirement is a logged revision, nothing is deleted. Only if controller.txt says pruning = on; otherwise refused and audited" },
             "stop_after_budget": { "type": "boolean", "description": "Default true: stop when no task is affordable. False: the world refills the budget at the next world day (logged) and the run continues" }
           }, "required": ["steps"] } }),
         json!({ "name": "being_status",
