@@ -29,6 +29,7 @@ import sys
 import time
 
 BATCH = 1000
+CACHE_KIB = 262144  # 256 MiB page cache for the sqlite_cache variant (SQLite default is 2 MiB)
 EVENT_COLS = ["event_id", "version", "occurred_at", "recorded_at", "source", "kind", "text", "tags", "redacted"]
 REV_COLS = ["seq", "version", "rev_id", "entity_type", "key", "stance", "confidence", "rationale", "supersedes",
             "valid_from", "author", "recorded_at"]
@@ -91,11 +92,13 @@ def make_batches(events, revs):
 # --------------------------------------------------------------------------- stores
 
 class SqliteStore:
-    def __init__(self, path, indexes=False, journal="DELETE", sync="FULL"):
+    def __init__(self, path, indexes=False, journal="DELETE", sync="FULL", cache_kib=None):
         self.path = path
         self.con = sqlite3.connect(path, isolation_level=None)
         self.con.execute(f"PRAGMA journal_mode={journal}").fetchall()
         self.con.execute(f"PRAGMA synchronous={sync}")
+        if cache_kib:
+            self.con.execute(f"PRAGMA cache_size=-{cache_kib}")
         self.heads = {}
         self.seq = 0
         c = self.con
@@ -411,7 +414,8 @@ def main():
         "started": now_iso()}, "systems": {}}
     S = R["systems"]
 
-    configs = [("sqlite", dict(indexes=False)), ("sqlite_idx", dict(indexes=True)), ("csv", {})]
+    SQ_NAMES = ["sqlite", "sqlite_idx", "sqlite_cache"]
+    configs = [("sqlite", dict(indexes=False)), ("sqlite_idx", dict(indexes=True)), ("sqlite_cache", dict(indexes=False, cache_kib=CACHE_KIB)), ("csv", {})]
     stores = {}
     for name, kw in configs:
         r = S.setdefault(name, {})
@@ -441,10 +445,12 @@ def main():
 
     # ---- point lookup
     lk_ids = [ids[i] for i in lk_idx]
-    for name in ("sqlite", "sqlite_idx"):
+    for name in SQ_NAMES:
         d = stores[name][1]
         t = time.perf_counter()
         con = sqlite3.connect(os.path.join(d, "log.db"))
+        if name == "sqlite_cache":
+            con.execute(f"PRAGMA cache_size=-{CACHE_KIB}")
         con.execute("SELECT COUNT(*) FROM events WHERE event_id=?", (lk_ids[0],)).fetchone()
         S[name]["cold_open_first_query_s"] = time.perf_counter() - t
         xs, last = timed(lambda: sq_lookup(con, lk_ids), a.reps)
@@ -458,13 +464,14 @@ def main():
     S["csv"]["lookup_check"] = last if csv_L == L else None
     # expected check for the first csv_L ids from the in-memory data, to validate csv_lookup
     S["csv"]["lookup_expected_first"] = sum(len(events[i][3]) for i in lk_idx[:csv_L])
-    for name in ("sqlite", "sqlite_idx"):
+    for name in SQ_NAMES:
         S[name]["lookup_check_first"] = sum(len(events[i][3]) for i in lk_idx[:csv_L])
     S["expected_lookup_check"] = sum(len(events[i][3]) for i in lk_idx)
 
     # ---- range / aggregate
-    for name in ("sqlite", "sqlite_idx"):
+    for name in SQ_NAMES:
         con = sqlite3.connect(os.path.join(stores[name][1], "log.db"))
+        con.execute(f"PRAGMA cache_size=-{CACHE_KIB}") if name == "sqlite_cache" else None
         xs, last = timed(lambda: sq_range(con, t1, t2), a.reps)
         S[name]["range_s"] = stats(xs)
         S[name]["range_check"] = chk(last)
@@ -480,13 +487,15 @@ def main():
     S["csv"]["fullagg_check"] = chk(last)
 
     # ---- as of version
-    for name in ("sqlite", "sqlite_idx", "csv"):
+    for name in SQ_NAMES + ["csv"]:
         S[name]["asof"] = {}
         for v in asof_versions:
             if name == "csv":
                 xs, last = timed(lambda: csv_asof(stores[name][1], v), a.reps)
             else:
                 con = sqlite3.connect(os.path.join(stores[name][1], "log.db"))
+                if name == "sqlite_cache":
+                    con.execute(f"PRAGMA cache_size=-{CACHE_KIB}")
                 xs, last = timed(lambda: sq_asof(con, v), a.reps)
                 con.close()
             S[name]["asof"][str(v)] = {"s": stats(xs), "check": chk([list(map(list, last[0])), list(map(list, last[1]))])}
@@ -599,6 +608,10 @@ def main():
     st = SqliteStore(os.path.join(stores["sqlite_idx"][1], "log.db"), indexes=True)
     S["sqlite_idx"]["append"] = run_append("sqlite_idx", st, ver0)
     S["sqlite_idx"]["append"]["config"] = "as sqlite + 3 secondary indexes"
+    st.close()
+    st = SqliteStore(os.path.join(stores["sqlite_cache"][1], "log.db"), cache_kib=CACHE_KIB)
+    S["sqlite_cache"]["append"] = run_append("sqlite_cache", st, ver0)
+    S["sqlite_cache"]["append"]["config"] = "as sqlite (DELETE/FULL) with cache_size=256 MiB"
     st.close()
     # variants on copies of the plain sqlite store
     for vname, journal, sync in (("sqlite_wal_full", "WAL", "FULL"), ("sqlite_off", "DELETE", "OFF")):

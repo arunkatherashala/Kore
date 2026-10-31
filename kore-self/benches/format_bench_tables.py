@@ -24,6 +24,10 @@ def t(x):
     return f"{x*1e9:.0f} ns"
 
 
+def msf(x):
+    return f"{x:.2f} ms"
+
+
 def rate(x):
     return f"{x:,.0f}"
 
@@ -86,12 +90,12 @@ for n in Ns:
     lines.append(("lookup", kc == exp and pget(n, "sqlite", "lookup_check") == exp and pget(n, "sqlite_idx", "lookup_check") == exp
                   and pget(n, "csv", "lookup_check_first") == pget(n, "csv", "lookup_expected_first")))
     kr = kget(n, "range", "check")
-    lines.append(("range", kr == kget(n, "range", "native_rust_check") == pget(n, "sqlite", "range_check") == pget(n, "sqlite_idx", "range_check") == pget(n, "csv", "range_check")))
+    lines.append(("range", kr == kget(n, "range", "native_rust_check") == pget(n, "sqlite", "range_check") == pget(n, "sqlite_idx", "range_check") == pget(n, "sqlite_cache", "range_check") == pget(n, "csv", "range_check")))
     kf = kget(n, "fullagg", "check")
-    lines.append(("fullagg", kf == kget(n, "fullagg", "native_rust_check") == pget(n, "sqlite", "fullagg_check") == pget(n, "sqlite_idx", "fullagg_check") == pget(n, "csv", "fullagg_check")))
+    lines.append(("fullagg", kf == kget(n, "fullagg", "native_rust_check") == pget(n, "sqlite", "fullagg_check") == pget(n, "sqlite_idx", "fullagg_check") == pget(n, "sqlite_cache", "fullagg_check") == pget(n, "csv", "fullagg_check")))
     for v in K[n]["asof"]:
         c = kget(n, "asof", v, "check")
-        lines.append((f"asof v{v}", c == pget(n, "sqlite", "asof", v, "check") == pget(n, "sqlite_idx", "asof", v, "check") == pget(n, "csv", "asof", v, "check")))
+        lines.append((f"asof v{v}", c == pget(n, "sqlite", "asof", v, "check") == pget(n, "sqlite_idx", "asof", v, "check") == pget(n, "sqlite_cache", "asof", v, "check") == pget(n, "csv", "asof", v, "check")))
     ok_all &= all(x[1] for x in lines)
     print(f"- N={n:,}: " + ", ".join(f"{a}={'MATCH' if b else 'MISMATCH'}" for a, b in lines))
 print(f"\nAll checks match: **{ok_all}**")
@@ -105,6 +109,7 @@ for n in Ns:
 table("(a) On-disk size after loading the dataset in batches of 1000", [
     ("KORE versioned log (events+revisions+causes+MANIFEST)", lambda n: mb(kget(n, "size_bytes"))),
     ("SQLite (PK on event_id, version column)", lambda n: mb(pget(n, "sqlite", "size_bytes"))),
+    ("SQLite [256 MiB cache] (PK on event_id, version column)", lambda n: mb(pget(n, "sqlite_cache", "size_bytes"))),
     ("SQLite + 3 secondary indexes", lambda n: mb(pget(n, "sqlite_idx", "size_bytes"))),
     ("CSV (3 files, version column)", lambda n: mb(pget(n, "csv", "size_bytes"))),
 ], "Raw JSONL input for reference: " + ", ".join(f"N={n:,}: {mb(os.path.getsize(os.path.join(d, 'data_%d.jsonl' % n))) if os.path.exists(os.path.join(d, 'data_%d.jsonl' % n)) else 'n/a'}" for n in Ns) +
@@ -113,26 +118,29 @@ table("(a) On-disk size after loading the dataset in batches of 1000", [
 table("(b1) Bulk load, batches of 1000 events, fsync per commit: events/s (from-scratch build, includes ~N/50 revisions)", [
     ("KORE", lambda n: mmm(kget(n, "build_b1000_events_per_s"), rate)),
     ("SQLite (DELETE journal, synchronous=FULL)", lambda n: mmm(pget(n, "sqlite", "build_b1000_events_per_s"), rate)),
+    ("SQLite [256 MiB cache] (DELETE journal, synchronous=FULL)", lambda n: mmm(pget(n, "sqlite_cache", "build_b1000_events_per_s"), rate)),
     ("SQLite + indexes (same sync)", lambda n: mmm(pget(n, "sqlite_idx", "build_b1000_events_per_s"), rate)),
     ("CSV (append + flush + fsync per batch)", lambda n: mmm(pget(n, "csv", "build_b1000_events_per_s"), rate)),
 ])
 table("(b2) Append of 1 event per commit onto an existing N-event store: ms per commit (100 commits per rep)", [
-    ("KORE (one new version per event)", lambda n: mmm(kget(n, "append", "b1_ms_per_commit"))),
-    ("SQLite DELETE/FULL (default)", lambda n: mmm(pget(n, "sqlite", "append", "b1_ms_per_commit"))),
-    ("SQLite DELETE/FULL + indexes", lambda n: mmm(pget(n, "sqlite_idx", "append", "b1_ms_per_commit"))),
-    ("SQLite WAL/FULL", lambda n: mmm(pget(n, "sqlite_wal_full", "append", "b1_ms_per_commit"))),
-    ("SQLite DELETE/synchronous=OFF (no fsync)", lambda n: mmm(pget(n, "sqlite_off", "append", "b1_ms_per_commit"))),
-    ("CSV fsync", lambda n: mmm(pget(n, "csv", "append", "b1_ms_per_commit"))),
-    ("CSV no fsync", lambda n: mmm(pget(n, "csv_nofsync", "append", "b1_ms_per_commit"))),
+    ("KORE (one new version per event)", lambda n: mmm(kget(n, "append", "b1_ms_per_commit"), msf)),
+    ("SQLite DELETE/FULL (default)", lambda n: mmm(pget(n, "sqlite", "append", "b1_ms_per_commit"), msf)),
+    ("SQLite [256 MiB cache] DELETE/FULL (default)", lambda n: mmm(pget(n, "sqlite_cache", "append", "b1_ms_per_commit"), msf)),
+    ("SQLite DELETE/FULL + indexes", lambda n: mmm(pget(n, "sqlite_idx", "append", "b1_ms_per_commit"), msf)),
+    ("SQLite WAL/FULL", lambda n: mmm(pget(n, "sqlite_wal_full", "append", "b1_ms_per_commit"), msf)),
+    ("SQLite DELETE/synchronous=OFF (no fsync)", lambda n: mmm(pget(n, "sqlite_off", "append", "b1_ms_per_commit"), msf)),
+    ("CSV fsync", lambda n: mmm(pget(n, "csv", "append", "b1_ms_per_commit"), msf)),
+    ("CSV no fsync", lambda n: mmm(pget(n, "csv_nofsync", "append", "b1_ms_per_commit"), msf)),
 ])
 table("(b3) Append of one 1000-event batch onto an existing N-event store: ms per batch", [
-    ("KORE", lambda n: mmm(kget(n, "append", "b1000_ms_per_batch"))),
-    ("SQLite DELETE/FULL (default)", lambda n: mmm(pget(n, "sqlite", "append", "b1000_ms_per_batch"))),
-    ("SQLite DELETE/FULL + indexes", lambda n: mmm(pget(n, "sqlite_idx", "append", "b1000_ms_per_batch"))),
-    ("SQLite WAL/FULL", lambda n: mmm(pget(n, "sqlite_wal_full", "append", "b1000_ms_per_batch"))),
-    ("SQLite DELETE/synchronous=OFF (no fsync)", lambda n: mmm(pget(n, "sqlite_off", "append", "b1000_ms_per_batch"))),
-    ("CSV fsync", lambda n: mmm(pget(n, "csv", "append", "b1000_ms_per_batch"))),
-    ("CSV no fsync", lambda n: mmm(pget(n, "csv_nofsync", "append", "b1000_ms_per_batch"))),
+    ("KORE", lambda n: mmm(kget(n, "append", "b1000_ms_per_batch"), msf)),
+    ("SQLite DELETE/FULL (default)", lambda n: mmm(pget(n, "sqlite", "append", "b1000_ms_per_batch"), msf)),
+    ("SQLite [256 MiB cache] DELETE/FULL (default)", lambda n: mmm(pget(n, "sqlite_cache", "append", "b1000_ms_per_batch"), msf)),
+    ("SQLite DELETE/FULL + indexes", lambda n: mmm(pget(n, "sqlite_idx", "append", "b1000_ms_per_batch"), msf)),
+    ("SQLite WAL/FULL", lambda n: mmm(pget(n, "sqlite_wal_full", "append", "b1000_ms_per_batch"), msf)),
+    ("SQLite DELETE/synchronous=OFF (no fsync)", lambda n: mmm(pget(n, "sqlite_off", "append", "b1000_ms_per_batch"), msf)),
+    ("CSV fsync", lambda n: mmm(pget(n, "csv", "append", "b1000_ms_per_batch"), msf)),
+    ("CSV no fsync", lambda n: mmm(pget(n, "csv_nofsync", "append", "b1000_ms_per_batch"), msf)),
 ])
 
 table("(c) Point lookup by event id, per lookup (store already open; row returned unless noted)", [
@@ -141,6 +149,7 @@ table("(c) Point lookup by event id, per lookup (store already open; row returne
     ("KORE SQL (kore-sql) on a pre-registered context", lambda n: mmm(kget(n, "lookup", "sql_registered_ctx_per_op_s"))),
     ("KORE SQL end-to-end run_readonly_sql (re-registers tables each call)", lambda n: mmm(kget(n, "lookup", "sql_end_to_end_run_readonly_sql_per_op_s"))),
     ("SQLite PRIMARY KEY lookup", lambda n: mmm(pget(n, "sqlite", "lookup_per_op_s"))),
+    ("SQLite [256 MiB cache] PRIMARY KEY lookup", lambda n: mmm(pget(n, "sqlite_cache", "lookup_per_op_s"))),
     ("SQLite + indexes PK lookup", lambda n: mmm(pget(n, "sqlite_idx", "lookup_per_op_s"))),
     ("CSV full-file scan with early exit (re-opens the file each lookup)", lambda n: mmm(pget(n, "csv", "lookup_per_op_s"))),
 ])
@@ -156,6 +165,7 @@ table("(d1) Range aggregate: COUNT by kind for the middle 10% of the time range"
     ("KORE SQL end-to-end run_readonly_sql", lambda n: mmm(kget(n, "range", "sql_end_to_end_s"))),
     ("KORE hand-written Rust loop over snapshot rows", lambda n: mmm(kget(n, "range", "native_rust_loop_s"))),
     ("SQLite (no index on occurred_at: scan)", lambda n: mmm(pget(n, "sqlite", "range_s"))),
+    ("SQLite [256 MiB cache] (no index on occurred_at: scan)", lambda n: mmm(pget(n, "sqlite_cache", "range_s"))),
     ("SQLite + index on occurred_at", lambda n: mmm(pget(n, "sqlite_idx", "range_s"))),
     ("CSV scan (csv module)", lambda n: mmm(pget(n, "csv", "range_s"))),
 ])
@@ -164,6 +174,7 @@ table("(d2) Full-table aggregate: COUNT by source", [
     ("KORE SQL end-to-end run_readonly_sql", lambda n: mmm(kget(n, "fullagg", "sql_end_to_end_s"))),
     ("KORE hand-written Rust loop", lambda n: mmm(kget(n, "fullagg", "native_rust_loop_s"))),
     ("SQLite", lambda n: mmm(pget(n, "sqlite", "fullagg_s"))),
+    ("SQLite [256 MiB cache]", lambda n: mmm(pget(n, "sqlite_cache", "fullagg_s"))),
     ("SQLite + indexes", lambda n: mmm(pget(n, "sqlite_idx", "fullagg_s"))),
     ("CSV scan", lambda n: mmm(pget(n, "csv", "fullagg_s"))),
 ])
@@ -178,6 +189,7 @@ for which, label in (("first", 0), ("mid", 1), ("last", 2)):
     rows.append(("KORE 2 queries (events by kind + beliefs_current)", lambda n, ver=ver: mmm(kget(n, "asof", ver(n), "queries_s"))))
     rows.append(("**KORE total** (open_at + register + queries)", lambda n, ver=ver: mmm(kget(n, "asof", ver(n), "total_s"))))
     rows.append(("SQLite emulated (version column, no index)", lambda n, ver=ver: mmm(pget(n, "sqlite", "asof", ver(n), "s"))))
+    rows.append(("SQLite emulated [256 MiB cache] (no index)", lambda n, ver=ver: mmm(pget(n, "sqlite_cache", "asof", ver(n), "s"))))
     rows.append(("SQLite emulated + indexes on version", lambda n, ver=ver: mmm(pget(n, "sqlite_idx", "asof", ver(n), "s"))))
     rows.append(("CSV scan with version filter", lambda n, ver=ver: mmm(pget(n, "csv", "asof", ver(n), "s"))))
     table(f"(e) State as of version v = {which} version (v = " + ", ".join(f"{n:,}: v{ver(n)}" for n in Ns) + ")", rows)
