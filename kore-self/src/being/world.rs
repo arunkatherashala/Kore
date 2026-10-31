@@ -146,6 +146,10 @@ pub enum Kind {
     NegMod7,
     /// Affine-geometric prefix (as ExtAffGeom) whose revealed next term uses a changed constant (rule-drift scenario).
     DriftAff,
+    /// As ExtPoly3 / ExtRec2 / ExtTribo, but the revealed next term is 3 higher (measurement-only wide rule drift).
+    DriftPoly3,
+    DriftRec2,
+    DriftTribo,
 }
 
 impl Kind {
@@ -184,15 +188,21 @@ impl Kind {
     /// Families of the `extended2` pattern world: everything of `options_ext`, plus the B5 families.
     /// `drifted`: the regime change has happened (difficulty 2 now shows `DriftAff` where it showed `ExtAffGeom`).
     pub fn options_ext2(d: Domain, difficulty: u8, drifted: bool) -> Vec<Kind> {
+        Kind::options_ext2w(d, difficulty, drifted, false)
+    }
+
+    /// As `options_ext2`; `wide`: after the change the cubic, second-order and tribonacci families drift too.
+    pub fn options_ext2w(d: Domain, difficulty: u8, drifted: bool, wide: bool) -> Vec<Kind> {
         use Kind::*;
+        let w = drifted && wide;
         if d != Domain::Pattern {
             return vec![Kind::of(d, difficulty)];
         }
         match difficulty.clamp(1, 5) {
             1 => vec![PatArith],
             2 => vec![PatGeom, if drifted { DriftAff } else { ExtAffGeom }, Ext2SplitQuad, NegLcg],
-            3 => vec![PatQuad, ExtPoly3, Ext2ParityCubic, NegMod7],
-            4 => vec![PatFib, ExtRec2, ExtTribo, Ext2CubeGeom],
+            3 => vec![PatQuad, if w { DriftPoly3 } else { ExtPoly3 }, Ext2ParityCubic, NegMod7],
+            4 => vec![PatFib, if w { DriftRec2 } else { ExtRec2 }, if w { DriftTribo } else { ExtTribo }, Ext2CubeGeom],
             _ => vec![ExtAlt, ExtPeriodic, NegProd, NegPrimes, Ext2AltCube],
         }
     }
@@ -336,6 +346,8 @@ pub struct World {
     pub ext2: bool,
     /// Track B5: world-clock second at which the sequence rules of difficulty 1 change (None: never).
     pub rule_drift_at: Option<i64>,
+    /// Measurement only (not part of the logged genesis): the rule drift also changes the cubic, second-order and tribonacci families.
+    pub drift_wide: bool,
 }
 
 /// In the extended world pattern puzzles pay this many times the usual reward (author-defined; it gives
@@ -344,7 +356,7 @@ pub const EXT_PATTERN_BONUS: i64 = 2;
 
 impl World {
     pub fn new(seed: u64) -> World {
-        World { seed, profile: Profile::from_seed(seed), extended: false, pattern_bonus: 1, drift: None, ext2: false, rule_drift_at: None }
+        World { seed, profile: Profile::from_seed(seed), extended: false, pattern_bonus: 1, drift: None, ext2: false, rule_drift_at: None, drift_wide: false }
     }
 
     /// The `extended2` pattern world (B5). `rule_drift_budget`: the sequence rules of difficulty 1 change
@@ -436,7 +448,7 @@ impl World {
 
     /// A pattern task of one given hidden family (extended world), for measurement only.
     pub fn task_of_kind(&self, step: u64, kind: Kind) -> Task {
-        let difficulty = (1..=5u8).find(|k| Kind::options_ext2(Domain::Pattern, *k, false).contains(&kind) || Kind::options_ext2(Domain::Pattern, *k, true).contains(&kind)).unwrap_or(1);
+        let difficulty = (1..=5u8).find(|k| Kind::options_ext2(Domain::Pattern, *k, false).contains(&kind) || Kind::options_ext2w(Domain::Pattern, *k, true, true).contains(&kind)).unwrap_or(1);
         self.build(step, Domain::Pattern, 0x99 + kind as u64, Some(difficulty), Some(kind), format!("kind-{step}-{}", kind as u64), &self.profile)
     }
 
@@ -455,7 +467,7 @@ impl World {
         let kind = if let Some(k) = force_kind {
             k
         } else if self.extended && d == Domain::Pattern {
-            let opts = if self.ext2 { Kind::options_ext2(d, difficulty, drifted) } else { Kind::options_ext(d, difficulty) };
+            let opts = if self.ext2 { Kind::options_ext2w(d, difficulty, drifted, self.drift_wide) } else { Kind::options_ext(d, difficulty) };
             opts[r.below(opts.len() as u64) as usize]
         } else {
             Kind::of(d, difficulty)
@@ -713,6 +725,18 @@ fn generate(kind: Kind, r: &mut Rng) -> (Vec<i64>, String, i64) {
             let f = |n: i64| ((n + s0) * (n + s0) + c) % 7;
             let t: Vec<i64> = (0..12).map(f).collect();
             (t.clone(), format!("Next term: {}", join(&t)), f(12))
+        }
+        DriftPoly3 => {
+            let (t, p, n) = generate(ExtPoly3, r);
+            (t, p, n + 3)
+        }
+        DriftRec2 => {
+            let (t, p, n) = generate(ExtRec2, r);
+            (t, p, n + 3)
+        }
+        DriftTribo => {
+            let (t, p, n) = generate(ExtTribo, r);
+            (t, p, n + 3)
         }
         DriftAff => {
             let (s0, p, c) = (r.range(1, 5), [2, 3, 4, -2][r.below(4) as usize], nz(r, -5, 9));

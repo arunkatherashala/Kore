@@ -193,8 +193,8 @@ fn merge_retires_a_rule_a_simpler_one_always_explains() {
 
 #[test]
 fn pruning_retires_a_wrong_rule_as_a_logged_revision_and_time_travel_shows_it() {
-    let lim = Limits { compose: true, prune: true, ..Default::default() };
-    for world in 1..=6u64 {
+    let lim = Limits { compose: true, prune: true, prune_cfg: PruneCfg { window: 10, min_n: 2, threshold: 0.9, merge_min: 5 }, ..Default::default() };
+    for world in 1..=12u64 {
         let dir = tempfile::tempdir().unwrap();
         let mut log = open(dir.path());
         let s = run(&mut log, &cfg2(world, 700, 4000, lim.clone(), true), &ScriptedThinker, &Policy::new(700)).unwrap();
@@ -224,7 +224,7 @@ fn pruning_retires_a_wrong_rule_as_a_logged_revision_and_time_travel_shows_it() 
         assert_eq!(st_now.live_rules(), s.state.live_rules());
         return;
     }
-    panic!("no retirement in 6 drifting worlds");
+    panic!("no retirement in 12 drifting worlds");
 }
 
 #[test]

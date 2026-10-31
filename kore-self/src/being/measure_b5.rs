@@ -68,7 +68,13 @@ impl B5Out {
 /// One run in the extended2 world. `limits`: None = the B2 behaviour (plain grammar search, no caps).
 /// `every`: discovery pass every N steps (0 = never).
 pub fn run_b5(seed: u64, budget: i64, rule_drift: bool, limits: Option<Limits>, every: u64, policy: &Policy) -> B5Out {
-    let world = World::with_ext2(seed, if rule_drift { Some(budget) } else { None });
+    run_b5w(seed, budget, rule_drift, false, limits, every, policy)
+}
+
+/// As `run_b5`; `wide`: the rule drift also changes the cubic, second-order and tribonacci families (measurement only).
+pub fn run_b5w(seed: u64, budget: i64, rule_drift: bool, wide: bool, limits: Option<Limits>, every: u64, policy: &Policy) -> B5Out {
+    let mut world = World::with_ext2(seed, if rule_drift { Some(budget) } else { None });
+    world.drift_wide = wide;
     let th = ScriptedThinker;
     let mut st = BeingState::default();
     st.start(Genesis { world_seed: seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: true, ext2: true, rule_drift, drift: false, adapt: Default::default(), advice: Default::default() }, String::new());

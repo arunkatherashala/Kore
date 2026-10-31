@@ -191,7 +191,7 @@ pub struct PruneCfg {
 
 impl Default for PruneCfg {
     fn default() -> PruneCfg {
-        PruneCfg { window: 10, min_n: 6, threshold: 0.5, merge_min: 5 }
+        PruneCfg { window: 6, min_n: 4, threshold: 0.5, merge_min: 5 }
     }
 }
 

@@ -141,10 +141,6 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         audit_refusals(owner, &[("controller_closed".into(), 0, steps, reason.clone())]);
         return Err(err(format!("controller refused the run (fail closed): {reason}. Create {} in the owner directory by hand (see README, Track B5); no tool can write it", controller::FILE)));
     }
-    if authorize::kill_active(owner) {
-        audit_refusals(owner, &[("kill_switch".into(), 0, steps, "the KILL file exists: the run was refused before it started".into())]);
-        return Err(err("the KILL file exists in the owner directory: the being does not run. Delete the file by hand to allow runs"));
-    }
     let (limits, req_refusals) = ctl.limits(want_compose, want_prune);
     for r in &req_refusals {
         refused.push((r.cap.clone(), r.limit, r.requested, r.what.clone()));
@@ -194,6 +190,10 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         }
         Some(make_advisor(kind, &cfg, existing.as_ref(), owner)?)
     };
+    if authorize::kill_active(owner) {
+        audit_refusals(owner, &[("kill_switch".into(), 0, steps, "the KILL file exists: the run was refused before it started".into())]);
+        return Err(err("the KILL file exists in the owner directory: the being does not run. Delete the file by hand to allow runs"));
+    }
     let mut log = open(owner)?;
     let mut policy = Policy::new(steps_eff);
     policy.refill_when_exhausted = cfg.refill_when_exhausted;
