@@ -40,6 +40,7 @@ struct Args {
     tamper_trials: usize,
     seed: u64,
     size_only: bool,
+    format: LogFormat,
 }
 
 fn parse_args() -> Args {
@@ -57,6 +58,7 @@ fn parse_args() -> Args {
         sql_lookups: get("--sql-lookups").map(|s| s.parse().unwrap()).unwrap_or(if n <= 100_000 { 100 } else { 20 }),
         tamper_trials: get("--tamper-trials").map(|s| s.parse().unwrap()).unwrap_or(40),
         size_only: v.iter().any(|a| a == "--size-only"),
+        format: if get("--format").as_deref() == Some("2") { LogFormat::V2 } else { LogFormat::V1 },
         seed: get("--seed").map(|s| s.parse().unwrap()).unwrap_or(7),
     }
 }
@@ -254,7 +256,7 @@ fn main() {
     let mut root = PathBuf::new();
     for rep in 0..a.build_reps {
         root = a.work.join(format!("build_{rep}"));
-        let mut log = VersionedLog::open_or_create(&root, OWNER).unwrap();
+        let mut log = VersionedLog::open_or_create_with_format(&root, OWNER, now_iso, a.format).unwrap();
         let t = Instant::now();
         let mut cc = 0.0;
         for b in &batches {
@@ -291,6 +293,22 @@ fn main() {
     // ---- open (reads + sha256-verifies every segment, rebuilds hash index)
     let (xs, _) = timed(a.reps, || VersionedLog::open(&root, OWNER).unwrap());
     res["open_s"] = stats(&xs);
+    res["log_format"] = json!(a.format.number());
+    // open + decode of the latest snapshot: the same work the old open() did eagerly
+    let (xs, _) = timed(a.reps, || {
+        let l = VersionedLog::open(&root, OWNER).unwrap();
+        let s = l.open_latest();
+        s.raw(Table::Events).len()
+    });
+    res["open_plus_latest_snapshot_s"] = stats(&xs);
+    // id -> row lookup on a freshly opened log (new API; the snapshot is not materialised first)
+    {
+        let fresh = VersionedLog::open(&root, OWNER).unwrap();
+        let want: usize = lk_idx.iter().map(|&i| events[i].text.len()).sum();
+        let (xs, c) = timed(a.reps, || lk_ids.iter().map(|id| fresh.get_event(id).unwrap().expect("found").text.len()).sum::<usize>());
+        assert_eq!(c, want);
+        res["get_event_per_op_s"] = stats(&xs.iter().map(|x| x / l as f64).collect::<Vec<_>>());
+    }
     let mut log = VersionedLog::open(&root, OWNER).unwrap();
     let (xs, _) = timed(a.reps, || log.verify().unwrap());
     res["verify_s"] = stats(&xs);
