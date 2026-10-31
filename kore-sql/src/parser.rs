@@ -15,7 +15,8 @@ pub fn parse(sql: &str) -> Result<SelectStmt, KoreError> {
 pub fn parse_query(sql: &str) -> Result<Query, KoreError> {
     let mut lexer = Lexer::new(sql);
     let tokens = lexer.tokenize()?;
-    let mut p = Parser::new(tokens);
+    let stack_marker = 0u8;
+    let mut p = Parser::new(tokens, &stack_marker as *const u8 as usize);
 
     // WITH clause (CTEs)
     let ctes = if p.peek() == &Token::With {
@@ -49,10 +50,27 @@ pub fn parse_query(sql: &str) -> Result<Query, KoreError> {
 struct Parser {
     tokens: Vec<Token>,
     pos:    usize,
+    /// Address of a local in `parse_query`: how much stack the recursive descent has used is measured against it.
+    stack_base: usize,
 }
 
+/// Stack the recursive-descent parser may use before it gives up with an error instead of overflowing
+/// (and aborting the whole process) on deeply nested parentheses / functions / CASE / NOT chains / subqueries.
+/// Debug frames are about 10x larger, so the budget is larger there; both stay inside a 2 MB thread stack.
+const PARSER_STACK_BUDGET: usize = if cfg!(debug_assertions) { 1_200_000 } else { 400_000 };
+
 impl Parser {
-    fn new(tokens: Vec<Token>) -> Self { Self { tokens, pos: 0 } }
+    fn new(tokens: Vec<Token>, stack_base: usize) -> Self { Self { tokens, pos: 0, stack_base } }
+
+    /// Err when the recursion has already consumed `PARSER_STACK_BUDGET` bytes of stack.
+    fn check_depth(&self) -> Result<(), KoreError> {
+        let marker = 0u8;
+        let here = &marker as *const u8 as usize;
+        if here.abs_diff(self.stack_base) > PARSER_STACK_BUDGET {
+            return Err(KoreError::InvalidArgument("query is nested too deeply (parentheses, functions, CASE, NOT or subqueries)".into()));
+        }
+        Ok(())
+    }
 
     fn peek(&self) -> &Token {
         self.tokens.get(self.pos).unwrap_or(&Token::Eof)
@@ -283,6 +301,7 @@ impl Parser {
     /// `arm [UNION|INTERSECT|EXCEPT|MINUS [ALL|DISTINCT] arm]* [ORDER BY ..] [LIMIT ..]`. With set operations
     /// the first arm carries them in `set_ops` and the trailing ORDER BY / LIMIT / OFFSET apply to the whole.
     fn parse_compound(&mut self) -> Result<SelectStmt, KoreError> {
+        self.check_depth()?;
         let mut first = self.parse_select_arm()?;
         let mut arms: Vec<(SetOpKind, SelectStmt)> = Vec::new();
         loop {
@@ -961,6 +980,7 @@ impl Parser {
     }
 
     fn parse_table_expr(&mut self) -> Result<TableExpr, KoreError> {
+        self.check_depth()?;
         // VALUES (r1c1, r1c2), (r2c1, r2c2) AS t(a, b) — inline table
         if self.peek_ident_upper() == "VALUES" {
             self.pos += 1;
@@ -1199,6 +1219,7 @@ impl Parser {
     // ─── Expression parser (Pratt/precedence climbing) ────────────────────
 
     fn parse_expr(&mut self, min_prec: u8) -> Result<Expr, KoreError> {
+        self.check_depth()?;
         let mut lhs = self.parse_unary()?;
         loop {
             // postfix field access on a struct-valued expression: f(..).field
@@ -1373,6 +1394,7 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, KoreError> {
+        self.check_depth()?;
         // EXISTS (SELECT ...)
         if let Token::Ident(ref s) = self.peek().clone() {
             // EXISTS(array, x -> ...) is the higher-order function; EXISTS (SELECT ...) the subquery predicate

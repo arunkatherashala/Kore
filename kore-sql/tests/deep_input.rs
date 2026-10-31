@@ -43,6 +43,12 @@ fn sql_for(name: &str) -> String {
 #[test]
 fn probe_child() {
     let Ok(name) = std::env::var("KORE_PROBE") else { return };
+    // "parse:<probe>" parses only (isolates the parser from later phases); "parsedrop:<probe>" also drops the AST
+    if let Some(p) = name.strip_prefix("parse:") {
+        let r = kore_sql::parse_query(&sql_for(p));
+        println!("PROBE_RESULT {} parse {}", name, if r.is_ok() { "ok" } else { "err" });
+        return;
+    }
     let sql = sql_for(&name);
     let r = ctx().query(&sql);
     println!("PROBE_RESULT {} {}", name, match &r { Ok(b) => format!("ok rows={}", b.num_rows), Err(e) => format!("err {}", format!("{e}").chars().take(80).collect::<String>()) });
@@ -54,7 +60,7 @@ fn run_probe(name: &str) -> (bool, String) {
     let out = std::process::Command::new(exe).args(["probe_child", "--exact", "--nocapture", "--test-threads=1"])
         .env("KORE_PROBE", name).output().unwrap();
     let so = String::from_utf8_lossy(&out.stdout).to_string();
-    let line = so.lines().find(|l| l.starts_with("PROBE_RESULT")).unwrap_or("").to_string();
+    let line = so.lines().find_map(|l| l.find("PROBE_RESULT").map(|i| &l[i..])).unwrap_or("").to_string();
     (out.status.success() && !line.is_empty(), if line.is_empty() { format!("CRASH status={:?} {}", out.status, String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("")) } else { line })
 }
 
@@ -75,4 +81,30 @@ fn deep_input_report() {
         if !ok { crashed.push(*p); }
     }
     if std::env::var("KORE_PROBE_ASSERT").is_ok() { assert!(crashed.is_empty(), "stack overflow / abort on: {crashed:?}"); }
+}
+
+/// Regression (fixed in parser.rs by a stack-budget guard): deep nesting returns a clean error instead of aborting.
+#[test]
+fn nesting_returns_error_not_abort() {
+    if std::env::var("KORE_PROBE").is_ok() { return; }
+    let mut crashed = vec![];
+    for p in ["parens_5000", "parens_select_5000", "notchain_5000", "negchain_5000", "func_5000", "case_5000", "subq_5000", "subq_in_5000"] {
+        let (ok, line) = run_probe(p);
+        println!("{p:22} {} | {line}", if ok { "OK" } else { "CRASH" });
+        if !ok { crashed.push(p); }
+    }
+    assert!(crashed.is_empty(), "aborted on: {crashed:?}");
+}
+
+/// Moderate nesting that real queries use must still work.
+#[test]
+fn moderate_nesting_still_parses() {
+    if std::env::var("KORE_PROBE").is_ok() { return; }
+    let c = ctx();
+    for n in [1usize, 5, 10] {
+        let sql = format!("SELECT a FROM t WHERE {}a{} = 1", "(".repeat(n), ")".repeat(n));
+        assert_eq!(c.query(&sql).unwrap().num_rows, 1, "{n} parens");
+    }
+    assert_eq!(c.query("SELECT a FROM (SELECT a FROM (SELECT a FROM (SELECT a FROM t) x) y) z WHERE NOT NOT a = 1").unwrap().num_rows, 1);
+    assert_eq!(c.query(&sql_for("andchain_150")).unwrap().num_rows, 3);
 }
