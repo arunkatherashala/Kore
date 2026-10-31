@@ -29,6 +29,9 @@ impl KoreReader {
         if crate::rowgroups::is_row_group_file(data) {
             return crate::rowgroups::read(data, wanted, None);
         }
+        if crate::v3::is_v3(data) {
+            return crate::v3::read(data, wanted);
+        }
         // Check for encryption marker
         if data.len() >= 4 && &data[0..4] == b"KENC" {
             return Err(KoreError::InvalidArgument(

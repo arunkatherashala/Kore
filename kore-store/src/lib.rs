@@ -19,14 +19,22 @@ pub mod reader;
 pub mod writer;
 pub mod versioned;
 pub mod rowgroups;
+pub mod codec;
+pub mod hz;
+pub mod v3;
 
 pub use reader::KoreReader;
 pub use writer::KoreWriter;
+pub use codec::{ColumnCodec, Stage, Transform, WriteOptions};
 
 use kore_core::KoreError;
 
 pub const MAGIC:   &[u8; 4] = b"KORE";
 pub const VERSION: u16       = 2;   // v2: native StrDict + f64 dict + NaN sentinel
+
+/// Opt-in container version with per-column codecs and a column directory (see `v3`). Readers that
+/// predate it reject the file at the version field.
+pub const VERSION_V3: u16    = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

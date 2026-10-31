@@ -203,6 +203,18 @@ impl KoreWriter {
         buf
     }
 
+    /// Serialize as a version-3 file with per-column codecs (opt-in; see `v3`). The output is a pure
+    /// function of `block` and `opts`. Readers older than version 3 reject the file.
+    pub fn to_bytes_with(block: &DataBlock, opts: &crate::WriteOptions) -> Result<Vec<u8>, kore_core::KoreError> {
+        crate::v3::write(block, opts)
+    }
+
+    /// Write a version-3 file to `path`.
+    pub fn write_file_with(path: &std::path::Path, block: &DataBlock, opts: &crate::WriteOptions) -> Result<(), kore_core::KoreError> {
+        let bytes = Self::to_bytes_with(block, opts)?;
+        std::fs::write(path, bytes).map_err(|e| kore_core::KoreError::InvalidArgument(format!("io: {e}")))
+    }
+
     /// Serialize with AES-256-GCM encryption on all column data.
     pub fn to_bytes_encrypted(block: &DataBlock, password: &[u8]) -> Result<Vec<u8>, String> {
         Self::encrypt_blob(&Self::to_bytes(block), password)
