@@ -95,10 +95,17 @@ pub fn make(log: &mut VersionedLog, req: &MakeReq) -> Result<MakeResult, LogErro
     if cite.len() > MAX_CITED {
         cite.drain(..cite.len() - MAX_CITED);
     }
+    let have: BTreeSet<String> = log.open_latest().rows::<PredictionRow>().into_iter().filter(|r| r.question_id == question_id).map(|r| r.model_id).collect();
+    let mut already_present = 0usize;
     let mut batch = Batch::default();
     let mut written = Vec::new();
     let mut refused = Vec::new();
     for k in kinds {
+        if have.contains(&format!("{MODEL_PREFIX}{}", k.id())) {
+            // one forecast per (question, predictor), whatever the log version now is
+            already_present += 1;
+            continue;
+        }
         let p = baselines::make(k, &req.cfg);
         let pred = if hist.is_empty() { Pred::Insufficient { n: 0, min_n: 1 } } else { p.predict(&hist, ctx, &options) };
         match pred {
@@ -130,7 +137,6 @@ pub fn make(log: &mut VersionedLog, req: &MakeReq) -> Result<MakeResult, LogErro
         }
     }
     let info = log.commit_batch(batch)?;
-    let fresh = info.new_rows.get("predictions").copied().unwrap_or(0);
     for (w, id) in written.iter_mut().zip(info.pred_ids.iter()) {
         w["pred_id"] = json!(id);
     }
@@ -139,7 +145,7 @@ pub fn make(log: &mut VersionedLog, req: &MakeReq) -> Result<MakeResult, LogErro
         made_at,
         cutoff_version,
         history_n: hist.len(),
-        already_present: written.len() - fresh.min(written.len()),
+        already_present,
         written,
         refused,
         version: info.version,
