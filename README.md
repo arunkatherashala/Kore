@@ -569,6 +569,8 @@ max_steps_per_run     = 2000    # steps of one being_run
 max_energy_per_run    = 100000  # a step that starts below the cap may end above it
 composition           = on      # default off
 pruning               = on      # default off
+transfer              = on      # B6: may the model start a new domain from a learned one (default off)
+max_transfer_links    = 16      # B6: (domain, difficulty) links that may exist at the same time
 ```
 
 * A missing key takes the safe default shown above (composition and pruning off). An unknown key, a repeated key, a value above the hard maximum or a malformed line makes the file unparseable.
@@ -590,6 +592,23 @@ Measured (docs/measured.md, "Track B5": synthetic world, seeds 1..20, tuning see
 * Caps: live rules, blocks, candidates per pass and steps were never exceeded in 20 worlds; the energy cap overshot by at most 4 units; the kill switch stopped 20 of 20 runs after exactly 40 steps.
 
 What B5 does NOT do. It does not show that composition pays in reward: it enlarges what can be found, and in this world that did not change the reward. It does not establish that pruning helps beyond a small effect in this one drift scenario. The families, the 7 transforms, the 17 forms and the rewards are all written by the same author; "composition" is a search over that small space, not open-ended invention. Real data, real language models, long unattended runs and crash recovery were not tested. `controller.txt` limits what one run may do; it does not sandbox the owner's `advisor.txt` or `thinker.txt` programs, which stay outside the being loop. Refusals of a tool that asks for a reserved path are rejected by `safe_path` but are not audit rows (an existing behaviour).
+
+### Track B6: transfer between domains
+
+Research question: when the being has learned in one domain, does what it learned speed up learning in a NEW domain, and can it avoid transfer that hurts? Everything is synthetic (an author-defined world) and deterministic. No claim of understanding, life or intelligence is made.
+
+The world (`being_run` with `pattern_families: "extended2"`, `transfer: true`; default off, with it off every earlier result is bit for bit unchanged and a test checks it). A life has two phases. In phase 1 (about the first 40% of the budget; the time is hidden) only sequence tasks are offered, domain A. Then two more domains appear: B, the same sequence families seen through a hidden affine map of the values (it shares building blocks with A and is not identical: polynomial forms carry over, recurrences need a constant term, and the fixed solvers that were exact on A for some families are not exact on B), and a control domain C (unit conversions, no sequence structure). B's rules are its own, found on B's own revealed examples.
+
+The mechanism (`learn_transfer: true`, needs `transfer`; log-derived only). When the logged examples of B (prefix and revealed next term) are explained by rules the being has ALREADY accepted in A after full verification (or the same rules with the constant term toggled), with no wrong application, then the cells of B start from the posterior of the same (difficulty, strategy) cell of A instead of the strategy-wide estimate. A guard compares, after at least 4 attempts a link influenced, how likely the outcomes were under the transferred prior and under the plain prior; a link that did worse by more than 2 nats is switched off for good. The rule search also tries rules accepted in A first on B's examples; acceptance is unchanged (same support, held-out split, spare equations, never applicable-and-wrong). Every link and every revocation is a log note plus a revision citing the events it rests on; replay of the log gives the same model. Hard limits in the owner's `controller.txt`: `transfer` (default off) and `max_transfer_links` (default 16); a request the controller does not allow, or a link beyond the cap, is refused, logged as a `controller_refusal` event and audited.
+
+Measured (docs/measured.md, "Track B6": synthetic world, seeds 1..20, budget 3000; tuning seeds 101..120 used only for the settings):
+* Transfer gives a modest early gain: reward per energy over the first 100 steps after B appears 3.034 against 2.824 without transfer, difference +0.211 [+0.054, +0.367], better in 11 of 20 worlds, worse in 0, 9 ties. The gain shrinks with time (+0.102 over the whole time after B at budget 3000, +0.041 at 6000). The oracle is about 1.4 better early on, so most of the gap remains.
+* Reaching 90% of the oracle's rate on B: 8 of 20 worlds against 6, 78 against 123 steps at the median (the paired comparison rests on 6 worlds).
+* Negative transfer is real and the guard helps without removing it: with the right domain but the wrong cells the reward falls by 0.20 [-0.36, -0.04] with the guard on and by 0.39 [-0.64, -0.14] with it off; the guard recovers +0.18 [+0.06, +0.31] and revoked 19 of 59 links. The similarity rule itself revoked 1 link in 20 worlds. A control that linked to the most dissimilar learned domain fired rarely and showed no significant cost or guard effect.
+* The domain without sequence structure was not hurt by transfer (+1.3 points [-17.8, +20.4] over its first 150 steps; it was never linked); under wrong similarity it lost 15 points, a difference that is not significant.
+* Changing the order of the rule search had no effect at all; all of the gain comes from the links. Wrong rules accepted: 0 applicable-and-wrong in every arm.
+
+What B6 does NOT do. It does not transfer rules directly: B's rules still need B's own examples. It does not show that the gain is specific knowledge rather than early exploration of B (there is no control that gives B a generic optimism bonus). The gain is small and rests on 11 or 12 of 20 worlds; in the others B was attempted too rarely. The map, the families, the schedule, the similarity (rule fit against one source domain), the settings and the rewards are all the author's. Real data, real language models, long unattended runs and crash recovery were not tested.
 
 ### Talking to the being (A1)
 
