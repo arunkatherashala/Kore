@@ -130,6 +130,26 @@ pub enum Kind {
     UnitKmh,
     UnitHms,
     UnitTrip,
+    // Track B5 (`pattern_families: extended2`): four families outside the 17-form grammar of B2 that
+    // composition of building blocks can express, three negative controls, and one regime-change family.
+    /// Even-index terms follow one quadratic in the index, odd-index terms another (parity split, then poly 2).
+    Ext2SplitQuad,
+    /// n^3 plus an alternating (-1)^n term (parity split then poly 3, or differences then a linear recurrence).
+    Ext2ParityCubic,
+    /// A cubic in n plus a geometric term (second differences are a linear recurrence of order 3).
+    Ext2CubeGeom,
+    /// (-1)^n times a cubic in n (parity split, then poly 3).
+    Ext2AltCube,
+    /// Linear congruential generator modulo 101 (negative control, long prefix).
+    NegLcg,
+    /// Squares modulo 7 (negative control, long prefix).
+    NegMod7,
+    /// Affine-geometric prefix (as ExtAffGeom) whose revealed next term uses a changed constant (rule-drift scenario).
+    DriftAff,
+    /// As ExtPoly3 / ExtRec2 / ExtTribo, but the revealed next term is 3 higher (measurement-only wide rule drift).
+    DriftPoly3,
+    DriftRec2,
+    DriftTribo,
 }
 
 impl Kind {
@@ -162,7 +182,29 @@ impl Kind {
 
     /// True for the families the author wrote outside the rule grammar (negative controls).
     pub fn is_negative_control(self) -> bool {
-        matches!(self, Kind::NegProd | Kind::NegPrimes)
+        matches!(self, Kind::NegProd | Kind::NegPrimes | Kind::NegLcg | Kind::NegMod7)
+    }
+
+    /// Families of the `extended2` pattern world: everything of `options_ext`, plus the B5 families.
+    /// `drifted`: the regime change has happened (difficulty 2 now shows `DriftAff` where it showed `ExtAffGeom`).
+    pub fn options_ext2(d: Domain, difficulty: u8, drifted: bool) -> Vec<Kind> {
+        Kind::options_ext2w(d, difficulty, drifted, false)
+    }
+
+    /// As `options_ext2`; `wide`: after the change the cubic, second-order and tribonacci families drift too.
+    pub fn options_ext2w(d: Domain, difficulty: u8, drifted: bool, wide: bool) -> Vec<Kind> {
+        use Kind::*;
+        let w = drifted && wide;
+        if d != Domain::Pattern {
+            return vec![Kind::of(d, difficulty)];
+        }
+        match difficulty.clamp(1, 5) {
+            1 => vec![PatArith],
+            2 => vec![PatGeom, if drifted { DriftAff } else { ExtAffGeom }, Ext2SplitQuad, NegLcg],
+            3 => vec![PatQuad, if w { DriftPoly3 } else { ExtPoly3 }, Ext2ParityCubic, NegMod7],
+            4 => vec![PatFib, if w { DriftRec2 } else { ExtRec2 }, if w { DriftTribo } else { ExtTribo }, Ext2CubeGeom],
+            _ => vec![ExtAlt, ExtPeriodic, NegProd, NegPrimes, Ext2AltCube],
+        }
     }
 }
 
@@ -300,6 +342,12 @@ pub struct World {
     pub pattern_bonus: i64,
     /// Scheduled changes (default None: the world is stationary and every earlier result is unchanged).
     pub drift: Option<Drift>,
+    /// Track B5: pattern tasks come from the `extended2` families (implies `extended`).
+    pub ext2: bool,
+    /// Track B5: world-clock second at which the sequence rules of difficulty 1 change (None: never).
+    pub rule_drift_at: Option<i64>,
+    /// Measurement only (not part of the logged genesis): the rule drift also changes the cubic, second-order and tribonacci families.
+    pub drift_wide: bool,
 }
 
 /// In the extended world pattern puzzles pay this many times the usual reward (author-defined; it gives
@@ -308,7 +356,16 @@ pub const EXT_PATTERN_BONUS: i64 = 2;
 
 impl World {
     pub fn new(seed: u64) -> World {
-        World { seed, profile: Profile::from_seed(seed), extended: false, pattern_bonus: 1, drift: None }
+        World { seed, profile: Profile::from_seed(seed), extended: false, pattern_bonus: 1, drift: None, ext2: false, rule_drift_at: None, drift_wide: false }
+    }
+
+    /// The `extended2` pattern world (B5). `rule_drift_budget`: the sequence rules of difficulty 1 change
+    /// at half of this budget (in world-clock seconds); None: they never change.
+    pub fn with_ext2(seed: u64, rule_drift_budget: Option<i64>) -> World {
+        let mut w = World::with_extended(seed, true);
+        w.ext2 = true;
+        w.rule_drift_at = rule_drift_budget.map(|b| b / 2 * SECS_PER_ENERGY);
+        w
     }
 
     pub fn with_extended(seed: u64, extended: bool) -> World {
@@ -368,11 +425,12 @@ impl World {
     /// the reward of the offers depend on which scheduled changes have already happened.
     pub fn offers_at(&self, step: u64, clock: i64) -> Vec<Task> {
         let regime = self.regime(clock);
+        let drifted = self.rule_drift_at.map_or(false, |t| clock >= t);
         let n: u64 = if regime >= 1 { 5 } else { 4 };
         (0..MENU_SIZE as u64)
             .map(|j| {
                 let d = ALL_DOMAINS[(mix(&[self.seed, step, j, 0xD0_0D]) % n) as usize];
-                self.build(step, d, j + 1, None, None, format!("{step}-{j}-{}", d.name()), self.profile_at(clock))
+                self.build_x(step, d, j + 1, None, None, format!("{step}-{j}-{}", d.name()), self.profile_at(clock), drifted)
             })
             .collect()
     }
@@ -390,11 +448,15 @@ impl World {
 
     /// A pattern task of one given hidden family (extended world), for measurement only.
     pub fn task_of_kind(&self, step: u64, kind: Kind) -> Task {
-        let difficulty = (1..=5u8).find(|k| Kind::options_ext(Domain::Pattern, *k).contains(&kind)).unwrap_or(1);
+        let difficulty = (1..=5u8).find(|k| Kind::options_ext2(Domain::Pattern, *k, false).contains(&kind) || Kind::options_ext2w(Domain::Pattern, *k, true, true).contains(&kind)).unwrap_or(1);
         self.build(step, Domain::Pattern, 0x99 + kind as u64, Some(difficulty), Some(kind), format!("kind-{step}-{}", kind as u64), &self.profile)
     }
 
     fn build(&self, step: u64, d: Domain, salt: u64, forced: Option<u8>, force_kind: Option<Kind>, id: String, prof: &Profile) -> Task {
+        self.build_x(step, d, salt, forced, force_kind, id, prof, false)
+    }
+
+    fn build_x(&self, step: u64, d: Domain, salt: u64, forced: Option<u8>, force_kind: Option<Kind>, id: String, prof: &Profile, drifted: bool) -> Task {
         let mut r = if salt == 0 {
             Rng::new(mix(&[self.seed, step, d.idx() as u64, 0x7A5C]))
         } else {
@@ -405,7 +467,7 @@ impl World {
         let kind = if let Some(k) = force_kind {
             k
         } else if self.extended && d == Domain::Pattern {
-            let opts = Kind::options_ext(d, difficulty);
+            let opts = if self.ext2 { Kind::options_ext2w(d, difficulty, drifted, self.drift_wide) } else { Kind::options_ext(d, difficulty) };
             opts[r.below(opts.len() as u64) as usize]
         } else {
             Kind::of(d, difficulty)
@@ -614,6 +676,79 @@ fn generate(kind: Kind, r: &mut Rng) -> (Vec<i64>, String, i64) {
             let i0 = r.range(0, 12) as usize;
             let t = P[i0..i0 + 6].to_vec();
             (t.clone(), format!("Next term: {}", join(&t)), P[i0 + 6])
+        }
+        Ext2SplitQuad => {
+            let (a1, b1, c1) = (r.range(1, 2), r.range(-3, 4), r.range(-5, 9));
+            // different leading coefficients: with equal ones the interleave would be quadratic plus an alternating term, which the plain grammar expresses
+            let (a2, b2, c2) = (a1 + r.range(1, 3), r.range(-3, 4), r.range(-5, 9));
+            let f = |n: i64| if n % 2 == 0 { let m = n / 2; a1 * m * m + b1 * m + c1 } else { let m = (n - 1) / 2; a2 * m * m + b2 * m + c2 };
+            let t: Vec<i64> = (0..12).map(f).collect();
+            (t.clone(), format!("Next term: {}", join(&t)), f(12))
+        }
+        Ext2ParityCubic => {
+            let (a, b, c, d, k) = (r.range(1, 2), r.range(-3, 3), r.range(-4, 4), r.range(-5, 9), nz(r, -6, 6));
+            let f = |n: i64| a * n * n * n + b * n * n + c * n + d + if n % 2 == 0 { k } else { -k };
+            let t: Vec<i64> = (0..14).map(f).collect();
+            (t.clone(), format!("Next term: {}", join(&t)), f(14))
+        }
+        Ext2CubeGeom => {
+            let (a, b, c, d) = (r.range(1, 2), r.range(-3, 3), r.range(-4, 4), r.range(-5, 9));
+            let (s0, q): (i64, i64) = (nz(r, -3, 3), [2, 3][r.below(2) as usize]);
+            let f = |n: i64| a * n * n * n + b * n * n + c * n + d + s0 * q.pow(n as u32);
+            let t: Vec<i64> = (0..12).map(f).collect();
+            (t.clone(), format!("Next term: {}", join(&t)), f(12))
+        }
+        Ext2AltCube => {
+            let (a, b, c, d) = (r.range(1, 2), r.range(-3, 3), r.range(-4, 4), r.range(-5, 9));
+            let f = |n: i64| (a * n * n * n + b * n * n + c * n + d) * if n % 2 == 0 { 1 } else { -1 };
+            let t: Vec<i64> = (0..14).map(f).collect();
+            (t.clone(), format!("Next term: {}", join(&t)), f(14))
+        }
+        NegLcg => {
+            // modulo a prime with a primitive-root-like multiplier: long cycles, no short-period structure
+            let (m, a, c) = (101, [2, 3, 5][r.below(3) as usize], r.range(1, 9));
+            let mut s0 = r.range(1, 100);
+            if (a * s0 + c) % m == s0 {
+                s0 = s0 % 100 + 1;
+            }
+            let mut t = vec![s0];
+            while t.len() < 13 {
+                let n = (a * t[t.len() - 1] + c) % m;
+                t.push(n);
+            }
+            let next = t[12];
+            t.truncate(12);
+            (t.clone(), format!("Next term: {}", join(&t)), next)
+        }
+        NegMod7 => {
+            let (s0, c) = (r.range(0, 6), r.range(0, 6));
+            let f = |n: i64| ((n + s0) * (n + s0) + c) % 7;
+            let t: Vec<i64> = (0..12).map(f).collect();
+            (t.clone(), format!("Next term: {}", join(&t)), f(12))
+        }
+        DriftPoly3 => {
+            let (t, p, n) = generate(ExtPoly3, r);
+            (t, p, n + 3)
+        }
+        DriftRec2 => {
+            let (t, p, n) = generate(ExtRec2, r);
+            (t, p, n + 3)
+        }
+        DriftTribo => {
+            let (t, p, n) = generate(ExtTribo, r);
+            (t, p, n + 3)
+        }
+        DriftAff => {
+            let (s0, p, c) = (r.range(1, 5), [2, 3, 4, -2][r.below(4) as usize], nz(r, -5, 9));
+            let mut t = vec![s0];
+            while t.len() < 7 {
+                let n = p * t[t.len() - 1] + c;
+                t.push(n);
+            }
+            // the regime changed: the constant is different at the point of prediction
+            let next = p * t[5] + c + 3;
+            t.truncate(6);
+            (t.clone(), format!("Next term: {}", join(&t)), next)
         }
         UnitKm => {
             let k = r.range(2, 90);

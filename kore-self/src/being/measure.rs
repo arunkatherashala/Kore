@@ -62,7 +62,7 @@ impl RunResult {
 pub fn run_policy(world_seed: u64, budget: i64, picker: &mut dyn DomainPicker) -> RunResult {
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: super::state::Chooser::Ucb, extended: false, drift: false, adapt: Default::default(), advice: Default::default() }, String::new());
+    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: super::state::Chooser::Ucb, extended: false, drift: false, adapt: Default::default(), advice: Default::default(), ext2: false, rule_drift: false }, String::new());
     let mut e = Engine::new(World::new(world_seed), st, &th);
     let mut picks = vec![];
     while let Ok(o) = e.step(picker) {
@@ -260,7 +260,7 @@ impl MenuRun {
 pub fn run_menu(world_seed: u64, budget: i64, chooser: &mut dyn MenuChooser) -> MenuRun {
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: false, drift: false, adapt: Default::default(), advice: Default::default() }, String::new());
+    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: false, drift: false, adapt: Default::default(), advice: Default::default(), ext2: false, rule_drift: false }, String::new());
     let mut e = Engine::new(World::new(world_seed), st, &th);
     let (mut recs, mut skips, mut strategies) = (vec![], 0, [0u64; 4]);
     while let Ok(o) = e.step_menu(chooser) {
@@ -379,7 +379,7 @@ pub fn run_menu_ext(world: World, budget: i64, chooser: &mut dyn MenuChooser, di
     let world_seed = world.seed;
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: true, drift: false, adapt: Default::default(), advice: Default::default() }, String::new());
+    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: true, drift: false, adapt: Default::default(), advice: Default::default(), ext2: false, rule_drift: false }, String::new());
     for r in preload {
         st.apply_rule(r.clone());
     }
@@ -610,7 +610,7 @@ impl DriftRun {
 pub fn run_drift(seed: u64, budget: i64, drift: bool, spec: &AdaptSpec, chooser: &mut dyn MenuChooser) -> DriftRun {
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed: seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: false, drift, adapt: spec.mode, advice: Default::default() }, String::new());
+    st.start(Genesis { world_seed: seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended: false, drift, adapt: spec.mode, advice: Default::default(), ext2: false, rule_drift: false }, String::new());
     st.model.set_mode(spec.mode, spec.half_life);
     st.model.cusum_k = spec.k;
     st.model.cusum_h = spec.h;
@@ -793,7 +793,7 @@ pub fn run_adv(world: World, budget: i64, mode: super::planner::AdviceMode, spec
     let world_seed = world.seed;
     let th = ScriptedThinker;
     let mut st = BeingState::default();
-    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended, drift: false, adapt: Default::default(), advice: Default::default() }, String::new());
+    st.start(Genesis { world_seed, loop_seed: 0, budget, explore_c: 0.0, chooser: Chooser::Model, extended, drift: false, adapt: Default::default(), advice: Default::default(), ext2: false, rule_drift: false }, String::new());
     st.trust.cusum_k = spec.k;
     st.trust.cusum_h = spec.h;
     st.trust.keep = spec.keep;

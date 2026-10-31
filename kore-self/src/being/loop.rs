@@ -18,12 +18,13 @@
 
 use super::advice::{self, Advice, AdviceRequest, AdviceSetup, Advisor, AdvisorKind, DecisionAdvice, OfferView, RULE_EVERY};
 use super::chooser::{DomainPicker, Pick, Ucb1, DEFAULT_EXPLORE_C};
+use super::controller::{self, Limits, Refusal};
 use super::discover::{self, terms_tag, Found, Rule};
 use super::planner::{Action, MenuChooser, ModelChooser, Offer, DEFAULT_BETA};
 use super::policy::{Policy, StopReason};
 use super::solver::{Context, Strategy, Thinker, STRATEGIES, STRATEGIES_EXT};
 use super::model::AdaptMode;
-use super::state::{genesis_event, refill_event, BeingState, Change, Chooser, Genesis, Outcome, SOURCE};
+use super::state::{genesis_event, refill_event, tag, BeingState, Change, Chooser, Genesis, Outcome, SOURCE};
 use super::world::{iso_at, Domain, Task, World, DOMAINS, SECS_PER_ENERGY, SKIP_COST};
 use crate::versioned::{event_id, prediction_id, Batch, LogError, NewEvent, NewOutcome, NewPrediction, NewRevision, VersionedLog};
 use serde_json::{json, Value};
@@ -54,7 +55,13 @@ pub struct StepOut {
 
 /// The world a being lives in, from its genesis event.
 pub fn world_for(g: &Genesis) -> World {
-    World::with_drift(g.world_seed, g.extended, if g.drift { Some(g.budget) } else { None })
+    let mut w = World::with_drift(g.world_seed, g.extended, if g.drift { Some(g.budget) } else { None });
+    if g.ext2 {
+        let d = w.drift.take();
+        w = World::with_ext2(g.world_seed, if g.rule_drift { Some(g.budget) } else { None });
+        w.drift = d;
+    }
+    w
 }
 
 /// The log records of one detected change.
@@ -122,11 +129,40 @@ pub struct Engine<'a> {
     /// Records of a step that ended without a decision (nothing affordable) after advice was already taken into the state.
     carry: Vec<NewEvent>,
     carry_rules: Vec<NewRule>,
+    /// B5: caps, composition and pruning switches (None: no controller, the B2 behaviour).
+    pub limits: Option<Limits>,
+    /// Refusals not yet written to the log (the run loop drains them after every step).
+    pub refusals: Vec<Refusal>,
+    /// Every refusal of this engine so far (for summaries and measurements).
+    pub refusals_total: Vec<Refusal>,
+    refused: std::collections::HashSet<String>,
+    /// Number of verified building blocks the last composed search used.
+    last_blocks: usize,
+    /// Most candidates a single capped discovery pass evaluated (for the cap checks of the measurement).
+    pub max_candidates_seen: usize,
 }
 
 impl<'a> Engine<'a> {
     pub fn new(world: World, state: BeingState, thinker: &'a dyn Thinker) -> Engine<'a> {
-        Engine { world, state, thinker, advisor: None, carry: vec![], carry_rules: vec![] }
+        Engine { world, state, thinker, advisor: None, carry: vec![], carry_rules: vec![], limits: None, refusals: vec![], refusals_total: vec![], refused: Default::default(), last_blocks: 0, max_candidates_seen: 0 }
+    }
+
+    pub fn with_limits(mut self, limits: Option<Limits>) -> Engine<'a> {
+        self.limits = limits;
+        self
+    }
+
+    /// Record a refusal once (the same refusal is not logged again in this run).
+    pub fn refuse(&mut self, r: Refusal) {
+        if self.refused.insert(format!("{}|{}", r.cap, r.what)) {
+            self.refusals_total.push(r.clone());
+            self.refusals.push(r);
+        }
+    }
+
+    /// Refusals to be written to the log now.
+    pub fn take_refusals(&mut self) -> Vec<Refusal> {
+        std::mem::take(&mut self.refusals)
     }
 
     pub fn with_advisor(mut self, advisor: Option<&'a dyn Advisor>) -> Engine<'a> {
@@ -287,6 +323,7 @@ impl<'a> Engine<'a> {
             listed_cost: v.cost,
             skipped: false,
             example: None,
+            rule_used: None,
         };
         self.state.apply(&outcome);
         Ok(StepOut { outcome, pick: Some(pick), action: None, predicted_p: None, decision_event_id: dev_id, events: vec![dev, aev, oev], revision, prediction: Some(prediction), resolved: Some(resolved), changes: vec![], rules: vec![], advice: None })
@@ -437,6 +474,9 @@ impl<'a> Engine<'a> {
                     // the checker's answer is revealed after the attempt and recorded: one example for the being's own search
                     otags.extend([format!("terms:{}", terms_tag(&v.params)), format!("next:{}", tasks[slot].expected())]);
                 }
+                if let Some(r) = &done.rule {
+                    otags.push(format!("rule_used:{r}"));
+                }
                 (v.domain, v.id.clone(), v.difficulty, v.cost)
             }
             None => (Domain::Arithmetic, "none".to_string(), 1, done.cost),
@@ -511,6 +551,7 @@ impl<'a> Engine<'a> {
             listed_cost: listed,
             skipped: !attempted,
             example,
+            rule_used: done.rule.clone(),
         };
         let before = self.state.changes.len();
         let pending_advice = self.state.advice.clone();
@@ -618,7 +659,34 @@ impl<'a> Engine<'a> {
     /// rule into the state. Pure function of the state; a second pass with no new examples adds nothing.
     pub fn discover_pass(&mut self) -> Vec<NewRule> {
         let mut out = vec![];
-        for f in discover::search(&self.state.examples) {
+        let found = match self.limits.clone() {
+            None => discover::search(&self.state.examples),
+            Some(l) => {
+                let all = self.blocks();
+                let blocks: Vec<discover::Form> = if l.compose { all.iter().take(l.max_blocks).cloned().collect() } else { vec![] };
+                if l.compose && all.len() > l.max_blocks {
+                    self.refuse(Refusal::new(
+                        "max_building_blocks",
+                        l.max_blocks as u64,
+                        all.len() as u64,
+                        format!("{} verified building blocks exist; only the first {} are used for composition", all.len(), l.max_blocks),
+                    ));
+                }
+                let o = discover::search_composed(&self.state.examples, &blocks, l.max_candidates);
+                if o.truncated {
+                    self.refuse(Refusal::new(
+                        "max_search_candidates",
+                        l.max_candidates as u64,
+                        o.wanted as u64,
+                        format!("a discovery pass would try {} candidates; it stopped after {}", o.wanted, o.candidates),
+                    ));
+                }
+                self.last_blocks = blocks.len();
+                self.max_candidates_seen = self.max_candidates_seen.max(o.candidates);
+                o.found
+            }
+        };
+        for f in found {
             if let Some(nr) = self.accept_found(&f, None) {
                 out.push(nr);
             }
@@ -626,12 +694,102 @@ impl<'a> Engine<'a> {
         out
     }
 
+    /// The building blocks: forms of the plain rules the being holds and has not retired, in acceptance order.
+    pub fn blocks(&self) -> Vec<discover::Form> {
+        self.state.blocks()
+    }
+
+    /// Pruning and merging, when the controller allows it: retire rules whose recent success rate is
+    /// below the threshold, and merge a rule into a simpler one that always agrees with it. Every
+    /// retirement is a logged note plus a revision of the rule's key citing the evidence; nothing is deleted.
+    pub fn housekeeping(&mut self) -> Vec<(NewEvent, NewRevision)> {
+        let Some(l) = self.limits.clone() else {
+            return vec![];
+        };
+        if !l.prune {
+            return vec![];
+        }
+        let cfg = l.prune_cfg;
+        let mut out = vec![];
+        let ids: Vec<String> = self.state.rules.iter().filter(|r| !r.retired).map(|r| r.id.clone()).collect();
+        for id in ids {
+            let Some(rule) = self.state.rules.iter().find(|r| r.id == id).cloned() else { continue };
+            let recent: Vec<(String, bool)> = self.state.rule_use.get(&id).map(|u| u.recent.iter().rev().take(cfg.window).rev().cloned().collect()).unwrap_or_default();
+            let n = recent.len() as u32;
+            let right = recent.iter().filter(|x| x.1).count() as u32;
+            if n >= cfg.min_n && (right as f64 / n as f64) < cfg.threshold {
+                let cites: Vec<String> = recent.iter().map(|x| x.0.clone()).collect();
+                let reason = format!("it produced the answer in its latest {n} uses and was right in {right} ({:.2}), below the retirement threshold {:.2} (minimum {} uses)", right as f64 / n as f64, cfg.threshold, cfg.min_n);
+                out.push(self.retire(&rule, "low_success", &reason, cites, None, json!({ "uses_in_window": n, "right_in_window": right, "threshold": cfg.threshold, "min_uses": cfg.min_n })));
+                continue;
+            }
+            // merge into a simpler live rule of the same signature that always agrees
+            let exs: Vec<&discover::Example> = self.state.examples.iter().filter(|e| e.sig == rule.sig).collect();
+            let mut applies: Vec<(String, i64)> = vec![];
+            for e in &exs {
+                if let Some(v) = discover::predict_x(rule.xf, &rule.form, &e.terms) {
+                    applies.push((e.event_id.clone(), v));
+                }
+            }
+            if (applies.len() as u32) < cfg.merge_min {
+                continue;
+            }
+            let simpler = self.state.rules.iter().filter(|s| !s.retired && s.id != rule.id && s.sig == rule.sig && s.key() < rule.key()).find(|s| {
+                exs.iter().all(|e| match discover::predict_x(rule.xf, &rule.form, &e.terms) {
+                    Some(v) => discover::predict_x(s.xf, &s.form, &e.terms) == Some(v),
+                    None => true,
+                })
+            });
+            if let Some(s) = simpler.cloned() {
+                let cites: Vec<String> = applies.iter().map(|x| x.0.clone()).take(discover::MAX_CITE).collect();
+                let reason = format!("on all {} logged examples of difficulty {} where it applies, the simpler rule {} applies and gives the identical prediction, so it adds nothing", applies.len(), rule.sig, s.id);
+                out.push(self.retire(&rule, "merged", &reason, cites, Some(s.id.clone()), json!({ "merged_into": s.id, "examples_where_it_applies": applies.len() })));
+            }
+        }
+        out
+    }
+
+    fn retire(&mut self, rule: &Rule, why: &str, reason: &str, mut cites: Vec<String>, into: Option<String>, detail: Value) -> (NewEvent, NewRevision) {
+        let at = iso_at(self.state.clock);
+        let text = format!("rule {} for pattern difficulty {} retired at step {}: {reason}; it stays in the log and is no longer applied", rule.id, rule.sig, self.state.step);
+        let mut tags = vec!["rule_retired".to_string(), format!("rule_id:{}", rule.id), format!("reason:{why}"), format!("at_step:{}", self.state.step), format!("sig:{}", rule.sig)];
+        if let Some(i) = &into {
+            tags.push(format!("into:{i}"));
+        }
+        let ev = NewEvent { source: SOURCE.into(), occurred_at: at.clone(), kind: "note".into(), text, tags, redacted: false };
+        let ev_id = event_id(&ev.source, &ev.occurred_at, &ev.text);
+        cites.push(ev_id);
+        let rationale = json!({ "rule_id": rule.id, "action": if into.is_some() { "merged into a simpler rule" } else { "retired" }, "reason": reason, "detail": detail, "retired_at_step": self.state.step, "rule_event": rule.event_id });
+        let revision = NewRevision {
+            entity_type: "rule".into(),
+            key: format!("being/rule/{}", rule.id),
+            stance: format!("{}: pattern difficulty {}: {}", if into.is_some() { "merged" } else { "retired" }, rule.sig, rule.form.dsl()),
+            confidence: 0.9,
+            rationale: rationale.to_string(),
+            supersedes: None,
+            valid_from: at,
+            author: "rule:being-prune".into(),
+            caused_by: cites,
+        };
+        self.state.apply_retire(&rule.id);
+        (ev, revision)
+    }
+
     /// Take an accepted form into the rule book and build its records. `via`: (advice id, advisor) when an advisor proposed it.
     /// None if the rule is already held.
     pub fn accept_found(&mut self, f: &Found, via: Option<(&str, &str)>) -> Option<NewRule> {
-        let mut rule = Rule::new(f.sig, f.form, f.train_ok, f.val_ok, self.state.step);
+        let nblocks = if f.xf.is_id() { 0 } else { self.last_blocks as u32 };
+        let mut rule = Rule::new_x(f.sig, f.xf, f.form, f.train_ok, f.val_ok, self.state.step, nblocks);
         if self.state.rules.iter().any(|r| r.id == rule.id) {
             return None;
+        }
+        if let Some(l) = &self.limits {
+            let live = self.state.live_rules();
+            if live >= l.max_live_rules {
+                let cap = l.max_live_rules as u64;
+                self.refuse(Refusal::new("max_live_rules", cap, live as u64 + 1, format!("rule {} ({} {}) for difficulty {} is verified but was not added: {live} rules are live", rule.id, f.xf.code(), f.form.code(), f.sig)));
+                return None;
+            }
         }
         let at = iso_at(self.state.clock);
         let (mut event, ev_id) = rule.event(at.clone());
@@ -653,6 +811,9 @@ impl<'a> Engine<'a> {
             "cited_examples": f.cite.len(), "accepted_at_step": self.state.step,
             "grammar": "author-defined: 14 linear forms over lags 1-3 (optional constant) and polynomials of degree 1-3 in the term index; coefficients fitted per task",
         });
+        if !f.xf.is_id() {
+            rationale["composition"] = json!({ "transform": f.xf.code(), "transform_words": f.xf.words(), "building_block": f.form.code(), "verified_blocks_available": self.last_blocks, "note": "the form is one the being had already accepted as a plain rule; the transform is one of the author-defined primitives (differences, running sums, parity subsequence), at most two chained" });
+        }
         if let Some((aid, who)) = via {
             rationale["proposed_by_advisor"] = json!(who);
             rationale["advice_id"] = json!(aid);
@@ -682,10 +843,16 @@ pub struct RunCfg {
     pub explore_c: Option<f64>,
     /// `Some(Chooser::Model)` creates a menu-world being with the learned planner; fixed once created.
     pub chooser: Option<Chooser>,
+    /// B5: caps and switches of the controller for this run (None: no controller, the B2 behaviour).
+    pub ctl: Option<Limits>,
     pub steps: u64,
     pub refill_when_exhausted: bool,
     /// `Some(true)` creates a being in the extended pattern world (menu world only); fixed once created.
     pub extended: Option<bool>,
+    /// `Some(true)` creates a being in the extended2 pattern world (implies extended); fixed once created.
+    pub ext2: Option<bool>,
+    /// `Some(true)` creates an extended2 being whose sequence rule of one family changes halfway through the budget; fixed once created.
+    pub rule_drift: Option<bool>,
     /// Run a discovery pass after every N-th step of the being (None or 0: never).
     pub discover_every: Option<u64>,
     /// `Some(true)` creates a being in a world with scheduled hidden changes (menu world only); fixed once created.
@@ -712,6 +879,10 @@ pub struct RunSummary {
     pub created: bool,
     /// Rules accepted during this run.
     pub new_rules: Vec<Rule>,
+    /// Refusals of this run (caps, requests the controller does not allow); each is also a log event.
+    pub refusals: Vec<Refusal>,
+    /// Ids of rules retired or merged during this run.
+    pub retired: Vec<String>,
 }
 
 impl RunSummary {
@@ -731,7 +902,8 @@ impl RunSummary {
             "advisor_quality": g.as_ref().and_then(|g| if g.advice.kind == AdvisorKind::Simulated { Some(g.advice.quality) } else { None }),
             "trust_learning": g.as_ref().map_or(false, |g| g.advice.kind != AdvisorKind::None && g.advice.trust),
             "advice": trust_json(&self.state),
-            "rules_total": self.state.rules.len(), "rules_accepted_this_run": self.new_rules.iter().map(|r| json!({ "rule_id": r.id, "signature": format!("pattern difficulty {}", r.sig), "form": r.form.code() })).collect::<Vec<_>>(),
+            "rules_total": self.state.rules.len(), "rules_live": self.state.live_rules(), "rules_retired_this_run": self.retired,
+            "controller_refusals_this_run": self.refusals.iter().map(|r| json!({ "cap": r.cap, "limit": r.limit, "requested": r.requested, "what": r.what })).collect::<Vec<_>>(), "rules_accepted_this_run": self.new_rules.iter().map(|r| json!({ "rule_id": r.id, "signature": format!("pattern difficulty {}", r.sig), "form": r.form.code() })).collect::<Vec<_>>(),
             "new_being": self.created, "version_before": self.version_before, "version_after": self.version_after,
             "domains": domain_json(&self.state),
         })
@@ -791,7 +963,7 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
     let mut state = BeingState::from_snapshot(&log.open_latest());
     let mut created = false;
     // validated before anything is written, so a refused request never creates a being
-    if cfg.discover_every.unwrap_or(0) > 0 && !state.genesis.as_ref().map_or(cfg.extended == Some(true), |g| g.extended) {
+    if cfg.discover_every.unwrap_or(0) > 0 && !state.genesis.as_ref().map_or(cfg.extended == Some(true) || cfg.ext2 == Some(true), |g| g.extended) {
         return Err(LogError::Invalid("discovery needs a being created with pattern_families extended (only then are revealed examples logged)".into()));
     }
     match &state.genesis {
@@ -853,7 +1025,11 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
             if !c.is_finite() || !(0.0..=10.0).contains(&c) {
                 return Err(LogError::Invalid("explore_c must be within 0..=10".into()));
             }
-            let extended = cfg.extended.unwrap_or(false);
+            let ext2 = cfg.ext2.unwrap_or(false);
+            let extended = cfg.extended.unwrap_or(false) || ext2;
+            if cfg.rule_drift == Some(true) && !ext2 {
+                return Err(LogError::Invalid("rule_drift needs pattern_families extended2".into()));
+            }
             if extended && chooser != Chooser::Model {
                 return Err(LogError::Invalid("pattern_families extended needs chooser model (the menu world)".into()));
             }
@@ -875,7 +1051,7 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
                 (_, None) => 0.0,
             };
             let advice = AdviceSetup { kind, quality, trust: cfg.trust.unwrap_or(true) };
-            let g = Genesis { world_seed: cfg.world_seed.unwrap_or(1), loop_seed: cfg.loop_seed.unwrap_or(1), budget, explore_c: c, chooser, extended, drift, adapt: if adapt { AdaptMode::Full } else { AdaptMode::Off }, advice };
+            let g = Genesis { world_seed: cfg.world_seed.unwrap_or(1), loop_seed: cfg.loop_seed.unwrap_or(1), budget, explore_c: c, chooser, extended: extended || ext2, ext2, rule_drift: cfg.rule_drift.unwrap_or(false), drift, adapt: if adapt { AdaptMode::Full } else { AdaptMode::Off }, advice };
             let (ev, id) = genesis_event(&g);
             log.append_events(&[ev])?;
             state.start(g, id);
@@ -895,15 +1071,22 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
 
     let menu = g.chooser == Chooser::Model;
     let mut mc = ModelChooser::for_genesis(&g);
-    let mut engine = Engine::new(world_for(&g), state, thinker).with_advisor(advisor);
+    let mut engine = Engine::new(world_for(&g), state, thinker).with_advisor(advisor).with_limits(cfg.ctl.clone());
     let mut new_rules: Vec<Rule> = vec![];
+    let mut retired: Vec<String> = vec![];
     let mut pending = Batch::default();
     let mut pending_steps = 0usize;
     let (mut done, mut reward, mut cost) = (0u64, 0i64, 0i64);
     let stopped;
     loop {
-        if let Some(r) = policy.gate(done) {
+        if let Some(r) = policy.gate_cost(done, cost) {
             stopped = r;
+            if matches!(r, StopReason::Killed | StopReason::EnergyCap) {
+                pending.events.push(controller::stop_event(r.as_str(), engine.state.step, engine.state.clock));
+                if r == StopReason::EnergyCap {
+                    engine.refuse(Refusal::new("max_energy_per_run", policy.max_energy.unwrap_or(0).max(0) as u64, cost.max(0) as u64, format!("the run spent {cost} energy units and may not start another step")));
+                }
+            }
             break;
         }
         let stepped = if menu { engine.step_menu(&mut mc) } else { engine.step(picker) };
@@ -932,6 +1115,14 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
                         new_rules.push(nr.rule);
                     }
                 }
+                for (ev, rev) in engine.housekeeping() {
+                    retired.push(tag(&ev.tags.join(","), "rule_id").unwrap_or("").to_string());
+                    pending.events.push(ev);
+                    pending.revisions.push(rev);
+                }
+                for r in engine.take_refusals() {
+                    pending.events.push(r.event(engine.state.step, engine.state.clock));
+                }
                 if pending_steps >= FLUSH_EVERY {
                     log.commit_batch(std::mem::take(&mut pending))?;
                     pending_steps = 0;
@@ -959,6 +1150,9 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
         }
     }
     let (carry_events, carry_rules) = engine.take_carry();
+    for r in engine.take_refusals() {
+        pending.events.push(r.event(engine.state.step, engine.state.clock));
+    }
     pending.events.extend(carry_events);
     for nr in carry_rules {
         pending.revisions.push(nr.revision);
@@ -967,5 +1161,5 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
     if !pending.events.is_empty() {
         log.commit_batch(pending)?;
     }
-    Ok(RunSummary { steps_run: done, stopped, reward, cost, state: engine.state, version_before, version_after: log.latest_version(), created, new_rules })
+    Ok(RunSummary { steps_run: done, stopped, reward, cost, state: engine.state, version_before, version_after: log.latest_version(), created, new_rules, refusals: engine.refusals_total, retired })
 }

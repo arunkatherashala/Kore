@@ -192,7 +192,7 @@ fn exact_answer(t: &TaskView) -> i64 {
         PatArith | PatGeom | PatQuad | PatFib => pattern(p).0,
         PatAlt => p[p.len() - 1] + (p[p.len() - 2] - p[p.len() - 3]),
         // no fixed method knows these families
-        ExtAffGeom | ExtPoly3 | ExtRec2 | ExtTribo | ExtAlt | ExtPeriodic | NegProd | NegPrimes => last_difference(p),
+        ExtAffGeom | ExtPoly3 | ExtRec2 | ExtTribo | ExtAlt | ExtPeriodic | NegProd | NegPrimes | Ext2SplitQuad | Ext2ParityCubic | Ext2CubeGeom | Ext2AltCube | NegLcg | NegMod7 | DriftAff | DriftPoly3 | DriftRec2 | DriftTribo => last_difference(p),
     }
 }
 
@@ -252,7 +252,7 @@ fn solve(t: &TaskView) -> (i64, bool, String) {
         UnitHms => (3600 * p[0] + 60 * p[1], false, "heuristic:drop-seconds".into()),
         UnitTrip => (p[0] * p[1] * 16, false, "heuristic:approx-factor".into()),
         PatArith | PatGeom | PatQuad | PatFib | PatAlt => pattern(p),
-        ExtAffGeom | ExtPoly3 | ExtRec2 | ExtTribo | ExtAlt | ExtPeriodic | NegProd | NegPrimes => (last_difference(p), false, "heuristic:last-difference".into()),
+        ExtAffGeom | ExtPoly3 | ExtRec2 | ExtTribo | ExtAlt | ExtPeriodic | NegProd | NegPrimes | Ext2SplitQuad | Ext2ParityCubic | Ext2CubeGeom | Ext2AltCube | NegLcg | NegMod7 | DriftAff | DriftPoly3 | DriftRec2 | DriftTribo => (last_difference(p), false, "heuristic:last-difference".into()),
     }
 }
 

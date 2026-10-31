@@ -13,7 +13,7 @@ fn open(root: &std::path::Path) -> VersionedLog {
 }
 
 fn cfg(world: u64, seed: u64, steps: u64, budget: i64) -> RunCfg {
-    RunCfg { world_seed: Some(world), loop_seed: Some(seed), budget: Some(budget), explore_c: None, chooser: None, steps, refill_when_exhausted: false, extended: None, discover_every: None, drift: None, adapt: None, advisor: None, advisor_quality: None, trust: None }
+    RunCfg { world_seed: Some(world), loop_seed: Some(seed), budget: Some(budget), explore_c: None, chooser: None, steps, refill_when_exhausted: false, extended: None, discover_every: None, drift: None, adapt: None, advisor: None, advisor_quality: None, trust: None, ..Default::default() }
 }
 
 fn run_logged(root: &std::path::Path, world: u64, seed: u64, steps: u64, budget: i64) -> VersionedLog {
@@ -226,7 +226,7 @@ fn being_sources_have_no_file_network_or_process_access() {
     let mut n = 0;
     for f in std::fs::read_dir(&dir).unwrap().flatten() {
         let name = f.file_name().to_string_lossy().to_string();
-        if name == "tests.rs" || !name.ends_with(".rs") {
+        if name.starts_with("tests") || !name.ends_with(".rs") {
             continue;
         }
         n += 1;

@@ -20,6 +20,17 @@ struct Server {
 
 impl Server {
     fn start(root: &Path, fake_home: &Path, owner: &str) -> Server {
+        // the owner's hand-written controller (B5): generous caps so the older end-to-end scenarios can run
+        let cdir = root.join(owner);
+        let _ = std::fs::create_dir_all(&cdir);
+        if !cdir.join("controller.txt").exists() {
+            std::fs::write(cdir.join("controller.txt"), "max_steps_per_run = 5000
+max_energy_per_run = 1000000
+max_live_rules = 100
+composition = on
+pruning = on
+").unwrap();
+        }
         let mut child = Command::new(env!("CARGO_BIN_EXE_kore-self"))
             .arg(owner)
             .env("KORE_SELF_HOME", root)

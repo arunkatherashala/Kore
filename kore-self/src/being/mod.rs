@@ -11,8 +11,10 @@
 
 pub mod advice;
 pub mod chooser;
+pub mod controller;
 pub mod discover;
 pub mod measure;
+pub mod measure_b5;
 pub mod model;
 pub mod planner;
 pub mod policy;
@@ -25,6 +27,10 @@ pub mod world;
 pub mod run_loop;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_b5;
+#[cfg(test)]
+mod tests_b5b;
 
 pub use chooser::{DomainPicker, Ucb1};
 pub use policy::{Policy, StopReason};

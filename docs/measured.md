@@ -1043,6 +1043,77 @@ Caveats. All intervals are percentile bootstrap intervals, the block bootstrap i
 * Ledger: forecasts are written before any outcome exists, with the log version they were computed from (`cutoff-v<N>` in the model version); a `made_at` earlier than events already in the log is refused; `predict_resolve` refuses an outcome dated before its forecast or citing an event that is not after it; `predict_score` excludes and lists pairs written around those guards (outcome dated before the forecast, outcome in the same commit as the forecast); below the minimum number of observations a predictor does not forecast and a refusal event is logged; fewer than 30 common questions give "insufficient data", never a verdict.
 * Floors (`measured_context_count_beats_frequency_where_context_matters`, `measured_no_predictor_wins_on_pure_noise`, `measured_recency_beats_frequency_under_drift`, seeds 1..8): context-count is "better" than frequency and uniform in every seed with accuracy above 0.70 and Brier below 0.5; no predictor is "better" than uniform or frequency on noise and frequency ECE stays below 0.12; recency is "better" than frequency and uniform under drift. These guard against regressions on synthetic data; they are not accuracy claims.
 
+## Track B5: composition of verified building blocks, pruning, controller (synthetic world, author-defined families)
+
+Everything here is a simulation written by one author: the sequence families, the 17-form grammar, the 7 transforms, the rewards and the solvers. "Composition" means a search over transform-then-form pairs where the form is one the being already accepted as a rule; it is not open-ended invention. Measured with `cargo run -p kore-self --example measure_being --offline --release -- b5` (modes `b5-compose`, `b5-prune`, `b5-prune-wide`, `b5-caps`, `b5-kill`, `b5-tune`), 2026-10-31, branch self-b5, commits c01c1f46 and later. Report seeds 1..20, tuning seeds 101..120 (used only for the pruning settings). The model learner and its settings are those of B2 (beta 1.5, discovery pass every 10 steps); budgets 3000 and 6000.
+
+World. `extended2` = every family of the B2 extended world plus four families outside the 17-form grammar that composition can express (a test shows the plain search never accepts them): even and odd terms following two different quadratics, n^3 plus an alternating term, a cubic plus a geometric term, and (-1)^n times a cubic; plus negative controls that nothing in the search space expresses (product recurrence, consecutive primes, a modulo-101 generator, squares modulo 7). Several families share a difficulty (one signature), so the rule for one family must never be applicable-and-wrong on the others.
+
+### Composition vs the B2 grammar only (report seeds 1..20, n = 20 worlds)
+
+Reward per energy unit, mean [95% interval of the mean]:
+
+| policy | budget 3000 | budget 6000 |
+|---|---|---|
+| no discovery | 3.654 [3.297, 4.010] | 3.722 [3.374, 4.069] |
+| B2 discovery (17-form grammar only) | 3.648 [3.291, 4.005] | 3.721 [3.374, 4.068] |
+| discovery with composition | 3.654 [3.301, 4.007] | 3.736 [3.398, 4.074] |
+
+Paired differences: composition minus grammar only +0.006 [-0.008, +0.019] (2 wins, 1 loss, 17 ties) at 3000 and +0.015 [-0.023, +0.053] (2 wins, 2 losses, 16 ties) at 6000. Grammar only minus no discovery -0.006 [-0.014, +0.002] and -0.001 [-0.004, +0.003]. Composition minus no discovery -0.000 [-0.016, +0.015] and +0.014 [-0.023, +0.052]. **No reward gain from composition is established in this world.** Rules answer very few attempts (per world: B2 3.4 and 5.4, composition 5.2 and 14.4 of about 700 and 1400 attempts), so even a larger rule book changes little.
+
+What composition does change is what gets found. Families covered by the final rule book (at least 90% exact on 100 fresh tasks of the family, scored against hidden truth that the being never sees), worlds out of 20, budget 3000 / 6000:
+
+| family | B2 grammar only | composition |
+|---|---|---|
+| even/odd quadratics (parity split) | 0 / 0 | 9 / 9 |
+| n^3 + alternating term | 0 / 0 | 5 / 6 |
+| cubic + geometric (second differences) | 0 / 0 | 4 / 4 |
+| (-1)^n times a cubic | 0 / 0 | 2 / 2 |
+| the six B2 grammar families, summed over families | 32 / 35 of 120 | 35 / 38 of 120 |
+
+Recall of the composable families: 0 of 80 for B2, 20 of 80 (25.0%) at 3000 and 21 of 80 (26.2%) at 6000 for composition. Recall is low: a block must be accepted first (for example the cubic polynomial from another family), and families that share a signature dilute each other's examples, as in B2. Composed rules accepted over all 20 worlds at 3000: parity then difference then polynomial 1: 9; parity then polynomial 3: 7; second differences then a 3-lag recurrence: 5; second differences then lag-2 with constant: 2.
+
+Junk or wrong rules. Rules accepted: B2 55 and 59, composition 81 and 87 (23 and 24 composed). Exact on 300 fresh tasks of their signature (never applicable-and-wrong, right at least once): all of them. Wrong or overfit: **0** in every arm, worlds with a wrong rule 0 of 20. Negative controls on fresh tasks with the final book: for all four families, in both arms, the share of tasks where some rule was applied is 0.000 and the wrong share is 0.000. Separately, tests run the search on 200 examples of each negative control in 10 worlds with nine blocks supplied: 0 rules accepted.
+
+### Pruning, rule drift (report seeds 1..20)
+
+Settings chosen on tuning seeds 101..120 at budget 3000: window 6 latest uses, at least 4 uses, retire below a 0.5 success rate (grid tried: (10,6,0.5), (10,6,0.3), (8,5,0.5), (10,8,0.5), (16,8,0.4), (6,4,0.5); wrong rule answers after the change per affected world 2.17, 2.50, 2.00, 2.17, 2.83, 1.83 against 3.50 without pruning; reward per energy identical to 0.003; no retirements in the stationary control for any setting). The planned 7th setting and the budget 6000 grid were not run (my run hit its time limit). A rule is also merged into a simpler live rule of the same signature when it applies to at least 5 logged examples and the simpler rule always agrees.
+
+Narrow drift: at half the budget the revealed next term of one family (difficulty 2, affine-geometric) changes, so the old rule fits every prefix and gives a wrong answer. Worlds where that rule was live at the change: 9 of 20. Over those worlds, after the change, budget 3000, no cap:
+
+| measure | no pruning | pruning |
+|---|---|---|
+| wrong answers produced by a rule, per world | 0.222 | 0.222 |
+| reward per energy | 3.691 | 3.691 |
+
+Identical: the being almost never used the stale rule (7.9 rule answers per world, 2 wrong in total) because its world model had already learned that the `discovered` strategy fails there. With a live-rule cap of 8: wrong answers 0.556 vs 0.333 per world (difference -0.222 [-0.687, +0.243], lower in 1 of 9 worlds), one retirement. Budget 6000, no cap: 0.444 vs 0.444, reward 3.709 vs 3.707.
+
+Wide drift (four families with plain rules change at half the budget; measurement-only world option), budget 3000, 11 of 20 worlds with a stale rule live, no cap:
+
+| measure | no pruning | pruning |
+|---|---|---|
+| wrong answers produced by a rule, per world | 2.455 | 1.182 (difference -1.273 [-3.937, +1.391]; lower in 1 of 11 worlds) |
+| share of rule answers that are wrong (pooled) | 0.500 | 0.361 |
+| reward per energy | 3.667 | 3.668 (+0.002 [-0.002, +0.005]) |
+
+Retirements in the pruning arm: 4 (3 low success, 1 merged), in 1 world with a retirement after the change (first one 47 steps after the change). **Wrong-rule use falls in the wide scenario, but the effect rests on one world and its interval includes zero; there is no reward effect.** Stationary control (no drift): reward identical with and without pruning (3.654); 2 merges in 20 worlds, no low-success retirement, so pruning did not remove good rules here.
+
+Rule count over time (mean live rules over 20 worlds, no cap, narrow scenario, no pruning vs pruning): after step 25: 0.40 / 0.40, 100: 1.00 / 1.00, 200: 2.25 / 2.25, 300: 3.35 / 3.30, 400: 3.85 / 3.75, 600: 4.00 / 3.90 (wide: 3.70 / 3.55 at 400). Without a cap the largest rule count in any world was 15 (narrow, no pruning) and 13 with pruning; with a cap of 8 the largest was 8, with 6 cap refusals logged per arm.
+
+### Caps and kill switch
+
+Caps run (budget 3000, 20 worlds, composition on): live rules 3, building blocks 2, search candidates per pass 60, steps per run 400, energy per run 900. Largest value seen: live rules 3, blocks used 2, candidates per pass 60, steps 400: **no cap exceeded**. Energy: the cap stops new steps once reached; overshoot was at most 4 units (a step that starts below the cap may end above it). 19 of 20 runs ended at the energy cap, 1 at the step limit. Refusals recorded: search candidates 47, live rules 3, building blocks 4; in a logged run each is a `controller_refusal` event (tests compare counts with the log).
+
+Kill switch: a check turned on before step 41 stopped 20 of 20 runs after exactly 40 steps. Tests also cover a KILL file present at the start (refused and audited), a KILL file created while the loop runs (the next check stops it: 7 steps ran, the file appeared at the 8th check) and the stop event in the log.
+
+### What is tested (not measured)
+
+controller.txt parsing (defaults, hard maxima, unknown or repeated keys, fail closed: every cap 0), the reserved-file refusal for every spelling of `controller.txt`, audit rows for each refusal kind, replay of composed and retired rules from the log alone (rule re-derivation includes composed rules), time travel across a retirement, nothing deleted, a capped search being a prefix of the uncapped search, the source scans (the being sources have no file or network API; `discover.rs` names no hidden family).
+
+### What B5 does not show
+
+No reward gain from composition; the pruning effect is small and rests on a few worlds; the families, transforms and rewards are the author's; the tuning grid was cut short; no real data, no real language model, no long unattended run, no crash recovery; sensitivity to the world design (the number of families sharing a signature, prefix length) was not swept.
+
 ## Not measured
 
 Real-life data of any kind (the free-text section above is also synthetic); the probabilities of the live ledger (`predict_make`/`predict_score` have not been run on real data; the S4 numbers above are synthetic sequences only; the older `self_ledger_snapshot` rows are not scored by any measurement); behaviour with
