@@ -155,6 +155,9 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
     } else {
         steps
     };
+    // refusals made before the run starts are audited now, so that a run that fails later still leaves them
+    audit_refusals(owner, &refused);
+    let mut refused_pre: Vec<(String, u64, u64, String)> = std::mem::take(&mut refused);
     let cfg = RunCfg {
         ctl: Some(limits),
         ext2,
@@ -206,6 +209,8 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         refused.push(("kill_switch".into(), 0, s.steps_run, format!("the KILL file stopped the run after {} steps", s.steps_run)));
     }
     audit_refusals(owner, &refused);
+    refused_pre.extend(refused);
+    let refused = refused_pre;
     let mut out = s.to_json();
     out["controller"] = json!({
         "origin": "controller.txt", "max_live_rules": ctl.max_live_rules, "max_building_blocks": ctl.max_building_blocks, "max_search_candidates": ctl.max_search_candidates,
@@ -461,3 +466,7 @@ pub fn tool_defs() -> Vec<Value> {
           "inputSchema": { "type": "object", "properties": {} } }),
     ]
 }
+
+#[cfg(test)]
+#[path = "being_tools_b5_tests.rs"]
+mod b5_tests;

@@ -202,16 +202,16 @@ pub fn prune_scenario(label: &str, seeds: std::ops::RangeInclusive<u64>, budget:
 pub fn caps_report(seeds: std::ops::RangeInclusive<u64>, budget: i64) {
     let n = seeds.clone().count();
     let lim = Limits { max_live_rules: 3, max_blocks: 2, max_candidates: 60, compose: true, prune: false, ..Default::default() };
-    let mut pol = Policy::new(150);
-    pol.max_energy = Some(1000);
+    let mut pol = Policy::new(400);
+    pol.max_energy = Some(900);
     println!("\n### Caps never exceeded (extended2 world, budget {budget}, n = {n} worlds)\n");
-    println!("Caps: live rules 3, building blocks 2, search candidates per pass 60, steps per run 150, energy per run 1000.\n");
+    println!("Caps: live rules 3, building blocks 2, search candidates per pass 60, steps per run 400, energy per run 900.\n");
     let runs: Vec<B5Out> = seeds.clone().map(|s| run_b5(s, budget, false, Some(lim.clone()), EVERY, &pol)).collect();
     let max_live = runs.iter().map(|r| r.max_live()).max().unwrap();
     let max_steps = runs.iter().map(|r| r.steps).max().unwrap();
     let max_cands = runs.iter().map(|r| r.max_candidates_seen).max().unwrap();
     let max_blocks = runs.iter().flat_map(|r| r.accepted.iter().map(|a| a.1.nblocks)).max().unwrap_or(0);
-    let over = runs.iter().map(|r| (r.cost - 1000).max(0)).max().unwrap();
+    let over = runs.iter().map(|r| (r.cost - 900).max(0)).max().unwrap();
     let stops = runs.iter().fold([0; 3], |mut a, r| {
         match r.stopped {
             Some(StopReason::MaxSteps) => a[0] += 1,
@@ -223,10 +223,10 @@ pub fn caps_report(seeds: std::ops::RangeInclusive<u64>, budget: i64) {
     println!("| cap | limit | largest value seen in any world | exceeded |");
     println!("|---|---|---|---|");
     println!("| live rules | 3 | {max_live} | {} |", if max_live > 3 { "YES" } else { "no" });
-    println!("| steps per run | 150 | {max_steps} | {} |", if max_steps > 150 { "YES" } else { "no" });
+    println!("| steps per run | 400 | {max_steps} | {} |", if max_steps > 400 { "YES" } else { "no" });
     println!("| search candidates per pass | 60 | {max_cands} | {} |", if max_cands > 60 { "YES" } else { "no" });
     println!("| building blocks used by a composed rule | 2 | {max_blocks} | {} |", if max_blocks > 2 { "YES" } else { "no" });
-    println!("| energy per run (a step that starts below the cap may end above it) | 1000 | overshoot at most {over} units | {} |", if over > 0 { "overshoot by the last step" } else { "no" });
+    println!("| energy per run (a step that starts below the cap may end above it) | 900 | overshoot at most {over} units | {} |", if over > 0 { "overshoot by the last step" } else { "no" });
     println!("\nRuns ended by: step limit {}, energy cap {}, other {}", stops[0], stops[1], stops[2]);
     let mut by: std::collections::BTreeMap<String, usize> = Default::default();
     for r in &runs {
