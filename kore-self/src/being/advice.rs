@@ -653,4 +653,24 @@ mod tests {
         let always = SimulatedAdvisor::new(1, 1.0, ranker());
         assert_eq!(always.advise(&req()).menu.unwrap().slot, 3);
     }
+
+    #[test]
+    fn the_request_an_advisor_sees_holds_only_the_synthetic_task_features() {
+        // Track B4b: exact key sets of the request (standard menu world and the extended world with terms)
+        let keys = |v: &Value| -> Vec<String> { let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect(); k.sort(); k };
+        let mut r = req();
+        r.rule_sigs_wanted = vec![];
+        let v = r.to_json();
+        assert_eq!(keys(&v), ["instructions", "offers", "rule_signatures_wanted", "step", "strategies", "task", "version"]);
+        for o in v["offers"].as_array().unwrap() {
+            assert_eq!(keys(o), ["difficulty", "domain", "listed_cost", "listed_reward", "slot"]);
+        }
+        r.offers[0].terms = Some(vec![1, 2, 3]);
+        assert_eq!(keys(&r.to_json()["offers"][0]), ["difficulty", "domain", "listed_cost", "listed_reward", "slot", "terms"]);
+        // nothing path-like or credential-like in the text sent to the program
+        let text = r.to_json().to_string().to_lowercase();
+        for bad in ["c:\\", "/users/", "/home/", "userprofile", "token", "password", "secret", "api_key", "sk-", "@"] {
+            assert!(!text.contains(bad), "{bad} in {text}");
+        }
+    }
 }

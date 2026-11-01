@@ -8,6 +8,7 @@
 //!   advise_best [strategy]  advisor protocol (Track B4): reply with the offer of best listed reward per cost
 //!   advise_echo             advisor protocol: report whether the request still held the word algebra or a redaction marker
 //!   advise_rule <sig> <form>  advisor protocol: propose a rule of the B2 grammar
+//!   advise_leak <text>      advisor protocol: option 0/fast with a note echoing <text> (redaction tests)
 
 use std::io::{Read, Write};
 
@@ -39,6 +40,11 @@ fn main() {
             let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default();
             let allowed = std::env::var("KORE_HELPER_ALLOWED").unwrap_or_default();
             out(serde_json::json!({"reply": format!("ENV names={} allowed={} cwd={}", names.join(","), allowed, cwd)}));
+        }
+        "advise_leak" => {
+            let mut s = String::new();
+            let _ = std::io::stdin().read_to_string(&mut s);
+            out(serde_json::json!({"slot": 0, "strategy": "fast", "note": format!("echo: {}", args.get(1).cloned().unwrap_or_default())}));
         }
         "advise_best" | "advise_echo" | "advise_rule" => {
             let mut s = String::new();

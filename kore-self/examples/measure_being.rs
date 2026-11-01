@@ -13,6 +13,16 @@ mod being;
 mod advice_mode;
 #[path = "measure_being_parts/b5.rs"]
 mod b5_mode;
+#[path = "../src/safety.rs"]
+mod safety;
+#[path = "../src/redact.rs"]
+mod redact;
+#[path = "measure_being_parts/authorize_shim.rs"]
+mod authorize;
+#[path = "measure_being_parts/chat_shim/mod.rs"]
+mod chat;
+#[path = "measure_being_parts/llm_pilot.rs"]
+mod llm_pilot_mode;
 #[path = "measure_being_parts/b6.rs"]
 mod b6_mode;
 
@@ -523,6 +533,10 @@ fn main() {
         a.insert(1, "x".into());
         a[2] = args[1].clone();
         b5_mode::main_b5(&a);
+        return;
+    }
+    if args.get(1).map(|a| a == "llm-pilot" || a == "llm-pilot-report").unwrap_or(false) {
+        llm_pilot_mode::main_pilot(&args);
         return;
     }
     if args.get(1).map(|a| a == "advice").unwrap_or(false) {

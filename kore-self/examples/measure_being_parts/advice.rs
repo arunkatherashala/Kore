@@ -30,7 +30,7 @@ pub struct Met {
     pub after: f64,
 }
 
-fn met(r: &AdvRun, target: f64, spec: &TrustSpec, split: usize) -> Met {
+pub fn met(r: &AdvRun, target: f64, spec: &TrustSpec, split: usize) -> Met {
     let n = r.run.recs.len();
     let tests = r.info.iter().filter(|i| i.tested).count() as u64;
     let (mut tw, mut tn, mut wsum) = (0.0, 0.0, 0.0);

@@ -378,3 +378,36 @@ fn rule_proposals_from_a_command_advisor_must_pass_the_verified_search() {
     assert_eq!(st["replay_check"]["re_derived_from_log_and_equal"], 400);
     s.stop();
 }
+
+#[test]
+fn logged_advice_holds_only_synthetic_features_and_no_home_path_or_credential() {
+    // Track B4b: what a (real) advisor program sees and what is logged. The helper `advise_leak` plays a model that
+    // echoes a home path, a key-like string and an e-mail address back in its note; the harness configuration
+    // (redact_patterns.txt with the home path and the key prefix) and the built-in redactor must keep them out of the log.
+    let root = tempfile::tempdir().unwrap();
+    let fake_home = tempfile::tempdir().unwrap();
+    let owner = "e2eleak";
+    let od = root.path().join(owner);
+    std::fs::create_dir_all(&od).unwrap();
+    std::fs::write(od.join("autonomy_policy.txt"), POLICY).unwrap();
+    let home_s = fake_home.path().to_string_lossy().to_string();
+    std::fs::write(od.join("redact_patterns.txt"), format!("{home_s}\nsk-ant-\n")).unwrap();
+    advisor_file(&od, &["advise_leak", &format!("{home_s}\.claude\secret sk-ant-FAKEKEY123 owner@example.com")], &[]);
+    let mut s = Server::start(root.path(), fake_home.path(), owner);
+    s.json("being_run", json!({"steps": 10, "seed": 1, "world_seed": 3, "budget": 3000, "chooser": "model", "advisor": "command"}));
+    let advice = s.count("SELECT COUNT(*) AS n FROM events WHERE source = 'advisor' AND tags LIKE '%ev:advice%'");
+    assert_eq!(advice, 10);
+    let esc = home_s.replace('\', "\\\\");
+    for needle in [home_s.as_str(), esc.as_str(), "sk-ant-FAKEKEY123", "owner@example.com", "USERPROFILE", "APPDATA", "KORE_SELF_HOME", "credentials", "password", "api_key", "authorization"] {
+        let q = format!("SELECT COUNT(*) AS n FROM events WHERE source = 'advisor' AND text LIKE '%{}%'", needle.replace('\'', "''"));
+        assert_eq!(s.count(&q), 0, "{needle} appears in a logged advisor event");
+    }
+    // the redaction markers prove the reply really carried them
+    assert!(s.count("SELECT COUNT(*) AS n FROM events WHERE source = 'advisor' AND text LIKE '%[REDACTED%'") >= 10);
+    // the logged request has the synthetic task fields
+    let t = s.first_cell("SELECT text FROM events WHERE source = 'advisor' AND tags LIKE '%ev:advice%' LIMIT 1", "text").unwrap();
+    for key in ["\"offers\"", "\"listed_cost\"", "\"listed_reward\"", "\"difficulty\"", "\"domain\"", "\"slot\"", "\"strategies\""] {
+        assert!(t.contains(key), "{key} missing in {t}");
+    }
+    s.stop();
+}
