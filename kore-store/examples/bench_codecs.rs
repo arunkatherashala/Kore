@@ -100,6 +100,7 @@ fn main() {
     let v3_auto = WriteOptions::auto();
     let v3_lz4 = WriteOptions { default: ColumnCodec::new(Transform::Auto, Stage::Lz4), columns: vec![] };
     let v3_zstd = WriteOptions { default: ColumnCodec::new(Transform::Auto, Stage::Zstd), columns: vec![] };
+    let v3_hz = WriteOptions { default: ColumnCodec::new(Transform::Auto, Stage::Hz), columns: vec![] };
 
     type W<'a> = Box<dyn Fn() -> Vec<u8> + 'a>;
     let writers: Vec<(&str, W)> = vec![
@@ -107,28 +108,27 @@ fn main() {
         ("v3 auto (lz4|hz|zstd)", Box::new(|| KoreWriter::to_bytes_with(&block, &v3_auto).unwrap())),
         ("v3 transforms+lz4", Box::new(|| KoreWriter::to_bytes_with(&block, &v3_lz4).unwrap())),
         ("v3 transforms+zstd", Box::new(|| KoreWriter::to_bytes_with(&block, &v3_zstd).unwrap())),
+        ("v3 transforms+hz", Box::new(|| KoreWriter::to_bytes_with(&block, &v3_hz).unwrap())),
     ];
     let k = writers.len();
     let mut wt: Vec<Vec<f64>> = vec![vec![]; k];
     let mut rt: Vec<Vec<f64>> = vec![vec![]; k];
     let mut sizes = vec![0usize; k];
-    let mut files: Vec<Vec<u8>> = vec![vec![]; k];
     for rep in 0..reps {
+        // round-robin over the variants; each file is read back right after it is written, then dropped
         for (i, (_, w)) in writers.iter().enumerate() {
             let t = Instant::now();
-            let b = w();
+            let bytes = w();
             wt[i].push(t.elapsed().as_secs_f64());
-            sizes[i] = b.len();
-            files[i] = b;
-        }
-        for i in 0..k {
+            sizes[i] = bytes.len();
             let t = Instant::now();
-            let back = KoreReader::from_bytes(&files[i]).unwrap();
+            let back = KoreReader::from_bytes(&bytes).unwrap();
             rt[i].push(t.elapsed().as_secs_f64());
+            drop(bytes);
             if rep == 0 {
                 assert_eq!(back.num_rows, block.num_rows);
                 // logical equality (the v2 reader may hand back StrDict for low-cardinality strings)
-                for (a, b) in back.columns.iter().zip(&block.columns) {
+                for (a, b) in back.columns.into_iter().zip(&block.columns) {
                     let strs = |c: &ColumnData| match c {
                         ColumnData::Str(v) => Some(v.clone()),
                         ColumnData::StrDict { codes, dict } => Some(codes.iter().map(|&x| if x == u8::MAX { None } else { Some(dict[x as usize].clone()) }).collect()),
@@ -141,9 +141,6 @@ fn main() {
                 }
             }
         }
-        files.iter_mut().for_each(|f| *f = vec![]);
-        // keep the last repetition's files only for sizes; re-create next round
-        let _ = rep;
     }
     println!("| variant | size bytes | vs v2 | write median s (min-max) | read median s (min-max) |");
     println!("|---|---:|---:|---|---|");
