@@ -201,6 +201,7 @@ fn setup_home(out: &Path, python: &str, script: &str) -> Result<PathBuf, String>
             if x.len() >= 3 {
                 pats.push(x.clone());
                 pats.push(x.replace('\\', "/"));
+                pats.push(x.replace('\\', "\\\\")); // JSON-escaped form, as it appears inside a reply
             }
         }
     }

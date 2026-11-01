@@ -822,6 +822,83 @@ Test floors (`measured_trust_protects_against_bad_advice_and_blind_following_doe
 
 Not measured by B4: any real model; real tasks; an advisor whose errors are correlated with task difficulty or domain (`q` by domain exists in the simulated advisor but was not measured); advice in the drifting world; very long lives; other mixing formulas.
 
+## Track B4b: real model as advisor (pilot)
+
+**This is a PILOT. n = 3 worlds, one model, one run per world. Nothing here can establish anything; every interval below is only indicative.** The five-world plan was cut to three because calls were slow (about 17 s median, 12 to 70 s range, on a machine that was at high CPU load, and a nearly full disk for part of the day); the wall time of the three real-advisor arms was 107 minutes.
+
+Research question: where does a real language model sit as an advisor for the B4 menu world (its agreement with the oracle's choice, `q-hat`), and what does the trust learner of B4 do with it? B4 used only SIMULATED advisors; this is the first use of a real one, through the real `CommandAdvisor` (program run without a shell, cleared environment, 90 s timeout, output cap, stop after 3 failures in a row).
+
+### Setup
+
+* Model: the Claude CLI, `claude.exe --version` = `2.1.204 (Claude Code)`, `--model haiku` (an alias; the CLI does not report the resolved model version to this harness), tools denied, one turn, no session persistence. Date of the run: 2026-10-31.
+* Wrapper: `kore-self/examples/llm_advisor/claude_advisor.py` (copy of `C:\Users\skathera\kw\llm-advisor\claude_advisor.py`, which still works; the copy has a wrapper timeout of 80 s, below the 90 s of `advisor.txt`, so the wrapper cleans up its own child, and reads the CLI output as UTF-8). It sends the request JSON of `being/advice.rs` and a one-paragraph instruction written by the author; it asks for ONE JSON object.
+* `advisor.txt` is written by the harness inside a temporary data root (`<out>/home/pilot/advisor.txt`, harness configuration, not the owner's file; the real `~/.kore-self` is never touched): `command` = the venv `python.exe`, `arg = -I`, `arg = <script>`, `timeout_secs = 90`, `max_output_bytes = 65536`, and NO `env_allow` line. Minimal environment, by testing: the CLI found the login with nothing beyond what the runner always passes (`PATH`, `SystemRoot`, `TEMP`, `TMP`); with `USERPROFILE` alone, with `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, and with those plus `HOME`, `HOMEDRIVE`, `HOMEPATH`, `USERNAME` it also worked (one call each, 16 to 31 s); the pilot itself then ran 334 calls with the empty set. The harness also writes a `redact_patterns.txt` in that temporary root with the real home path and user name.
+* Worlds: `World::new(seed)`, seeds 1, 2, 3, budget 300 (this gave 107, 133 and 98 steps, not the roughly 75 expected, because the model advised `fast` at half the energy every time), trust learner at its defaults (`beta_trust` 1.0).
+* Arms per world (identical worlds, same seeds): no advisor (the B1 learner, trust machinery off); the REAL advisor with the trust learner; simulated advisors with the trust learner at q = 0.5 and q = 0.9; a simulated advisor at the real advisor's own measured q-hat of that world (context); the oracle. The real arm ran last in each world, one call at a time, never in parallel.
+* `q-hat` = share of the advisor's calls whose (slot, strategy) equals the first option of the ranking by true reward per energy over all offers and strategies (the same oracle choice the simulated advisor uses for its `q`).
+
+Command (from `kore-self`, `CARGO_TARGET_DIR` set to any directory):
+
+```
+cargo run -p kore-self --example measure_being --offline --release -- llm-pilot seeds=1-3 budget=300 out=<dir>
+cargo run -p kore-self --example measure_being --offline --release -- llm-pilot-report out=<dir>
+```
+
+`python=<path>` and `script=<path>` override the interpreter and wrapper. Results are checkpointed per world in `<dir>/worlds.jsonl` and every call in `<dir>/calls.jsonl` (the advice event text as the being would log it); a re-run with `seeds=1-5` and the same `out` skips finished worlds. The files of this run are in `kore-self/examples/llm_advisor/pilot_results_seeds1-3/`. The existing `measure_being` t interval uses the 19-degrees-of-freedom value; the pilot report uses its own t quantiles for df = n-1.
+
+### Results (seeds 1..3, budget 300)
+
+Reward per energy:
+
+| seed | steps | no advisor | simulated q = 0.5 | simulated q = 0.9 | simulated q = q-hat | REAL | oracle |
+|---|---|---|---|---|---|---|---|
+| 1 | 107 | 3.562 | 3.324 | 3.355 | 3.324 | 3.563 | 3.678 |
+| 2 | 133 | 4.114 | 4.114 | 4.020 | 4.114 | 3.980 | 3.997 |
+| 3 | 98 | 3.357 | 3.294 | 3.245 | 3.250 | 3.264 | 3.692 |
+
+(In seed 2 the oracle is below the no-advisor learner: the oracle maximises expected value per attempt, the realised reward of a 133-step run is noisy.)
+
+Paired difference against no advisor (mean, indicative 95% t interval with df = 2, wins / losses / ties):
+
+| arm | difference | interval | w / l / t |
+|---|---|---|---|
+| simulated q = 0.5 | -0.100 | [-0.406, +0.206] | 0 / 2 / 1 |
+| simulated q = 0.9 | -0.138 | [-0.289, +0.014] | 0 / 3 / 0 |
+| simulated q = q-hat | -0.115 | [-0.410, +0.181] | 0 / 2 / 1 |
+| REAL advisor, trust learner | -0.075 | [-0.247, +0.097] | 1 / 2 / 0 |
+
+Every interval contains zero. The simulated q = 0.9 arm is negative here although B4 measured +0.15 [-0.02, +0.32] at budget 600 over 20 worlds: with three worlds and budget 300 that sign is noise, which is the honest reading of how little this pilot can say about differences between arms.
+
+The real advisor, per world:
+
+| seed | calls | valid option | failures | q-hat | same slot as oracle | mean value of advised option / best value | advice followed | tests (followed against the model) / wins | pooled trust at end | latency median / max (s) | wall (min) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 105 | 105 | 0 | 0.581 | 64 | 0.728 | 63 of 104 steps | 8 / 4 | 0.531 | 21.3 / 46.1 | 40.5 |
+| 2 | 134 | 134 | 0 | 0.619 | 86 | 0.702 | 76 of 133 | 2 / 0 | 0.250 | 15.6 / 52.9 | 38.7 |
+| 3 | 95 | 95 | 0 | 0.400 | 44 | 0.524 | 53 of 94 | 8 / 3 | 0.425 | 16.2 / 58.7 | 27.4 |
+
+Pooled: 334 calls, 334 valid replies (valid JSON, a valid slot and a strategy from the list: 100%), no timeout, no failure of any kind, the 3-failures rule never triggered. q-hat = 182 / 334 = 0.545 (Wilson interval [0.491, 0.598]; the calls inside a world are not independent, so this interval is too narrow; per-world values 0.40 to 0.62). Same slot as the oracle (any strategy): 194 / 334 = 0.581. Latency per call over 334 calls: median 17.1 s, maximum 58.7 s.
+
+Where it sits: q-hat of about 0.55 is next to the simulated q = 0.5 of the B4 grid and far below the blind-following break-even of about 0.93 to 0.97 of B4. In B4 terms the model, with this prompt, in this world, is an advisor to be tested and not followed blindly; the trust learner reacted that way (pooled trust 0.25 to 0.53, and mixing weights at the end between 0.00 and 0.58 per domain, mostly near the prior). Only 18 followed-against-model tests happened in the three worlds (7 wins), so the learned trust is very uncertain; "advice followed" counts agreements with the model's own choice too and is mostly agreement.
+
+What the replies looked like: the model named the strategy `fast` in all 334 calls (the oracle's choice was `fast` in 315 of them, `careful` 15, `deep` 4), so the errors are almost all in the choice of slot, not of strategy; it always stated a `p_success`. Its notes give a reward-per-energy figure computed from the listed numbers; it uses the listed cost and reward and has no information about the hidden success rates, which is what the oracle uses.
+
+Trust over time (pooled running Beta(1,1) mean of the followed-against-model tests, at four points of the run): seed 1: 0.60, 0.60, 0.50, 0.50; seed 2: 0.50, 0.50, 0.33, 0.25 (2 tests); seed 3: 0.33, 0.50, 0.44, 0.40.
+
+Privacy and logging. The request the model receives holds only the synthetic task features (domain, difficulty, listed cost, listed reward, strategy names, the fixed instruction text); the exact key sets are asserted by the unit test `the_request_an_advisor_sees_holds_only_the_synthetic_task_features`. The end-to-end test `logged_advice_holds_only_synthetic_features_and_no_home_path_or_credential` (helper program that echoes a home path, a key-like string and an e-mail address) checks that none of them is in any logged advisor event. In the pilot the harness scanned every logged advice event (request as sent and the reply, redacted) for the real home path variants, the user name, `.credentials`, `oauth`, `sk-ant`, `bearer`, `api_key`, `password`: 0 hits in 334 events. What the scan cannot see: the Claude CLI adds its own system prompt, working directory (the temporary scratch directory), date and platform to what the service receives, and the service is reached with the owner's account; those are not part of the logged prompt.
+
+A gap found while writing the test: the redactor works on the raw text of the reply, which is JSON, so a Windows path echoed by a model comes back with doubled backslashes and a `redact_patterns.txt` line with single backslashes does not match it; the owner must list both forms (the harness now does, and so does the test). The pilot's harness list at the time of the run had the single-backslash and slash forms and the user name (which would have caught a path anyway); no reply contained a path.
+
+Cost: 334 model calls in the pilot, plus 14 calls of a smoke run (seed 99, budget 40, not reported) = 348 calls; about 107 minutes of waiting for the real arms.
+
+### Caveats
+
+n = 3 worlds (5 planned); one model through the `haiku` alias, whose resolved version is not recorded; one run per world, no repetition, and the model is not deterministic (the same request may get another answer); the prompt wording and the answer format were chosen by the author and were not tuned or compared (another wording could give another q-hat); budget 300 is shorter than the B4 budgets (600, 3000), so the trust learner has little time; the seeds and the world are the B4 synthetic world with author-defined rewards; the machine was heavily loaded, which affects latency only; the simulated arms use the same worlds but their randomness is separate from the model's.
+
+### What is NOT shown
+
+That a language model helps or hurts a being in general; that haiku, or any model, has a quality of 0.55 in other worlds or on real tasks (this is one prompt, three worlds, 334 correlated calls); that the real-advisor arm is better or worse than no advisor (the interval contains zero in all comparisons); how a larger model or another prompt would do; anything about understanding, intelligence or life. It also does not show that the trust learner works for a real advisor: with 18 tests, the learned trust is a few numbers, not a calibration.
+
 ## Prediction: baseline predictors and calibration (S4; synthetic sequences, author-defined processes)
 
 **Synthetic only.** These sequences come from `kore-self/src/predict/scenarios.rs`: four contexts, four choices, one observation per hour, with a known generating process. They say how the baselines behave when the process is exactly what the scenario describes. They say nothing about how well anything predicts a real person's choices, and no such number exists in this repository. The live ledger (`predict_make` / `predict_resolve` / `predict_score`) has not been run on real data for any period; its scoring report is only as good as the log it reads.

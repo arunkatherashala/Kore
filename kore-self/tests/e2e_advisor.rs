@@ -391,13 +391,14 @@ fn logged_advice_holds_only_synthetic_features_and_no_home_path_or_credential() 
     std::fs::create_dir_all(&od).unwrap();
     std::fs::write(od.join("autonomy_policy.txt"), POLICY).unwrap();
     let home_s = fake_home.path().to_string_lossy().to_string();
-    std::fs::write(od.join("redact_patterns.txt"), format!("{home_s}\nsk-ant-\n")).unwrap();
-    advisor_file(&od, &["advise_leak", &format!("{home_s}\.claude\secret sk-ant-FAKEKEY123 owner@example.com")], &[]);
+    let esc = home_s.replace('\\', "\\\\");
+    // the reply is JSON, so a Windows path comes back with doubled backslashes: the owner lists both forms
+    std::fs::write(od.join("redact_patterns.txt"), format!("{home_s}\n{esc}\nsk-ant-\n")).unwrap();
+    advisor_file(&od, &["advise_leak", &format!("{home_s}\\.claude\\secret sk-ant-FAKEKEY123 owner@example.com")], &[]);
     let mut s = Server::start(root.path(), fake_home.path(), owner);
     s.json("being_run", json!({"steps": 10, "seed": 1, "world_seed": 3, "budget": 3000, "chooser": "model", "advisor": "command"}));
     let advice = s.count("SELECT COUNT(*) AS n FROM events WHERE source = 'advisor' AND tags LIKE '%ev:advice%'");
     assert_eq!(advice, 10);
-    let esc = home_s.replace('\', "\\\\");
     for needle in [home_s.as_str(), esc.as_str(), "sk-ant-FAKEKEY123", "owner@example.com", "USERPROFILE", "APPDATA", "KORE_SELF_HOME", "credentials", "password", "api_key", "authorization"] {
         let q = format!("SELECT COUNT(*) AS n FROM events WHERE source = 'advisor' AND text LIKE '%{}%'", needle.replace('\'', "''"));
         assert_eq!(s.count(&q), 0, "{needle} appears in a logged advisor event");
@@ -405,9 +406,9 @@ fn logged_advice_holds_only_synthetic_features_and_no_home_path_or_credential() 
     // the redaction markers prove the reply really carried them
     assert!(s.count("SELECT COUNT(*) AS n FROM events WHERE source = 'advisor' AND text LIKE '%[REDACTED%'") >= 10);
     // the logged request has the synthetic task fields
-    let t = s.first_cell("SELECT text FROM events WHERE source = 'advisor' AND tags LIKE '%ev:advice%' LIMIT 1", "text").unwrap();
     for key in ["\"offers\"", "\"listed_cost\"", "\"listed_reward\"", "\"difficulty\"", "\"domain\"", "\"slot\"", "\"strategies\""] {
-        assert!(t.contains(key), "{key} missing in {t}");
+        let q = format!("SELECT COUNT(*) AS n FROM events WHERE source = 'advisor' AND tags LIKE '%ev:advice%' AND text LIKE '%{key}%'");
+        assert_eq!(s.count(&q), 10, "{key} missing in a logged request");
     }
     s.stop();
 }
