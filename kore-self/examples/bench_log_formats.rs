@@ -58,7 +58,7 @@ fn parse_args() -> Args {
         sql_lookups: get("--sql-lookups").map(|s| s.parse().unwrap()).unwrap_or(if n <= 100_000 { 100 } else { 20 }),
         tamper_trials: get("--tamper-trials").map(|s| s.parse().unwrap()).unwrap_or(40),
         size_only: v.iter().any(|a| a == "--size-only"),
-        format: if get("--format").as_deref() == Some("2") { LogFormat::V2 } else { LogFormat::V1 },
+        format: match get("--format").as_deref() { Some("2") => LogFormat::V2, Some("3") => LogFormat::V3, _ => LogFormat::V1 },
         seed: get("--seed").map(|s| s.parse().unwrap()).unwrap_or(7),
     }
 }
@@ -286,7 +286,7 @@ fn main() {
     per_table.insert("MANIFEST".into(), json!(std::fs::metadata(logdir.join("MANIFEST")).unwrap().len()));
     res["size_bytes"] = json!(dir_size(&root));
     res["size_by_table"] = Value::Object(per_table);
-    if a.format == LogFormat::V2 {
+    if a.format != LogFormat::V1 {
         // actual per-column bytes of the events segments (v2 only)
         let mut cols = std::collections::BTreeMap::<String, usize>::new();
         if let Ok(rd) = std::fs::read_dir(logdir.join("events")) {

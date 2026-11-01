@@ -7,12 +7,12 @@ use sha2::{Digest, Sha256};
 
 pub fn hex(bytes: &[u8]) -> String {
     const H: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(bytes.len() * 2);
+    let mut v = Vec::with_capacity(bytes.len() * 2);
     for b in bytes {
-        s.push(H[(b >> 4) as usize] as char);
-        s.push(H[(b & 15) as usize] as char);
+        v.push(H[(b >> 4) as usize]);
+        v.push(H[(b & 15) as usize]);
     }
-    s
+    String::from_utf8(v).expect("hex digits are ascii")
 }
 
 pub fn sha256_hex(parts: &[&[u8]]) -> String {
@@ -484,6 +484,12 @@ pub const ENTITY_TYPES: [&str; 4] = ["belief", "habit", "decision", "rule"];
 /// Event id: hex sha256 of `source|occurred_at|normalised text`
 /// (text trimmed, internal whitespace runs collapsed to one space).
 pub fn event_id(source: &str, occurred_at: &str, text: &str) -> String {
-    let norm = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut norm = String::with_capacity(text.len());
+    for w in text.split_whitespace() {
+        if !norm.is_empty() {
+            norm.push(' ');
+        }
+        norm.push_str(w);
+    }
     sha256_hex(&[source.as_bytes(), b"|", occurred_at.as_bytes(), b"|", norm.as_bytes()])
 }

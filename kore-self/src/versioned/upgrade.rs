@@ -58,6 +58,8 @@ pub fn migrate_to_v2(src_root: &Path, dst_root: &Path, owner: &str) -> Result<Mi
         dir: dir.clone(),
         entries: vec![],
         manifest_raw: format!("{}\n", manifest::HEADER).into_bytes(),
+        journal: false,
+        torn: vec![],
         head: Mutex::new(None),
         index: Index::default(),
         ev_segs: vec![],

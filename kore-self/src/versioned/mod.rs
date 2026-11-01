@@ -46,31 +46,44 @@ pub const FORMAT_VERSION: i64 = 1;
 /// Reached only by creating a log with `LogFormat::V2` or by an explicit
 /// `upgrade_to_v2` / `migrate_to_v2`; never silently.
 pub const FORMAT_V2: i64 = 2;
+/// Log format 3: format 2 segments plus the journal MANIFEST (header `KORE-VLOG-MANIFEST 2`):
+/// a commit appends one line and fsyncs instead of rewriting the whole file, so commit cost no
+/// longer grows with the number of versions. Reached only by creating a log with `LogFormat::V3`
+/// or by the explicit `upgrade_to_v3`; never silently. Older binaries refuse the header.
+pub const FORMAT_V3: i64 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
     V1,
     V2,
+    V3,
 }
 impl LogFormat {
     pub fn number(self) -> i64 {
         match self {
             LogFormat::V1 => FORMAT_VERSION,
             LogFormat::V2 => FORMAT_V2,
+            LogFormat::V3 => FORMAT_V3,
         }
     }
     fn enc(self) -> Option<u8> {
         match self {
             LogFormat::V1 => None,
-            LogFormat::V2 => Some(2),
+            LogFormat::V2 | LogFormat::V3 => Some(2),
         }
     }
     fn from_number(n: i64) -> LogFormat {
-        if n >= FORMAT_V2 {
+        if n >= FORMAT_V3 {
+            LogFormat::V3
+        } else if n >= FORMAT_V2 {
             LogFormat::V2
         } else {
             LogFormat::V1
         }
+    }
+    /// Revision replay is content-idempotent from format 2 on.
+    fn content_idem(self) -> bool {
+        self != LogFormat::V1
     }
 }
 
@@ -376,6 +389,10 @@ pub struct VersionedLog {
     entries: Vec<Entry>,
     /// Exact bytes of the MANIFEST as last written or read (header + one line per entry).
     manifest_raw: Vec<u8>,
+    /// Journal manifest (header 2): commits append. False for format 1/2 logs written before format 3.
+    journal: bool,
+    /// Uncommitted partial tail found on disk at open (journal only); removed before the next append.
+    torn: Vec<u8>,
     /// Latest snapshot, decoded lazily for all-v2 logs (see `open_latest`).
     head: Mutex<Option<Snapshot>>,
     index: Index,
@@ -606,11 +623,11 @@ fn load_state(dir: &Path, entries: &[Entry]) -> Result<State, VerifyError> {
             }
         }
     }
-    let format = tables[Table::SchemaMeta.idx()].iter().map(|r| LogFormat::from_number(MetaRow::from_cells(r).format_version)).fold(LogFormat::V1, |a, b| if b == LogFormat::V2 { b } else { a });
+    let format = tables[Table::SchemaMeta.idx()].iter().map(|r| LogFormat::from_number(MetaRow::from_cells(r).format_version)).fold(LogFormat::V1, |a, b| if b.number() > a.number() { b } else { a });
     let last = entries.len() - 1;
     let mut index = if lazy { Index::build_with_ids(ids, &tables) } else { Index::build(&tables) };
     index.forgotten = forget::forgotten_set(entries);
-    index.content_idem = format == LogFormat::V2;
+    index.content_idem = format.content_idem();
     let e = &entries[last];
     let head = if lazy {
         None
@@ -651,9 +668,11 @@ impl VersionedLog {
             let mut log = VersionedLog {
                 dir: dir.clone(),
                 entries: vec![],
-                manifest_raw: format!("{}\n", manifest::HEADER).into_bytes(),
+                manifest_raw: format!("{}\n", if format == LogFormat::V3 { manifest::HEADER_J } else { manifest::HEADER }).into_bytes(),
+                journal: format == LogFormat::V3,
+                torn: vec![],
                 head: Mutex::new(Some(Snapshot { version: 0, recorded_at: String::new(), manifest_hash: String::new(), valid_at: String::new(), tables: Arc::new(vec![Vec::new(); ALL_TABLES.len()]) })),
-                index: Index { content_idem: format == LogFormat::V2, ..Index::default() },
+                index: Index { content_idem: format.content_idem(), ..Index::default() },
                 ev_segs: vec![],
                 format,
                 clock: Box::new(clock),
@@ -680,20 +699,29 @@ impl VersionedLog {
     fn open_existing(dir: PathBuf) -> Result<VersionedLog, LogError> {
         // Finish (or discard) a forget that was interrupted by a crash.
         recover_pending(&dir)?;
-        let raw = read_manifest_raw(&dir)?;
-        let entries = manifest::parse(&raw).map_err(VerifyError::ManifestCorrupt)?;
+        let full = read_manifest_raw(&dir)?;
+        let parsed = manifest::parse_ex(&full).map_err(VerifyError::ManifestCorrupt)?;
+        let (entries, journal) = (parsed.entries, parsed.journal);
+        let torn = full[parsed.valid_len..].to_vec();
+        let mut raw = full;
+        raw.truncate(parsed.valid_len);
         check_chain(&entries)?;
         if entries.is_empty() {
             return Err(VerifyError::ManifestCorrupt("no entries".into()).into());
         }
         let st = load_state(&dir, &entries)?;
-        Ok(VersionedLog { dir, entries, manifest_raw: raw, head: Mutex::new(st.head), index: st.index, ev_segs: st.ev_segs, format: st.format, clock: Box::new(now_iso) })
+        Ok(VersionedLog { dir, entries, manifest_raw: raw, journal, torn, head: Mutex::new(st.head), index: st.index, ev_segs: st.ev_segs, format: st.format, clock: Box::new(now_iso) })
     }
 
     /// Re-derive all in-memory state from disk (used after `forget`).
     fn reload(&mut self) -> Result<(), LogError> {
-        let raw = read_manifest_raw(&self.dir)?;
-        let entries = manifest::parse(&raw).map_err(VerifyError::ManifestCorrupt)?;
+        let full = read_manifest_raw(&self.dir)?;
+        let parsed = manifest::parse_ex(&full).map_err(VerifyError::ManifestCorrupt)?;
+        let entries = parsed.entries;
+        self.torn = full[parsed.valid_len..].to_vec();
+        self.journal = parsed.journal;
+        let mut raw = full;
+        raw.truncate(parsed.valid_len);
         check_chain(&entries)?;
         let st = load_state(&self.dir, &entries)?;
         self.entries = entries;
@@ -713,7 +741,7 @@ impl VersionedLog {
 
     /// Check an event against the same rules a commit applies (without writing).
     pub fn check_new_event(e: &NewEvent) -> Result<(), LogError> {
-        validate_event(e, "1970-01-01T00:00:00Z").map(|_| ())
+        check_event(e).map(|_| ())
     }
 
     /// True if an event with this id is stored (latest version).
@@ -742,8 +770,16 @@ impl VersionedLog {
         }
         let k = self.ev_segs.partition_point(|s| s.0 <= ord) - 1;
         let (start, ei, si) = self.ev_segs[k];
-        let rows = load_segment(&self.dir, &self.entries[ei].segments[si])?;
-        Ok(rows.get((ord - start) as usize).map(|r| EventRow::from_cells(r)))
+        let seg = &self.entries[ei].segments[si];
+        let at = (ord - start) as usize;
+        if seg.enc == Some(2) {
+            // Verified read, then materialise only this row (not the whole segment).
+            let bytes = read_verified(&self.dir, seg)?;
+            let cells = codec::decode_row(seg_table(seg)?, &bytes, at).map_err(|d| unreadable(seg, d))?;
+            return Ok(Some(EventRow::from_cells(&cells)));
+        }
+        let rows = load_segment(&self.dir, seg)?;
+        Ok(rows.get(at).map(|r| EventRow::from_cells(r)))
     }
 
     /// True if this event id was removed by `forget` (ingest of it is refused).
@@ -771,7 +807,19 @@ impl VersionedLog {
             let _ = fs::remove_file(self.dir.join(f));
         }
         let _ = fs::remove_file(self.dir.join("MANIFEST.tmp"));
+        self.drop_torn_tail()?;
         Ok(strays)
+    }
+
+    /// Journal manifest: cut an uncommitted partial last line (a crashed append) off the file.
+    fn drop_torn_tail(&mut self) -> Result<(), LogError> {
+        if self.journal && !self.torn.is_empty() {
+            let f = fs::OpenOptions::new().write(true).open(self.dir.join("MANIFEST"))?;
+            f.set_len(self.manifest_raw.len() as u64)?;
+            f.sync_all()?;
+            self.torn.clear();
+        }
+        Ok(())
     }
 
     /// Cheap per-commit cleanup: only the file names a crashed commit could have
@@ -901,9 +949,27 @@ impl VersionedLog {
     /// Detect a concurrent writer / on-disk tampering of the MANIFEST: the file
     /// must still be byte-identical to what this handle last wrote or read.
     fn check_manifest_unchanged(&self) -> Result<(), LogError> {
-        let on_disk = read_manifest_raw(&self.dir)?;
-        if on_disk != self.manifest_raw {
-            return Err(LogError::Conflict("MANIFEST changed on disk since this log was opened".into()));
+        let conflict = || LogError::Conflict("MANIFEST changed on disk since this log was opened".into());
+        if !self.journal || !self.torn.is_empty() {
+            let on_disk = read_manifest_raw(&self.dir)?;
+            let mut want = self.manifest_raw.clone();
+            want.extend_from_slice(&self.torn);
+            return if on_disk == want { Ok(()) } else { Err(conflict()) };
+        }
+        // Journal: O(1) check, length plus the last bytes (a concurrent append changes both).
+        use std::io::{Read, Seek, SeekFrom};
+        let path = self.dir.join("MANIFEST");
+        let mut f = fs::File::open(&path).map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { LogError::from(VerifyError::ManifestMissing) } else { LogError::from(VerifyError::Io(e.to_string())) })?;
+        let len = f.metadata()?.len();
+        if len != self.manifest_raw.len() as u64 {
+            return Err(conflict());
+        }
+        let k = (len as usize).min(512);
+        f.seek(SeekFrom::Start(len - k as u64))?;
+        let mut tail = vec![0u8; k];
+        f.read_exact(&mut tail)?;
+        if tail != self.manifest_raw[self.manifest_raw.len() - k..] {
+            return Err(conflict());
         }
         Ok(())
     }
@@ -930,11 +996,32 @@ impl VersionedLog {
         Ok(true)
     }
 
+    /// Explicit, one-way upgrade to format 3 (from 1 or 2): one new commit records
+    /// `schema_meta.format_version = 3` and, in the same atomic MANIFEST replacement, switches the
+    /// MANIFEST to the journal header (all earlier entry lines are kept byte for byte, so the hash
+    /// chain and every old version hash are unchanged). Later commits append. Segments written from
+    /// here on use the format 2 encoding. Old binaries cannot read the result. False if already 3.
+    pub fn upgrade_to_v3(&mut self) -> Result<bool, LogError> {
+        if self.format == LogFormat::V3 {
+            return Ok(false);
+        }
+        self.check_manifest_unchanged()?;
+        let last_at = self.entries.last().map(|e| e.recorded_at.clone()).unwrap_or_default();
+        let mut now = (self.clock)();
+        if now < last_at {
+            now = last_at;
+        }
+        let meta = MetaRow { format_version: FORMAT_V3, created_at: now.clone() };
+        self.write_commit(vec![(Table::SchemaMeta, vec![meta.to_cells()])], now, LogFormat::V3, None)?;
+        self.format = LogFormat::V3;
+        self.index.content_idem = true;
+        Ok(true)
+    }
+
     /// Validate everything, then write at most one new version atomically.
     /// Within a batch, revisions may cite events of the same batch, and
     /// outcomes may reference predictions of the same batch.
     pub fn commit_batch(&mut self, batch: Batch) -> Result<CommitInfo, LogError> {
-        self.check_manifest_unchanged()?;
         let last_at = self.entries.last().map(|e| e.recorded_at.clone()).unwrap_or_default();
         let mut now = (self.clock)();
         if now < last_at {
@@ -961,6 +1048,12 @@ impl VersionedLog {
                 pred_ids,
                 suppressed,
             });
+        }
+        // Conflict check only when something will be written (a no-op re-submission reads nothing from
+        // disk; the log is append-only, so "already stored" cannot become false behind our back).
+        if let Err(e) = self.check_manifest_unchanged() {
+            self.index.rollback(undo);
+            return Err(e);
         }
         let new_rows: BTreeMap<String, usize> = new.iter().map(|(t, r)| (t.name().to_string(), r.len())).collect();
         let ev_rows = new.iter().find(|(t, _)| *t == Table::Events).map(|(_, r)| r.len()).unwrap_or(0);
@@ -989,16 +1082,17 @@ impl VersionedLog {
         let ix = &mut self.index;
 
         for e in &batch.events {
-            let row = validate_event(e, now)?;
-            if ix.forgotten.contains(&forget_hash(&row.event_id)) {
+            // Cheap path first: a duplicate (re-ingest) never builds a row.
+            let (occurred_at, id) = check_event(e)?;
+            if ix.forgotten.contains(&forget_hash(&id)) {
                 suppressed += 1;
                 continue;
             }
-            event_ids.push(row.event_id.clone());
-            let key = IdKey::from_str(&row.event_id);
+            let key = IdKey::from_str(&id);
+            event_ids.push(id.clone());
             if ix.ev_add(key.clone()) {
                 undo.push(Undo::Event(key));
-                ev.push(row.to_cells());
+                ev.push(build_event_row(e, occurred_at, id, now).to_cells());
             } else {
                 // duplicate: the ordinal counter was bumped by ev_add; undo that
                 ix.next_ord -= 1;
@@ -1077,16 +1171,44 @@ impl VersionedLog {
             entry.reseal(&prev);
         }
         let line = serde_json::to_string(&entry).expect("entry serialises");
-        let mut raw = Vec::with_capacity(self.manifest_raw.len() + line.len() + 1);
-        raw.extend_from_slice(&self.manifest_raw);
-        raw.extend_from_slice(line.as_bytes());
-        raw.push(b'\n');
-        let tmp = self.dir.join("MANIFEST.tmp");
-        write_synced(&tmp, &raw)?;
-        fs::rename(&tmp, self.dir.join("MANIFEST"))?;
-        sync_dir(&self.dir);
+        let to_journal = fmt == LogFormat::V3;
+        let path = self.dir.join("MANIFEST");
+        if self.journal && v > 0 {
+            // Journal append: the segments are already durable; the commit exists once this line
+            // (with its newline) is fsynced. A crash in between leaves an unterminated tail that
+            // `open` ignores. No rename, no directory entry changes, nothing is rewritten.
+            self.drop_torn_tail()?;
+            let mut rec = Vec::with_capacity(line.len() + 1);
+            rec.extend_from_slice(line.as_bytes());
+            rec.push(b'\n');
+            let mut f = fs::OpenOptions::new().append(true).open(&path)?;
+            f.write_all(&rec)?;
+            f.sync_all()?;
+            self.manifest_raw.extend_from_slice(&rec);
+        } else {
+            // Atomic whole-file replacement (format 1/2 logs, genesis, or the switch to the journal header).
+            let mut raw = Vec::with_capacity(self.manifest_raw.len() + line.len() + 1);
+            if to_journal && !self.journal {
+                raw.extend_from_slice(manifest::HEADER_J.as_bytes());
+                raw.push(b'\n');
+                let old_hdr = self.manifest_raw.iter().position(|&b| b == b'\n').map(|p| p + 1).unwrap_or(self.manifest_raw.len());
+                raw.extend_from_slice(&self.manifest_raw[old_hdr..]);
+            } else {
+                raw.extend_from_slice(&self.manifest_raw);
+            }
+            raw.extend_from_slice(line.as_bytes());
+            raw.push(b'\n');
+            let tmp = self.dir.join("MANIFEST.tmp");
+            write_synced(&tmp, &raw)?;
+            fs::rename(&tmp, &path)?;
+            sync_dir(&self.dir);
+            self.manifest_raw = raw;
+            if to_journal {
+                self.journal = true;
+            }
+            self.torn.clear();
+        }
         // Commit point passed: update memory.
-        self.manifest_raw = raw;
         self.entries.push(entry);
         let e = self.entries.last().expect("just pushed");
         if let Some(h) = self.head.get_mut().unwrap_or_else(|e| e.into_inner()).as_mut() {
@@ -1130,7 +1252,8 @@ fn check_text(name: &str, s: &str, max: usize) -> Result<(), LogError> {
     Ok(())
 }
 
-fn validate_event(e: &NewEvent, now: &str) -> Result<EventRow, LogError> {
+/// Field checks; returns the normalised `occurred_at` and the event id (no row is built yet).
+fn check_event(e: &NewEvent) -> Result<(String, String), LogError> {
     check_text("source", &e.source, 256)?;
     if e.source.contains('|') {
         return inv("source must not contain '|'");
@@ -1145,16 +1268,17 @@ fn validate_event(e: &NewEvent, now: &str) -> Result<EventRow, LogError> {
             return inv("tags must be non-empty and contain no commas");
         }
     }
-    Ok(EventRow {
-        event_id: event_id(&e.source, &occurred_at, &e.text),
-        occurred_at,
-        recorded_at: now.to_string(),
-        source: e.source.clone(),
-        kind: e.kind.clone(),
-        text: e.text.clone(),
-        tags: e.tags.join(","),
-        redacted: e.redacted,
-    })
+    let id = event_id(&e.source, &occurred_at, &e.text);
+    Ok((occurred_at, id))
+}
+
+fn build_event_row(e: &NewEvent, occurred_at: String, event_id: String, now: &str) -> EventRow {
+    EventRow { event_id, occurred_at, recorded_at: now.to_string(), source: e.source.clone(), kind: e.kind.clone(), text: e.text.clone(), tags: e.tags.join(","), redacted: e.redacted }
+}
+
+fn validate_event(e: &NewEvent, now: &str) -> Result<EventRow, LogError> {
+    let (occurred_at, id) = check_event(e)?;
+    Ok(build_event_row(e, occurred_at, id, now))
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -39,5 +39,5 @@ secrets.toml
 _tpch_tables/
 tpch_lineitem.csv
 
-# test fixtures written by the v1 writer must stay tracked
-!kore-self/tests/data/vlog_v1/fixture/**/*.kore
+# test fixtures are real segment files (written by the old/round-1 binaries), keep them
+!kore-self/tests/data/**/*.kore

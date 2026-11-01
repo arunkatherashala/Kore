@@ -177,6 +177,31 @@ fn fmt_ts(secs: i64) -> String {
     if m <= 2 {
         y += 1;
     }
+    if (0..=9999).contains(&y) {
+        // canonical form without the formatting machinery (this runs once per timestamp cell on decode)
+        let (h, mi, se) = (rem / 3600, rem % 3600 / 60, rem % 60);
+        let two = |v: i64, o: &mut Vec<u8>| {
+            o.push(b'0' + (v / 10) as u8);
+            o.push(b'0' + (v % 10) as u8);
+        };
+        let mut o = Vec::with_capacity(20);
+        o.push(b'0' + (y / 1000) as u8);
+        o.push(b'0' + (y / 100 % 10) as u8);
+        o.push(b'0' + (y / 10 % 10) as u8);
+        o.push(b'0' + (y % 10) as u8);
+        o.push(b'-');
+        two(m, &mut o);
+        o.push(b'-');
+        two(d, &mut o);
+        o.push(b'T');
+        two(h, &mut o);
+        o.push(b':');
+        two(mi, &mut o);
+        o.push(b':');
+        two(se, &mut o);
+        o.push(b'Z');
+        return String::from_utf8(o).expect("ascii");
+    }
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
@@ -467,8 +492,8 @@ fn read_nulls(r: &mut Rd, n: usize) -> Result<Vec<bool>, String> {
     }
 }
 
-fn wrap(body: Vec<u8>) -> (u8, Vec<u8>) {
-    if body.len() >= 64 {
+fn wrap(body: Vec<u8>, try_hz: bool) -> (u8, Vec<u8>) {
+    if try_hz && body.len() >= 64 {
         let z = hz::compress(&body);
         if z.len() < body.len() {
             return (V2_FLAG | HZ_FLAG, z);
@@ -480,13 +505,22 @@ fn wrap(body: Vec<u8>) -> (u8, Vec<u8>) {
 fn encode_col(name: &str, ty: Ty, col: usize, rows: &[Vec<Cell>]) -> (u8, Vec<u8>) {
     let n = rows.len();
     let mut body = Vec::new();
+    let mut try_hz = true;
     match ty {
         Ty::S => {
             let cells: Vec<Option<&str>> = rows.iter().map(|r| if let Cell::S(s) = &r[col] { Some(s.as_str()) } else { None }).collect();
             let isnull: Vec<bool> = cells.iter().map(|c| c.is_none()).collect();
             nulls_section(&mut body, &isnull);
             let vals: Vec<&str> = cells.into_iter().flatten().collect();
-            body.extend(encode_strs_body(&vals, name));
+            let strs = encode_strs_body(&vals, name);
+            // Distinct 32-byte ids (sha256) are incompressible: skip the entropy stage (it never pays, and costs time).
+            if strs.first() == Some(&M_HEX32) {
+                let mut seen = std::collections::HashSet::with_capacity(vals.len());
+                if vals.iter().all(|v| seen.insert(*v)) {
+                    try_hz = false;
+                }
+            }
+            body.extend(strs);
         }
         Ty::I => {
             let cells: Vec<Option<i64>> = rows.iter().map(|r| if let Cell::I(x) = r[col] { Some(x) } else { None }).collect();
@@ -515,7 +549,7 @@ fn encode_col(name: &str, ty: Ty, col: usize, rows: &[Vec<Cell>]) -> (u8, Vec<u8
         }
     }
     let _ = n;
-    wrap(body)
+    wrap(body, try_hz)
 }
 
 fn dtype_byte(t: Ty) -> u8 {
@@ -539,6 +573,7 @@ pub fn encode_segment(table: Table, rows: &[Vec<Cell>]) -> Vec<u8> {
         out.extend(name.as_bytes());
         out.push(dtype_byte(*ty));
     }
+    // (Encoding the columns in parallel gave the same bytes but was slower under load: measured, not used.)
     for (i, (name, ty)) in spec.iter().enumerate() {
         let (comp, data) = encode_col(name, *ty, i, rows);
         out.push(comp);
@@ -605,18 +640,19 @@ fn unwrap_block(comp: u8, data: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, Str
     }
 }
 
-enum ColOut {
-    S(Vec<Option<String>>),
-    I(Vec<Option<i64>>),
-    F(Vec<Option<f64>>),
-    B(Vec<Option<bool>>),
-}
-
-fn fill<T>(isnull: &[bool], vals: Vec<T>) -> Result<Vec<Option<T>>, String> {
-    let mut it = vals.into_iter();
+/// Turn decoded non-null values into one cell per row (nulls become `Cell::Null`).
+fn fill_cells(isnull: &[bool], vals: impl ExactSizeIterator<Item = Cell>, any_null: bool) -> Result<Vec<Cell>, String> {
+    let m = vals.len();
+    if !any_null {
+        if m != isnull.len() {
+            return Err("codec: value count mismatch".into());
+        }
+        return Ok(vals.collect());
+    }
+    let mut it = vals;
     let mut out = Vec::with_capacity(isnull.len());
     for &nl in isnull {
-        out.push(if nl { None } else { Some(it.next().ok_or("codec: too few values")?) });
+        out.push(if nl { Cell::Null } else { it.next().ok_or("codec: too few values")? });
     }
     if it.next().is_some() {
         return Err("codec: too many values".into());
@@ -624,22 +660,17 @@ fn fill<T>(isnull: &[bool], vals: Vec<T>) -> Result<Vec<Option<T>>, String> {
     Ok(out)
 }
 
-fn decode_col(ty: Ty, n: usize, comp: u8, data: &[u8]) -> Result<ColOut, String> {
+fn decode_col(ty: Ty, n: usize, comp: u8, data: &[u8]) -> Result<Vec<Cell>, String> {
     let raw = unwrap_block(comp, data)?;
     let mut r = Rd::new(&raw);
     let isnull = read_nulls(&mut r, n)?;
-    let m = isnull.iter().filter(|&&b| !b).count();
-    Ok(match ty {
-        Ty::S => {
-            let vals = match decode_strs_body(&mut r, m)? {
-                StrCol::Hex(h) => h.iter().map(|b| hex(b)).collect(),
-                StrCol::Strs(s) => s,
-            };
-            if vals.len() != m {
-                return Err("codec: value count mismatch".into());
-            }
-            ColOut::S(fill(&isnull, vals)?)
-        }
+    let any_null = isnull.iter().any(|&b| b);
+    let m = if any_null { isnull.iter().filter(|&&b| !b).count() } else { n };
+    match ty {
+        Ty::S => match decode_strs_body(&mut r, m)? {
+            StrCol::Hex(h) => fill_cells(&isnull, h.iter().map(|b| Cell::S(hex(b))), any_null),
+            StrCol::Strs(s) => fill_cells(&isnull, s.into_iter().map(Cell::S), any_null),
+        },
         Ty::I => {
             if r.u8()? != M_INT {
                 return Err("codec: bad int mode".into());
@@ -648,46 +679,176 @@ fn decode_col(ty: Ty, n: usize, comp: u8, data: &[u8]) -> Result<ColOut, String>
             let mut prev = 0i64;
             for _ in 0..m {
                 prev = prev.wrapping_add(unzz(r.varint()?));
-                v.push(prev);
+                v.push(Cell::I(prev));
             }
-            ColOut::I(fill(&isnull, v)?)
+            fill_cells(&isnull, v.into_iter(), any_null)
         }
         Ty::F => {
             if r.u8()? != M_F64 {
                 return Err("codec: bad float mode".into());
             }
             let raw = r.take(m.checked_mul(8).ok_or("codec: overflow")?)?;
-            let v: Vec<f64> = raw.chunks_exact(8).map(|c| f64::from_bits(u64::from_le_bytes(c.try_into().unwrap()))).collect();
-            ColOut::F(fill(&isnull, v)?)
+            let v: Vec<Cell> = raw.chunks_exact(8).map(|c| Cell::F(f64::from_bits(u64::from_le_bytes(c.try_into().unwrap())))).collect();
+            fill_cells(&isnull, v.into_iter(), any_null)
         }
         Ty::B => {
             if r.u8()? != M_BOOL {
                 return Err("codec: bad bool mode".into());
             }
-            let v: Vec<bool> = unpack_bits(&mut r, m, 1)?.into_iter().map(|b| b == 1).collect();
-            ColOut::B(fill(&isnull, v)?)
+            let v: Vec<Cell> = unpack_bits(&mut r, m, 1)?.into_iter().map(|b| Cell::B(b == 1)).collect();
+            fill_cells(&isnull, v.into_iter(), any_null)
         }
-    })
+    }
 }
 
 pub fn decode_segment(table: Table, bytes: &[u8]) -> Result<Vec<Vec<Cell>>, String> {
     let mut h = read_header(table, bytes)?;
     let spec = table.columns();
-    let mut cols: Vec<ColOut> = Vec::with_capacity(spec.len());
-    for (_, ty) in spec {
-        let (comp, data) = next_block(&mut h.body)?;
-        cols.push(decode_col(*ty, h.nrows, comp, data)?);
+    let mut blocks = Vec::with_capacity(spec.len());
+    for _ in spec {
+        blocks.push(next_block(&mut h.body)?);
     }
-    let mut rows: Vec<Vec<Cell>> = (0..h.nrows).map(|_| Vec::with_capacity(spec.len())).collect();
+    let nrows = h.nrows;
+    // (Decoding columns in parallel inside a segment measured slower than sequential: segments are already decoded in parallel.)
+    let cols: Vec<Vec<Cell>> = spec.iter().zip(&blocks).map(|((_, ty), (comp, data))| decode_col(*ty, nrows, *comp, data)).collect::<Result<_, _>>()?;
+    let mut rows: Vec<Vec<Cell>> = (0..nrows).map(|_| Vec::with_capacity(spec.len())).collect();
     for c in cols {
-        match c {
-            ColOut::S(v) => rows.iter_mut().zip(v).for_each(|(r, x)| r.push(x.map(Cell::S).unwrap_or(Cell::Null))),
-            ColOut::I(v) => rows.iter_mut().zip(v).for_each(|(r, x)| r.push(x.map(Cell::I).unwrap_or(Cell::Null))),
-            ColOut::F(v) => rows.iter_mut().zip(v).for_each(|(r, x)| r.push(x.map(Cell::F).unwrap_or(Cell::Null))),
-            ColOut::B(v) => rows.iter_mut().zip(v).for_each(|(r, x)| r.push(x.map(Cell::B).unwrap_or(Cell::Null))),
-        }
+        rows.iter_mut().zip(c).for_each(|(r, x)| r.push(x));
     }
     Ok(rows)
+}
+
+/// Decode only row `k` of a v2 segment: every column block is unwrapped (the entropy stage
+/// is per column), but only one value per column is materialised.
+pub fn decode_row(table: Table, bytes: &[u8], k: usize) -> Result<Vec<Cell>, String> {
+    let mut h = read_header(table, bytes)?;
+    if k >= h.nrows {
+        return Err("codec: row out of range".into());
+    }
+    let spec = table.columns();
+    let mut out = Vec::with_capacity(spec.len());
+    for (_, ty) in spec {
+        let (comp, data) = next_block(&mut h.body)?;
+        let raw = unwrap_block(comp, data)?;
+        let mut r = Rd::new(&raw);
+        let n = h.nrows;
+        let isnull = read_nulls(&mut r, n)?;
+        if isnull[k] {
+            out.push(Cell::Null);
+            continue;
+        }
+        let any_null = isnull.iter().any(|&b| b);
+        let m = if any_null { isnull.iter().filter(|&&b| !b).count() } else { n };
+        let idx = if any_null { isnull[..k].iter().filter(|&&b| !b).count() } else { k };
+        out.push(match ty {
+            Ty::S => Cell::S(value_str(&mut r, m, idx)?),
+            Ty::I => {
+                if r.u8()? != M_INT {
+                    return Err("codec: bad int mode".into());
+                }
+                let mut prev = 0i64;
+                for _ in 0..=idx {
+                    prev = prev.wrapping_add(unzz(r.varint()?));
+                }
+                Cell::I(prev)
+            }
+            Ty::F => {
+                if r.u8()? != M_F64 {
+                    return Err("codec: bad float mode".into());
+                }
+                let all = r.take(m.checked_mul(8).ok_or("codec: overflow")?)?;
+                Cell::F(f64::from_bits(u64::from_le_bytes(all[idx * 8..idx * 8 + 8].try_into().unwrap())))
+            }
+            Ty::B => {
+                if r.u8()? != M_BOOL {
+                    return Err("codec: bad bool mode".into());
+                }
+                let all = r.take(m.div_ceil(8))?;
+                Cell::B(all[idx / 8] >> (idx % 8) & 1 == 1)
+            }
+        });
+    }
+    Ok(out)
+}
+
+/// Value number `idx` of a string column body holding `m` values.
+fn value_str(r: &mut Rd, m: usize, idx: usize) -> Result<String, String> {
+    let mode = r.u8()?;
+    match mode {
+        M_RAW => {
+            if m > r.left() {
+                return Err("codec: bad count".into());
+            }
+            let (mut start, mut len) = (0usize, 0usize);
+            for i in 0..m {
+                let l = r.varint()? as usize;
+                if i < idx {
+                    start += l;
+                } else if i == idx {
+                    len = l;
+                }
+            }
+            let rest = r.take(r.left())?;
+            let s = rest.get(start..start.checked_add(len).ok_or("codec: overflow")?).ok_or("codec: truncated")?;
+            String::from_utf8(s.to_vec()).map_err(|_| "codec: not utf-8".to_string())
+        }
+        M_DICT => {
+            let dict = read_dict(r)?;
+            let bits = r.u8()? as u32;
+            if bits > 32 {
+                return Err("codec: bad bit width".into());
+            }
+            let nbytes = (m * bits as usize).div_ceil(8);
+            let data = r.take(nbytes)?;
+            let code = if bits == 0 {
+                0
+            } else {
+                let mut v = 0u64;
+                let bit0 = idx * bits as usize;
+                for b in 0..bits as usize {
+                    let p = bit0 + b;
+                    v |= ((data[p / 8] >> (p % 8) & 1) as u64) << b;
+                }
+                v as usize
+            };
+            dict.get(code).cloned().ok_or_else(|| "codec: dict code out of range".to_string())
+        }
+        M_HEX32 => {
+            let raw = r.take(m.checked_mul(32).ok_or("codec: overflow")?)?;
+            Ok(hex(&raw[idx * 32..idx * 32 + 32]))
+        }
+        M_TS => {
+            let mut prev = 0i64;
+            for _ in 0..=idx {
+                prev = prev.wrapping_add(unzz(r.varint()?));
+            }
+            Ok(fmt_ts(prev))
+        }
+        M_TAGS => {
+            let dict = read_dict(r)?;
+            let mut out = String::new();
+            for i in 0..m {
+                let c = r.varint()? as usize;
+                if c > r.left() {
+                    return Err("codec: bad tag count".into());
+                }
+                for t in 0..c {
+                    let code = r.varint()? as usize;
+                    if i == idx {
+                        if t > 0 {
+                            out.push(',');
+                        }
+                        out.push_str(dict.get(code).ok_or("codec: tag code out of range")?);
+                    }
+                }
+                if i == idx {
+                    break;
+                }
+            }
+            Ok(out)
+        }
+        x => Err(format!("codec: unknown string mode {x}")),
+    }
 }
 
 /// Encoded bytes per column (block header included) of a v2 segment, for size reports.
@@ -777,6 +938,42 @@ mod tests {
         let ids = decode_first_col_ids(Table::Events, &bytes).unwrap();
         assert_eq!(ids.len(), 300);
         assert_eq!(ids[5], IdKey::from_str(&id(5)));
+    }
+
+    #[test]
+    fn decode_row_equals_decode_segment_for_every_row() {
+        let id = |i: u32| hex(&[(i % 251) as u8; 32]);
+        let mut rows = vec![];
+        for i in 0..300u32 {
+            rows.push(vec![
+                s(&id(i)), s(&format!("2025-06-{:02}T10:{:02}:00Z", 1 + i % 28, i % 60)), s("2026-03-01T00:00:00Z"), s(["a", "b", "c"][(i % 3) as usize]),
+                s("note"), s(&format!("text number {i} with, commas \u{4e16} {}", "x".repeat((i % 17) as usize))), s(["", "x", "x,y", "z,,w", ","][(i % 5) as usize]), Cell::B(i % 7 == 0),
+            ]);
+        }
+        let bytes = encode_segment(Table::Events, &rows);
+        assert_eq!(decode_segment(Table::Events, &bytes).unwrap(), rows);
+        for k in 0..rows.len() {
+            assert_eq!(decode_row(Table::Events, &bytes, k).unwrap(), rows[k], "row {k}");
+        }
+        assert!(decode_row(Table::Events, &bytes, 300).is_err());
+        // nulls, odd ids, floats
+        let rv = |i: usize| {
+            vec![
+                if i % 3 == 0 { s("not hex") } else { s(&hex(&[i as u8; 32])) }, s("belief"), s(&format!("k{}", i % 4)), s("st"), Cell::F(i as f64 / 7.0), s("rat"),
+                if i % 2 == 0 { Cell::Null } else { s(&hex(&[9u8; 32])) }, s("2025-01-01"), s("user"), s("2025-01-01T00:00:00Z"),
+            ]
+        };
+        let rev_rows: Vec<Vec<Cell>> = (0..40).map(rv).collect();
+        let b = encode_segment(Table::Revisions, &rev_rows);
+        assert_eq!(decode_segment(Table::Revisions, &b).unwrap(), rev_rows);
+        for k in 0..rev_rows.len() {
+            assert_eq!(decode_row(Table::Revisions, &b, k).unwrap(), rev_rows[k], "rev row {k}");
+        }
+        let meta = vec![vec![Cell::I(2), s("2026-01-01T00:00:00Z")], vec![Cell::I(5), s("2026-01-02T00:00:00Z")]];
+        let b = encode_segment(Table::SchemaMeta, &meta);
+        for k in 0..2 {
+            assert_eq!(decode_row(Table::SchemaMeta, &b, k).unwrap(), meta[k]);
+        }
     }
 
     #[test]

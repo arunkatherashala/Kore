@@ -40,7 +40,7 @@ All tables are typed `.kore` files (KORE columnar format).
 
 ```
 <root>/<owner>/log/
-  MANIFEST                      one JSON line per commit, hash-chained
+  MANIFEST                      one JSON line per commit, hash-chained (header 1, or 2 = journal, format 3)
   events/0000000003.kore        only the rows added by commit 3
   revisions/0000000003.kore
   revision_causes/...  predictions/...  outcomes/...  schema_meta/0000000000.kore
@@ -64,6 +64,7 @@ the platform allows. The commit exists only once the manifest rename succeeds.
 Segments from a crash before that point are not listed, are ignored by readers,
 and are deleted by `recover()` or the next commit. Before writing, a commit
 re-reads the manifest and fails with `Conflict` if another writer changed it.
+(Format 3 replaces the rename by an append, see below.) The check runs only when the commit has something to write: a call whose events all exist already reads nothing from disk.
 
 ## Log format 2 (opt-in) and compatibility
 
@@ -102,7 +103,45 @@ Two segment encodings exist; a manifest entry's segment records which one
   to `MANIFEST.tmp`, fsynced, renamed; the conflict check compares the on-disk
   bytes with the bytes this handle last wrote.
 
-See `docs/format_improvement.md` for measurements and limits.
+## Log format 3 (opt-in): journal MANIFEST
+
+Format 3 is format 2 plus a different MANIFEST discipline; the segment encoding is the
+format 2 one (`"enc":2`), the entry lines and the hash chain are unchanged.
+
+* **Shape.** Header line `KORE-VLOG-MANIFEST 2` (format 1 and 2 logs have `... 1`). Older
+  binaries refuse the header cleanly. Every entry line is exactly what it was, so the chain
+  hashes of an upgraded log are unchanged.
+* **Commit.** Segments are written, fsynced and renamed as before; then the one new entry
+  line (with its `\n`) is appended to MANIFEST with a single write and fsynced. The commit
+  exists once that fsync returns. Nothing is rewritten, no rename, no directory entry change,
+  so the cost no longer grows with the number of versions (measured in
+  `docs/format_improvement_r2.md`).
+* **Crash during the append.** An unterminated last line is an uncommitted tail: `open()`
+  ignores it (the log is at the previous version), `verify()` reports it as a manifest
+  problem, and `recover()` or the next commit cuts it off before appending. A malformed line
+  that is newline-terminated is corruption and fails `open()`. The segment files of the
+  interrupted commit are stray files, handled as before.
+* **Conflict check.** For a journal the check is the file length plus the last 512 bytes
+  compared with what this handle last wrote (O(1)); a concurrent append changes both. Format 1
+  and 2 logs keep the full byte comparison. An edit in the middle of a journal that keeps the
+  length is not seen by the conflict check but is caught by `verify()` and by the checksum or
+  chain check on the next read of the affected data.
+* **Upgrade is explicit.** `VersionedLog::upgrade_to_v3()` (from format 1 or 2) appends one
+  commit with `schema_meta.format_version = 3` and, in the same atomic file replacement,
+  switches the header; all earlier lines are kept byte for byte. `open_or_create*` never does
+  it; `LogFormat::V3` applies only when a log is created. There is no downgrade.
+* `forget` rewrites the MANIFEST (the chain is re-sealed) with the log's own header.
+
+## Round 2 changes that do not alter the on-disk shape
+
+The encoder search of the `hz` stage is cheaper (same stream grammar, same decoder; segment
+bytes written by the new code differ slightly from those of round 1, old segments decode
+unchanged), the entropy stage is skipped for columns of distinct 32-byte ids, `get_event` on a
+lazily opened format 2/3 log materialises one row instead of one segment, and re-submitting
+events that already exist builds no row. See `docs/format_improvement_r2.md`.
+
+See `docs/format_improvement.md` (round 1) and `docs/format_improvement_r2.md` (round 2) for
+measurements and limits.
 
 ## Invariants (tested in `versioned/tests.rs`)
 
@@ -281,7 +320,8 @@ Not guaranteed:
   by exactly whole commits is indistinguishable from a crash unless the head hash
   is recorded elsewhere; use `verify_against(head_hash)` with a hash kept
   externally (unlisted later segments are also reported by `verify()`).
-* Single writer per log. A second writer is detected at commit and refused, but
+* Single writer per log. A second writer is detected at commit and refused (full byte
+  comparison of the MANIFEST for format 1/2, length plus tail for format 3), but
   there is no cross-process lock.
 * fsync of the directory is best effort (not available on every platform).
 * Durability against hardware or OS faults beyond what fsync gives.

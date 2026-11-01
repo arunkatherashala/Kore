@@ -15,7 +15,13 @@ const MIN_MATCH: usize = 4;
 const MAX_MATCH: usize = 258;
 const MAX_DIST: usize = 1 << 20;
 const BLOCK_TOKENS: usize = 1 << 18;
-const CHAIN: usize = 32;
+// Encoder search limits (the decoder accepts any stream; measured trade-off in docs/format_improvement_r2.md):
+const CHAIN: usize = 16; // candidates tried per position
+const HASH_BITS: u32 = 14;
+const NICE_LEN: usize = 32; // stop searching at a match this long
+const GOOD_LEN: usize = 16; // from this length on, only CHAIN_AFTER_GOOD more candidates are tried
+const CHAIN_AFTER_GOOD: usize = 4;
+const MAX_LAZY: usize = 32; // no lookahead for matches at least this long
 
 const LBASE: [u16; 29] = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
 const LEXTRA: [u8; 29] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
@@ -31,13 +37,32 @@ struct Tok {
 
 fn hash4(d: &[u8], i: usize) -> usize {
     let v = u32::from_le_bytes([d[i], d[i + 1], d[i + 2], d[i + 3]]);
-    (v.wrapping_mul(2_654_435_761) >> 16) as usize
+    (v.wrapping_mul(2_654_435_761) >> (32 - HASH_BITS)) as usize
+}
+
+/// Length of the common prefix of data[c..] and data[i..], at most `max` (8 bytes at a time).
+#[inline]
+fn match_len(data: &[u8], c: usize, i: usize, max: usize) -> usize {
+    let mut l = 0;
+    while l + 8 <= max {
+        let x = u64::from_le_bytes(data[c + l..c + l + 8].try_into().unwrap());
+        let y = u64::from_le_bytes(data[i + l..i + l + 8].try_into().unwrap());
+        let d = x ^ y;
+        if d != 0 {
+            return l + (d.trailing_zeros() / 8) as usize;
+        }
+        l += 8;
+    }
+    while l < max && data[c + l] == data[i + l] {
+        l += 1;
+    }
+    l
 }
 
 fn lz(data: &[u8]) -> Vec<Tok> {
     let n = data.len();
     let mut toks = Vec::with_capacity(n / 3 + 16);
-    let mut head = vec![u32::MAX; 1 << 16];
+    let mut head = vec![u32::MAX; 1 << HASH_BITS];
     let mut prev = vec![u32::MAX; n];
     let find = |head: &Vec<u32>, prev: &Vec<u32>, i: usize| -> (usize, usize) {
         if i + MIN_MATCH > n {
@@ -46,27 +71,27 @@ fn lz(data: &[u8]) -> Vec<Tok> {
         let mut best = (0usize, 0usize);
         let mut cand = head[hash4(data, i)];
         let maxl = MAX_MATCH.min(n - i);
-        let mut chain = 0;
-        while cand != u32::MAX && chain < CHAIN {
+        let mut chain_left = CHAIN;
+        while cand != u32::MAX && chain_left > 0 {
             let c = cand as usize;
             let dist = i - c;
             if dist > MAX_DIST {
                 break;
             }
             if data[c + best.0.min(maxl - 1)] == data[i + best.0.min(maxl - 1)] {
-                let mut l = 0;
-                while l < maxl && data[c + l] == data[i + l] {
-                    l += 1;
-                }
+                let l = match_len(data, c, i, maxl);
                 if l > best.0 {
                     best = (l, dist);
-                    if l == maxl {
+                    if l >= NICE_LEN.min(maxl) {
                         break;
+                    }
+                    if l >= GOOD_LEN {
+                        chain_left = chain_left.min(CHAIN_AFTER_GOOD);
                     }
                 }
             }
             cand = prev[c];
-            chain += 1;
+            chain_left -= 1;
         }
         if best.0 >= MIN_MATCH {
             best
@@ -82,16 +107,20 @@ fn lz(data: &[u8]) -> Vec<Tok> {
         }
     };
     let mut i = 0;
+    let mut cur = find(&head, &prev, 0);
     while i < n {
-        let (l, d) = find(&head, &prev, i);
+        let (l, d) = cur;
         if l >= MIN_MATCH {
-            // lazy: is the next position clearly better?
+            // lazy: is the next position clearly better? The lookahead result is reused as `cur`.
             insert(&mut head, &mut prev, i);
-            let (l2, _) = find(&head, &prev, i + 1);
-            if l2 > l + 1 {
-                toks.push(Tok { a: data[i] as u32, len: 0 });
-                i += 1;
-                continue;
+            if l < MAX_LAZY {
+                let nxt = find(&head, &prev, i + 1);
+                if nxt.0 > l + 1 {
+                    toks.push(Tok { a: data[i] as u32, len: 0 });
+                    i += 1;
+                    cur = nxt;
+                    continue;
+                }
             }
             toks.push(Tok { a: d as u32, len: l as u16 });
             for k in 1..l {
@@ -103,6 +132,7 @@ fn lz(data: &[u8]) -> Vec<Tok> {
             toks.push(Tok { a: data[i] as u32, len: 0 });
             i += 1;
         }
+        cur = find(&head, &prev, i);
     }
     toks
 }

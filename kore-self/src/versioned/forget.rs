@@ -293,7 +293,7 @@ impl VersionedLog {
             write_synced(&p, bytes)?;
         }
         fs::create_dir_all(&staging)?;
-        write_synced(&staging.join("MANIFEST"), manifest::render(&entries).as_bytes())?;
+        write_synced(&staging.join("MANIFEST"), manifest::render(&entries, self.journal).as_bytes())?;
         if matches!(crash, Some(Crash::BeforeMarker)) {
             return Err(crash_err());
         }
