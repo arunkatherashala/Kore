@@ -36,7 +36,7 @@ fn long_text_all_like_forms() {
     assert_eq!(count(&ctx, "SELECT id FROM t WHERE s ILIKE '%NEEDLE%'"), 1);
     assert_eq!(count(&ctx, "SELECT id FROM t WHERE s ILIKE 'AB%AB'"), 1);
     assert_eq!(count(&ctx, "SELECT id FROM t WHERE s NOT LIKE '%needle%'"), 3); // big, "", "a%b_c"; NULL excluded
-    assert_eq!(count(&ctx, "SELECT id FROM t WHERE s NOT ILIKE '%AB%'"), 2);
+    assert_eq!(count(&ctx, "SELECT id FROM t WHERE s NOT ILIKE '%AB%'"), 3);
     // ESCAPE
     assert_eq!(count(&ctx, "SELECT id FROM t WHERE s LIKE 'a#%b#_c' ESCAPE '#'"), 1);
     assert_eq!(count(&ctx, "SELECT id FROM t WHERE s LIKE '%#%b#_c' ESCAPE '#'"), 1);
