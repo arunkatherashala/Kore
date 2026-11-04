@@ -244,17 +244,16 @@ impl KoreReader {
     }
 
     /// High Performance: Use Memory Mapped I/O for zero-copy file bridge.
+    /// Files under `MMAP_MIN_BYTES` are read into memory in one call (mapping and faulting in a
+    /// small file costs more than reading it); larger ones are memory-mapped so that only the parts a
+    /// read touches (one version of a log, some columns) are loaded.
     pub fn read_file(path: &std::path::Path) -> Result<DataBlock, KoreError> {
-        let file = std::fs::File::open(path).map_err(io_err)?;
-        let mmap = unsafe { Mmap::map(&file).map_err(io_err)? };
-        Self::from_bytes(&mmap)
+        with_file_bytes(path, |d| Self::from_bytes(d))
     }
 
-    /// Memory-mapped file read of selected columns only (see `from_bytes_columns`).
+    /// File read of selected columns only (see `from_bytes_columns` and `read_file`).
     pub fn read_file_columns(path: &std::path::Path, columns: &[&str]) -> Result<DataBlock, KoreError> {
-        let file = std::fs::File::open(path).map_err(io_err)?;
-        let mmap = unsafe { Mmap::map(&file).map_err(io_err)? };
-        Self::from_bytes_columns(&mmap, columns)
+        with_file_bytes(path, |d| Self::from_bytes_columns(d, columns))
     }
 
     /// Time travel: newest version with timestamp <= `target_timestamp`.
@@ -298,6 +297,22 @@ impl KoreReader {
             }
         }
         None
+    }
+}
+
+/// Size from which `read_file` memory-maps instead of reading the file into a buffer.
+const MMAP_MIN_BYTES: u64 = 8 * 1024 * 1024;
+
+fn with_file_bytes<T>(path: &std::path::Path, f: impl FnOnce(&[u8]) -> Result<T, KoreError>) -> Result<T, KoreError> {
+    let mut file = std::fs::File::open(path).map_err(io_err)?;
+    let len = file.metadata().map_err(io_err)?.len();
+    if len < MMAP_MIN_BYTES {
+        let mut buf = Vec::with_capacity(len as usize + 1);
+        file.read_to_end(&mut buf).map_err(io_err)?;
+        f(&buf)
+    } else {
+        let mmap = unsafe { Mmap::map(&file).map_err(io_err)? };
+        f(&mmap)
     }
 }
 
