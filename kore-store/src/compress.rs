@@ -147,13 +147,25 @@ pub fn decode_strs(data: &[u8]) -> Vec<Option<String>> {
     // Validate the string bytes once; a slice between two char boundaries of valid UTF-8 is valid
     // UTF-8, so per-string validation is only needed when the whole body is not valid (lossy path).
     let text = std::str::from_utf8(body).ok();
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
+    let one = |i: usize| -> Option<String> {
         let (a, b) = (offset(i), offset(i + 1));
-        if null_flags[i] == 1 || a > b || b > body.len() { out.push(None); continue; }
-        out.push(Some(utf8_owned(text, body, a, b)));
+        if null_flags[i] == 1 || a > b || b > body.len() { return None; }
+        Some(utf8_owned(text, body, a, b))
+    };
+    build_strs(n, one)
+}
+
+/// Rows from which a string column's values are built on several threads (allocation-bound).
+const PAR_STR_ROWS: usize = 1 << 15;
+
+/// `(0..n).map(one).collect()`, in parallel for large columns (same values, same order).
+fn build_strs(n: usize, one: impl Fn(usize) -> Option<String> + Sync + Send) -> Vec<Option<String>> {
+    if n >= PAR_STR_ROWS {
+        use rayon::prelude::*;
+        (0..n).into_par_iter().with_min_len(4096).map(one).collect()
+    } else {
+        (0..n).map(one).collect()
     }
-    out
 }
 
 /// `String::from_utf8_lossy(&body[a..b]).into_owned()`, skipping validation when `text` (the whole of
@@ -190,18 +202,21 @@ pub fn decode_strs_len(data: &[u8]) -> Vec<Option<String>> {
     let flags = &data[4..4 + n];
     let lens = &data[4 + n..len_end];
     let body = &data[len_end..];
-    let text = std::str::from_utf8(body).ok();
+    // start of every value (nulls take no bytes); any value running past the end voids the column
+    let mut starts = Vec::with_capacity(n + 1);
     let mut pos = 0usize;
-    let mut out = Vec::with_capacity(n);
     for i in 0..n {
+        starts.push(pos);
+        if flags[i] == 1 { continue; }
         let l = u32::from_le_bytes(lens[i * 4..i * 4 + 4].try_into().unwrap()) as usize;
-        if flags[i] == 1 { out.push(None); continue; }
         match pos.checked_add(l).filter(|&e| e <= body.len()) {
-            Some(e) => { out.push(Some(utf8_owned(text, body, pos, e))); pos = e; }
+            Some(e) => pos = e,
             None => return vec![],
         }
     }
-    out
+    starts.push(pos);
+    let text = std::str::from_utf8(body).ok();
+    build_strs(n, |i| if flags[i] == 1 { None } else { Some(utf8_owned(text, body, starts[i], starts[i + 1])) })
 }
 
 // ── NaN-sentinel Float64 (8 bytes/element, fastest read path) ─────────────────
@@ -892,6 +907,17 @@ mod speed_equivalence_tests {
                 }
             }
         }
+        // large columns take the multi-threaded path
+        let v = sample_strs(&mut r, 3 * PAR_STR_ROWS);
+        for enc in [encode_strs(&v), encode_strs_len(&v)] {
+            for k in [0usize, 3, 5, enc.len() / 2, enc.len() - 1] {
+                let mut m = enc.clone(); m[k] ^= 0x80;
+                assert_eq!(decode_strs(&m), decode_strs_reference(&m));
+                assert_eq!(decode_strs_len(&m), decode_strs_len_reference(&m));
+            }
+        }
+        assert_eq!(decode_strs(&encode_strs(&v)), v);
+        assert_eq!(decode_strs_len(&encode_strs_len(&v)), v);
         // invalid UTF-8 inside one string and a char split across two strings
         let mut raw = encode_strs(&[Some("ab".into()), Some("\u{e9}".into())]);
         let l = raw.len(); raw[l - 1] = 0xff;
