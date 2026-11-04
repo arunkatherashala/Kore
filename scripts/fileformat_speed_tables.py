@@ -35,7 +35,7 @@ if mode == 'store':
 else:
     metrics = [('build events/s', 'build_b1000_events_per_s'), ('open_s', 'open_s'), ('open+latest snapshot_s', 'open_plus_latest_snapshot_s'),
                ('verify_s', 'verify_s'), ('get_event per op_s', 'get_event_per_op_s')]
-    sizes = [('size_bytes', 'size_bytes'), ('events dir bytes', 'size_by_table.events')]
+    sizes = [('size_bytes', 'size_bytes'), ('events dir bytes', 'size_by_table.events'), ('tamper detected', 'tamper.detected_by_check'), ('tamper silent changes', 'tamper.silent_data_change')]
 
 def fmt(xs, p=3):
     xs = [x for x in xs if x is not None]
