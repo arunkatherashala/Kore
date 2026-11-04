@@ -1602,6 +1602,7 @@ dependencies = [
  "crc",
  "kore-core",
  "lz4_flex 0.11.6",
+ "memchr",
  "memmap2",
  "pbkdf2",
  "rand",
@@ -1683,7 +1684,7 @@ dependencies = [
 
 [[package]]
 name = "kore_fileformat"
-version = "1.8.13"
+version = "1.8.15"
 
 [[package]]
 name = "libc"

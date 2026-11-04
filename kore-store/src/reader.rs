@@ -7,6 +7,10 @@ use memmap2::Mmap;
 
 const READABLE_FOOTER_PREFIX: &[u8] = b"KORE-READABLE-FOOTER trailer_len=";
 
+/// Below this many kept column bytes a file is checksummed and decoded on the calling thread: for
+/// tiny files the rayon hand-off costs more than it saves.
+const PAR_MIN_BYTES: usize = 16 * 1024;
+
 pub struct KoreReader;
 
 impl KoreReader {
@@ -79,7 +83,8 @@ impl KoreReader {
     /// Read a version snapshot from the KVER footer marker.
     pub fn read_version_snapshot(data: &[u8]) -> Option<crate::VersionSnapshot> {
         let marker = b"KVER";
-        if let Some(pos) = data.windows(4).rposition(|w| w == marker) {
+        // last occurrence, as `windows(4).rposition` found it, via a vectorised search
+        if let Some(pos) = memchr::memmem::rfind(data, marker) {
             let vd = &data[pos + 4..];
             if vd.len() >= 28 {
                 return Some(crate::VersionSnapshot {
@@ -166,13 +171,14 @@ impl KoreReader {
         }
         let keep = |name: &str| wanted.map_or(true, |w| w.iter().any(|x| *x == name));
 
-        // Verify per-column CRC32 from the stats section the writer appends after the
-        // column data. Skipped when the section is absent or not exactly parseable (older files).
+        // Per-column CRC32 from the stats section the writer appends after the column data. Skipped
+        // when the section is absent or not exactly parseable (older files).
+        let mut crcs: Option<Vec<u32>> = None;
         if let Ok(len_bytes) = take(binary_data, &mut pos, 4) {
             let sec_len = u32::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
             if let Ok(sec) = take(binary_data, &mut pos, sec_len) {
                 let mut sp = 0usize;
-                let mut crcs = Vec::with_capacity(chunks.len());
+                let mut v = Vec::with_capacity(chunks.len());
                 let mut ok = true;
                 for _ in 0..chunks.len() {
                     let entry = (|| -> Option<u32> {
@@ -181,29 +187,39 @@ impl KoreReader {
                         sp += 6 + if has_stats == 1 { 16 } else { 0 };
                         (sp <= sec.len()).then_some(crc)
                     })();
-                    match entry { Some(c) => crcs.push(c), None => { ok = false; break; } }
+                    match entry { Some(c) => v.push(c), None => { ok = false; break; } }
                 }
-                if ok && sp == sec.len() {
-                    for (chunk, expected) in chunks.iter().zip(&crcs) {
-                        if !keep(&chunk.name) { continue; }
-                        if compress::crc32(chunk.raw) != *expected {
-                            return Err(KoreError::InvalidArgument(
-                                format!("checksum mismatch in column '{}'", chunk.name)));
-                        }
-                    }
-                }
+                if ok && sp == sec.len() { crcs = Some(v); }
             }
         }
 
-        let columns: Result<Vec<Column>, String> = chunks.into_par_iter()
-            .enumerate()
-            .filter(|(_, chunk)| keep(&chunk.name))
-            .map(|(i, chunk)| {
-                let col_data = decode_column(chunk.raw, chunk.dtype, chunk.comp, num_rows)
-                    .map_err(|e| format!("col {}: {}", i, e))?;
-                Ok(Column { name: chunk.name, data: col_data })
-            })
+        // Kept columns: (position, chunk, expected crc).
+        let work: Vec<(usize, ColChunk, Option<u32>)> = chunks.into_iter().enumerate()
+            .map(|(i, c)| { let e = crcs.as_ref().map(|v| v[i]); (i, c, e) })
+            .filter(|(_, c, _)| keep(&c.name))
             .collect();
+
+        // Every kept column is checksummed before any column is decoded (so a damaged column is
+        // reported as a checksum mismatch, first one in file order, and never decoded). Both steps
+        // run in parallel only when there is enough data to pay for the thread hand-off.
+        let kept_bytes: usize = work.iter().map(|(_, c, _)| c.raw.len()).sum();
+        let parallel = work.len() > 1 && kept_bytes >= PAR_MIN_BYTES;
+        let crc_ok = |(_, c, e): &(usize, ColChunk, Option<u32>)| e.map_or(true, |e| compress::crc32(c.raw) == e);
+        let ok: Vec<bool> = if parallel { work.par_iter().map(crc_ok).collect() } else { work.iter().map(crc_ok).collect() };
+        if let Some(k) = ok.iter().position(|o| !o) {
+            return Err(KoreError::InvalidArgument(format!("checksum mismatch in column '{}'", work[k].1.name)));
+        }
+
+        let dec = |(i, chunk, _): (usize, ColChunk, Option<u32>)| -> Result<Column, String> {
+            let col_data = decode_column(chunk.raw, chunk.dtype, chunk.comp, num_rows)
+                .map_err(|e| format!("col {}: {}", i, e))?;
+            Ok(Column { name: chunk.name, data: col_data })
+        };
+        let columns: Result<Vec<Column>, String> = if parallel {
+            work.into_par_iter().map(dec).collect()
+        } else {
+            work.into_iter().map(dec).collect()
+        };
         let mut columns = columns.map_err(|e| KoreError::InvalidArgument(e))?;
 
         if let Some(w) = wanted {
@@ -271,7 +287,7 @@ impl KoreReader {
     pub fn get_delete_vector(data: &[u8]) -> Option<crate::DeleteVector> {
         // Scan footer for delete vector marker b"KDEL"
         let marker = b"KDEL";
-        if let Some(pos) = data.windows(4).rposition(|w| w == marker) {
+        if let Some(pos) = memchr::memmem::rfind(data, marker) {
             let dv_data = &data[pos + 4..];
             if dv_data.len() >= 12 {
                 let cardinality = u32::from_le_bytes(dv_data[0..4].try_into().unwrap());
@@ -309,8 +325,9 @@ fn find_footer_prefix(data: &[u8]) -> Option<usize> {
     if data.len() < READABLE_FOOTER_PREFIX.len() {
         return None;
     }
-    data.windows(READABLE_FOOTER_PREFIX.len())
-        .rposition(|window| window == READABLE_FOOTER_PREFIX)
+    // last occurrence (same result as `windows(..).rposition(..)`), vectorised: files without a text
+    // trailer used to pay a byte-by-byte scan of the whole file here
+    memchr::memmem::rfind(data, READABLE_FOOTER_PREFIX)
 }
 
 fn decode_column(raw: &[u8], dtype: DType, comp: Compression, n: usize) -> Result<ColumnData, String> {
@@ -338,14 +355,15 @@ fn decode_column(raw: &[u8], dtype: DType, comp: Compression, n: usize) -> Resul
         }
         let stride = raw[1] as usize;
         if !(2..=16).contains(&stride) { return Err("invalid shuffle stride".into()); }
-        let planes = zstd::decode_all(&raw[2..]).map_err(|e| format!("ZSTD decompress: {e}"))?;
+        let planes = compress::zstd_decode_all(&raw[2..], decoded_size_hint(dtype, inner_comp, n))
+            .map_err(|e| format!("ZSTD decompress: {e}"))?;
         if planes.len() % stride != 0 { return Err("shuffled block length not a multiple of stride".into()); }
         return decode_column(&compress::byte_unshuffle(&planes, stride), dtype, inner_comp, n);
     } else if comp == Compression::Zstd {
         if raw.is_empty() { return Err("empty ZSTD block".into()); }
         let inner_comp = Compression::try_from(raw[0])
             .map_err(|e| format!("ZSTD inner comp: {e}"))?;
-        let decompressed = zstd::decode_all(&raw[1..])
+        let decompressed = compress::zstd_decode_all(&raw[1..], decoded_size_hint(dtype, inner_comp, n))
             .map_err(|e| format!("ZSTD decompress: {e}"))?;
         return decode_column(&decompressed, dtype, inner_comp, n);
     } else {
@@ -426,6 +444,21 @@ fn decode_column(raw: &[u8], dtype: DType, comp: Compression, n: usize) -> Resul
         return Err(format!("column has {len} values, expected {n}"));
     }
     Ok(col)
+}
+
+/// Lower bound of a column's encoded size before the ZSTD stage, used only to pre-size the output
+/// buffer (never trusted for bounds; the decoder caps it relative to the compressed size).
+fn decoded_size_hint(dtype: DType, comp: Compression, n: usize) -> usize {
+    match (dtype, comp) {
+        (DType::I64, Compression::Delta) | (DType::I64, Compression::Raw) => n.saturating_mul(9),
+        (DType::F64, Compression::NanRaw) => n.saturating_mul(8),
+        (DType::F64, Compression::Raw) => n.saturating_mul(9),
+        (DType::Bool, _) => n,
+        (DType::Str, Compression::Raw) => n.saturating_mul(5).saturating_add(8),
+        (DType::Str, Compression::StrLen) => n.saturating_mul(5).saturating_add(4),
+        (DType::Str, Compression::Dict) | (DType::StrDict, _) | (DType::F64, Compression::Dict) => n.saturating_add(2),
+        _ => 0,
+    }
 }
 
 fn io_err<E: std::fmt::Display>(e: E) -> KoreError {
