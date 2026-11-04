@@ -141,18 +141,29 @@ pub fn decode_strs(data: &[u8]) -> Vec<Option<String>> {
         _ => return vec![],
     };
     let null_flags = &data[4..null_end];
-    let off_start  = null_end;
-    let data_start = off_end;
-    let offset = |i: usize| u32::from_le_bytes(data[off_start + i*4..off_start + i*4 + 4].try_into().unwrap()) as usize;
+    let offsets = &data[null_end..off_end];
+    let body = &data[off_end..];
+    let offset = |i: usize| u32::from_le_bytes(offsets[i * 4..i * 4 + 4].try_into().unwrap()) as usize;
+    // Validate the string bytes once; a slice between two char boundaries of valid UTF-8 is valid
+    // UTF-8, so per-string validation is only needed when the whole body is not valid (lossy path).
+    let text = std::str::from_utf8(body).ok();
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
-        let (o1, o2) = (offset(i), offset(i + 1));
-        let bytes = if null_flags[i] == 1 { None } else {
-            data_start.checked_add(o1).zip(data_start.checked_add(o2)).and_then(|(a, b)| data.get(a..b))
-        };
-        out.push(bytes.map(|b| String::from_utf8_lossy(b).into_owned()));
+        let (a, b) = (offset(i), offset(i + 1));
+        if null_flags[i] == 1 || a > b || b > body.len() { out.push(None); continue; }
+        out.push(Some(utf8_owned(text, body, a, b)));
     }
     out
+}
+
+/// `String::from_utf8_lossy(&body[a..b]).into_owned()`, skipping validation when `text` (the whole of
+/// `body`, already validated) has char boundaries at both ends.
+#[inline]
+fn utf8_owned(text: Option<&str>, body: &[u8], a: usize, b: usize) -> String {
+    match text {
+        Some(t) if t.is_char_boundary(a) && t.is_char_boundary(b) => t[a..b].to_owned(),
+        _ => String::from_utf8_lossy(&body[a..b]).into_owned(),
+    }
 }
 
 /// Strings as `[count:4] [null flags: count] [byte length per string: count*4] [bytes...]`.
@@ -178,13 +189,15 @@ pub fn decode_strs_len(data: &[u8]) -> Vec<Option<String>> {
     if n == 0 || len_end > data.len() { return vec![]; }
     let flags = &data[4..4 + n];
     let lens = &data[4 + n..len_end];
-    let mut pos = len_end;
+    let body = &data[len_end..];
+    let text = std::str::from_utf8(body).ok();
+    let mut pos = 0usize;
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         let l = u32::from_le_bytes(lens[i * 4..i * 4 + 4].try_into().unwrap()) as usize;
         if flags[i] == 1 { out.push(None); continue; }
-        match pos.checked_add(l).and_then(|e| data.get(pos..e)) {
-            Some(b) => { out.push(Some(String::from_utf8_lossy(b).into_owned())); pos += l; }
+        match pos.checked_add(l).filter(|&e| e <= body.len()) {
+            Some(e) => { out.push(Some(utf8_owned(text, body, pos, e))); pos = e; }
             None => return vec![],
         }
     }
@@ -305,7 +318,36 @@ pub fn decode_strdict(data: &[u8], n: usize) -> (Vec<u8>, Vec<String>) {
 
 // ── ZSTD compression (better ratio than LZ4) ──────────────────────────────────
 pub fn zstd_encode(data: &[u8]) -> Vec<u8> {
-    zstd::encode_all(data, 3).unwrap_or_else(|_| data.to_vec())
+    zstd_encode_reused(data).unwrap_or_else(|| zstd::encode_all(data, 3).unwrap_or_else(|_| data.to_vec()))
+}
+
+/// Byte-for-byte the same as `zstd::encode_all(data, 3)` (same streaming encoder, same calls), but on
+/// a per-thread compression context created once instead of once per column. None when the context is
+/// busy or any step fails; the caller then uses `encode_all` itself.
+fn zstd_encode_reused(data: &[u8]) -> Option<Vec<u8>> {
+    use std::cell::RefCell;
+    use zstd::zstd_safe::{CCtx, CParameter, ResetDirective};
+    thread_local! { static CCTX: RefCell<Option<CCtx<'static>>> = const { RefCell::new(None) }; }
+    CCTX.with(|cell| {
+        let mut slot = cell.try_borrow_mut().ok()?;
+        if slot.is_none() {
+            // what `zstd::stream::raw::Encoder::new(3)` sets up
+            let mut c = CCtx::create();
+            c.set_parameter(CParameter::CompressionLevel(3)).ok()?;
+            c.load_dictionary(&[]).ok()?;
+            *slot = Some(c);
+        }
+        let cctx = slot.as_mut()?;
+        // a new frame from a clean session; parameters (level 3) are kept
+        cctx.reset(ResetDirective::SessionOnly).ok()?;
+        let mut enc = zstd::stream::write::Encoder::with_context(Vec::<u8>::new(), cctx);
+        let mut src = data;
+        let r = std::io::copy(&mut src, &mut enc).and_then(|_| enc.finish());
+        match r {
+            Ok(v) => Some(v),
+            Err(_) => { *slot = None; None }
+        }
+    })
 }
 
 /// Transpose fixed-width records into byte planes (all byte 0s, then all byte 1s, ...).
@@ -329,14 +371,63 @@ pub fn byte_unshuffle(data: &[u8], width: usize) -> Vec<u8> {
     out
 }
 
+/// Decompress a ZSTD stream (one or more frames), returning exactly what `zstd::decode_all` returns.
+///
+/// Fast path: one reused decompression context per thread, output written straight into a single
+/// buffer pre-sized from `size_hint` (or the frame header when it records the content size), with no
+/// intermediate read buffer. Anything the fast path does not finish cleanly (error, truncated frame,
+/// trailing bytes, empty input) is handed to `zstd::decode_all`, so results and errors are unchanged.
+pub fn zstd_decode_all(src: &[u8], size_hint: usize) -> std::io::Result<Vec<u8>> {
+    match zstd_decode_fast(src, size_hint) {
+        Some(v) => Ok(v),
+        None => zstd::decode_all(src),
+    }
+}
+
+fn zstd_decode_fast(src: &[u8], size_hint: usize) -> Option<Vec<u8>> {
+    use std::cell::RefCell;
+    use zstd::zstd_safe::{DCtx, InBuffer, OutBuffer, ResetDirective};
+    thread_local! { static DCTX: RefCell<Option<DCtx<'static>>> = const { RefCell::new(None) }; }
+    if src.is_empty() { return None; }
+    // A recorded content size is only a hint here (a stream can hold several frames); cap it so a
+    // corrupt header cannot force a huge allocation up front.
+    let declared = zstd::zstd_safe::get_frame_content_size(src).ok().flatten().unwrap_or(0) as usize;
+    let cap_limit = src.len().saturating_mul(64).max(1 << 16);
+    let first = size_hint.max(declared).max(src.len().saturating_mul(2)).clamp(256, cap_limit);
+    DCTX.with(|cell| {
+        let mut slot = cell.try_borrow_mut().ok()?;
+        let dctx = slot.get_or_insert_with(DCtx::create);
+        dctx.reset(ResetDirective::SessionOnly).ok()?;
+        let mut out: Vec<u8> = Vec::with_capacity(first);
+        let mut input = InBuffer::around(src);
+        loop {
+            if out.capacity() - out.len() < 4096 { out.reserve(out.len().max(1 << 16)); }
+            let (in_before, out_before) = (input.pos(), out.len());
+            // the output buffer sets `out.len()` to the bytes written when it goes out of scope
+            let r = dctx.decompress_stream(&mut OutBuffer::around_pos(&mut out, out_before), &mut input);
+            let hint = match r { Ok(h) => h, Err(_) => { let _ = dctx.reset(ResetDirective::SessionOnly); return None; } };
+            let consumed = input.pos() == src.len();
+            if hint == 0 && consumed { return Some(out); }
+            let full = out.capacity() == out.len();
+            if consumed && !full && input.pos() == in_before && out.len() == out_before {
+                // input exhausted mid-frame: truncated; let decode_all produce its error
+                let _ = dctx.reset(ResetDirective::SessionOnly);
+                return None;
+            }
+        }
+    })
+}
+
 pub fn zstd_decode(data: &[u8], n: usize) -> Vec<u8> {
     zstd::decode_all(data).unwrap_or_else(|_| vec![0; n])
 }
 
 // ── CRC32 checksums for data integrity ─────────────────────────────────────────
+/// CRC-32 (ISO-HDLC, the zlib/PNG polynomial). Slice-by-16 tables: the same checksum as the
+/// byte-at-a-time default of the `crc` crate, several times faster on large columns.
 pub fn crc32(data: &[u8]) -> u32 {
-    use crc::{Crc, CRC_32_ISO_HDLC};
-    const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
+    use crc::{Crc, Table, CRC_32_ISO_HDLC};
+    const CRC: Crc<u32, Table<16>> = Crc::<u32, Table<16>>::new(&CRC_32_ISO_HDLC);
     CRC.checksum(data)
 }
 
@@ -657,4 +748,157 @@ pub fn decode_delete_vector(data: &[u8]) -> Option<crate::DeleteVector> {
     if 16 + bitmap_len > data.len() { return None; }
     let bitmap = data[16..16+bitmap_len].to_vec();
     Some(crate::DeleteVector { bitmap, cardinality, timestamp })
+}
+
+#[cfg(test)]
+mod speed_equivalence_tests {
+    //! The faster implementations must return exactly what the ones they replace returned.
+    use super::*;
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 { let mut x = self.0; x ^= x << 13; x ^= x >> 7; x ^= x << 17; self.0 = x; x }
+        fn bytes(&mut self, n: usize, alphabet: u64) -> Vec<u8> { (0..n).map(|_| (self.next() % alphabet) as u8).collect() }
+    }
+
+    fn crc32_bytewise(data: &[u8]) -> u32 {
+        use crc::{Crc, CRC_32_ISO_HDLC};
+        const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
+        CRC.checksum(data)
+    }
+
+    // the decoders exactly as they were before the speed work
+    fn decode_strs_reference(data: &[u8]) -> Vec<Option<String>> {
+        if data.len() < 4 { return vec![]; }
+        let n = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+        if n == 0 { return vec![]; }
+        let null_end = 4 + n;
+        let off_end = match (n + 1).checked_mul(4).and_then(|o| null_end.checked_add(o)) {
+            Some(e) if e <= data.len() => e,
+            _ => return vec![],
+        };
+        let null_flags = &data[4..null_end];
+        let off_start = null_end;
+        let data_start = off_end;
+        let offset = |i: usize| u32::from_le_bytes(data[off_start + i*4..off_start + i*4 + 4].try_into().unwrap()) as usize;
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let (o1, o2) = (offset(i), offset(i + 1));
+            let bytes = if null_flags[i] == 1 { None } else {
+                data_start.checked_add(o1).zip(data_start.checked_add(o2)).and_then(|(a, b)| data.get(a..b))
+            };
+            out.push(bytes.map(|b| String::from_utf8_lossy(b).into_owned()));
+        }
+        out
+    }
+
+    fn decode_strs_len_reference(data: &[u8]) -> Vec<Option<String>> {
+        if data.len() < 4 { return vec![]; }
+        let n = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+        let Some(len_end) = n.checked_mul(5).and_then(|x| x.checked_add(4)) else { return vec![] };
+        if n == 0 || len_end > data.len() { return vec![]; }
+        let flags = &data[4..4 + n];
+        let lens = &data[4 + n..len_end];
+        let mut pos = len_end;
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let l = u32::from_le_bytes(lens[i * 4..i * 4 + 4].try_into().unwrap()) as usize;
+            if flags[i] == 1 { out.push(None); continue; }
+            match pos.checked_add(l).and_then(|e| data.get(pos..e)) {
+                Some(b) => { out.push(Some(String::from_utf8_lossy(b).into_owned())); pos += l; }
+                None => return vec![],
+            }
+        }
+        out
+    }
+
+    fn sample_strs(r: &mut Rng, n: usize) -> Vec<Option<String>> {
+        let pool = ["", "a", "caf\u{e9}", "\u{1f600}x", "plain ascii text", "\u{4e2d}\u{6587}"];
+        (0..n).map(|i| if r.next() % 9 == 0 { None } else { Some(format!("{}{}", pool[(r.next() % 6) as usize], i % 13)) }).collect()
+    }
+
+    #[test]
+    fn crc32_matches_the_bytewise_table_and_the_check_value() {
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+        let mut r = Rng(0x1234_5678_9abc_def1);
+        for n in [0usize, 1, 3, 15, 16, 17, 31, 64, 1000, 65_537] {
+            let d = r.bytes(n, 256);
+            assert_eq!(crc32(&d), crc32_bytewise(&d), "len {n}");
+        }
+    }
+
+    #[test]
+    fn zstd_encode_is_byte_identical_to_encode_all() {
+        let mut r = Rng(0x0bad_cafe_f00d_1234);
+        let mut inputs: Vec<Vec<u8>> = vec![vec![], vec![7], vec![0; 300_000]];
+        for n in [10usize, 64, 1000, 4096, 131_071, 131_072, 131_073, 400_000] {
+            inputs.push(r.bytes(n, 256));
+            inputs.push(r.bytes(n, 4));
+        }
+        // the same thread twice (context reuse) and other threads (fresh contexts)
+        for _ in 0..2 {
+            for d in &inputs { assert_eq!(zstd_encode(d), zstd::encode_all(&d[..], 3).unwrap(), "len {}", d.len()); }
+        }
+        std::thread::scope(|s| for d in &inputs {
+            s.spawn(move || assert_eq!(zstd_encode(d), zstd::encode_all(&d[..], 3).unwrap()));
+        });
+    }
+
+    #[test]
+    fn zstd_decode_all_matches_decode_all_on_good_and_bad_input() {
+        let mut r = Rng(0x5eed_5eed_5eed_5eed);
+        let mut cases: Vec<Vec<u8>> = vec![vec![], vec![0x28, 0xb5, 0x2f, 0xfd], r.bytes(100, 256)];
+        for n in [1usize, 100, 70_000, 300_000] {
+            let raw = r.bytes(n, 5);
+            let z = zstd::encode_all(&raw[..], 3).unwrap();
+            cases.push(z.clone());
+            cases.push(z[..z.len() / 2].to_vec()); // truncated
+            let mut two = z.clone(); two.extend_from_slice(&z); cases.push(two); // two frames
+            let mut junk = z.clone(); junk.extend_from_slice(b"junk"); cases.push(junk); // trailing bytes
+            let mut flip = z.clone(); let k = flip.len() / 3; flip[k] ^= 0x40; cases.push(flip);
+            cases.push(zstd::bulk::compress(&raw, 3).unwrap()); // content size in the header
+        }
+        for (i, c) in cases.iter().enumerate() {
+            for hint in [0usize, 10, 1 << 20] {
+                let want = zstd::decode_all(&c[..]);
+                let got = zstd_decode_all(c, hint);
+                match (&want, &got) {
+                    (Ok(a), Ok(b)) => assert_eq!(a, b, "case {i}"),
+                    (Err(_), Err(_)) => {}
+                    _ => panic!("case {i}: decode_all {:?} vs fast {:?}", want.as_ref().map(|v| v.len()), got.as_ref().map(|v| v.len())),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn string_decoders_match_the_previous_ones_on_valid_and_damaged_input() {
+        let mut r = Rng(0xfeed_beef_dead_c0de);
+        for n in [0usize, 1, 2, 50, 1000] {
+            let v = sample_strs(&mut r, n);
+            for enc in [encode_strs(&v), encode_strs_len(&v)] {
+                assert_eq!(decode_strs(&encode_strs(&v)), decode_strs_reference(&encode_strs(&v)));
+                assert_eq!(decode_strs_len(&encode_strs_len(&v)), decode_strs_len_reference(&encode_strs_len(&v)));
+                // damage: every single byte flipped in a few ways, and every truncation
+                for k in 0..enc.len().min(600) {
+                    for x in [0x01u8, 0x80, 0xff] {
+                        let mut m = enc.clone(); m[k] ^= x;
+                        assert_eq!(decode_strs(&m), decode_strs_reference(&m));
+                        assert_eq!(decode_strs_len(&m), decode_strs_len_reference(&m));
+                    }
+                    let t = &enc[..k];
+                    assert_eq!(decode_strs(t), decode_strs_reference(t));
+                    assert_eq!(decode_strs_len(t), decode_strs_len_reference(t));
+                }
+            }
+        }
+        // invalid UTF-8 inside one string and a char split across two strings
+        let mut raw = encode_strs(&[Some("ab".into()), Some("\u{e9}".into())]);
+        let l = raw.len(); raw[l - 1] = 0xff;
+        assert_eq!(decode_strs(&raw), decode_strs_reference(&raw));
+        let mut split = encode_strs(&[Some("x\u{e9}".into()), Some("y".into())]);
+        let off = 4 + 2 + 4; // second offset
+        split[off..off + 4].copy_from_slice(&2u32.to_le_bytes());
+        assert_eq!(decode_strs(&split), decode_strs_reference(&split));
+    }
 }
