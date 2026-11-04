@@ -379,7 +379,17 @@ fn decode_column(raw: &[u8], dtype: DType, comp: Compression, n: usize) -> Resul
         if raw.is_empty() { return Err("empty ZSTD block".into()); }
         let inner_comp = Compression::try_from(raw[0])
             .map_err(|e| format!("ZSTD inner comp: {e}"))?;
-        let decompressed = compress::zstd_decode_all(&raw[1..], decoded_size_hint(dtype, inner_comp, n))
+        let hint = decoded_size_hint(dtype, inner_comp, n);
+        // Decompress into a per-thread scratch buffer (decoding copies everything out of it), so a
+        // read does not allocate and fault in a fresh buffer per column. Busy buffer (nested codec in
+        // a crafted file) or anything the fast path declines: the owned path below, as before.
+        if let Some(r) = ZSTD_SCRATCH.with(|c| {
+            let mut buf = c.try_borrow_mut().ok()?;
+            let r = compress::zstd_decode_into(&raw[1..], hint, &mut buf).then(|| decode_column(&buf, dtype, inner_comp, n));
+            if buf.capacity() > SCRATCH_KEEP_BYTES { *buf = Vec::new(); }
+            r
+        }) { return r; }
+        let decompressed = compress::zstd_decode_all(&raw[1..], hint)
             .map_err(|e| format!("ZSTD decompress: {e}"))?;
         return decode_column(&decompressed, dtype, inner_comp, n);
     } else {
@@ -461,6 +471,10 @@ fn decode_column(raw: &[u8], dtype: DType, comp: Compression, n: usize) -> Resul
     }
     Ok(col)
 }
+
+thread_local! { static ZSTD_SCRATCH: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) }; }
+/// Larger scratch buffers are released after use instead of being kept by the thread.
+const SCRATCH_KEEP_BYTES: usize = 8 * 1024 * 1024;
 
 /// Lower bound of a column's encoded size before the ZSTD stage, used only to pre-size the output
 /// buffer (never trusted for bounds; the decoder caps it relative to the compressed size).

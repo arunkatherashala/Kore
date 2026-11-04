@@ -393,41 +393,43 @@ pub fn byte_unshuffle(data: &[u8], width: usize) -> Vec<u8> {
 /// intermediate read buffer. Anything the fast path does not finish cleanly (error, truncated frame,
 /// trailing bytes, empty input) is handed to `zstd::decode_all`, so results and errors are unchanged.
 pub fn zstd_decode_all(src: &[u8], size_hint: usize) -> std::io::Result<Vec<u8>> {
-    match zstd_decode_fast(src, size_hint) {
-        Some(v) => Ok(v),
-        None => zstd::decode_all(src),
-    }
+    let mut out = Vec::new();
+    if zstd_decode_into(src, size_hint, &mut out) { Ok(out) } else { zstd::decode_all(src) }
 }
 
-fn zstd_decode_fast(src: &[u8], size_hint: usize) -> Option<Vec<u8>> {
+/// The fast path of `zstd_decode_all`, decoding into `out` (cleared first; its capacity is reused).
+/// Returns false, with `out` in an unspecified state, when the input needs `zstd::decode_all` to get
+/// the result or the error that function gives.
+pub fn zstd_decode_into(src: &[u8], size_hint: usize, out: &mut Vec<u8>) -> bool {
     use std::cell::RefCell;
     use zstd::zstd_safe::{DCtx, InBuffer, OutBuffer, ResetDirective};
     thread_local! { static DCTX: RefCell<Option<DCtx<'static>>> = const { RefCell::new(None) }; }
-    if src.is_empty() { return None; }
+    if src.is_empty() { return false; }
     // A recorded content size is only a hint here (a stream can hold several frames); cap it so a
     // corrupt header cannot force a huge allocation up front.
     let declared = zstd::zstd_safe::get_frame_content_size(src).ok().flatten().unwrap_or(0) as usize;
     let cap_limit = src.len().saturating_mul(64).max(1 << 16);
     let first = size_hint.max(declared).max(src.len().saturating_mul(2)).clamp(256, cap_limit);
+    out.clear();
+    if out.capacity() < first { out.reserve(first); }
     DCTX.with(|cell| {
-        let mut slot = cell.try_borrow_mut().ok()?;
+        let Ok(mut slot) = cell.try_borrow_mut() else { return false };
         let dctx = slot.get_or_insert_with(DCtx::create);
-        dctx.reset(ResetDirective::SessionOnly).ok()?;
-        let mut out: Vec<u8> = Vec::with_capacity(first);
+        if dctx.reset(ResetDirective::SessionOnly).is_err() { return false; }
         let mut input = InBuffer::around(src);
         loop {
             if out.capacity() - out.len() < 4096 { out.reserve(out.len().max(1 << 16)); }
             let (in_before, out_before) = (input.pos(), out.len());
             // the output buffer sets `out.len()` to the bytes written when it goes out of scope
-            let r = dctx.decompress_stream(&mut OutBuffer::around_pos(&mut out, out_before), &mut input);
-            let hint = match r { Ok(h) => h, Err(_) => { let _ = dctx.reset(ResetDirective::SessionOnly); return None; } };
+            let r = dctx.decompress_stream(&mut OutBuffer::around_pos(&mut *out, out_before), &mut input);
+            let hint = match r { Ok(h) => h, Err(_) => { let _ = dctx.reset(ResetDirective::SessionOnly); return false; } };
             let consumed = input.pos() == src.len();
-            if hint == 0 && consumed { return Some(out); }
+            if hint == 0 && consumed { return true; }
             let full = out.capacity() == out.len();
             if consumed && !full && input.pos() == in_before && out.len() == out_before {
                 // input exhausted mid-frame: truncated; let decode_all produce its error
                 let _ = dctx.reset(ResetDirective::SessionOnly);
-                return None;
+                return false;
             }
         }
     })
