@@ -12,7 +12,7 @@
 //!   open    read_file of every file from disk (OS cache warm after the first rep)
 //!   scan    from_bytes of every file from memory (full decode)
 //!   proj    decode only the `kind` column (old store: no projection API, so full decode + drop)
-//!   lookup  20 point lookups by event_id: find the file and row via the id column, then decode that file
+//!   lookup  20 (env BENCH_LOOKUPS) point lookups by event_id: find the file and row via the id column, then decode that file
 //!   asof    (only where the store has a version log; `-` otherwise) read_at_version of the middle
 //!           version of a 10-version KVLG log holding the `seg` files of the first 10k rows
 
@@ -71,9 +71,10 @@ fn main() {
     let segs: Vec<DataBlock> = (0..rows).step_by(1000)
         .map(|s| full.select_rows(&(s..(s + 1000).min(rows)).collect::<Vec<_>>())).collect();
     let mut r = 0x9E37_79B9_7F4A_7C15u64;
-    let ids: Vec<String> = (0..20).map(|_| { r ^= r << 13; r ^= r >> 7; r ^= r << 17; str_at(&full, 0, (r % rows as u64) as usize) }).collect();
+    let lookups: usize = std::env::var("BENCH_LOOKUPS").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+    let ids: Vec<String> = (0..lookups).map(|_| { r ^= r << 13; r ^= r >> 7; r ^= r << 17; str_at(&full, 0, (r % rows as u64) as usize) }).collect();
 
-    let mut json = format!("{{\"rows\": {rows}, \"reps\": {reps}");
+    let mut json = format!("{{\"rows\": {rows}, \"reps\": {reps}, \"lookups\": {lookups}");
     for (layout, blocks) in [("seg", &segs), ("one", &vec![full.clone()])] {
         let (w, _) = time(reps, || blocks.iter().map(|b| KoreWriter::to_bytes(b).len()).sum());
         let files: Vec<Vec<u8>> = blocks.iter().map(KoreWriter::to_bytes).collect();
