@@ -26,7 +26,7 @@ for n in $SIZES; do
         reps=9; lk=20; [ "$n" -ge 100000 ] && reps=5; [ "$n" -ge 1000000 ] && { reps=3; lk=5; }
         BENCH_LOOKUPS=$lk timeout 1800 "$BIN/bench_store_$v.exe" $n $reps "$OUT/w_$v" "$OUT/r_${v}_${n}_r$r.json" > /dev/null 2> "$OUT/log_${v}_${n}_r$r.txt"
       else
-        tt=40; [ "$n" -le 10000 ] && tt=100
+        tt=40
         timeout 3600 "$BIN/bench_log_formats_$v.exe" --data "$DATA/data_$n.jsonl" --n $n --format 1 --work "$OUT/w_$v" \
           --out "$OUT/r_${v}_${n}_r$r.json" --build-reps 2 --reps 5 --tamper-trials $tt 2> "$OUT/log_${v}_${n}_r$r.txt"
       fi
