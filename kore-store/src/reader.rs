@@ -199,27 +199,28 @@ impl KoreReader {
             .filter(|(_, c, _)| keep(&c.name))
             .collect();
 
-        // Every kept column is checksummed before any column is decoded (so a damaged column is
-        // reported as a checksum mismatch, first one in file order, and never decoded). Both steps
-        // run in parallel only when there is enough data to pay for the thread hand-off.
+        // One task per kept column: checksum, and decode only if the checksum matched. The result is
+        // what checking every column before decoding any gave: if any column is damaged, the first
+        // damaged one in file order is reported as a checksum mismatch (and none of the damaged
+        // columns is decoded); otherwise the first decode error in file order. Columns are handled in
+        // parallel only when there is enough data to pay for the thread hand-off.
+        enum Res { Ok(Column), Crc(String), Dec(String) }
         let kept_bytes: usize = work.iter().map(|(_, c, _)| c.raw.len()).sum();
         let parallel = work.len() > 1 && kept_bytes >= PAR_MIN_BYTES;
-        let crc_ok = |(_, c, e): &(usize, ColChunk, Option<u32>)| e.map_or(true, |e| compress::crc32(c.raw) == e);
-        let ok: Vec<bool> = if parallel { work.par_iter().map(crc_ok).collect() } else { work.iter().map(crc_ok).collect() };
-        if let Some(k) = ok.iter().position(|o| !o) {
-            return Err(KoreError::InvalidArgument(format!("checksum mismatch in column '{}'", work[k].1.name)));
+        let one = |(i, chunk, expected): (usize, ColChunk, Option<u32>)| -> Res {
+            if expected.map_or(false, |e| compress::crc32(chunk.raw) != e) { return Res::Crc(chunk.name); }
+            match decode_column(chunk.raw, chunk.dtype, chunk.comp, num_rows) {
+                Ok(data) => Res::Ok(Column { name: chunk.name, data }),
+                Err(e) => Res::Dec(format!("col {}: {}", i, e)),
+            }
+        };
+        let results: Vec<Res> = if parallel { work.into_par_iter().map(one).collect() } else { work.into_iter().map(one).collect() };
+        if let Some(name) = results.iter().find_map(|r| if let Res::Crc(n) = r { Some(n) } else { None }) {
+            return Err(KoreError::InvalidArgument(format!("checksum mismatch in column '{name}'")));
         }
-
-        let dec = |(i, chunk, _): (usize, ColChunk, Option<u32>)| -> Result<Column, String> {
-            let col_data = decode_column(chunk.raw, chunk.dtype, chunk.comp, num_rows)
-                .map_err(|e| format!("col {}: {}", i, e))?;
-            Ok(Column { name: chunk.name, data: col_data })
-        };
-        let columns: Result<Vec<Column>, String> = if parallel {
-            work.into_par_iter().map(dec).collect()
-        } else {
-            work.into_iter().map(dec).collect()
-        };
+        let columns: Result<Vec<Column>, String> = results.into_iter()
+            .map(|r| match r { Res::Ok(c) => Ok(c), Res::Dec(e) => Err(e), Res::Crc(_) => unreachable!() })
+            .collect();
         let mut columns = columns.map_err(|e| KoreError::InvalidArgument(e))?;
 
         if let Some(w) = wanted {
