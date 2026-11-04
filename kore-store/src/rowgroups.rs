@@ -236,8 +236,11 @@ pub fn read(data: &[u8], columns: Option<&[&str]>, range: Option<&Range>) -> Res
         if b.num_rows as u64 != g.rows { return Err(bad("row group length disagrees with the index")); }
         Ok(b)
     };
-    let mut parts = Vec::with_capacity(keep.len());
-    for &i in &keep { parts.push(decode(&idx.groups[i])?); }
+    // groups are independent files: decode them in parallel (results kept in group order; the first
+    // failing group in order is the error returned, as with the sequential loop)
+    use rayon::prelude::*;
+    let decoded: Vec<Result<DataBlock, KoreError>> = keep.par_iter().map(|&i| decode(&idx.groups[i])).collect();
+    let parts = decoded.into_iter().collect::<Result<Vec<_>, _>>()?;
     if parts.is_empty() {
         // everything pruned: keep the schema, return no rows
         return Ok(decode(&idx.groups[0])?.select_rows(&[]));
@@ -249,6 +252,46 @@ pub fn read(data: &[u8], columns: Option<&[&str]>, range: Option<&Range>) -> Res
 /// one group and plain in another, and never lets a merged dictionary outgrow its 8-bit codes.
 fn concat(mut parts: Vec<DataBlock>) -> Result<DataBlock, KoreError> {
     if parts.len() == 1 { return Ok(parts.pop().unwrap()); }
+    if movable(&parts) { return Ok(concat_moving(parts)); }
+    concat_values(parts)
+}
+
+/// True when every group has the same column names and, per column, the same variant (and, for
+/// dictionaries, an equal dictionary): then concatenation is a plain append, and `concat_moving`
+/// gives exactly what `concat_values` gives without copying each value.
+fn movable(parts: &[DataBlock]) -> bool {
+    let first = &parts[0];
+    parts.iter().all(|p| p.columns.len() == first.columns.len()
+        && p.columns.iter().zip(&first.columns).all(|(c, f)| c.name == f.name
+            && std::mem::discriminant(&c.data) == std::mem::discriminant(&f.data)
+            && match (&c.data, &f.data) {
+                (ColumnData::StrDict { dict: a, .. }, ColumnData::StrDict { dict: b, .. }) => a == b,
+                _ => true,
+            }))
+}
+
+fn concat_moving(parts: Vec<DataBlock>) -> DataBlock {
+    let num_rows = parts.iter().map(|p| p.num_rows).sum();
+    let mut groups = parts.into_iter().map(|p| p.columns.into_iter());
+    let mut columns: Vec<Column> = groups.next().unwrap().collect();
+    for g in groups {
+        for (dst, src) in columns.iter_mut().zip(g) {
+            match (&mut dst.data, src.data) {
+                (ColumnData::Int64(a), ColumnData::Int64(b)) => a.extend(b),
+                (ColumnData::Float64(a), ColumnData::Float64(b)) => a.extend(b),
+                (ColumnData::Bool(a), ColumnData::Bool(b)) => a.extend(b),
+                (ColumnData::Str(a), ColumnData::Str(b)) => a.extend(b),
+                (ColumnData::StrDict { codes: a, .. }, ColumnData::StrDict { codes: b, .. }) => a.extend(b),
+                _ => unreachable!("checked by movable()"),
+            }
+        }
+    }
+    DataBlock { columns, num_rows }
+}
+
+/// Value-copying concatenation, unchanged: handles groups where a column is dictionary-encoded in
+/// some groups and plain in others, and reports schema disagreements.
+fn concat_values(parts: Vec<DataBlock>) -> Result<DataBlock, KoreError> {
     let first = &parts[0];
     let mut columns = Vec::with_capacity(first.columns.len());
     for ci in 0..first.columns.len() {
@@ -345,6 +388,29 @@ mod tests {
         // the exact value must never be pruned even though f64 cannot represent it
         let r = Range { column: "v".into(), min: Some((big + 5) as f64), max: Some((big + 5) as f64) };
         assert_eq!(matching_groups(&idx, &r).unwrap(), vec![0]);
+    }
+
+    #[test]
+    fn moving_concat_equals_value_copying_concat() {
+        let mk = |k: usize, dict: bool| DataBlock::new(vec![
+            Column::int64("i", (0..50).map(|x| if x % 7 == 0 { None } else { Some((x * k) as i64) }).collect()),
+            Column::float64("f", (0..50).map(|x| Some(x as f64 * 0.5 + k as f64)).collect()),
+            Column::bool_col("b", (0..50).map(|x| if x % 5 == 0 { None } else { Some(x % 2 == 0) }).collect()),
+            Column { name: "s".into(), data: if dict {
+                ColumnData::StrDict { codes: (0..50).map(|x| if x % 9 == 0 { u8::MAX } else { (x % 3) as u8 }).collect(), dict: vec!["a".into(), "b".into(), "c".into()] }
+            } else { ColumnData::Str((0..50).map(|x| Some(format!("{k}-{x}"))).collect()) } },
+        ]).unwrap();
+        for groups in [vec![mk(1, false), mk(2, false), mk(3, false)], vec![mk(1, true), mk(2, true)]] {
+            assert!(movable(&groups));
+            let a = concat_moving(groups.clone());
+            let b = concat_values(groups).unwrap();
+            assert_eq!((a.num_rows, a.columns.len()), (b.num_rows, b.columns.len()));
+            for (x, y) in a.columns.iter().zip(&b.columns) { assert_eq!(x.name, y.name); assert_eq!(x.data, y.data); }
+        }
+        // mixed dictionary / plain: not movable, goes the copying way
+        let mixed = vec![mk(1, true), mk(2, false)];
+        assert!(!movable(&mixed));
+        assert!(matches!(concat(mixed).unwrap().columns[3].data, ColumnData::Str(_)));
     }
 
     #[test]
