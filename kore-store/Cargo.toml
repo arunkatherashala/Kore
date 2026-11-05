@@ -1,9 +1,18 @@
 [package]
 name    = "kore-store"
-version = "0.1.0"
+version = "1.6.0"
 edition = "2021"
 
 [dependencies]
 kore-core = { workspace = true }
 thiserror = { workspace = true }
 lz4_flex  = { workspace = true }
+zstd      = "0.13.1"
+crc       = "3.2.1"
+aes-gcm   = "0.10.3"
+sha2      = "0.10.8"
+pbkdf2    = "0.12.1"
+rand      = "0.8.5"
+rayon     = { workspace = true }
+memmap2   = "0.9.11"
+memchr    = "2.7"
