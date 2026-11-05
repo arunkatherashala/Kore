@@ -19,7 +19,7 @@ use std::sync::Mutex;
 pub(crate) static LOG_LOCK: Mutex<()> = Mutex::new(());
 
 /// Tools that only need the owner name (no `KoreSelf` state).
-pub const STATELESS_TOOLS: [&str; 25] = [
+pub const STATELESS_TOOLS: [&str; 27] = [
     "self_event_add",
     "self_belief_revise",
     "self_belief_history",
@@ -45,6 +45,8 @@ pub const STATELESS_TOOLS: [&str; 25] = [
     "being_status",
     "being_explain",
     "being_rules",
+    "being_run_v2",
+    "being_status_v2",
 ];
 
 pub fn is_log_tool(name: &str) -> bool {
@@ -123,6 +125,7 @@ pub fn handle(name: &str, args: &Value, owner: &str) -> Option<Value> {
         "self_learn" | "self_explain" | "self_evolve_rules" | "self_ledger_snapshot" | "self_ledger_outcome" | "self_tag_rules_check" => crate::learn_tools::handle(name, args, owner),
         "predict_make" | "predict_resolve" | "predict_score" => crate::predict_tools::handle(name, args, owner),
         "being_run" | "being_status" | "being_explain" | "being_rules" => crate::being_tools::handle(name, args, owner),
+        "being_run_v2" | "being_status_v2" => crate::being_v2_tools::handle(name, args, owner),
         _ => unreachable!(),
     };
     Some(r.unwrap_or_else(|e| e))
@@ -453,6 +456,7 @@ Example 2: SELECT r.key, r.stance, e.occurred_at, e.text FROM revisions r JOIN r
     .chain(crate::learn_tools::tool_defs())
     .chain(crate::predict_tools::tool_defs())
     .chain(crate::being_tools::tool_defs())
+    .chain(crate::being_v2_tools::tool_defs())
     .chain(crate::chat_tools::tool_defs())
     .collect()
 }

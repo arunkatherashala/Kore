@@ -91,6 +91,8 @@ This table is generated from the tool registry (`kore-self --tool-table`); a tes
 | `being_status` | Read-only: the being's steps, budget, per-domain selections and reward per energy, its last decisions with their reasons, and a check that every decision can be re-derived from the log |
 | `being_explain` | Read-only: for one decision event, show why the domain was chosen (counts, mean reward per energy, exploration bonus and score of every alternative), the events it cited as evidence, the outcome, and a replay that re-derives the choice from the log |
 | `being_rules` | Read-only: the rules the being has discovered by search over its own logged examples (author-defined grammar): form, signature, training and held-out support, the cited example events, how often each was used, and a check that each rule is re-derived from the log alone |
+| `being_run_v2` | Opt-in World v2 run (many task families with hidden rules, feedback noise and drift; see docs/world_v2.md) |
+| `being_status_v2` | State of the World v2 being folded from its log, with a replay check of every decision and rule |
 | `chat_say` | Say something to the being and get its reply |
 | `chat_history` | Read-only: the last messages of a conversation (yours, the being's replies and tool results), from the log |
 | `chat_pending` | Read-only: tool calls the thinker proposed that need your approval (listed under L3 in autonomy_policy.txt) and that you have not decided yet |

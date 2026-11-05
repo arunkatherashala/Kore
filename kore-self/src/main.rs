@@ -48,6 +48,7 @@ mod predict;
 mod predict_tools;
 mod being;
 mod being_tools;
+mod being_v2_tools;
 mod authorize;
 mod chat;
 mod chat_tools;

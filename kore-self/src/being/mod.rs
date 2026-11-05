@@ -25,6 +25,8 @@ pub mod state;
 pub mod transfer;
 pub mod trust;
 pub mod world;
+/// World v2 (opt-in: separate files and log source; see docs/world_v2.md).
+pub mod world2;
 #[path = "loop.rs"]
 pub mod run_loop;
 #[cfg(test)]

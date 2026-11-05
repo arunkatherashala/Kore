@@ -49,7 +49,8 @@ const MAX_POLICY_BYTES: u64 = 64 * 1024;
 pub const CHAT_TOOLS: [(&str, u8); 4] = [("self_sql", 1), ("self_belief_history", 1), ("being_status", 1), ("self_event_add", 2)];
 /// Tools that only the being loop itself requests (never the chat thinker): asking the configured advisor
 /// for advice (L1: it sends the visible task features to a program the owner chose; it changes nothing in the world).
-pub const INTERNAL_TOOLS: [(&str, u8); 1] = [("advisor_query", 1)];
+/// `world_v2_run` (L2): a World v2 run of the being, which appends to its own log (`being_v2_tools.rs`).
+pub const INTERNAL_TOOLS: [(&str, u8); 2] = [("advisor_query", 1), ("world_v2_run", 2)];
 /// The actor name the being loop uses for its own requests.
 pub const BEING_ACTOR: &str = "being";
 /// Tools only the human actor may use.
