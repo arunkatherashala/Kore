@@ -1274,6 +1274,154 @@ The gain is small, concentrated in 11 or 12 of 20 worlds, and the interval for t
 
 Earlier results bit for bit unchanged with the option off (golden digests recorded with the B5 code, plus no new domain ever offered); the two phases and the hidden affine map of the world; the transferred search order keeps the full verification (every rule found is never applicable-and-wrong on all examples of its signature, with the same minimum support; no preference means exactly the composed search; a hypothesis that is not a candidate is ignored); the guard revokes a harmful link, keeps a good one, does nothing with the guard off and lends nothing from a source with too little evidence; links are logged as notes and revisions that cite the logged examples, replay gives the same model, links and rules, and the log before the first link note has no link; transfer is off unless the being was created with it; `controller.txt` keys `transfer` (default off) and `max_transfer_links` (default 16, hard maximum 1000, unparseable values fail closed); a cap on links is a logged refusal and the live number never exceeds it; a controller that does not allow transfer refuses it once, logs it and audits it (tool level as well); no wrong rule accepted in the transfer and control arms; the measurement is deterministic; the transfer and model sources name no hidden world parameter and use no file or network API.
 
+## Track B3b: adaptation, second attempt (synthetic world, author-defined schedule)
+
+Same drifting world, same seeds and same budget (6000) as Track B3; only the learner is new. Everything is a simulation written by one author. Question: attempt 1 (B3) did not adapt measurably better than the B1 learner; why, and can a learner be made to lose measurably less after a change? Measured 2026-11-05 on branch `b3-v2` (built on c7e5d8c3), code commit 6cc82e2a, with
+
+```
+cargo run -p kore-self --example measure_b3b --offline --release -- diag              # diagnosis of attempt 1 (tuning seeds)
+cargo run -p kore-self --example measure_b3b --offline --release -- breakdown 0 300   # per-cell breakdown after change 0/1/2 (tuning seeds)
+cargo run -p kore-self --example measure_b3b --offline --release -- tune quick|m1|m2|combo|m4|told|check
+cargo run -p kore-self --example measure_b3b --offline --release -- report with-tuning   # tables below (about 5 min)
+cargo run -p kore-self --example measure_b3b --offline --release -- budgets
+```
+
+Every setting was chosen on tuning seeds 101..120; the tables are report seeds 1..20 (n = 20 worlds), 95% t-intervals of the mean over worlds, paired by world. About 70 learner settings were tried on the tuning seeds in total (listed below), so a small gain on the tuning seeds is expected by selection alone; the report seeds are the test.
+
+### Why attempt 1 failed (diagnosis, tuning seeds 101..120)
+
+Two yardsticks were added: an **oracle with the skip rule** (the B3 oracle knows the hidden success rates but never skips a menu, so a learner that skips can beat it; B1 was above it in two of the four regimes in B3, so "B1 is within 0.08 of the oracle" did not mean there was nothing to gain), and a **told-what upper bound** (B1 that, at the true time of each change, is given 20 pseudo-attempts at the true success rate of every cell the change concerns: all units cells; all physics and arithmetic cells at the shift; the `fast` cells, cleared first, at the degradation). Neither is a learner.
+
+1. **There is headroom after the changes, but almost none of it is where the attempt-1 detector acted.** Regret of B1 against the oracle + skip in the 300 energy units before the first change: -0.009 [-0.220, +0.201]; in the 300 after the new domain 0.492 [0.269, 0.715], after the shift 0.799 [0.507, 1.092], after the degradation 0.145 [-0.170, 0.459]. Told-what minus B1, whole life: new domain +0.114 (18 of 20 worlds better), shift cells +0.090 (20 of 20), degradation +0.027 (12 of 20), all three +0.264 (19 of 20). The only change in a hidden success rate (the degradation) is worth at most +0.03 over the life; the other two changes are visible in the offers and cost the learner through exploration, which a change detector does not address.
+2. **The losses after the new domain and the shift are failed exploration of hard cells whose prior is too optimistic.** The prior of an untried (domain, difficulty, strategy) cell is the domain's (domain, strategy) rate pooled over all difficulties, which is dominated by the easy tasks. In units, `fast` succeeds 0.82 at difficulty 1-2 and 0.00 at 3-5 (hidden truth, mean over worlds; the old domains average 0.47 / 0.25 / 0.36 at 3-5). Pooled over the 20 worlds in the 300 energy after units appears, B1 made 173 `fast` attempts at units difficulty 3-5 with 0 right and 16 `careful` attempts at 4-5 with 0 right; after the shift (physics pays twice as much, so its hard cells become worth trying) 168 `fast` attempts at physics difficulty 3-5 with about 10% right and 60 at arithmetic difficulty 4 with 8% right. With the prior weight PRIOR_K = 4 and the planner's optimism, a cell with a prior near 0.8 needs about 5 failures before the planner leaves it.
+3. **The attempt-1 reaction to an alarm made things worse.** Cutting a (domain, strategy) group to 10% of its weight sends its cells back to a stale prior (the strategy-wide rate, still built on the undegraded other domains) with a large uncertainty; the optimistic planner then tries `fast` more: 125.8 attempts at difficulty 1-2 in the 600 energy after the degradation against 116.4 for B1, and regret in the 300 after the degradation 0.383 [0.041, 0.725] against 0.145 for B1. The detector also works per (domain, strategy) although the degradation hits `fast` in every domain at once (12 of the 20 alarms on the tuning seeds were in units, the domain with the least evidence).
+4. **Clearing knowledge creates a skip trap.** A "told when" control that clears every `fast` cell at the true time of the degradation fell to 1.112 [0.336, 1.888] reward per energy in the next 300 energy (B1 3.936) with 4298 skipped menus over the 20 worlds (B1 774): cleared cells look expensive and uncertain, the skip rule compares their score with the realized rate, and a skip produces no evidence. So resetting, or forgetting, is dangerous with this planner.
+5. **The attempt-1 cold-start gain is an artifact of a threshold.** The bonus applies while a (domain, strategy) group has "less than 1.0 effective attempt". With any discounting (attempt 1 used a half-life of 5000 attempts; the cold-start-only control 1e12), one attempt decays to 0.99999..., so the bonus actually lasts two attempts. With exact counting (half-life 1e300, same bonus) the same arm goes from +0.090 to -0.098 against B1 on the tuning seeds (7 wins, 13 losses). Attempt 1's +0.03 / +0.04 was therefore not evidence for adaptation.
+6. **Small planner changes move single worlds by +-0.2 to 0.3.** Attempt 1 against B1 was 10 wins and 10 losses with an interval of +-0.21; any rule that changes the trajectory early has this spread. Effects smaller than about 0.05 are only visible when the change leaves most of the life untouched (as M1 and M2 below do: their stationary runs are identical to B1 in most worlds).
+7. **Relative to its own level before the changes, B1 is not clearly better at absorbing changes than the fixed policies.** Excess regret (mean regret in the three post-change windows minus the regret before the first change): tuning seeds B1 0.488, UCB1 0.519, greedy 0.493, random 0.427. A learner explores new options and pays for it; a fixed policy takes the new offers at face value.
+
+### What was tried (one at a time, tuning seeds only)
+
+New mode `adapt_mode: switch` (`being/adapt_b3b.rs`, hooks in `model.rs`); no forgetting, everything replay-exact and logged.
+* **M1 windowed switch.** Each (domain, difficulty, strategy) cell keeps its last W outcomes; after each attempt a generalized likelihood ratio (window rate against the older rate, against one rate for all) above a threshold, with at least `min_old` older attempts, REPLACES the cell's evidence by the window (real recent data, so no burst of optimism and no skip trap). Grid W 6/8/12/16 x threshold 3/4/6/8 nats x min_old 8/16 (32 settings): thresholds of 3-4 nats cost 0.02 to 0.065 in the stationary world (0.9 to 3.5 switches per stationary world, all false); 6-8 nats are within +-0.01 of B1. Chosen W 6, 8 nats, min_old 8: +0.004 drifting, +0.000 stationary (0 stationary switches).
+* **M2 prior-data conflict.** While a cell holds fewer than `max_n` own attempts, the log-likelihood of its outcomes under the model's prediction is compared with a flat prediction from its own outcomes (Laplace); when the prior loses by more than a threshold, the cell keeps only `keep` of the prior weight PRIOR_K. Grid threshold 1/1.5/2/3 nats x keep 0.1/0.25/0.5 x max_n 8/16 (24 settings): every setting was at or above B1 in the drifting world (+0.001 to +0.013); thresholds of 1-2 nats won in 14-17 of 20 worlds, 3 nats rarely fired. Chosen 1 nat, keep 0.1, max_n 16: +0.013 drifting (16 / 4), -0.004 stationary (13 / 7), post-change windows +0.085 (15 / 5).
+* **M3 sibling spread** (after a switch, the same (difficulty, strategy) cells of the other domains test with a lower threshold): factor 0.5 / 0.75 added at most +0.004; not kept.
+* **Cold-start bonus in the new mode** (exact threshold, tested with a temporary planner edit that was then reverted): M1+M2 with the bonus -0.070 drifting, -0.161 stationary; not kept (see cause 5).
+* **M4 cross-domain prior** ("priors from similar domains"): while a (domain, strategy) group holds fewer than N effective attempts, a cell's prior mean is the mean posterior of the same (difficulty, strategy) cell in the other domains that hold evidence there. Best case first: B1 given the old domains' mean TRUE rates for every units cell at the change: +0.088 (16 / 4). Realistic M4 alone: +0.009 to +0.026 drifting with 9-11 wins of 20; with M1+M2: +0.025 (N infinite) to +0.086 (N 20), but it also moved the stationary result by +0.055 to +0.081 with 10 wins of 20, i.e. it changes the whole early life, not the adaptation. Kept only as a reported variant (N 20).
+* Exploration reset on a detected change was not built as a mechanism: cause 3 and 4 show that more optimism or cleared evidence after a change costs reward with this planner.
+
+The B3b learner is M1+M2 (`DEFAULT_SWITCH`: W 6, 8 nats, min_old 8; 1 nat, keep 0.1, max_n 16; no spread, no cross-domain prior, no cold-start bonus).
+
+### Report seeds 1..20 (budget 6000, n = 20 worlds)
+
+Reward per energy, mean [95% interval]; windows are the 300 energy units after each change.
+
+| policy | whole life, drifting | whole life, stationary | after new domain | after shift | after fast degrades |
+|---|---|---|---|---|---|
+| B1 (no adaptation) | 3.810 [3.495, 4.125] | 3.395 [3.077, 3.714] | 3.124 [2.831, 3.417] | 4.285 [3.790, 4.779] | 3.692 [3.362, 4.023] |
+| attempt 1 (B3 adaptive) | 3.840 [3.525, 4.155] | 3.449 [3.166, 3.733] | 3.129 [2.845, 3.414] | 4.491 [3.997, 4.984] | 3.523 [3.216, 3.829] |
+| B3b M1 only | 3.808 [3.501, 4.115] | 3.395 [3.077, 3.714] | 3.124 [2.831, 3.417] | 4.285 [3.790, 4.779] | 3.656 [3.329, 3.984] |
+| B3b M2 only | 3.830 [3.523, 4.137] | 3.398 [3.081, 3.716] | 3.237 [2.955, 3.518] | 4.466 [4.010, 4.923] | 3.657 [3.365, 3.949] |
+| **B3b M1+M2** | 3.837 [3.532, 4.141] | 3.398 [3.081, 3.716] | 3.237 [2.955, 3.518] | 4.466 [4.010, 4.923] | 3.683 [3.379, 3.986] |
+| B3b M1+M2+M4 (N 20) | 3.727 [3.349, 4.104] | 3.276 [2.888, 3.665] | 3.167 [2.857, 3.478] | 4.443 [3.881, 5.006] | 3.595 [3.291, 3.899] |
+| UCB1 domain chooser | 1.867 [1.709, 2.025] | | 1.624 [1.445, 1.803] | 1.988 [1.799, 2.178] | 2.025 [1.770, 2.281] |
+| greedy by listed reward per cost | 1.612 [1.434, 1.790] | | 1.333 [1.137, 1.528] | 1.792 [1.548, 2.035] | 1.839 [1.553, 2.126] |
+| random | 1.332 [1.242, 1.422] | | 1.190 [1.098, 1.281] | 1.535 [1.416, 1.654] | 1.327 [1.200, 1.454] |
+| oracle (B3, never skips) | 3.888 [3.628, 4.148] | | 3.651 [3.407, 3.896] | 4.723 [4.383, 5.063] | 3.665 [3.403, 3.927] |
+| oracle + skip rule | 4.051 [3.753, 4.349] | | 3.681 [3.404, 3.958] | 5.189 [4.747, 5.631] | 3.853 [3.462, 4.244] |
+| told-what upper bound (not a learner) | 4.032 [3.738, 4.327] | | 3.641 [3.366, 3.916] | 5.123 [4.662, 5.584] | 3.904 [3.550, 4.258] |
+
+Regret against the oracle + skip rule (same world, same window; excess = mean of the three post-change windows minus the window before the first change):
+
+| policy | 300 before change 1 | mean of the three after | excess |
+|---|---|---|---|
+| B1 | 0.075 [-0.169, 0.319] | 0.540 [0.259, 0.821] | 0.465 [0.305, 0.626] |
+| attempt 1 | -0.051 [-0.242, 0.141] | 0.527 [0.366, 0.688] | 0.578 [0.363, 0.792] |
+| **B3b M1+M2** | 0.085 [-0.146, 0.315] | 0.446 [0.190, 0.701] | 0.361 [0.208, 0.514] |
+| B3b M1+M2+M4 | 0.144 [-0.053, 0.340] | 0.506 [0.265, 0.746] | 0.362 [0.205, 0.520] |
+| UCB1 | 1.708 [1.508, 1.908] | 2.362 [2.154, 2.570] | 0.654 [0.415, 0.893] |
+| greedy | 1.950 [1.702, 2.198] | 2.586 [2.396, 2.777] | 0.636 [0.420, 0.852] |
+| random | 2.218 [1.987, 2.449] | 2.890 [2.583, 3.197] | 0.672 [0.402, 0.942] |
+| told-what upper bound | 0.075 [-0.169, 0.319] | 0.018 [-0.087, 0.123] | -0.057 [-0.280, 0.167] |
+
+Paired differences (first minus second; wins / losses / ties of 20):
+
+| comparison | report seeds 1..20 | W / L / T | tuning seeds 101..120 |
+|---|---|---|---|
+| B3b M1+M2 minus B1, whole life | +0.027 [+0.010, +0.044] | 18 / 2 / 0 | +0.022 [-0.001, +0.045], 13 / 7 |
+| B3b M1+M2 minus B1, the three post-change windows | +0.095 [+0.043, +0.147] | 16 / 4 / 0 | +0.087 [+0.035, +0.138], 15 / 5 |
+| B3b M1+M2 minus B1, stationary world | +0.003 [-0.001, +0.008] | 12 / 5 / 3 | -0.004 [-0.014, +0.007], 13 / 7 |
+| M2 only minus B1, whole life | +0.020 [+0.004, +0.036] | 17 / 2 / 1 | +0.013 |
+| M1 only minus B1, whole life | -0.002 [-0.015, +0.011] | 10 / 7 / 3 | +0.004 |
+| M1 only minus B1, post-change windows | -0.012 [-0.029, +0.005] | 5 / 8 / 7 | +0.012 |
+| M1+M2+M4 minus B1, whole life | -0.083 [-0.335, +0.168] | 11 / 9 / 0 | +0.086 |
+| M1+M2+M4 minus B1, stationary | -0.119 [-0.393, +0.156] | 6 / 14 / 0 | +0.081 |
+| B3b M1+M2 minus attempt 1, whole life | -0.003 [-0.208, +0.201] | 15 / 5 / 0 | |
+| B3b M1+M2 minus attempt 1, post-change windows | +0.081 [-0.091, +0.253] | 15 / 5 / 0 | |
+| excess regret, B1 minus B3b (positive: B3b loses less to the changes) | +0.105 [+0.049, +0.160] | 15 / 5 / 0 | +0.095 [+0.015, +0.175], 13 / 7 |
+| excess regret, attempt 1 minus B3b | +0.217 [+0.085, +0.349] | 15 / 5 / 0 | +0.280 [+0.158, +0.403], 18 / 2 |
+| excess regret, UCB1 minus B3b | +0.293 [+0.085, +0.501] | 15 / 5 / 0 | +0.127 [-0.107, +0.361], 11 / 9 |
+| excess regret, greedy minus B3b | +0.275 [+0.031, +0.520] | 14 / 6 / 0 | +0.100 [-0.101, +0.301], 14 / 6 |
+| excess regret, random minus B3b | +0.311 [+0.109, +0.514] | 16 / 4 / 0 | +0.034 [-0.228, +0.296], 12 / 8 |
+| excess regret, UCB1 minus B1 | +0.189 [-0.009, +0.386] | 13 / 7 / 0 | +0.031 [-0.192, +0.255], 9 / 11 |
+| B3b M1+M2 minus UCB1, whole life | +1.970 [+1.769, +2.170] | 20 / 0 / 0 | |
+| oracle + skip minus B3b, whole life | +0.214 [+0.011, +0.418] | 15 / 5 / 0 | |
+| told-what upper bound minus B1, post-change windows | +0.522 [+0.294, +0.750] | 20 / 0 / 0 | |
+
+Time to competence in the new domain (energy after units appears until the trailing 10 units attempts earn 80% of the B3 oracle's reward per energy there; median over the worlds that reach it within the run):
+
+| policy | report seeds: worlds reaching it, median | reward per energy on units, first 300 energy | tuning seeds: worlds, median |
+|---|---|---|---|
+| B1 | 11 of 20, 142 | 2.475 | 14 of 20, 198 |
+| attempt 1 | 13 of 20, 193 | 2.380 | 15 of 20, 153 |
+| **B3b M1+M2** | 11 of 20, 90 | 2.919 | 16 of 20, 114 |
+| B3b M1+M2+M4 | 16 of 20, 132 | 2.615 | 18 of 20, 124 |
+| UCB1 | 7 of 20, 892 | 1.310 | 5 of 20, 798 |
+| greedy | 6 of 20, 970 | 1.123 | 5 of 20, 1073 |
+| oracle + skip rule | 16 of 20, 83 | 4.674 | 17 of 20, 112 |
+| told-what upper bound | 17 of 20, 121 | 4.362 | 18 of 20, 73 |
+
+Paired over the worlds where both reach it: B3b minus B1 -42 energy [-79, -5] (11 worlds; faster in 9, slower in 2); tuning seeds -32 [-63, -1] (13 worlds; 10 faster, 3 slower). Attempt 1 minus B1: +11 [-76, +97] (11 worlds).
+
+Flagged changes per world (report seeds, drifting / stationary): B3b cell switches 1.25 / 0.00 (1.20 of them a drop of `fast` at difficulty 1-2 after the degradation, the true change); 0 switches before the first change in 20 worlds; a `fast` switch after the degradation in 15 of 20 worlds, median 189 energy units after it (attempt 1: 13 of 20, median 265). Prior conflicts 5.75 / 2.35 per world (1.90 in units); a prior conflict is not a world change but the model saying that its prior was wrong for that cell, so it also happens in the stationary world (mostly hard cells). Attempt 1: 0.80 group alarms / 0.00.
+
+Other budgets (B3b minus B1, whole life; the schedule scales with the budget):
+
+| seeds | budget | world | B1 | B3b | B3b minus B1 | W / L / T | flagged changes per world |
+|---|---|---|---|---|---|---|---|
+| report seeds 1..20 | 600 | drifting | 3.163 | 3.231 | +0.068 [+0.026, +0.111] | 13 / 5 / 2 | 3.80 |
+| report seeds 1..20 | 600 | stationary | 3.117 | 3.163 | +0.046 [+0.028, +0.065] | 17 / 0 / 3 | 2.15 |
+| report seeds 1..20 | 3000 | drifting | 3.707 | 3.764 | +0.057 [+0.032, +0.083] | 17 / 2 / 1 | 6.85 |
+| report seeds 1..20 | 3000 | stationary | 3.377 | 3.385 | +0.008 [+0.002, +0.014] | 13 / 4 / 3 | 2.35 |
+| tuning seeds 101..120 | 600 | drifting | 3.390 | 3.474 | +0.084 [+0.010, +0.157] | 12 / 7 / 1 | 3.75 |
+| tuning seeds 101..120 | 600 | stationary | 3.415 | 3.455 | +0.040 [+0.011, +0.069] | 16 / 4 / 0 | 2.40 |
+| tuning seeds 101..120 | 3000 | drifting | 3.947 | 3.973 | +0.026 [-0.014, +0.065] | 15 / 5 / 0 | 6.75 |
+| tuning seeds 101..120 | 3000 | stationary | 3.653 | 3.648 | -0.005 [-0.023, +0.013] | 13 / 7 / 0 | 2.55 |
+
+At budget 600 B3b also gains in the stationary world (+0.046 [+0.028, +0.065], 17 / 0 / 3 on the report seeds). So part of what M2 does is not adaptation to a change but faster learning of any untried hard cell, which matters most early in a life (at 600 the whole life is "early"). At 6000 the stationary gain is +0.003, so there the gain is concentrated after the changes.
+
+### Verdict
+
+* **B3 is now weakly positive against B1, and only there.** The B3b learner loses less after the changes than B1: +0.095 [+0.043, +0.147] reward per energy over the three post-change windows (better in 16 of 20 worlds), excess regret 0.105 lower [+0.049, +0.160], competence in the new domain about 40 energy units sooner (paired -42 [-79, -5] over the 11 worlds where both get there). Over the whole life that is +0.027 [+0.010, +0.044] (18 of 20 worlds), about 0.7%, and the stationary world is unchanged (+0.003 [-0.001, +0.008]). The tuning seeds show the same signs and sizes (+0.087 post-change, +0.022 whole life). Small, but the interval excludes 0 on the report seeds. Part of the mechanism is generic (see the stationary gain at budget 600): it speeds up learning of any untried hard cell, and the changes in this world are exactly what creates many such cells mid-life.
+* Almost all of it comes from M2 (prior conflict: stop exploring a cell whose outcomes contradict the prior). M1 (the change detector proper) flags the degradation in 15 of 20 worlds, faster than attempt 1, with no false switch, but adds nothing measurable (-0.002 whole life alone; +0.007 on top of M2). This matches the diagnosis: the hidden change is worth at most +0.03 over the life even when told; what costs after a change is exploration.
+* **Against attempt 1** the whole-life difference is not established (-0.003 [-0.208, +0.201]): attempt 1's spread over worlds is large (cause 6). Its excess regret is larger than B3b's (+0.217 [+0.085, +0.349]).
+* **Against the fixed policies** B3b is far ahead in absolute terms (+1.97 against UCB1). In excess regret (loss caused by the changes, relative to the policy's own level before them) B3b loses less than UCB1, greedy and random on the report seeds (+0.29, +0.28, +0.31, all intervals above 0), but on the tuning seeds the same comparisons are +0.13, +0.10, +0.03 with intervals including 0. So "adapts faster than the fixed policies" is not established; B1 itself is not clearly better than them on this measure (+0.19 [-0.01, +0.39] report, +0.03 tuning).
+* Most of the headroom remains: the told-what bound is +0.522 above B1 in the post-change windows; B3b recovers 0.095 of it (about 18%). The oracle + skip rule is still +0.214 [+0.011, +0.418] above B3b over the whole life.
+* The cross-domain prior (M4) gave the largest tuning gain and did not replicate (-0.083 [-0.335, +0.168] on the report seeds); it is reported, not recommended.
+
+### Caveats
+
+* One author wrote the world, the schedule, the learners, the diagnosis and the yardsticks. The diagnosis was done on the tuning seeds and the mechanisms were designed after looking at it (M2 targets exactly the failure seen in the per-cell breakdown), so the world was in effect used twice: once to see the failure, once (other seeds) to test the fix.
+* About 70 settings on 20 tuning worlds; the chosen one is the best on the post-change metric there. The report-seed effect (+0.095) is close to the tuning one (+0.087), which argues against pure selection, but n = 20 worlds.
+* The skip-aware oracle uses the planner's skip rule with the hidden success rates; it is a better yardstick than the B3 oracle, not an optimal policy (the told-what bound beats it in some windows).
+* The told-what bound and the "told when" control use hidden truth and exist only in the measurement (`measure_b3b.rs`); no learner or tool can switch them on. The cold-start-in-switch-mode numbers came from a temporary planner edit that was reverted; they are not reproducible from this commit.
+* Prior conflicts cut a cell's prior weight for good (no restoring); in a longer life or a world where hard cells improve this could cost. A world in which the hidden change is expensive (where a detector should matter) was not built; this world was kept so that the comparison with B3 is on the same worlds.
+* Not shown: real data, a real thinker, other worlds, other budgets beyond the line above, long unattended runs.
+
+### What is tested (not measured)
+
+`being/adapt_b3b.rs` and `being/tests_b3b.rs`, `being_tools_b3b_tests.rs`: the switch fires on a window that disagrees with long evidence and not on a steady cell; the prior is rejected after surprising failures and kept when it fits; a switched cell holds only its window; after three failures in an untried hard cell B3b believes much less than B1; switch mode with both mechanisms off equals B1 bit for bit; a logged B3b run is deterministic, every decision is re-derived from the log, the refolded model and changes equal the live ones, every change is a note plus a `belief` revision (author `rule:being-detector`, tags `change_kind` and `difficulty`) citing the outcome events of its (domain, strategy); a run split over two calls equals one run; `adapt_mode` needs `adapt`, accepts only full or switch and is fixed once the being exists (`adapt: true` alone is still the B3 learner); the KILL switch is checked before every step (12 steps when it turns on at the 13th check) and the energy cap stops the run with a logged refusal; through the tool, a missing controller.txt fails closed and is audited, the step cap cuts the run and is audited, a KILL file refuses the run and is audited; the B3b sources name no hidden world parameter and use no file or network API; floors on report seeds 1..4 (whole life and post-change mean above -0.05, stationary above -0.03, the degradation flagged by a cell switch in at least 2 of 4 worlds; measured -0.009, +0.013, +0.001, 4 of 4).
+
 ## Not measured
 
 Real-life data of any kind (the free-text section above is also synthetic); the probabilities of the live ledger (`predict_make`/`predict_score` have not been run on real data; the S4 numbers above are synthetic sequences only; the older `self_ledger_snapshot` rows are not scored by any measurement); behaviour with
