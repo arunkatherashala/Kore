@@ -29,10 +29,15 @@
 //!     `KEEP_AFTER_ALARM` of its weight and the alarm is returned to the caller, which logs
 //!     it with the outcome events it rests on.
 //!
+//! Step B3b adds `Switch` (see `adapt_b3b.rs`): no forgetting; a cell whose recent window disagrees
+//! with its older evidence replaces that evidence by the window, and a cell whose outcomes reject the
+//! prior keeps only a share of the prior weight. Both are returned as alarms and logged.
+//!
 //! Everything is a fixed order of float operations on the logged outcomes, so folding the
 //! same log twice gives the same model bit for bit.
 
 use super::solver::{Strategy, STRATEGIES, STRATEGIES_EXT};
+use super::adapt_b3b::{CellSw, SwitchCfg, DEFAULT_SWITCH};
 use super::world::{Domain, ALL_DOMAINS_X, N_DOM};
 
 /// Pseudo-observations the parent level contributes to a child level.
@@ -63,6 +68,9 @@ pub enum AdaptMode {
     Forget,
     /// Forgetting, change detection and a cold-start bonus for domains never tried with a strategy.
     Full,
+    /// Track B3b: no forgetting and no cold-start bonus; per-cell windowed switch and prior-data
+    /// conflict check (`adapt_b3b.rs`).
+    Switch,
 }
 
 impl AdaptMode {
@@ -71,6 +79,7 @@ impl AdaptMode {
             AdaptMode::Off => "off",
             AdaptMode::Forget => "forget",
             AdaptMode::Full => "full",
+            AdaptMode::Switch => "switch",
         }
     }
     pub fn parse(s: &str) -> Option<AdaptMode> {
@@ -78,6 +87,7 @@ impl AdaptMode {
             "off" => Some(AdaptMode::Off),
             "forget" => Some(AdaptMode::Forget),
             "full" => Some(AdaptMode::Full),
+            "switch" => Some(AdaptMode::Switch),
             _ => None,
         }
     }
@@ -162,6 +172,32 @@ pub struct Alarm {
     pub run_succ: u32,
     /// Sum of the model's predicted success probabilities over that run.
     pub run_pred: f64,
+    /// What fired (B3 group CUSUM, or a B3b cell mechanism).
+    pub kind: Detector,
+    /// Difficulty of the cell (B3b cell mechanisms only).
+    pub cell: Option<u8>,
+}
+
+/// Which detector produced an alarm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Detector {
+    /// B3: CUSUM per (domain, strategy); the group's evidence is cut to `keep`.
+    #[default]
+    Group,
+    /// B3b M1: the cell's recent window disagrees with its older evidence; the window replaces it.
+    CellSwitch,
+    /// B3b M2: the cell's outcomes reject its prior; the prior weight is cut.
+    PriorConflict,
+}
+
+impl Detector {
+    pub fn name(self) -> &'static str {
+        match self {
+            Detector::Group => "group-cusum",
+            Detector::CellSwitch => "cell-switch",
+            Detector::PriorConflict => "prior-conflict",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -234,6 +270,15 @@ pub struct Model {
     /// Pseudo-observations the source posterior contributes to a linked cell (B6).
     pub xfer_k: f64,
     revoked: Vec<Revoked>,
+    /// B3b (mode `Switch` only): settings and per-cell state, indexed by `sw_idx`.
+    pub sw_cfg: SwitchCfg,
+    sw: Vec<CellSw>,
+    /// B3b alarms of the last `observe` beyond the first (an attempt can trip M2 and M1 at once).
+    extra_alarms: Vec<Alarm>,
+}
+
+fn sw_idx(d: usize, k: usize, s: usize) -> usize {
+    (d * 5 + k) * 4 + s
 }
 
 impl Default for Model {
@@ -266,7 +311,29 @@ impl Model {
             guard_min_n: GUARD_MIN_N,
             xfer_k: XFER_K,
             revoked: vec![],
+            sw_cfg: DEFAULT_SWITCH,
+            sw: if mode == AdaptMode::Switch { vec![CellSw::new(); N_DOM * 5 * 4] } else { vec![] },
+            extra_alarms: vec![],
         }
+        .no_forgetting_in_switch()
+    }
+
+    fn no_forgetting_in_switch(mut self) -> Model {
+        if self.mode == AdaptMode::Switch {
+            self.gamma = 1.0;
+        }
+        self
+    }
+
+    /// B3b alarms of the last `observe` beyond the one it returned.
+    pub fn take_extra_alarms(&mut self) -> Vec<Alarm> {
+        std::mem::take(&mut self.extra_alarms)
+    }
+
+    /// B3b: whether the prior of a cell has been rejected (mode `Switch` only).
+    pub fn prior_rejected(&self, d: Domain, difficulty: u8, s: Strategy) -> bool {
+        let k = (difficulty.clamp(1, 5) - 1) as usize;
+        self.sw.get(sw_idx(d.idx(), k, s.idx())).map_or(false, |c| c.prior_off)
     }
 
     pub fn mode(&self) -> AdaptMode {
@@ -333,9 +400,19 @@ impl Model {
                     g.run_succ = 0;
                     g.run_pred = 0.0;
                 } else if g.up > self.cusum_h || g.down > self.cusum_h {
-                    alarm = Some(Alarm { domain: o.domain, strategy: o.strategy, drop: g.down > self.cusum_h, statistic: g.up.max(g.down), run_n: g.run_n, run_succ: g.run_succ, run_pred: g.run_pred });
+                    alarm = Some(Alarm { domain: o.domain, strategy: o.strategy, drop: g.down > self.cusum_h, statistic: g.up.max(g.down), run_n: g.run_n, run_succ: g.run_succ, run_pred: g.run_pred, kind: Detector::Group, cell: None });
                     *g = Group::default();
                 }
+            }
+        }
+        let mut sw_alarms: Vec<Alarm> = vec![];
+        if self.mode == AdaptMode::Switch {
+            let pre = self.estimate(o.domain, o.difficulty, o.strategy);
+            let own = self.cell_tot(d, k, s);
+            let cfg = self.sw_cfg;
+            if self.sw[sw_idx(d, k, s)].prior_step(&cfg, pre.p, own.n, own.succ, o.correct) {
+                let c = &self.sw[sw_idx(d, k, s)];
+                sw_alarms.push(Alarm { domain: o.domain, strategy: o.strategy, drop: (own.succ + o.correct as u8 as f64) < pre.p * (own.n + 1.0), statistic: -c.prior_ll, run_n: own.n as u32 + 1, run_succ: (own.succ + o.correct as u8 as f64) as u32, run_pred: pre.p * (own.n + 1.0), kind: Detector::PriorConflict, cell: Some(o.difficulty) });
             }
         }
         self.t += 1;
@@ -353,7 +430,30 @@ impl Model {
             w.listed = w.listed * f + o.listed_cost as f64;
             w.t = self.t;
         }
-        if alarm.is_some() {
+        if self.mode == AdaptMode::Switch {
+            let cfg = self.sw_cfg;
+            let (cn, cs) = (self.wcells[d][k][s].n, self.wcells[d][k][s].succ);
+            if let Some(h) = self.sw[sw_idx(d, k, s)].switch_step(&cfg, o.correct, o.spent, o.listed_cost, cn, cs) {
+                let w = &mut self.wcells[d][k][s];
+                w.n = h.n_window as f64;
+                w.succ = h.succ_window as f64;
+                w.spent = h.spent as f64;
+                w.listed = h.listed as f64;
+                if cfg.spread < 1.0 {
+                    for dd in 0..N_DOM {
+                        if dd != d {
+                            let c = &mut self.sw[sw_idx(dd, k, s)];
+                            c.factor = c.factor.min(cfg.spread);
+                        }
+                    }
+                }
+                sw_alarms.push(Alarm { domain: o.domain, strategy: o.strategy, drop: h.drop, statistic: h.llr, run_n: h.n_window, run_succ: h.succ_window, run_pred: h.p_old * h.n_window as f64, kind: Detector::CellSwitch, cell: Some(o.difficulty) });
+            }
+            let mut it = sw_alarms.into_iter();
+            alarm = it.next();
+            self.extra_alarms.extend(it);
+        }
+        if alarm.is_some() && self.mode == AdaptMode::Full {
             // bring the group up to date, then keep only a share of its weight
             for kk in 0..5 {
                 let f = self.retained(&self.wcells[d][kk][s]);
@@ -465,6 +565,23 @@ impl Model {
 
     /// Estimate, with (`use_link`) or without the transfer link. Without a link both are the B1 numbers bit for bit.
     fn est(&self, d: Domain, difficulty: u8, s: Strategy, use_link: bool) -> Estimate {
+        self.est_x(d, difficulty, s, use_link, true)
+    }
+
+    /// B3b M4: mean posterior success of the same (difficulty, strategy) cell in the other domains that hold
+    /// own evidence there (equal weight per domain), or None.
+    fn cross_prior(&self, d: Domain, k: usize, s: Strategy) -> Option<f64> {
+        let (mut sum, mut m) = (0.0, 0u32);
+        for dd in ALL_DOMAINS_X {
+            if dd != d && self.cell_tot(dd.idx(), k, s.idx()).n >= 1.0 {
+                sum += self.est_x(dd, k as u8 + 1, s, false, false).p;
+                m += 1;
+            }
+        }
+        if m > 0 { Some(sum / m as f64) } else { None }
+    }
+
+    fn est_x(&self, d: Domain, difficulty: u8, s: Strategy, use_link: bool, use_cross: bool) -> Estimate {
         let k = (difficulty.clamp(1, 5) - 1) as usize;
         let st = self.strategy_total(s);
         let dt = self.domain_total(d, s);
@@ -485,9 +602,19 @@ impl Model {
         }
         let p_d = match from_src {
             Some((p, _)) => p,
-            None => shrink(dt.succ, dt.n, p_s, PRIOR_K),
+            None => {
+                let plain = shrink(dt.succ, dt.n, p_s, PRIOR_K);
+                if use_cross && self.mode == AdaptMode::Switch && self.sw_cfg.cross && dt.n < self.sw_cfg.cross_below {
+                    self.cross_prior(d, k, s).unwrap_or(plain)
+                } else {
+                    plain
+                }
+            }
         };
-        let kc = if from_src.is_some() { self.xfer_k } else { PRIOR_K };
+        let mut kc = if from_src.is_some() { self.xfer_k } else { PRIOR_K };
+        if from_src.is_none() && self.sw.get(sw_idx(d.idx(), k, s.idx())).map_or(false, |c| c.prior_off) {
+            kc *= self.sw_cfg.prior_keep;
+        }
         let a = c.succ + kc * p_d;
         let b = (c.n - c.succ) + kc * (1.0 - p_d);
         let p = a / (a + b);

@@ -9,6 +9,7 @@
 //! numbers in docs/measured.md.
 #![allow(dead_code)]
 
+pub mod adapt_b3b;
 pub mod advice;
 pub mod chooser;
 pub mod controller;
@@ -16,6 +17,7 @@ pub mod discover;
 pub mod measure;
 pub mod measure_b5;
 pub mod measure_b6;
+pub mod measure_b3b;
 pub mod model;
 pub mod planner;
 pub mod policy;
@@ -35,6 +37,8 @@ mod tests_b5;
 mod tests_b5b;
 #[cfg(test)]
 mod tests_b6;
+#[cfg(test)]
+mod tests_b3b;
 
 pub use chooser::{DomainPicker, Ucb1};
 pub use policy::{Policy, StopReason};

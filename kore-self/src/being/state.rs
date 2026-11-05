@@ -290,6 +290,10 @@ impl BeingState {
                 let cites: Vec<String> = self.group_recent[o.domain.idx()][strategy.idx()].iter().cloned().collect();
                 self.changes.push(Change { index: self.changes.len(), step: o.step, clock: o.clock, alarm, cites });
             }
+            for alarm in self.model.take_extra_alarms() {
+                let cites: Vec<String> = self.group_recent[o.domain.idx()][strategy.idx()].iter().cloned().collect();
+                self.changes.push(Change { index: self.changes.len(), step: o.step, clock: o.clock, alarm, cites });
+            }
             for rv in self.model.take_revoked() {
                 let src = self.model.link(rv.domain, rv.difficulty).map(|l| l.src);
                 let cites: Vec<String> = self.cell_recent.get(&(rv.domain.idx(), rv.difficulty)).map(|q| q.iter().cloned().collect()).unwrap_or_default();
@@ -551,7 +555,7 @@ pub fn genesis_event(g: &Genesis) -> (NewEvent, String) {
     let ext = format!("{ext}{}", if g.transfer { "; two-phase life: from a hidden time the domains pattern_b (sequence families seen through a hidden map of the values) and control (unit conversions) are offered as well" } else { "" });
     let ext = format!("{ext}{}", if g.learn_transfer { "; the model may start a new domain from the posterior of a similar learned domain (transfer, with a guard)" } else { "" });
     let drift = if g.drift { "; the world changes at scheduled times that the being is not told about" } else { "" };
-    let adapt = match g.adapt { AdaptMode::Off => "", AdaptMode::Forget => "; the model forgets old evidence exponentially", AdaptMode::Full => "; the model forgets old evidence exponentially and flags changes with a CUSUM detector" };
+    let adapt = match g.adapt { AdaptMode::Off => "", AdaptMode::Forget => "; the model forgets old evidence exponentially", AdaptMode::Full => "; the model forgets old evidence exponentially and flags changes with a CUSUM detector", AdaptMode::Switch => "; the model replaces a cell's old evidence by its recent window when they disagree and drops a prior its outcomes reject" };
     let advice = match g.advice.kind {
         AdvisorKind::None => String::new(),
         AdvisorKind::Simulated => format!("; takes advice from a simulated advisor of quality {} and {}", g.advice.quality, if g.advice.trust { "learns how far to trust it" } else { "follows its advice blindly" }),
