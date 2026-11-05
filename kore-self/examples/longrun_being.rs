@@ -676,6 +676,7 @@ fn checkpoint(o: &Opts, an: &mut Analyzer, recorded: &mut Vec<Recorded>, oracle_
     let diff_ms = ms(t);
     let t = Instant::now();
     an.feed(&d.events, o.replay_n);
+    drop(d);
     let feed_ms = ms(t);
     an.last_version = latest;
     // heavy: the full latest snapshot (what a restart folds), a re-fold, and its content hash for later open_at checks
@@ -917,7 +918,11 @@ fn cmd_run(o: Opts) {
             }
         }
     }
-    if cps.last().map_or(true, |c| c["steps"].as_u64() != Some(an.st.step)) || an.last_version == 0 {
+    if last_peak == 0 {
+        // resumed with nothing to run: estimate the restart memory from the log size (measured ratio about 25)
+        last_peak = dir_stats(&o.root.join(OWNER).join("log")).0 * 25;
+    }
+    if cps.last().map_or(true, |c| c["steps"].as_u64() != Some(steps_done)) || an.last_version == 0 {
         cps.push(checkpoint(&o, &mut an, &mut recorded, &mut oracle_cache, &mut out, "final", mem_ok(last_peak)));
     }
     // windows
@@ -1274,6 +1279,40 @@ fn cmd_prof(o: Opts) {
     }
 }
 
+/// rulecheck: for every wrong answer that came from a rule, was the rule itself wrong on that task (its
+/// prediction differs from the revealed next term) or was it an execution slip (the rule's prediction is right)?
+fn cmd_rulecheck(o: Opts) {
+    let root = std::fs::canonicalize(&o.root).unwrap();
+    let log = VersionedLog::open(&root, OWNER).unwrap();
+    let rows: Vec<EventRow> = log.open_latest().rows();
+    let mut st = BeingState::default();
+    let mut per: BTreeMap<String, (u64, u64, u64, u64)> = BTreeMap::new(); // (uses, wrong, rule wrong on the task, slips)
+    for e in rows.iter().filter(|e| e.source == SOURCE) {
+        if e.kind == "outcome" {
+            if let (Some(id), Some(out)) = (tag(&e.tags, "rule_used"), being::state::outcome_from_event(e)) {
+                let c = per.entry(id.to_string()).or_default();
+                c.0 += 1;
+                if !out.correct && !out.skipped {
+                    c.1 += 1;
+                    let rule = st.rules.iter().find(|r| r.id == id);
+                    match (rule, &out.example) {
+                        (Some(r), Some(ex)) if being::discover::predict_x(r.xf, &r.form, &ex.terms) == Some(ex.next) => c.3 += 1,
+                        (Some(_), Some(_)) => c.2 += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        st.fold_event(e);
+    }
+    println!("| rule | form | difficulty | uses | wrong answers | rule wrong on the task | execution slips |");
+    println!("|---|---|---|---|---|---|---|");
+    for (id, c) in &per {
+        let r = st.rules.iter().find(|r| &r.id == id);
+        println!("| {id} | {} | {} | {} | {} | {} | {} |", r.map(|r| format!("{} {}", r.xf.code(), r.form.code())).unwrap_or_default(), r.map(|r| r.sig).unwrap_or(0), c.0, c.1, c.2, c.3);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().cloned().unwrap_or_default();
@@ -1284,6 +1323,7 @@ fn main() {
         "scan" => cmd_scan(parse_opts(&args[1..])),
         "memstat" => cmd_memstat(parse_opts(&args[1..])),
         "prof" => cmd_prof(parse_opts(&args[1..])),
+        "rulecheck" => cmd_rulecheck(parse_opts(&args[1..])),
         "torn" => {
             let i = args.iter().position(|a| a == "--src").expect("--src <root of a run>");
             let src = PathBuf::from(&args[i + 1]);

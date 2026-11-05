@@ -1274,6 +1274,33 @@ The gain is small, concentrated in 11 or 12 of 20 worlds, and the interval for t
 
 Earlier results bit for bit unchanged with the option off (golden digests recorded with the B5 code, plus no new domain ever offered); the two phases and the hidden affine map of the world; the transferred search order keeps the full verification (every rule found is never applicable-and-wrong on all examples of its signature, with the same minimum support; no preference means exactly the composed search; a hypothesis that is not a candidate is ignored); the guard revokes a harmful link, keeps a good one, does nothing with the guard off and lends nothing from a source with too little evidence; links are logged as notes and revisions that cite the logged examples, replay gives the same model, links and rules, and the log before the first link note has no link; transfer is off unless the being was created with it; `controller.txt` keys `transfer` (default off) and `max_transfer_links` (default 16, hard maximum 1000, unparseable values fail closed); a cap on links is a logged refusal and the live number never exceeds it; a controller that does not allow transfer refuses it once, logs it and audits it (tool level as well); no wrong rule accepted in the transfer and control arms; the measurement is deterministic; the transfer and model sources name no hidden world parameter and use no file or network API.
 
+## Long run (unattended, with restarts; synthetic world, author-defined rewards)
+
+Details, commands and all tables: `docs/longrun.md`. Harness `kore-self/examples/longrun_being.rs`, branch `longrun`,
+code of commit c7e5d8c3, 2026-11-05, Windows, 8 CPUs, 34 GB RAM, machine at 98-100% CPU from other work the whole
+time (wall times are upper bounds). The real binary is driven over stdio (`being_run`, chooser model, extended2,
+discovery every 10 steps, composition and pruning, controller.txt safe defaults), one process per 10,000 steps (a
+cold restart each time), log format 3. One world per configuration (n = 1), so there are no intervals.
+
+| quantity | world 1 (no rules found) | world 4 (12 rules) |
+|---|---|---|
+| steps reached (target 1,000,000) | 390,000 in 3.65 h, 40 restarts; ended by the memory guard | 44,275 in 4.3 h; stopped by hand (0.56 s per step) |
+| reward per energy, first window -> last window | 4.095 -> 4.030 (windows of 50,000) | 3.537 -> 3.821 (windows of 5,000; flat at 3.80-3.85 after 5,000 steps) |
+| regret vs an oracle that knows the hidden success rates and skips optimally | +0.063 -> +0.128 (rising after 200,000 steps) | +0.367 -> +0.05 to +0.11 |
+| repeated known mistakes (attempt on a choice whose own record had >= 10 tries and <= 10% right), per 1000 attempts | 0 in every window | 0.6 in the first window, then 0 |
+| wrong answers that came from a rule | none used | 183 of 5,744; all execution slips, the rule's own prediction was right every time |
+| `verify()` at checkpoints / replayed decisions / open_at re-checks | 8 of 8 ok / 2,400, 0 mismatches / 4 of 4 identical | 3 of 3 ok / 900, 0 mismatches / - |
+| caps exceeded / KILL | none / KILL at 300,000 steps: 0 steps after the file, but the answer took 174 s (log loading) | none (max 12 live rules, 6 blocks) / - |
+| log on disk | 611-618 bytes per step, flat (238 MB); format 1 at 50,000 steps: 2,582 bytes per step | 758-760 bytes per step |
+| probe commit time | 8-20 ms median, no growth with log size | 10-13 ms |
+| restart: child peak memory, time of a 5,000-step call | 136 MB -> 5.2 GB (about 13 KB per step), 17 s -> 446 s: both linear in the history | 161 MB -> 717 MB; 239 s -> 2,787 s per call (discovery and pruning scan all examples) |
+
+Restart invariance: an in-process single run of 20,000 steps gives exactly the same 60,016 being events as the
+chunked, KILL-interrupted log. Torn writes on copies (torn journal tail, stray segment, lost last commit, flipped byte):
+the first two recover on the next run, the lost commit is redone with identical events, the flipped byte is refused.
+**Not shown**: 1,000,000 steps (memory and restart time grow linearly with the history), a real crash during a
+commit, speeds on an idle machine, more than one world per configuration, the cause of the slow decline in world 1.
+
 ## Not measured
 
 Real-life data of any kind (the free-text section above is also synthetic); the probabilities of the live ledger (`predict_make`/`predict_score` have not been run on real data; the S4 numbers above are synthetic sequences only; the older `self_ledger_snapshot` rows are not scored by any measurement); behaviour with
