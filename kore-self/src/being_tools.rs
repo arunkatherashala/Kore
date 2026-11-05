@@ -116,6 +116,11 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
             Some(_) => Err(err(format!("'{k}' must be a boolean"))),
         }
     };
+    let adapt_mode = match args.get("adapt_mode") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if s == "full" || s == "switch" => crate::being::model::AdaptMode::parse(s),
+        Some(_) => return Err(err("'adapt_mode' must be \"full\" or \"switch\"")),
+    };
     let advisor_kind = match args.get("advisor") {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) => Some(AdvisorKind::parse(s).ok_or_else(|| err("'advisor' must be \"none\", \"simulated\" or \"command\""))?),
@@ -168,6 +173,7 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         trust: flag("trust")?,
         drift: flag("drift")?,
         adapt: flag("adapt")?,
+        adapt_mode,
         extended,
         discover_every,
         chooser,
@@ -450,6 +456,7 @@ pub fn tool_defs() -> Vec<Value> {
             "pattern_families": { "type": "string", "enum": ["standard", "extended", "extended2"], "description": "Default standard. extended2 (B5): as extended plus families that only composition of verified building blocks can express, negative controls and (with rule_drift) a regime change. extended (needs chooser model): sequence tasks also come from extra hidden families the fixed solvers cannot solve, revealed answers are logged and a fourth strategy, discovered, applies rules the being found itself. Fixed once the being exists" },
             "drift": { "type": "boolean", "description": "Default false. true (needs chooser model): the world changes at scheduled times the being is not told about (a new domain, units, appears in the menu; one domain's rewards and costs shift; the fast strategy gets much less reliable). The times scale with the initial budget. Fixed once the being exists" },
             "adapt": { "type": "boolean", "description": "Default false. true (needs chooser model): the world model discounts old evidence exponentially and a detector flags changes in the success rate of a (domain, strategy) group; every flagged change is logged with the outcomes it rests on and shown by being_status. Fixed once the being exists" },
+            "adapt_mode": { "type": "string", "enum": ["full", "switch"], "description": "With adapt: true, default full (the B3 learner above). switch (B3b): no forgetting; a (domain, difficulty, strategy) cell whose recent window of outcomes disagrees with its older evidence replaces that evidence by the window, and a cell whose outcomes reject the model's prior drops most of the prior's weight; both are logged as changes citing the outcomes they rest on. Fixed once the being exists" },
             "discover": { "type": "boolean", "description": "Run rule discovery during this run (needs a being created with pattern_families extended): every discover_every steps the being searches a small author-defined grammar of sequence rules over its own revealed examples and logs accepted rules" },
             "discover_every": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "With discover: steps between discovery passes. Default 10" },
             "advisor": { "type": "string", "enum": ["none", "simulated", "command"], "description": "Default none (needs chooser model). simulated: a deterministic simulated advisor of quality advisor_quality advises each step; command: the program in advisor.txt (hand-edited by the owner) is asked. Advice is ONE input to the planner, never executed blindly; proposed rules must pass the verified search. Every run that asks an advisor is authorized (tool advisor_query, default deny, list it under [L1]) and audited. Fixed once the being exists" },
@@ -477,3 +484,7 @@ pub fn tool_defs() -> Vec<Value> {
 #[cfg(test)]
 #[path = "being_tools_b5_tests.rs"]
 mod b5_tests;
+
+#[cfg(test)]
+#[path = "being_tools_b3b_tests.rs"]
+mod b3b_tests;

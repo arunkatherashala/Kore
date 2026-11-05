@@ -70,6 +70,9 @@ pub fn world_for(g: &Genesis) -> World {
 
 /// The log records of one detected change.
 pub fn change_records(c: &Change) -> (NewEvent, NewRevision) {
+    if c.alarm.kind != super::model::Detector::Group {
+        return super::adapt_b3b::cell_change_records(c);
+    }
     let a = &c.alarm;
     let dir = if a.drop { "lower" } else { "higher" };
     let at = iso_at(c.clock);
@@ -911,6 +914,8 @@ pub struct RunCfg {
     pub drift: Option<bool>,
     /// `Some(true)` creates a being whose model forgets old evidence and flags changes (menu world only); fixed once created.
     pub adapt: Option<bool>,
+    /// Creation-time, with `adapt`: which adaptive learner (default `Full`, the B3 learner; `Switch` is B3b); fixed once created.
+    pub adapt_mode: Option<AdaptMode>,
     /// Creation-time: where advice comes from (menu world only); fixed once the being exists.
     pub advisor: Option<AdvisorKind>,
     /// Creation-time, simulated advisor only: its quality in 0..1.
@@ -1051,6 +1056,11 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
                     return bad("adapt", if g.adapt != AdaptMode::Off { "on" } else { "off" }.into(), if e { "on" } else { "off" }.into());
                 }
             }
+            if let Some(m) = cfg.adapt_mode {
+                if m != g.adapt {
+                    return bad("adapt_mode", g.adapt.name().into(), m.name().into());
+                }
+            }
             if let Some(k) = cfg.advisor {
                 if k != g.advice.kind {
                     return bad("advisor", g.advice.kind.name().into(), k.name().into());
@@ -1091,6 +1101,13 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
                 return Err(LogError::Invalid("pattern_families extended needs chooser model (the menu world)".into()));
             }
             let (drift, adapt) = (cfg.drift.unwrap_or(false), cfg.adapt.unwrap_or(false));
+            let adapt_mode = match (adapt, cfg.adapt_mode) {
+                (false, None) => AdaptMode::Off,
+                (false, Some(_)) => return Err(LogError::Invalid("adapt_mode only applies with adapt: true".into())),
+                (true, None) => AdaptMode::Full,
+                (true, Some(m @ (AdaptMode::Full | AdaptMode::Switch))) => m,
+                (true, Some(_)) => return Err(LogError::Invalid("adapt_mode must be full or switch".into())),
+            };
             if (drift || adapt) && chooser != Chooser::Model {
                 return Err(LogError::Invalid("drift and adapt need chooser model (the menu world)".into()));
             }
@@ -1115,7 +1132,7 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
             if learn_transfer && !transfer {
                 return Err(LogError::Invalid("learn_transfer needs a being created with transfer".into()));
             }
-            let g = Genesis { world_seed: cfg.world_seed.unwrap_or(1), loop_seed: cfg.loop_seed.unwrap_or(1), budget, explore_c: c, chooser, extended: extended || ext2, ext2, rule_drift: cfg.rule_drift.unwrap_or(false), drift, adapt: if adapt { AdaptMode::Full } else { AdaptMode::Off }, advice, transfer, learn_transfer };
+            let g = Genesis { world_seed: cfg.world_seed.unwrap_or(1), loop_seed: cfg.loop_seed.unwrap_or(1), budget, explore_c: c, chooser, extended: extended || ext2, ext2, rule_drift: cfg.rule_drift.unwrap_or(false), drift, adapt: adapt_mode, advice, transfer, learn_transfer };
             let (ev, id) = genesis_event(&g);
             log.append_events(&[ev])?;
             state.start(g, id);
