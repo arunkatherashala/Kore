@@ -163,3 +163,24 @@ fn transfer_link_cap_from_controller_is_enforced_and_audited() {
     let v: Value = serde_json::from_str(&t).unwrap();
     assert!(v["transfer_links"].as_u64().unwrap() >= 2, "{t}");
 }
+
+#[test]
+fn kill_file_with_an_advisor_names_the_kill_file_not_the_policy() {
+    // long-run finding: with an advisor, the KILL refusal comes from authorize(); its hint must name the KILL file
+    let o = "b5-kill-advisor";
+    let dir = setup(o);
+    std::fs::write(dir.join("controller.txt"), "max_steps_per_run = 500\n").unwrap();
+    std::fs::write(dir.join(authorize::POLICY_FILE), "[L1]\nadvisor_query\n").unwrap();
+    let args = json!({"steps": 5, "chooser": "model", "advisor": "simulated", "advisor_quality": 0.9, "world_seed": 3, "budget": 3000});
+    let (e, t) = call(o, args.clone());
+    assert!(!e, "{t}");
+    let before = audit_rows(o).len();
+    std::fs::write(dir.join("KILL"), "").unwrap();
+    let (e, t) = call(o, json!({"steps": 5}));
+    assert!(e && t.contains("advisor_query was not allowed") && t.contains("kill"), "{t}");
+    assert!(t.contains("Delete the KILL file") && !t.contains("list advisor_query under [L1]"), "{t}");
+    assert_eq!(audit_rows(o).len(), before + 1, "the refusal is audited");
+    std::fs::remove_file(dir.join("KILL")).unwrap();
+    let (e, t) = call(o, json!({"steps": 5}));
+    assert!(!e, "{t}");
+}

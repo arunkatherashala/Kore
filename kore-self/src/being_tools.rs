@@ -197,7 +197,9 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         // every run that asks an advisor is authorized (and audited) first, BEFORE the log is opened: default deny
         let d = authorize::authorize_locked(owner, BEING_ACTOR, "advisor_query", &json!({ "advisor": kind.name(), "steps": steps }));
         if d.outcome != Outcome::Allow {
-            return Err(err(format!("advisor_query was not allowed ({}): {}. The being will not ask its advisor. To allow it, list advisor_query under [L1] in autonomy_policy.txt (edit that file by hand)", d.outcome.name(), d.reason)));
+            // with the KILL file present the policy is not the reason: say how to lift the real one
+            let hint = if authorize::kill_active(owner) { "Delete the KILL file by hand to allow runs" } else { "To allow it, list advisor_query under [L1] in autonomy_policy.txt (edit that file by hand)" };
+            return Err(err(format!("advisor_query was not allowed ({}): {}. The being will not ask its advisor. {hint}", d.outcome.name(), d.reason)));
         }
         Some(make_advisor(kind, &cfg, existing.as_ref(), owner)?)
     };
