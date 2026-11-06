@@ -234,6 +234,11 @@ pub fn append_event(owner: &str, source: &str, kind: &str, text: &str, tags: Vec
 /// Same as the unlocked append, for a caller that already holds the process log lock (a log tool running under it).
 pub fn append_event_locked(owner: &str, source: &str, kind: &str, text: &str, tags: Vec<String>) -> Result<(String, bool), String> {
     let mut log = crate::log_tools::open(owner).map_err(|v| v["content"][0]["text"].as_str().unwrap_or("log error").to_string())?;
+    append_event_in(&mut log, owner, source, kind, text, tags)
+}
+
+/// Same, into a log the caller already has open (no second open of a large log).
+pub fn append_event_in(log: &mut vl::VersionedLog, owner: &str, source: &str, kind: &str, text: &str, tags: Vec<String>) -> Result<(String, bool), String> {
     let red = Redactor::load(&safety::owner_dir(owner)).redact(text);
     let ev = NewEvent { source: source.into(), occurred_at: vl::now_iso(), kind: kind.into(), text: red.text.clone(), tags, redacted: red.changed() };
     let info = log.append_events(&[ev]).map_err(|e| e.to_string())?;
@@ -270,12 +275,18 @@ fn finish(owner: &str, actor: &str, tool: &str, args: &serde_json::Value, d: Dec
 /// a run stopped by the KILL file): one audit row, actor `being`, decision `deny`. For a caller that
 /// holds the process log lock.
 pub fn audit_controller_locked(owner: &str, cap: &str, limit: u64, requested: u64, what: &str) -> Result<(), String> {
+    let mut log = crate::log_tools::open(owner).map_err(|v| v["content"][0]["text"].as_str().unwrap_or("log error").to_string())?;
+    audit_controller_in(&mut log, owner, cap, limit, requested, what)
+}
+
+/// Same row, written into a log the caller already has open (the being loop after its run).
+pub fn audit_controller_in(log: &mut vl::VersionedLog, owner: &str, cap: &str, limit: u64, requested: u64, what: &str) -> Result<(), String> {
     let body = serde_json::json!({
         "actor": BEING_ACTOR, "tool": format!("controller:{}", safety::trunc(cap, 40)), "decision": "deny",
         "reason": safety::trunc(what, 300), "args": format!("limit {limit}, requested {requested}"), "nonce": nonce(),
     });
     let tags = vec!["decision:deny".to_string(), format!("tool:controller_{}", tag_safe(cap)), format!("actor:{BEING_ACTOR}")];
-    append_event_locked(owner, SOURCE, "decision", &body.to_string(), tags).map(|_| ())
+    append_event_in(log, owner, SOURCE, "decision", &body.to_string(), tags).map(|_| ())
 }
 
 /// Decide, and write the audit row. Fails closed if the row cannot be written.

@@ -14,7 +14,7 @@ use super::model::{AdaptMode, Alarm, Model, Obs, DEFAULT_HALF_LIFE};
 use super::solver::Strategy;
 use super::transfer::{self, XferKind, XferMode, XferRec, XferState};
 use super::world::{iso_at, Domain, ALL_DOMAINS_X, N_DOM};
-use crate::versioned::{event_id, EventRow, NewEvent, Snapshot};
+use crate::versioned::{event_id, EventRow, LogError, NewEvent, Snapshot, VersionedLog};
 use std::collections::{BTreeMap, VecDeque};
 
 pub const SOURCE: &str = "being:loop";
@@ -411,6 +411,47 @@ impl BeingState {
     /// Fold the being's events (log order) into a state.
     pub fn from_snapshot(snap: &Snapshot) -> BeingState {
         Self::from_events(&snap.rows::<EventRow>())
+    }
+
+    /// Fold the being's events straight from the log: an events-only read, one chunk of segments at
+    /// a time (no revision text is decoded, no row is kept). The same state as `from_snapshot`.
+    pub fn from_log(log: &VersionedLog) -> Result<BeingState, LogError> {
+        let mut st = BeingState::default();
+        log.for_each_event(|e| {
+            if e.source == SOURCE || e.source == ADVISOR_SOURCE {
+                st.fold_event(&e);
+            }
+            true
+        })?;
+        Ok(st)
+    }
+
+    /// The being's genesis (the first logged genesis note that parses), reading events only until it.
+    pub fn genesis_of(log: &VersionedLog) -> Result<Option<Genesis>, LogError> {
+        let mut st = BeingState::default();
+        log.for_each_event(|e| {
+            if e.source == SOURCE || e.source == ADVISOR_SOURCE {
+                st.fold_event(&e);
+            }
+            st.genesis.is_none()
+        })?;
+        Ok(st.genesis)
+    }
+
+    /// The genesis of the being in the log at `<root>/<owner>/log` without opening the log (see
+    /// `VersionedLog::peek_events`): only the events up to the genesis are read. No log yet: `None`.
+    pub fn genesis_peek(root: &std::path::Path, owner: &str) -> Result<Option<Genesis>, LogError> {
+        if !root.join(owner).join("log").join("MANIFEST").exists() {
+            return Ok(None);
+        }
+        let mut st = BeingState::default();
+        VersionedLog::peek_events(root, owner, |e| {
+            if e.source == SOURCE || e.source == ADVISOR_SOURCE {
+                st.fold_event(&e);
+            }
+            st.genesis.is_none()
+        })?;
+        Ok(st.genesis)
     }
 
     pub fn from_events(rows: &[EventRow]) -> BeingState {

@@ -26,6 +26,8 @@ pub use upgrade::{migrate_to_v2, MigrateReport};
 mod tests;
 #[cfg(test)]
 mod tests_v2;
+#[cfg(test)]
+mod tests_restart;
 
 use manifest::{Entry, SegRef, ZERO_HASH};
 pub use model::*;
@@ -332,22 +334,37 @@ impl Index {
         }
         for r in &tables[Table::Revisions.idx()] {
             let rv = RevisionRow::from_cells(r);
-            let mut c = causes.remove(&rv.rev_id).unwrap_or_default();
-            c.sort();
-            let digest = revision_content(&rv.entity_type, &rv.key, &rv.stance, &format!("{:?}", rv.confidence), &rv.rationale, &rv.valid_from, &rv.author, &c);
-            ix.revs.insert(rv.rev_id.clone(), (rv.entity_type.clone(), rv.key.clone()));
-            ix.content_ids.entry(digest.clone()).or_insert_with(|| rv.rev_id.clone());
-            ix.heads.insert((rv.entity_type, rv.key), (rv.rev_id, digest));
+            let c = causes.remove(&rv.rev_id).unwrap_or_default();
+            ix.add_rev(rv, c);
         }
         for r in &tables[Table::Predictions.idx()] {
-            let p = PredictionRow::from_cells(r);
-            let opts: Vec<String> = serde_json::from_str(&p.options).unwrap_or_default();
-            ix.preds.insert(p.pred_id, opts);
+            ix.add_pred(r);
         }
         for r in &tables[Table::Outcomes.idx()] {
             ix.outcomes.insert(r[0].s());
         }
         ix
+    }
+
+    /// Register a stored revision with all its cause event ids (any order).
+    fn add_rev(&mut self, rv: RevisionRow, mut c: Vec<String>) {
+        c.sort();
+        let digest = revision_content(&rv.entity_type, &rv.key, &rv.stance, &format!("{:?}", rv.confidence), &rv.rationale, &rv.valid_from, &rv.author, &c);
+        self.revs.insert(rv.rev_id.clone(), (rv.entity_type.clone(), rv.key.clone()));
+        self.content_ids.entry(digest.clone()).or_insert_with(|| rv.rev_id.clone());
+        self.heads.insert((rv.entity_type, rv.key), (rv.rev_id, digest));
+    }
+
+    fn add_pred(&mut self, r: &[Cell]) {
+        let p = PredictionRow::from_cells(r);
+        let opts: Vec<String> = serde_json::from_str(&p.options).unwrap_or_default();
+        self.preds.insert(p.pred_id, opts);
+    }
+
+    /// Order-independent comparison of two indexes (tests: the streamed open equals the full one).
+    #[cfg(test)]
+    pub(crate) fn same_as(&self, o: &Index) -> bool {
+        self.events == o.events && self.events_odd == o.events_odd && self.next_ord == o.next_ord && self.revs == o.revs && self.heads == o.heads && self.content_ids == o.content_ids && self.content_idem == o.content_idem && self.preds == o.preds && self.outcomes == o.outcomes && self.forgotten == o.forgotten
     }
 
     fn build(tables: &[Vec<Vec<Cell>>]) -> Index {
@@ -589,8 +606,105 @@ enum Part {
 
 /// Read and verify every segment. If all events segments are v2, only their id
 /// column is decoded (the text etc. is decoded later, on first use of the
-/// snapshot); otherwise everything is decoded now, as before.
+/// snapshot) and the other tables are read a chunk of segments at a time and
+/// folded into the index, so open never holds the whole log in memory
+/// (`load_state_streamed`); otherwise everything is decoded now, as before.
 fn load_state(dir: &Path, entries: &[Entry]) -> Result<State, VerifyError> {
+    let lazy = entries.iter().flat_map(|e| e.segments.iter()).filter(|g| g.table == "events").all(|g| g.enc == Some(2));
+    if lazy {
+        if let Some(st) = load_state_streamed(dir, entries)? {
+            return Ok(st);
+        }
+    }
+    load_state_full(dir, entries)
+}
+
+/// Segments read and decoded at once (in parallel) by the streamed open and the events-only read.
+const READ_CHUNK: usize = 512;
+
+/// The streamed open of an all-v2 log. Gives exactly the index of `load_state_full`, provided every
+/// revision_causes row is in the same commit as its revision and no rev_id is stored twice (true for
+/// every log written through `commit_batch`); otherwise returns `None` and the caller falls back to
+/// the full read, so an irregular log still opens with the same index as before.
+fn load_state_streamed(dir: &Path, entries: &[Entry]) -> Result<Option<State>, VerifyError> {
+    let segs = all_segs(entries);
+    let mut ix = Index::default();
+    let mut ev_segs = Vec::new();
+    let mut meta: Vec<Vec<Cell>> = Vec::new();
+    // revisions and cause rows of the commit being read (a revision's causes are in its own commit)
+    let mut cur = usize::MAX;
+    let mut revs: Vec<RevisionRow> = Vec::new();
+    let mut causes: HashMap<String, Vec<String>> = HashMap::new();
+    fn flush(ix: &mut Index, revs: &mut Vec<RevisionRow>, causes: &mut HashMap<String, Vec<String>>) -> bool {
+        for rv in revs.drain(..) {
+            if ix.revs.contains_key(&rv.rev_id) {
+                return false;
+            }
+            let c = causes.remove(&rv.rev_id).unwrap_or_default();
+            ix.add_rev(rv, c);
+        }
+        causes.is_empty()
+    }
+    for chunk in segs.chunks(READ_CHUNK) {
+        let parts: Vec<Result<Part, VerifyError>> = chunk
+            .par_iter()
+            .map(|&(ei, si)| {
+                let g = &entries[ei].segments[si];
+                if g.table == "events" {
+                    load_ids(dir, g).map(Part::Ids)
+                } else {
+                    load_segment(dir, g).map(Part::Rows)
+                }
+            })
+            .collect();
+        for (&(ei, si), r) in chunk.iter().zip(parts) {
+            if ei != cur {
+                if !flush(&mut ix, &mut revs, &mut causes) {
+                    return Ok(None);
+                }
+                cur = ei;
+            }
+            let t = seg_table(&entries[ei].segments[si])?;
+            match (r?, t) {
+                (Part::Ids(v), _) => {
+                    ev_segs.push((ix.next_ord, ei, si));
+                    ix.events.reserve(v.len());
+                    for k in v {
+                        ix.ev_add(k);
+                    }
+                }
+                (Part::Rows(_), Table::Events) => return Ok(None),
+                (Part::Rows(rows), Table::Revisions) => revs.extend(rows.iter().map(|r| RevisionRow::from_cells(r))),
+                (Part::Rows(rows), Table::RevisionCauses) => {
+                    for r in &rows {
+                        causes.entry(r[0].s()).or_default().push(r[1].s());
+                    }
+                }
+                (Part::Rows(rows), Table::Predictions) => {
+                    for r in &rows {
+                        ix.add_pred(r);
+                    }
+                }
+                (Part::Rows(rows), Table::Outcomes) => {
+                    for r in &rows {
+                        ix.outcomes.insert(r[0].s());
+                    }
+                }
+                (Part::Rows(rows), Table::SchemaMeta) => meta.extend(rows),
+            }
+        }
+    }
+    if !flush(&mut ix, &mut revs, &mut causes) {
+        return Ok(None);
+    }
+    let format = meta.iter().map(|r| LogFormat::from_number(MetaRow::from_cells(r).format_version)).fold(LogFormat::V1, |a, b| if b.number() > a.number() { b } else { a });
+    ix.forgotten = forget::forgotten_set(entries);
+    ix.content_idem = format.content_idem();
+    Ok(Some(State { head: None, index: ix, ev_segs, format }))
+}
+
+/// Read and decode every segment at once (format 1 events, irregular logs).
+fn load_state_full(dir: &Path, entries: &[Entry]) -> Result<State, VerifyError> {
     let segs = all_segs(entries);
     let lazy = entries.iter().flat_map(|e| e.segments.iter()).filter(|g| g.table == "events").all(|g| g.enc == Some(2));
     let results: Vec<Result<Part, VerifyError>> = segs
@@ -713,6 +827,32 @@ impl VersionedLog {
         Ok(VersionedLog { dir, entries, manifest_raw: raw, journal, torn, head: Mutex::new(st.head), index: st.index, ev_segs: st.ev_segs, format: st.format, clock: Box::new(now_iso) })
     }
 
+    /// Read the first events of an existing log without opening it: the MANIFEST hash chain is
+    /// checked and the events segments are read in log order (each checksum verified) until `f`
+    /// returns false; nothing else is read and no index is built, so the cost does not grow with the
+    /// log when `f` stops early. For a quick look before a full `open` (the being's genesis when the
+    /// KILL file is present). An interrupted forget is finished first, as `open` does.
+    pub fn peek_events(root: &Path, owner: &str, mut f: impl FnMut(EventRow) -> bool) -> Result<(), LogError> {
+        if !valid_owner(owner) {
+            return inv("owner must be 1-64 chars of [A-Za-z0-9_-]");
+        }
+        let dir = root.join(owner).join("log");
+        recover_pending(&dir)?;
+        let full = read_manifest_raw(&dir)?;
+        let parsed = manifest::parse_ex(&full).map_err(VerifyError::ManifestCorrupt)?;
+        check_chain(&parsed.entries)?;
+        for e in &parsed.entries {
+            for g in e.segments.iter().filter(|g| g.table == "events") {
+                for r in load_segment(&dir, g)? {
+                    if !f(EventRow::from_cells(&r)) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Re-derive all in-memory state from disk (used after `forget`).
     fn reload(&mut self) -> Result<(), LogError> {
         let full = read_manifest_raw(&self.dir)?;
@@ -780,6 +920,40 @@ impl VersionedLog {
         }
         let rows = load_segment(&self.dir, seg)?;
         Ok(rows.get(at).map(|r| EventRow::from_cells(r)))
+    }
+
+    /// Every event row of the latest version, in log order, without decoding any other table and
+    /// without keeping the rows: the events segments are read (checksums verified) a chunk at a time.
+    /// If the latest snapshot is already in memory its rows are used. `f` returns false to stop.
+    /// Gives the same rows, in the same order, as `open_latest().rows::<EventRow>()`.
+    pub fn for_each_event(&self, mut f: impl FnMut(EventRow) -> bool) -> Result<(), LogError> {
+        let head = self.head.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(s) = head {
+            for r in s.tables[Table::Events.idx()].iter() {
+                if !f(EventRow::from_cells(r)) {
+                    break;
+                }
+            }
+            return Ok(());
+        }
+        // small first chunks, so that a read that stops early (the genesis) touches few segments
+        let mut at = 0usize;
+        let mut n = 8usize;
+        while at < self.ev_segs.len() {
+            let chunk = &self.ev_segs[at..(at + n).min(self.ev_segs.len())];
+            at += chunk.len();
+            n = (n * 2).min(READ_CHUNK);
+            let (dir, entries) = (&self.dir, &self.entries);
+            let parts: Vec<Result<Vec<Vec<Cell>>, VerifyError>> = chunk.par_iter().map(|&(_, ei, si)| load_segment(dir, &entries[ei].segments[si])).collect();
+            for p in parts {
+                for r in p? {
+                    if !f(EventRow::from_cells(&r)) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// True if this event id was removed by `forget` (ingest of it is refused).

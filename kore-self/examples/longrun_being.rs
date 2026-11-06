@@ -275,10 +275,11 @@ struct Opts {
     replay_n: usize,
     max_hours: f64,
     heavy_every: u64,
+    kill_ms: Option<u64>,
 }
 
 fn parse_opts(args: &[String]) -> Opts {
-    let mut o = Opts { root: PathBuf::new(), steps: 20_000, chunk: 5000, calls_per_proc: 2, checkpoint_every: 10_000, window: 10_000, format: 3, world: 1, budget: 3000, kill_at: None, min_free_gb: 12.0, replay_n: 300, max_hours: 1e9, heavy_every: 5 };
+    let mut o = Opts { root: PathBuf::new(), steps: 20_000, chunk: 5000, calls_per_proc: 2, checkpoint_every: 10_000, window: 10_000, format: 3, world: 1, budget: 3000, kill_at: None, min_free_gb: 12.0, replay_n: 300, max_hours: 1e9, heavy_every: 5, kill_ms: None };
     let mut i = 0;
     while i < args.len() {
         let v = args.get(i + 1).cloned().unwrap_or_default();
@@ -297,6 +298,7 @@ fn parse_opts(args: &[String]) -> Opts {
             "--replay-n" => o.replay_n = v.parse().unwrap(),
             "--max-hours" => o.max_hours = v.parse().unwrap(),
             "--heavy-every" => o.heavy_every = v.parse().unwrap(),
+            "--kill-ms" => o.kill_ms = Some(v.parse().unwrap()),
             other => panic!("unknown option {other}"),
         }
         i += 2;
@@ -1213,20 +1215,52 @@ fn cmd_memstat(o: Opts) {
     let root = std::fs::canonicalize(&o.root).unwrap();
     let ws = || win::self_peak_ws() as f64 / 1e6;
     let m0 = ws();
+    let t = Instant::now();
     let log = VersionedLog::open(&root, OWNER).unwrap();
-    let m1 = ws();
+    let (m1, t1) = (ws(), ms(t));
     let rows = log.versions().last().map(|v| v.rows.clone()).unwrap_or_default();
+    let t = Instant::now();
     let snap = log.open_latest();
-    let m2 = ws();
+    let (m2, t2) = (ws(), ms(t));
+    let t = Instant::now();
     let ev: Vec<EventRow> = snap.rows();
-    let m3 = ws();
+    let (m3, t3) = (ws(), ms(t));
+    let t = Instant::now();
     let st = BeingState::from_events(&ev);
-    let m4 = ws();
+    let (m4, t4) = (ws(), ms(t));
     let text: usize = ev.iter().map(|e| e.text.len() + e.tags.len() + e.event_id.len() + e.occurred_at.len() + e.recorded_at.len() + e.source.len() + e.kind.len()).sum();
     let revs: Vec<versioned::RevisionRow> = snap.rows();
     let rtext: usize = revs.iter().map(|r| r.rationale.len() + r.stance.len() + r.key.len()).sum();
     println!("{}", serde_json::to_string_pretty(&json!({ "steps": st.step, "rows_per_table": rows, "peak_ws_mb_after": { "start": m0, "open": m1, "open_latest": m2, "event_rows": m3, "fold": m4 },
+        "ms": { "open": t1, "open_latest": t2, "event_rows": t3, "fold": t4 },
         "event_string_bytes": text, "revision_rationale_stance_key_bytes": rtext, "log_bytes_on_disk": dir_stats(&root.join(OWNER).join("log")).0 })).unwrap());
+}
+
+/// memfold: the restart read path of `being_run` after the restart fix (open, events-only fold), with
+/// the peak working set and time after each part. Compare with `memstat` (the old path).
+fn cmd_memfold(o: Opts) {
+    let root = std::fs::canonicalize(&o.root).unwrap();
+    let ws = || win::self_peak_ws() as f64 / 1e6;
+    let m0 = ws();
+    let t = Instant::now();
+    let g = BeingState::genesis_peek(&root, OWNER).unwrap();
+    let (mg, tg) = (ws(), ms(t));
+    let t = Instant::now();
+    let log = VersionedLog::open(&root, OWNER).unwrap();
+    let (m1, t1) = (ws(), ms(t));
+    let t = Instant::now();
+    let st = BeingState::from_log(&log).unwrap();
+    let (m2, t2) = (ws(), ms(t));
+    // the floor of any verified open: read every segment file and hash it (no decoding)
+    let t = Instant::now();
+    let dir = root.join(OWNER).join("log");
+    let raw = std::fs::read_to_string(dir.join("MANIFEST")).unwrap();
+    let files: Vec<String> = raw.lines().skip(1).filter_map(|l| serde_json::from_str::<Value>(l).ok()).flat_map(|e| e["segments"].as_array().unwrap().iter().map(|g| g["file"].as_str().unwrap().to_string()).collect::<Vec<_>>()).collect();
+    let t_manifest = ms(t);
+    let t = Instant::now();
+    let bytes: usize = files.iter().map(|f| { let b = std::fs::read(dir.join(f)).unwrap(); let _ = versioned::sha256_hex(&[&b]); b.len() }).sum();
+    let t_read = ms(t);
+    println!("{}", json!({ "type": "memfold", "steps": st.step, "events": log.event_count(), "genesis_found": g.is_some(), "peak_ws_mb_after": { "start": m0, "genesis_peek": mg, "open": m1, "fold": m2 }, "ms": { "genesis_peek": tg, "open": t1, "fold": t2, "manifest_json_parse_1_thread": t_manifest, "read_and_sha_all_segments_1_thread": t_read }, "segment_files": files.len(), "segment_bytes": bytes }));
 }
 
 /// prof: where the time of one step goes as the history grows (in-process engine, no log): the step
@@ -1313,6 +1347,108 @@ fn cmd_rulecheck(o: Opts) {
     }
 }
 
+// ─── restart fix: cut a log at a version, time one restart, compare two logs ─────
+
+/// cut: copy of the log of `--src` holding only versions 0..=V (MANIFEST lines and their segments).
+fn cmd_cut(o: Opts, src: PathBuf, upto: u64) {
+    let src = std::fs::canonicalize(src).unwrap().join(OWNER).join("log");
+    std::fs::create_dir_all(&o.root).unwrap();
+    let root = std::fs::canonicalize(&o.root).unwrap();
+    let dst = root.join(OWNER).join("log");
+    assert!(!dst.join("MANIFEST").exists(), "{} already holds a log", dst.display());
+    let raw = std::fs::read_to_string(src.join("MANIFEST")).unwrap();
+    let mut out = String::new();
+    let mut n = 0u64;
+    for (i, line) in raw.split_inclusive('\n').enumerate() {
+        if i == 0 {
+            out.push_str(line);
+            continue;
+        }
+        if !line.ends_with('\n') {
+            break;
+        }
+        let e: Value = serde_json::from_str(line.trim_end()).unwrap();
+        if e["v"].as_u64().unwrap() > upto {
+            break;
+        }
+        for g in e["segments"].as_array().unwrap() {
+            let f = g["file"].as_str().unwrap();
+            let to = dst.join(f);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::copy(src.join(f), &to).unwrap();
+        }
+        out.push_str(line);
+        n += 1;
+    }
+    for t in ["events", "revisions", "revision_causes", "predictions", "outcomes", "schema_meta"] {
+        std::fs::create_dir_all(dst.join(t)).unwrap();
+    }
+    std::fs::write(dst.join("MANIFEST"), out).unwrap();
+    std::fs::write(root.join(OWNER).join("controller.txt"), CONTROLLER).unwrap();
+    let log = VersionedLog::open(&root, OWNER).unwrap();
+    println!("{}", json!({ "type": "cut", "versions": n, "latest": log.latest_version(), "events": log.event_count() }));
+}
+
+/// restart: one cold start of the binary (LONGRUN_BIN or the default) and one `being_run` call of
+/// `--chunk` steps on the log under `--root`. With `--kill-ms D` the KILL file is created D ms after
+/// the call was sent and the time from the file to the answer is recorded (the file is removed after).
+fn cmd_restart(o: Opts) {
+    let root = std::fs::canonicalize(&o.root).unwrap();
+    let _ = std::fs::remove_file(root.join(OWNER).join("KILL"));
+    let sys0 = win::system_times();
+    let t0 = Instant::now();
+    let mut srv = Server::start(&root);
+    let start_ms = ms(t0);
+    // --kill-ms 0: the file exists before the call is sent
+    let pre = (o.kill_ms == Some(0)).then(|| {
+        std::fs::write(root.join(OWNER).join("KILL"), "stop\n").unwrap();
+        Instant::now()
+    });
+    let kill = o.kill_ms.filter(|d| *d > 0).map(|d| {
+        let p = root.join(OWNER).join("KILL");
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(d));
+            std::fs::write(&p, "stop\n").unwrap();
+            Instant::now()
+        })
+    });
+    let tc = Instant::now();
+    let (is_err, text) = srv.call("being_run", run_args(&o, o.chunk));
+    let done = Instant::now();
+    let secs = tc.elapsed().as_secs_f64();
+    let kill_lag_ms = kill.map(|h| h.join().unwrap()).or(pre).map(|t| done.saturating_duration_since(t).as_secs_f64() * 1000.0);
+    let (peak, cpu) = srv.stop();
+    let _ = std::fs::remove_file(root.join(OWNER).join("KILL"));
+    let r: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let v = json!({ "type": "restart", "binary": binary().display().to_string(), "chunk": o.chunk, "is_error": is_err, "steps_run": r["steps_run"], "steps_total": r["total_steps"], "stopped": r["stopped"],
+        "text": if r.is_null() { text.chars().take(300).collect::<String>() } else { String::new() },
+        "start_ms": start_ms, "call_secs": secs, "kill_ms": o.kill_ms, "kill_lag_ms": kill_lag_ms, "peak_ws_mb": peak as f64 / 1e6, "cpu_secs": cpu, "machine_busy_share": busy_share(sys0, win::system_times()), "mem_avail_gb": gb(win::memory().1) });
+    println!("{v}");
+    Out::new(&root, "restart.jsonl").put(v);
+}
+
+fn row_key_e(e: &EventRow) -> String {
+    format!("{}|{}|{}|{}|{}|{}|{}", e.event_id, e.occurred_at, e.source, e.kind, e.text, e.tags, e.redacted)
+}
+
+/// compare: rows committed after version `--from` in two logs (roots `--root` and `--other`), field by
+/// field, everything except the wall-clock `recorded_at`.
+fn cmd_compare(o: Opts, other: PathBuf, from: u64) {
+    let a = VersionedLog::open(&std::fs::canonicalize(&o.root).unwrap(), OWNER).unwrap();
+    let b = VersionedLog::open(&std::fs::canonicalize(&other).unwrap(), OWNER).unwrap();
+    let da = a.diff(from, a.latest_version()).unwrap();
+    let db = b.diff(from, b.latest_version()).unwrap();
+    let ev = |d: &versioned::Diff| d.events.iter().filter(|e| e.source != "authorize").map(row_key_e).collect::<Vec<_>>();
+    let rv = |d: &versioned::Diff| d.revisions.iter().map(|r| format!("{}|{}|{}|{}|{:?}|{}|{:?}|{}|{}", r.rev_id, r.entity_type, r.key, r.stance, r.confidence, r.rationale, r.supersedes, r.valid_from, r.author)).collect::<Vec<_>>();
+    let ca = |d: &versioned::Diff| d.causes.iter().map(|c| format!("{}|{}", c.rev_id, c.event_id)).collect::<Vec<_>>();
+    let pr = |d: &versioned::Diff| d.predictions.iter().map(|p| format!("{:?}", p)).collect::<Vec<_>>();
+    let oc = |d: &versioned::Diff| d.outcomes.iter().map(|p| format!("{:?}", p)).collect::<Vec<_>>();
+    let cmp = |x: Vec<String>, y: Vec<String>| json!({ "a": x.len(), "b": y.len(), "identical": x == y, "first_diff": x.iter().zip(y.iter()).position(|(p, q)| p != q) });
+    let v = json!({ "type": "compare", "from": from, "versions": [a.latest_version(), b.latest_version()],
+        "events_except_audit": cmp(ev(&da), ev(&db)), "revisions": cmp(rv(&da), rv(&db)), "causes": cmp(ca(&da), ca(&db)), "predictions": cmp(pr(&da), pr(&db)), "outcomes": cmp(oc(&da), oc(&db)) });
+    println!("{v}");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().cloned().unwrap_or_default();
@@ -1322,8 +1458,27 @@ fn main() {
         "authz" => cmd_authz(parse_opts(&args[1..])),
         "scan" => cmd_scan(parse_opts(&args[1..])),
         "memstat" => cmd_memstat(parse_opts(&args[1..])),
+        "memfold" => cmd_memfold(parse_opts(&args[1..])),
         "prof" => cmd_prof(parse_opts(&args[1..])),
         "rulecheck" => cmd_rulecheck(parse_opts(&args[1..])),
+        "restart" => cmd_restart(parse_opts(&args[1..])),
+        "cut" | "compare" => {
+            let flag = if cmd == "cut" { "--src" } else { "--other" };
+            let i = args.iter().position(|a| a == flag).unwrap_or_else(|| panic!("{flag} <root>"));
+            let src = PathBuf::from(&args[i + 1]);
+            let k = args.iter().position(|a| a == "--at").expect("--at <version>");
+            let at: u64 = args[k + 1].parse().unwrap();
+            let mut rest: Vec<String> = args[1..].to_vec();
+            for f in [flag, "--at"] {
+                let j = rest.iter().position(|a| a == f).unwrap();
+                rest.drain(j..j + 2);
+            }
+            if cmd == "cut" {
+                cmd_cut(parse_opts(&rest), src, at)
+            } else {
+                cmd_compare(parse_opts(&rest), src, at)
+            }
+        }
         "torn" => {
             let i = args.iter().position(|a| a == "--src").expect("--src <root of a run>");
             let src = PathBuf::from(&args[i + 1]);

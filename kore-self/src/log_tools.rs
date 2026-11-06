@@ -72,12 +72,17 @@ pub(crate) fn log_err(e: LogError) -> Value {
 }
 
 pub(crate) fn open(owner: &str) -> Result<VersionedLog, Value> {
+    let root = log_root(owner)?;
+    VersionedLog::open_or_create(&root, owner).map_err(log_err)
+}
+
+/// The root under which the owner's log lives (`<root>/<owner>/log`), checked as `open` checks it.
+pub(crate) fn log_root(owner: &str) -> Result<std::path::PathBuf, Value> {
     safety::validate_owner(owner).map_err(|e| err(format!("invalid owner: {e}")))?;
     // Routes through safe_path: the owner dir must resolve inside the data root.
     let base = safety::safe_path(owner, "log").map_err(|e| err(format!("log path rejected: {e}")))?;
-    let root = base.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf()).unwrap_or_else(safety::data_root);
     // `safe_path` canonicalises; open with the canonical root so the log lives at <root>/<owner>/log.
-    VersionedLog::open_or_create(&root, owner).map_err(log_err)
+    Ok(base.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf()).unwrap_or_else(safety::data_root))
 }
 
 pub(crate) fn req_str<'a>(args: &'a Value, k: &str) -> Result<&'a str, Value> {

@@ -1022,7 +1022,7 @@ pub fn run_advised(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, 
 
 pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, policy: &Policy, picker: Option<&mut dyn DomainPicker>, advisor: Option<&dyn Advisor>) -> Result<RunSummary, LogError> {
     let version_before = log.latest_version();
-    let mut state = BeingState::from_snapshot(&log.open_latest());
+    let mut state = BeingState::from_log(log)?;
     let mut created = false;
     // validated before anything is written, so a refused request never creates a being
     if cfg.discover_every.unwrap_or(0) > 0 && !state.genesis.as_ref().map_or(cfg.extended == Some(true) || cfg.ext2 == Some(true), |g| g.extended) {

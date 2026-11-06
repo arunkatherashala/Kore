@@ -98,6 +98,23 @@ Two segment encodings exist; a manifest entry's segment records which one
   sha256-verifies every segment (in parallel) but decodes only the event-id column;
   `open_latest()` decodes the rows on first use. `get_event(id)` reads one segment.
   Logs with any v1 events segment decode everything at open, as before.
+* **Streamed open (restart fix).** For such an all-v2-events log, `open()` reads the other
+  tables a chunk of segments at a time (512, in parallel) and folds each chunk into the
+  index before reading the next, so open no longer holds every revision, cause,
+  prediction and outcome row in memory at once (peak memory = the index plus one chunk).
+  The index is the same as the full read gives, provided every `revision_causes` row is
+  in the same commit as its revision and no `rev_id` is stored twice (always true for
+  logs written through the API); a log where that does not hold is detected and read
+  the old way (all at once), so it opens with the same index. Every segment is still
+  read and sha256-verified at open; nothing about the files or the format changed.
+* **Events-only read.** `for_each_event(f)` hands every event row of the latest version
+  to `f`, in log order (the same rows as `open_latest().rows::<EventRow>()`), reading
+  only the events segments, a chunk at a time, checksums verified, without keeping
+  them (the snapshot is used if it is already in memory). `peek_events(root, owner, f)`
+  does the same without opening the log (MANIFEST chain checked, events segments read
+  in order until `f` stops), for a quick look at the first events. The being folds its
+  state with `for_each_event` (`BeingState::from_log`) and reads its genesis with
+  `peek_events`; revision text is not decoded on a restart except to build the index.
 * **Commit cost.** A commit no longer clones the id index or re-parses/re-renders
   the MANIFEST: the new MANIFEST is the previous bytes plus one line, still written
   to `MANIFEST.tmp`, fsynced, renamed; the conflict check compares the on-disk
@@ -327,7 +344,9 @@ Not guaranteed:
 * Durability against hardware or OS faults beyond what fsync gives.
 * A format 1 log is loaded in memory when opened; a format 2 log keeps only an id
   index at open and loads rows on first snapshot use. Fine for personal-scale data,
-  not tuned for large volumes.
+  not tuned for large volumes. Open time and the index size still grow linearly with the
+  log (every segment file is read and hashed at open; the index holds every event id,
+  every revision id, key and content digest): see `docs/longrun.md`, "Restart fix".
 * No automatic scheduling of learning, no prediction scoring yet, no encryption yet. Learning
   is rule-based and measured only on synthetic data (`docs/measured.md`). `forget` exists
   (see above) but only inside this log; redaction before storage is best-effort.

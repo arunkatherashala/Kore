@@ -14,7 +14,7 @@ use crate::being::state::{tag, BeingState, Chooser, Genesis, SOURCE};
 use crate::being::controller::{self, Controller, Origin};
 use crate::being::policy::KillCheck;
 use crate::being::{self, Policy, ScriptedThinker};
-use crate::log_tools::{err, log_err, open, req_str, text};
+use crate::log_tools::{err, log_err, log_root, open, req_str, text};
 use crate::versioned::{CauseRow, EventRow, RevisionRow};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -55,8 +55,20 @@ pub fn load_controller(owner: &str) -> Controller {
 /// Every refusal of the controller (and every kill-switch stop) is a row of the audit trail
 /// (source `authorize`, actor `being`, decision deny). Called with the process log lock held.
 fn audit_refusals(owner: &str, refusals: &[(String, u64, u64, String)]) {
+    if refusals.is_empty() {
+        return;
+    }
+    match open(owner) {
+        Ok(mut log) => audit_refusals_in(&mut log, owner, refusals),
+        // the same failure the per-row open had: no row can be written
+        Err(_) => {}
+    }
+}
+
+/// As `audit_refusals`, into the log the run already has open.
+fn audit_refusals_in(log: &mut crate::versioned::VersionedLog, owner: &str, refusals: &[(String, u64, u64, String)]) {
     for (cap, limit, requested, what) in refusals {
-        let _ = authorize::audit_controller_locked(owner, cap, *limit, *requested, what);
+        let _ = authorize::audit_controller_in(log, owner, cap, *limit, *requested, what);
     }
 }
 
@@ -185,11 +197,10 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         refill_when_exhausted: !stop_after_budget,
         ..Default::default()
     };
-    // which advisor will be asked: the one the being already has, else the one requested for a new being
-    let existing = {
-        let (_, rows) = load(owner)?;
-        BeingState::from_events(&rows).genesis
-    };
+    // which advisor will be asked: the one the being already has, else the one requested for a new being.
+    // Only the events up to the genesis are read here (no open, no fold of the history): the log is
+    // opened and folded once, below, after the advisor and KILL checks.
+    let existing = BeingState::genesis_peek(&log_root(owner)?, owner).map_err(log_err)?;
     let kind = existing.as_ref().map_or(cfg.advisor.unwrap_or(AdvisorKind::None), |g| g.advice.kind);
     let advisor: Option<Box<dyn Advisor>> = if kind == AdvisorKind::None {
         None
@@ -214,14 +225,14 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
     let owner_k = owner.to_string();
     policy.kill = Some(KillCheck(std::sync::Arc::new(move || authorize::kill_active(&owner_k))));
     let s = run_advised(&mut log, &cfg, &ScriptedThinker, &policy, advisor.as_deref()).map_err(log_err)?;
-    drop(log);
     for r in &s.refusals {
         refused.push((r.cap.clone(), r.limit, r.requested, r.what.clone()));
     }
     if s.stopped == being::StopReason::Killed {
         refused.push(("kill_switch".into(), 0, s.steps_run, format!("the KILL file stopped the run after {} steps", s.steps_run)));
     }
-    audit_refusals(owner, &refused);
+    audit_refusals_in(&mut log, owner, &refused);
+    drop(log);
     refused_pre.extend(refused);
     let refused = refused_pre;
     let mut out = s.to_json();
@@ -490,3 +501,7 @@ mod b5_tests;
 #[cfg(test)]
 #[path = "being_tools_b3b_tests.rs"]
 mod b3b_tests;
+
+#[cfg(test)]
+#[path = "being_tools_restart_tests.rs"]
+mod restart_tests;
