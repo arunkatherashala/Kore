@@ -65,7 +65,7 @@ pub const VAL_EVERY: usize = 3;
 const MAX_NUM: i128 = 100;
 const MAX_DEN: i128 = 12;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Form {
     /// Bit i of `mask` set = lag i+1 is used.
     Lin { mask: u8, constant: bool },
@@ -624,7 +624,7 @@ pub fn toggle_constant(f: &Form) -> Option<Form> {
     }
 }
 
-fn candidates_for(blocks: &[Form]) -> Vec<(Xf, Form)> {
+pub(crate) fn candidates_for(blocks: &[Form]) -> Vec<(Xf, Form)> {
     let mut v: Vec<(Xf, Form)> = forms().into_iter().map(|f| (Xf::ID, f)).collect();
     let mut c: Vec<(Xf, Form)> = vec![];
     for x in 1..XFORMS.len() {

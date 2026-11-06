@@ -14,6 +14,7 @@ pub mod advice;
 pub mod chooser;
 pub mod controller;
 pub mod discover;
+pub mod discover_scan;
 pub mod measure;
 pub mod measure_b5;
 pub mod measure_b6;
@@ -41,6 +42,8 @@ mod tests_b5b;
 mod tests_b6;
 #[cfg(test)]
 mod tests_b3b;
+#[cfg(test)]
+mod tests_scan;
 
 pub use chooser::{DomainPicker, Ucb1};
 pub use policy::{Policy, StopReason};

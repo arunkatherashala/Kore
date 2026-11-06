@@ -1243,8 +1243,8 @@ fn cmd_prof(o: Opts) {
     let mut mc = ModelChooser::for_genesis(&g);
     let _ = mc.name();
     let (mut t_step, mut t_disc, mut t_house) = (0.0f64, 0.0f64, 0.0f64);
-    println!("| steps | examples | live rules | ms per step: step | discovery (amortised) | housekeeping | total |");
-    println!("|---|---|---|---|---|---|---|");
+    println!("| steps | examples | live rules | ms per step: step | discovery (amortised) | housekeeping | total | scan cache MB | peak working set MB |");
+    println!("|---|---|---|---|---|---|---|---|---|");
     let bucket = o.window.max(1);
     let mut n = 0u64;
     while n < o.steps {
@@ -1271,12 +1271,18 @@ fn cmd_prof(o: Opts) {
         let _ = e.take_refusals();
         if n % bucket == 0 {
             let b = bucket as f64;
-            println!("| {n} | {} | {} | {:.2} | {:.2} | {:.2} | {:.2} |", e.state.examples.len(), e.state.live_rules(), t_step / b, t_disc / b, t_house / b, (t_step + t_disc + t_house) / b);
+            println!("| {n} | {} | {} | {:.2} | {:.2} | {:.2} | {:.2} | {:.1} | {:.0} |", e.state.examples.len(), e.state.live_rules(), t_step / b, t_disc / b, t_house / b, (t_step + t_disc + t_house) / b, e.scan.approx_bytes() as f64 / 1e6, win::self_peak_ws() as f64 / 1e6);
             t_step = 0.0;
             t_disc = 0.0;
             t_house = 0.0;
         }
     }
+    // the first discovery pass of a new engine (after every restart) scans every example once
+    let blocks: Vec<being::discover::Form> = e.blocks().into_iter().take(8).collect();
+    let t = Instant::now();
+    let mut cold = being::discover_scan::ScanCache::new();
+    let o = cold.search(&e.state.examples, being::discover::K_TRAIN, being::discover::K_VAL, &blocks, 2000, &[]);
+    println!("first pass of a new engine over {} examples: {:.0} ms, {} predictions, {} rules found", e.state.examples.len(), ms(t), cold.predictions, o.found.len());
 }
 
 /// rulecheck: for every wrong answer that came from a rule, was the rule itself wrong on that task (its
@@ -1313,6 +1319,56 @@ fn cmd_rulecheck(o: Opts) {
     }
 }
 
+/// digest: the being in-process with a real log, in calls of `--chunk` steps (a new engine per call, as
+/// `being_run` does), then a sha256 over every being event (id, kind, world time, text, tags) and every
+/// revision (type, key, stance, confidence bits, rationale, supersedes, valid from, author), in log order.
+/// Two builds that print the same digest for the same world and steps wrote the same records.
+fn cmd_digest(o: Opts) {
+    std::fs::create_dir_all(&o.root).unwrap();
+    let root = std::fs::canonicalize(&o.root).unwrap();
+    let scratch = root.join(format!("digest_w{}_{}", o.world, o.steps));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let mut log = VersionedLog::open_or_create_with_format(&scratch, OWNER, versioned::now_iso, LogFormat::V3).unwrap();
+    let t0 = Instant::now();
+    let mut done = 0u64;
+    println!("| steps at end of call | examples | live rules / total | wall s of the call | ms per step |");
+    println!("|---|---|---|---|---|");
+    while done < o.steps {
+        let n = o.chunk.min(o.steps - done);
+        let (cfg, policy) = cfg_in_process(&o, n);
+        let t = Instant::now();
+        let s = run_full(&mut log, &cfg, &ScriptedThinker, &policy, None, None).unwrap();
+        let secs = t.elapsed().as_secs_f64();
+        done += s.steps_run;
+        println!("| {} | {} | {} / {} | {:.1} | {:.2} |", s.state.step, s.state.examples.len(), s.state.live_rules(), s.state.rules.len(), secs, secs * 1000.0 / s.steps_run.max(1) as f64);
+        if s.steps_run == 0 {
+            break;
+        }
+    }
+    let snap = log.open_latest();
+    let ev: Vec<EventRow> = snap.rows();
+    let revs: Vec<versioned::RevisionRow> = snap.rows();
+    let mut parts: Vec<Vec<u8>> = vec![];
+    let mut nev = 0usize;
+    for e in ev.iter().filter(|e| e.source == SOURCE) {
+        parts.push(format!("E|{}|{}|{}|{}|{}\n", e.event_id, e.kind, e.occurred_at, e.text, e.tags).into_bytes());
+        nev += 1;
+    }
+    for r in &revs {
+        parts.push(format!("R|{}|{}|{}|{}|{}|{:?}|{}|{}\n", r.entity_type, r.key, r.stance, r.confidence.to_bits(), r.rationale, r.supersedes, r.valid_from, r.author).into_bytes());
+    }
+    let refs: Vec<&[u8]> = parts.iter().map(|p| p.as_slice()).collect();
+    let digest = versioned::sha256_hex(&refs);
+    let st = BeingState::from_snapshot(&snap);
+    let v = json!({ "type": "digest", "world": o.world, "steps": st.step, "chunk": o.chunk, "events": nev, "revisions": revs.len(), "examples": st.examples.len(),
+        "rules": st.rules.iter().map(|r| format!("{}:{}:{}:{}:{}", r.id, r.sig, r.xf.code(), r.form.code(), r.retired)).collect::<Vec<_>>(),
+        "total_reward": st.total_reward, "total_cost": st.total_cost, "sha256": digest, "wall_s": t0.elapsed().as_secs_f64() });
+    println!("{}", serde_json::to_string(&v).unwrap());
+    Out::new(&root, "digest.jsonl").put(v);
+    drop(log);
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().cloned().unwrap_or_default();
@@ -1323,6 +1379,7 @@ fn main() {
         "scan" => cmd_scan(parse_opts(&args[1..])),
         "memstat" => cmd_memstat(parse_opts(&args[1..])),
         "prof" => cmd_prof(parse_opts(&args[1..])),
+        "digest" => cmd_digest(parse_opts(&args[1..])),
         "rulecheck" => cmd_rulecheck(parse_opts(&args[1..])),
         "torn" => {
             let i = args.iter().position(|a| a == "--src").expect("--src <root of a run>");

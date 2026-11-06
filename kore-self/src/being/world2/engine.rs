@@ -333,6 +333,10 @@ pub struct Engine2 {
     refused: HashSet<String>,
     last_blocks: usize,
     pub max_candidates_seen: usize,
+    /// Incremental scan of the revealed examples (same answers as a full rescan; see `discover_scan`).
+    pub scan: crate::being::discover_scan::ScanCache,
+    /// true: rescan every example on every pass (the code before the rule scan fix; tests compare both).
+    pub reference_scan: bool,
 }
 
 pub fn offers_of2(tasks: &[Task2]) -> Vec<Offer2> {
@@ -346,7 +350,7 @@ fn fin(x: f64) -> String {
 impl Engine2 {
     pub fn new(state: State2, limits: Option<Limits>) -> Engine2 {
         let world = World2::new(state.cfg.clone().expect("a started state"));
-        Engine2 { world, state, limits, refusals: vec![], refusals_total: vec![], refused: HashSet::new(), last_blocks: 0, max_candidates_seen: 0 }
+        Engine2 { world, state, limits, refusals: vec![], refusals_total: vec![], refused: HashSet::new(), last_blocks: 0, max_candidates_seen: 0, scan: Default::default(), reference_scan: crate::being::discover_scan::reference_default() }
     }
 
     pub fn refuse(&mut self, r: Refusal) {
@@ -533,17 +537,26 @@ impl Engine2 {
         Ok(Step2Out { outcome, truth, label, events: vec![dev, aev, oev], revision, prediction, resolved })
     }
 
+    /// `discover::search_composed` over the being's examples: incremental, or the full rescan with `reference_scan`.
+    pub fn search_examples(&mut self, blocks: &[discover::Form], max_candidates: usize) -> discover::SearchOut {
+        if self.reference_scan {
+            discover::search_composed(&self.state.examples, blocks, max_candidates)
+        } else {
+            self.scan.search(&self.state.examples, discover::K_TRAIN, discover::K_VAL, blocks, max_candidates, &[])
+        }
+    }
+
     /// One discovery pass over the being's own revealed examples (as `Engine::discover_pass`, with the caps).
     pub fn discover_pass(&mut self) -> Vec<NewRule2> {
         let found: Vec<Found> = match self.limits.clone() {
-            None => discover::search(&self.state.examples),
+            None => self.search_examples(&[], usize::MAX).found,
             Some(l) => {
                 let all = self.state.blocks();
                 let blocks: Vec<discover::Form> = if l.compose { all.iter().take(l.max_blocks).cloned().collect() } else { vec![] };
                 if l.compose && all.len() > l.max_blocks {
                     self.refuse(Refusal::new("max_building_blocks", l.max_blocks as u64, all.len() as u64, format!("{} verified building blocks exist; only the first {} are used for composition", all.len(), l.max_blocks)));
                 }
-                let o = discover::search_composed(&self.state.examples, &blocks, l.max_candidates);
+                let o = self.search_examples(&blocks, l.max_candidates);
                 if o.truncated {
                     self.refuse(Refusal::new("max_search_candidates", l.max_candidates as u64, o.wanted as u64, format!("a discovery pass would try {} candidates; it stopped after {}", o.wanted, o.candidates)));
                 }
