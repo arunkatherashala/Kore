@@ -311,7 +311,7 @@ fn housekeeping_merges_are_identical_with_the_full_rescan() {
 }
 
 
-/// A new engine on a long history: the first pass scans every example, on several threads; same answer.
+/// A new engine on a long history: the first pass scans every example at once; same answer, and it goes on from there.
 #[test]
 fn first_pass_on_a_long_history_equals_the_full_rescan() {
     let mut ex = mixed_examples(8, 500);

@@ -19,9 +19,8 @@
 //!
 //! Between runs (`being_run` calls) of one process the cache is kept (`stash`, `adopt`) and reused only if
 //! the new run's examples begin with exactly the scanned ones (compared example for example). A new process
-//! starts with an empty cache: its first pass scans every example once, spread over threads when that is
-//! a lot of work (the status of each candidate on each example is computed on its own, so the answer does
-//! not depend on the threads).
+//! starts with an empty cache: its first pass scans every example once, on this thread
+//! (the being's sources start no threads; a test checks it).
 
 use super::discover::{candidates_for, is_held_out, predict_x, Example, Form, Found, SearchOut, Xf, MAX_CITE};
 use std::cell::{Cell, RefCell};
@@ -62,10 +61,6 @@ pub fn adopt(examples: &[Example]) -> ScanCache {
         _ => ScanCache::default(),
     }
 }
-
-/// From this many predictions still to make before a pass (a new engine on a long history), they are made on
-/// several threads first.
-const PARALLEL_FROM: usize = 20_000;
 
 type Key = (u8, Form);
 
@@ -209,59 +204,11 @@ impl ScanCache {
         self.seen = examples.len();
     }
 
-    /// When the candidates the pass will try still have many examples to scan (a new engine on a long history),
-    /// scan them on several threads first. The pass then finds them up to date; nothing else changes.
-    fn pre_extend(&mut self, examples: &[Example], cands: &[(Xf, Form)], prefer: &[(u8, Xf, Form)], max_candidates: usize) -> u64 {
-        let mut wanted: Vec<(u8, Key)> = vec![];
-        'sigs: for sig in self.sigs.keys() {
-            for (xf, form) in order(cands, prefer, *sig) {
-                if wanted.len() >= max_candidates {
-                    break 'sigs;
-                }
-                wanted.push((*sig, (xf.0, *form)));
-            }
-        }
-        let pending: usize = wanted
-            .iter()
-            .map(|(sig, k)| {
-                let s = &self.sigs[sig];
-                s.cands.get(k).map_or(s.idx.len(), |c| if c.dead { 0 } else { s.idx.len() - c.upto })
-            })
-            .sum();
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
-        if pending < PARALLEL_FROM || threads < 2 {
-            return 0;
-        }
-        let mut jobs: Vec<(&mut Cand, Key, &[usize], &[u64])> = vec![];
-        for (sig, s) in self.sigs.iter_mut() {
-            let Sig { idx, val_mask, cands, .. } = s;
-            for (sg, k) in &wanted {
-                if sg == sig {
-                    cands.entry(*k).or_default();
-                }
-            }
-            for (k, c) in cands.iter_mut() {
-                if !c.dead && c.upto < idx.len() && wanted.iter().any(|(sg, w)| sg == sig && w == k) {
-                    jobs.push((c, *k, idx.as_slice(), val_mask.as_slice()));
-                }
-            }
-        }
-        let per = jobs.len().div_ceil(threads).max(1);
-        let mut total = 0u64;
-        std::thread::scope(|sc| {
-            let handles: Vec<_> = jobs.chunks_mut(per).map(|chunk| sc.spawn(move || chunk.iter_mut().map(|(c, k, idx, vm)| extend(c, *k, idx, vm, examples)).sum::<u64>())).collect();
-            for h in handles {
-                total += h.join().expect("scan thread");
-            }
-        });
-        total
-    }
-
     /// Exactly `discover::search_core(examples, k_train, k_val, blocks, max_candidates, prefer)`.
     pub fn search(&mut self, examples: &[Example], k_train: u32, k_val: u32, blocks: &[Form], max_candidates: usize, prefer: &[(u8, Xf, Form)]) -> SearchOut {
         self.sync(examples);
         let cands = candidates_for(blocks);
-        let mut predictions = self.pre_extend(examples, &cands, prefer, max_candidates);
+        let mut predictions = 0u64;
         let sig_keys: Vec<u8> = self.sigs.keys().copied().collect();
         let mut out = vec![];
         let (mut tried, mut truncated) = (0usize, false);
