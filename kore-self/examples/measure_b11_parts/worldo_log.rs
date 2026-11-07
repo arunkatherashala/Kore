@@ -35,7 +35,7 @@ pub fn cmd_worldo_log(args: &[String]) {
     // the log is created in format 3 (journal), as in the long run of docs/longrun.md
     let log = VersionedLog::open_or_create_with_format(&root.join("log"), "being", || "2030-01-01T00:00:00Z".to_string(), LogFormat::V3).unwrap();
     assert_eq!(log.format(), LogFormat::V3);
-    let mut done = log.open_latest().rows().iter().filter(|e| e.source == SOURCE_O && e.kind == "outcome").count() as u64;
+    let mut done = log.open_latest().rows().iter().filter(|e: &&EventRow| e.source == SOURCE_O && e.kind == "outcome").count() as u64;
     drop(log);
     let mut killed_once = done > kill_at;
     println!("| steps | call wall s | open+fold+run of the call | live rules | families open | log files | log MB |");

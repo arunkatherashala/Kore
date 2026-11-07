@@ -24,6 +24,7 @@ be burstier, messier and phrased differently.
 | Prediction: any predictor beating uniform or frequency on pure noise, synthetic | 20 seeds x 380 forecasts | uniform, frequency | 0 of 20 seeds for either baseline; every learner slightly worse than uniform on average | 2026-10-31 | c8fcade0 |
 | Prediction: recency vs frequency under drift (Brier gain), synthetic | 20 seeds x 380 forecasts | frequency, uniform | +0.1937 [+0.1829, +0.2040]; better in 20 of 20 seeds | 2026-10-31 | c8fcade0 |
 | B9 experiments: rule targets covered per world, experiments minus passive discovery, World v2 large clean / B2 world budget 3000 (synthetic) | 20 worlds each | passive discovery (current learner); random probes with the same budget | +7.35 [+5.53, +9.17] / +1.70 [+1.02, +2.38]; reward per energy -0.044 [-0.316, +0.229] / -0.097 [-0.284, +0.090]; 0 wrong rules (Track B9) | 2026-11-06 | f4bb0f8a |
+| B11 long-run decline and World O (synthetic) | 8 worlds x 1M steps (decline); 20 worlds (World O); 20 worlds (B1 check) | B1 skip test; oracle-knows-rules | settled skip test vs B1 over 1M steps +0.208 [+0.066, +0.350]; world 1 4.164 -> 4.152 (B1 4.096 -> 4.020); B1 budget 600 +0.001 [-0.007, +0.009], 3000 +0.049 [+0.010, +0.087]; World O regret current 0.131 -> 0.836 per 100k-energy window, no faster learning of later families (Spearman +0.025 [-0.060, +0.110]) | 2026-11-07 | open-world |
 
 ## How to reproduce
 
@@ -1632,7 +1633,7 @@ Restart invariance: an in-process single run of 20,000 steps gives exactly the s
 chunked, KILL-interrupted log. Torn writes on copies (torn journal tail, stray segment, lost last commit, flipped byte):
 the first two recover on the next run, the lost commit is redone with identical events, the flipped byte is refused.
 **Not shown**: 1,000,000 steps (memory and restart time grow linearly with the history), a real crash during a
-commit, speeds on an idle machine, more than one world per configuration, the cause of the slow decline in world 1.
+commit, speeds on an idle machine, more than one world per configuration, the cause of the slow decline in world 1. (The cause was found later, Track B11: a skip bar that is too strict once the optimism bonus has shrunk; an opt-in fix removes the decline in-process.)
 
 **Restart fix** (branch `restart-fix`, 2026-11-06, same shared machine; details in `docs/longrun.md`, "Restart fix"):
 the log's open now streams the non-event tables into the index a chunk at a time, the being folds its state from an
@@ -1865,6 +1866,201 @@ Secondary setting, not chosen by the tuning rule (kappa 1, budget 100 per mille;
 ### What B9 does not show
 
 No reward gain; the hypothesis space, the families, the worlds and the oracle are the author's; experiments only choose among offered tasks (no free probe action exists in these worlds); the split term rarely separates applicable rules (the acceptance guard already makes forms rarely applicable to the same prefix); under feedback noise experiments can reject a right hypothesis because the told answer was wrong; the first world's logged loop does not run experiments (measured in memory with the same engine); 20 worlds per condition, one budget per World v2 size, a tuning grid over two worlds only.
+
+## Track B11: open-ended world and the long-run decline (synthetic worlds, author-defined rewards)
+
+Branch `open-world` (from 4feb8daf), 2026-11-07, Windows, 8 CPUs, machine shared with other work. Measured with
+`cargo run -p kore-self --example measure_b11 --offline --release -- decline|b1|worldo|worldo-log` (modes described
+in the file head). All runs in-process; run data under `kw\openworld-data` (not committed). Design of World O:
+`docs/open_world.md`.
+
+### Part 1: why reward per energy declines in a stationary world (bug 4 of docs/longrun.md)
+
+Reproduction: `being/measure_b11.rs` steps the long run's being in-process (world 1, extended2 families, chooser
+model, discovery every 10 steps, composition and pruning under the long-run controller, budget 3000 with refills)
+through the normal `Engine::step_menu`, with a side channel that is never logged: per step, the decision of a renewal
+oracle on the same offers (knows the hidden success rates and real energy; takes the option of highest
+`reward x p - rho x energy`, skips when that is below `-rho x 1`; `rho` found by iterating `rho <- its own rate`:
+4.220 in world 1, above the grid skip oracle of docs/longrun.md, 4.158), the loss of each step in those terms (split
+into skip decisions and option choice), the optimism bonus and the skip bar. The first 300,000 steps give the long
+run's numbers (0-100k 4.096 here; the long run's two 50k windows 4.095 and 4.098).
+
+World 1, 1,000,000 steps, windows of 100,000 steps (B1 skip test):
+
+| steps | reward per energy | regret vs renewal oracle | attempt share (oracle 0.577-0.580) | over-skips per 1000 steps | loss from skip decisions / option choice per 1000 steps | bonus of the attempted option | skip bar | mean abs error of p on attempts |
+|---|---|---|---|---|---|---|---|---|
+| 0-100k | 4.096 | +0.123 | 0.427 | 150.9 | 288.8 / 0.3 | 0.0170 | 4.086 | 0.0020 |
+| 100-200k | 4.091 | +0.128 | 0.420 | 161.0 | 320.7 / 0.0 | 0.0062 | 4.096 | 0.0014 |
+| 300-400k | 4.052 | +0.168 | 0.402 | 176.1 | 378.4 / 0.0 | 0.0035 | 4.082 | 0.0011 |
+| 500-600k | 4.025 | +0.195 | 0.391 | 187.2 | 417.2 / 0.0 | 0.0026 | 4.076 | 0.0011 |
+| 700-800k | 4.044 | +0.175 | 0.398 | 179.5 | 390.6 / 0.0 | 0.0024 | 4.073 | 0.0010 |
+| 900k-1M | 4.020 | +0.200 | 0.387 | 191.2 | 434.1 / 0.0 | 0.0019 | 4.066 | 0.0009 |
+
+Cause (confirmed by these numbers): the whole regret is in skip decisions; option choice costs nothing after 100k
+steps. The B1 planner skips when the best optimistic score is below the full realized rate (about 4.07 to 4.09, close
+to constant because it is the cumulative rate). But a skip costs energy too: both "attempt" and "skip" lead to a fresh
+menu, so the attempt is worth it when `reward x p > rate x (energy - 1)`, i.e. the right bar is about
+`rate x (1 - 1/energy)` (3.0 here). Early, the optimism `beta x sd` of the options it attempts lifts many good offers
+over the too-strict bar; that bonus shrinks with the evidence (0.0170 -> 0.0019, about 1/sqrt(n)), so offers that pay
+more than a skip saves fall below the bar one cell at a time, and a skipped cell gets no new data. The attempt share
+falls (0.427 -> 0.387) while the oracle's stays at 0.577, and over-skips rise (151 -> 191 per 1000 steps). The
+hypothesis of docs/longrun.md (shrinking bonus, fixed bar) is right, with the addition that the bar was too strict
+from the start. Ruled out: estimate drift (the error of the attempted cells' p falls 0.0020 -> 0.0009), counts or float
+precision (u64 counts; f64 sums of integers stay far below 2^53), forgetting (none in this mode). The decline is not
+monotone (a cumulative bar moves slowly and lets cells back in now and then: 4.087 at 400-500k, 4.085 at 600-700k).
+
+Fix (opt-in, `planner::SkipRule`, default `Rate` = B1): `Calibrated` uses the bar `rate x (1 - SKIP_COST / e)` with
+`e` the estimated energy of the best option; `Settled(k)` moves from the B1 bar to the calibrated one as the best
+option's own cell fills up: `rate x (1 - w x SKIP_COST / e)`, `w = n / (n + k)`. Choice of k on tuning seeds 101..120
+only (B1 menu world, budgets 600 / 3000, difference to the B1 test): calibrated -0.118 / +0.079; k = 10 -0.008 /
++0.085; 30 +0.001 / +0.071; **100 +0.004 / +0.058**; 300 +0.006 / +0.044; 1000 -0.001 / +0.028. k = 100 was taken
+(no loss at the short budget, worse in 4 of 20 there).
+
+Short runs, report seeds 1..20 (B1 menu world, mean [95% interval]; the B1 skip test gives exactly the documented
+3.117 and 3.377):
+
+| budget | B1 skip test | calibrated | calibrated minus B1 (better / equal / worse) | settled k=100 | settled minus B1 (better / equal / worse) |
+|---|---|---|---|---|---|
+| 600 | 3.117 [2.757, 3.477] | 3.016 [2.684, 3.348] | -0.101 [-0.163, -0.039] (1 / 0 / 19) | 3.118 [2.759, 3.477] | +0.001 [-0.007, +0.009] (5 / 9 / 6) |
+| 3000 | 3.377 [3.057, 3.697] | 3.420 [3.074, 3.766] | +0.043 [+0.001, +0.086] (12 / 0 / 8) | 3.425 [3.087, 3.764] | +0.049 [+0.010, +0.087] (14 / 0 / 6) |
+
+Long runs, 1,000,000 steps in-process, worlds 1..8 (the long-run settings; n = 8, intervals over worlds), reward per
+energy in the second window (100-200k) and the last (900k-1M):
+
+| skip test | second window | last window | last minus second | whole run after the first window, minus B1 (paired) |
+|---|---|---|---|---|
+| B1 (`rate`) | 4.023 [3.702, 4.344] | 3.973 [3.629, 4.317] | -0.050 [-0.130, +0.030] | - |
+| calibrated | 4.576 [4.022, 5.129] | 4.500 [3.960, 5.039] | -0.076 [-0.200, +0.047] | +0.556 [+0.286, +0.826] |
+| settled k=100 | 4.212 [3.871, 4.553] | 4.172 [3.796, 4.548] | -0.040 [-0.126, +0.047] | +0.208 [+0.066, +0.350] |
+
+World 1 with `settled`: 4.164, 4.167, 4.166, 4.161, 4.170, 4.148, 4.168, 4.160, 4.159, 4.152 per 100k window (B1:
+4.096 -> 4.020), regret +0.055 to +0.072, attempt share 0.466-0.467 in every window, over-skips 111-113 per 1000
+steps in every window. With `calibrated` world 1 is at 4.182-4.205 (regret +0.014 to +0.038). Per world, second
+window -> last window with `settled`: 4.167 -> 4.152, 4.609 -> 4.614, 3.563 -> 3.569, 3.842 -> 3.515, 4.398 -> 4.420,
+3.726 -> 3.732, 4.824 -> 4.803, 4.567 -> 4.573. The fall in world 4 (both skip tests, at 400k steps: B1 3.780 ->
+3.309) comes with a rule retired by the long-run pruning (live rules 11 -> 10) and a jump of the option-choice loss
+(42 -> 281 per 1000 steps) and of the estimate error (0.005 -> 0.036): a different effect, not studied here. With the
+B1 test the decline across the 8 worlds is small and its interval contains 0; world 1, the long run's world, has the
+clearest one.
+
+Verdict: cause found (a skip bar that is too strict, hidden early by the optimism bonus); `settled` removes the
+decline in world 1 and earns more in long runs (+0.208 over worlds 1..8) without a loss at budget 600 and with a
+small gain at 3000. `calibrated` gains more in long runs but loses at budget 600 (19 of 20 worlds). Off by default; the
+first world's genesis does not record the switch, so it is not available through the binary (`being_run`).
+
+### Part 2: World O, an open-ended world
+
+Default config (`docs/open_world.md`): a new family every 6000 energy units, each living 12 x that, 8 families per
+tier, a quarter of the families change their hidden rule once, no feedback noise; the being keeps one life (no
+refills). Conditions: `current` (World v2 learner: B1 model keyed by slot and B1 planner, B2 rule search every 10
+steps), `fix` (+ settled skip test), `b7` (+ B7 switches A and A2), `fix+b7`, and the references `oracle-planner`,
+`oracle-knows-rules` (the yardstick of the regret). Controller of these runs: no composition, live-rule cap 200,
+candidate cap 100,000 (neither bound: 0 refusals). Nothing was tuned on World O. Reward per energy is the TRUE reward;
+listed rewards rise with the tier, so the reference rises too and regret is the measure of keeping up.
+
+Report seeds 1..20, a life of 1,200,000 energy units (212,000 to 648,000 steps), windows of 100,000 energy units, mean
+[95% interval]:
+
+| energy | current | fix | b7 | oracle-knows-rules | regret current | regret fix | regret b7 | mean tier of attempts |
+|---|---|---|---|---|---|---|---|---|
+| 0-100k | 2.653 [2.519, 2.787] | 2.673 [2.535, 2.812] | 2.648 [2.513, 2.784] | 2.785 [2.676, 2.893] | 0.131 [0.044, 0.218] | 0.111 [0.020, 0.202] | 0.136 [0.049, 0.224] | 0.42 |
+| 100-200k | 3.548 [3.356, 3.741] | 3.487 [3.261, 3.713] | 3.505 [3.312, 3.698] | 3.787 [3.691, 3.883] | 0.239 [0.075, 0.403] | 0.300 [0.084, 0.516] | 0.282 [0.112, 0.452] | 2.30 |
+| 200-300k | 4.235 [3.677, 4.792] | 4.294 [3.881, 4.707] | 4.217 [3.712, 4.723] | 4.772 [4.568, 4.976] | 0.537 [0.114, 0.961] | 0.478 [0.168, 0.788] | 0.555 [0.198, 0.911] | 3.89 |
+| 300-400k | 4.425 [3.996, 4.855] | 4.200 [3.697, 4.703] | 3.863 [3.275, 4.452] | 4.975 [4.763, 5.186] | 0.549 [0.242, 0.857] | 0.775 [0.351, 1.199] | 1.111 [0.621, 1.601] | 4.00 |
+| 500-600k | 4.254 [3.693, 4.815] | 4.086 [3.462, 4.711] | 4.087 [3.525, 4.649] | 5.059 [4.878, 5.240] | 0.805 [0.377, 1.233] | 0.973 [0.459, 1.486] | 0.972 [0.544, 1.401] | 4.00 |
+| 700-800k | 4.581 [4.065, 5.096] | 4.346 [3.692, 5.000] | 4.252 [3.594, 4.910] | 5.016 [4.801, 5.231] | 0.436 [0.071, 0.800] | 0.670 [0.163, 1.178] | 0.764 [0.265, 1.263] | 4.00 |
+| 900k-1M | 4.225 [3.693, 4.757] | 4.097 [3.529, 4.664] | 3.909 [3.342, 4.476] | 4.890 [4.678, 5.103] | 0.665 [0.264, 1.067] | 0.794 [0.332, 1.256] | 0.982 [0.549, 1.415] | 4.00 |
+| 1.1M-1.2M | 4.163 [3.555, 4.771] | 4.103 [3.477, 4.730] | 4.148 [3.588, 4.709] | 4.999 [4.770, 5.227] | 0.836 [0.359, 1.313] | 0.895 [0.408, 1.383] | 0.850 [0.438, 1.263] | 4.00 |
+
+(all 12 windows, `fix+b7` and `oracle-planner` are printed by the mode; `oracle-planner`, which knows the fixed
+strategies' success rates but no rules, is at 3.65 to 4.22 per window from 300k on, close to the learners.)
+
+Trend, last third of the windows minus the first third (windows 2-4 vs 9-12), paired by world: reward per energy
+`current` +0.079 [-0.385, +0.543], regret +0.442 -> +0.751, change +0.309 [-0.041, +0.659]; `fix` regret change
++0.336 [+0.013, +0.658]; `b7` +0.303 [-0.042, +0.647]; `fix+b7` +0.362 [+0.036, +0.689]; the reference rises by
++0.388 [+0.206, +0.570]. Whole run after the first window, paired: fix minus current -0.150 [-0.350, +0.051] (better in
+10 of 20), b7 minus current -0.244 [-0.340, -0.147] (2 of 20), fix+b7 minus current -0.245 [-0.342, -0.148] (2 of 20).
+
+Rules (per world, mean): current 126 accepted, 46,528 rule answers, 93.6% right by the checker, at most 32 live; fix 102 / 31,310; b7 51 /
+22,209; attempt share 0.49 (current) against 0.99 for oracle-knows-rules. Rules accepted per 100k-energy window
+(current): 7.8, 14.8, 12.4, 20.0, 13.5, 11.6, 10.2, 9.9, 4.3, 8.9, 4.3, 8.6: fewer later, while new families keep
+coming at the same rate (16 to 17 per window).
+
+Time to competence on each new family (learnable families only; pooled over the 20 worlds; `current`):
+
+| families (order of appearance) | tiers | learnable | reached competence | median attempts to competence | median energy since opening | mean ratio to the best the means allow, first 10 attempts | attempts 11-50 |
+|---|---|---|---|---|---|---|---|
+| 0-31 | 0-3 | 331 | 279 (84%) | 10 | 150 | 0.725 | 0.861 |
+| 32-63 | 4 | 406 | 257 (63%) | 17 | 617 | 0.319 | 0.636 |
+| 64-95 | 4 | 330 | 220 (67%) | 17 | 564 | 0.357 | 0.679 |
+| 96-127 | 4 | 269 | 176 (65%) | 10 | 326 | 0.414 | 0.675 |
+| 128-159 | 4 | 258 | 157 (61%) | 10 | 261 | 0.415 | 0.644 |
+| 160-191 | 4 | 260 | 122 (47%) | 10 | 166 | 0.379 | 0.545 |
+| 192-223 | 4 | 76 | 37 (49%) | 10 | 220 | 0.345 | 0.535 |
+
+Within the top tier, Spearman correlation per world of the family's index with attempts to competence (not reached =
+slowest): current +0.025 [-0.060, +0.110], fix +0.013 [-0.060, +0.086], b7 -0.067 [-0.162, +0.028], fix+b7 -0.034
+[-0.119, +0.050] (20 worlds each). The median of 10 attempts is the shortest possible (competent from the first window
+of attempts); the share that reaches competence falls from 84% (tiers 0-3) to 47-49% for the last top-tier families.
+
+Long runs, seeds 1..5, up to 1,000,000 steps (`current`, `fix`, `fix+b7`) and oracle-knows-rules (876,000 to
+1,000,000 steps; 2,000,000 energy units reached by every run), windows of 250,000 energy units, n = 5:
+
+| energy | current | fix | fix+b7 | oracle-knows-rules | regret current |
+|---|---|---|---|---|---|
+| 0-250k | 3.462 [3.224, 3.700] | 3.392 [3.164, 3.620] | 3.397 [3.118, 3.676] | 3.558 [3.344, 3.771] | 0.096 [0.063, 0.128] |
+| 250-500k | 4.991 [4.637, 5.345] | 4.887 [4.407, 5.368] | 4.639 [4.002, 5.276] | 5.098 [4.843, 5.352] | 0.106 [-0.074, 0.287] |
+| 500-750k | 3.956 [3.205, 4.707] | 3.756 [2.969, 4.543] | 3.816 [3.018, 4.613] | 4.977 [4.825, 5.130] | 1.022 [0.384, 1.659] |
+| 750k-1M | 3.900 [3.339, 4.460] | 3.796 [3.123, 4.469] | 3.807 [3.128, 4.487] | 4.689 [4.537, 4.841] | 0.790 [0.376, 1.204] |
+| 1M-1.25M | 3.653 [2.812, 4.494] | 3.677 [2.613, 4.742] | 3.594 [2.592, 4.595] | 4.691 [4.342, 5.040] | 1.038 [0.450, 1.626] |
+| 1.25M-1.5M | 4.475 [3.860, 5.089] | 4.456 [3.869, 5.043] | 4.139 [3.629, 4.650] | 5.098 [4.953, 5.242] | 0.623 [0.086, 1.160] |
+| 1.5M-1.75M | 4.318 [2.909, 5.727] | 4.043 [2.745, 5.341] | 4.160 [2.802, 5.519] | 4.981 [4.619, 5.344] | 0.663 [-0.428, 1.754] |
+| 1.75M-2M | 4.213 [3.476, 4.949] | 4.135 [3.510, 4.759] | 4.143 [3.440, 4.846] | 4.898 [4.585, 5.210] | 0.685 [0.213, 1.157] |
+
+Steps: the learner spends about 2 energy per step (attempt share 0.37-0.41, it skips most menus), so 1,000,000 steps
+are about 2,000,000 energy units; the window 250-500k energy is about steps 80,000-180,000. Whole run after the first
+window: fix minus current -0.109 [-0.344, +0.126] (1 of 5 better), fix+b7 minus current -0.178 [-0.340, -0.015]. Top
+tier Spearman (index vs attempts to competence): +0.019 [-0.095, +0.133] (current). Rules accepted per world: 207
+(current), 125 (fix), 67 (fix+b7); 93.8% of rule answers right.
+
+Logged run (`worldo-log`, seed 1, learner `current`, real versioned log in format 3, chunks of 5,000 steps, every
+chunk a cold restart that re-folds the state from the log, KILL file before the call that would cross 30,000 steps):
+12 calls of 5,000 steps (60,000 steps) plus one call refused by the KILL file
+(0 steps, `stop:kill_switch` note logged); 13 to 56 s per call on the shared machine, growing with the log (every call
+reads and folds the whole log); 49.3 MB and 12,000 files at 60,000 steps (about 820 bytes per step). At the end:
+`verify` ok, outcome steps consecutive from 0 to 59,999, all 60,000 decisions re-derived from the log alone with 0
+mismatches, 68 rule notes, 74 family notes, 0 refusals. The 1,000,000-step target was not run on a log (the full read
+at every call makes each call slower as the log grows; World O has no streamed restart path).
+
+Verdict: **the learning curve does not keep rising; it flattens and falls behind.** In World O the learner keeps up
+with the reference while the families are simple (regret 0.10-0.13 in the first 100k-250k energy) and then falls
+behind once almost all families are of the top tier: regret 0.4 to 1.0 from about 300,000 energy units (roughly
+100,000 to 150,000 steps) on, reward per energy flat at about 4.0 to 4.6 while the reference sits at 4.7 to 5.1.
+There is no sign that it learns new families faster after having seen more of them (correlation about 0, the first-10
+ratio does not rise, the share of families it ever becomes competent on falls). Neither the skip fix nor the B7
+switches help here (both are worse on the mean; B7 significantly). The gap to the reference is mostly rule knowledge
+(oracle-planner without rules is close to the learners); the being accepts fewer rules per window as the life goes
+on. B3b adaptation is not available for the family-keyed model and was not run. Not tested: why the rule acceptances
+fall (candidate: fewer attempts, hence fewer examples, on new families that start from the pooled prior and are
+skipped), a cold-start bonus for new families in the family-keyed model.
+
+### What is tested (not measured)
+
+`being/tests_b11.rs`: the skip switch is off by default and the B1 report means at budgets 600 and 3000 are unchanged
+(3.117, 3.377); the bars (settled at n = 0 is the B1 bar, at large n the calibrated one); `settled` attempts more,
+over-skips less and earns more than B1 in world 1 (12,000 steps). `being/world_o/tests.rs`: World O is a pure function
+of its config; the schedule (open slots distinct, compose bases open and outliving their children, tiers
+non-decreasing, all tiers, compose and drift present, config validation and tag round trip); the checkers against an
+independent statement of each rule; `LearnerO` with the default test is `Learner2` step for step over 1,500 steps;
+the fold of a logged run equals the live state, every decision is re-derived from the log (2,500 of 2,500), a run of
+2,500 steps equals 1,200 + 1,300 with a cold restart (same rows), for both skip tests; caps (live rules), KILL before
+the first step and after 12 steps, energy cap, end of budget; World v2 and World O rows in one log fold independently;
+the references are deterministic and oracle-knows-rules beats oracle-planner and the learner.
+
+### What B11 does not show
+
+Anything outside these author-defined worlds; the skip fix through the real binary; World O through the real binary
+(there is no MCP tool for it); World O with feedback noise; a learner that keeps up in World O.
 
 ## Not measured
 
