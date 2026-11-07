@@ -36,6 +36,9 @@ impl KoreReader {
         if crate::v3::is_v3(data) {
             return crate::v3::read(data, wanted);
         }
+        if crate::v4::is_v4(data) {
+            return crate::v4::read(data, wanted, &crate::dict::DictSet::new());
+        }
         // Check for encryption marker
         if data.len() >= 4 && &data[0..4] == b"KENC" {
             return Err(KoreError::InvalidArgument(
@@ -43,6 +46,29 @@ impl KoreReader {
         }
         let binary_data = strip_readable_trailer(data);
         Self::parse_binary(binary_data, wanted)
+    }
+
+    /// Like `from_bytes`, with the shared dictionaries a version-4 file may reference (see `dict`).
+    /// Other versions ignore `dicts`. Version logs read their latest entry.
+    pub fn from_bytes_with_dicts(data: &[u8], dicts: &crate::dict::DictSet) -> Result<DataBlock, KoreError> {
+        Self::from_bytes_columns_with_dicts_opt(data, None, dicts)
+    }
+
+    /// Column projection with shared dictionaries: only the dictionaries of the requested columns are
+    /// needed.
+    pub fn from_bytes_columns_with_dicts(data: &[u8], columns: &[&str], dicts: &crate::dict::DictSet) -> Result<DataBlock, KoreError> {
+        Self::from_bytes_columns_with_dicts_opt(data, Some(columns), dicts)
+    }
+
+    fn from_bytes_columns_with_dicts_opt(data: &[u8], wanted: Option<&[&str]>, dicts: &crate::dict::DictSet) -> Result<DataBlock, KoreError> {
+        if crate::versioned::is_version_log(data) {
+            let latest = crate::versioned::select_raw(data, u64::MAX)?;
+            return Self::from_bytes_columns_with_dicts_opt(latest, wanted, dicts);
+        }
+        if crate::v4::is_v4(data) {
+            return crate::v4::read(data, wanted, dicts);
+        }
+        Self::from_bytes_columns_opt(data, wanted)
     }
 
     /// Parse an encrypted .kore file.

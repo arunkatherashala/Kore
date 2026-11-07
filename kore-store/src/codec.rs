@@ -37,6 +37,12 @@ pub enum Transform {
     Dict,
     /// str: every non-null value is the same even-length lowercase hex string; stored as raw bytes (half the size)
     HexFixed,
+    /// str (version-4 files only): every non-null value is a canonical UTC timestamp
+    /// `YYYY-MM-DDTHH:MM:SSZ` (years 0000-9999); stored as zigzag varint deltas of epoch seconds
+    TsText,
+    /// str (version-4 files only): values are lists split on ','; token dictionary (first appearance) and
+    /// per value `varint(count)` then `varint(code)` per token; "" is a list of zero tokens
+    Tokens,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +60,17 @@ impl Transform {
         match self {
             Transform::Auto => None, Transform::Plain => Some(0), Transform::Delta => Some(1),
             Transform::Varint => Some(2), Transform::Dict => Some(3), Transform::HexFixed => Some(4),
+            Transform::TsText => Some(5), Transform::Tokens => Some(6),
+        }
+    }
+    /// True for transforms that only version-4 files may use (version-3 readers do not know them).
+    pub fn v4_only(self) -> bool { matches!(self, Transform::TsText | Transform::Tokens) }
+    /// Transform ids accepted in version-4 files (a superset of `from_id`).
+    pub fn from_id_v4(v: u8) -> Result<Self, KoreError> {
+        match v {
+            5 => Ok(Transform::TsText),
+            6 => Ok(Transform::Tokens),
+            _ => Self::from_id(v),
         }
     }
     pub fn from_id(v: u8) -> Result<Self, KoreError> {
@@ -187,14 +204,14 @@ fn valid_for(data: &ColumnData, t: Transform) -> bool {
     match data {
         ColumnData::Int64(_) => matches!(t, Plain | Delta | Varint),
         ColumnData::Float64(_) | ColumnData::Bool(_) | ColumnData::StrDict { .. } => matches!(t, Plain),
-        ColumnData::Str(_) => matches!(t, Plain | Dict | HexFixed),
+        ColumnData::Str(_) => matches!(t, Plain | Dict | HexFixed | TsText | Tokens),
     }
 }
 
 fn is_lower_hex(b: u8) -> bool { b.is_ascii_digit() || (b'a'..=b'f').contains(&b) }
 
 /// `Some(width_in_chars)` if all non-null values are equal-length, even, non-empty lowercase hex.
-fn hex_width(v: &[Option<String>]) -> Option<usize> {
+pub(crate) fn hex_width(v: &[Option<String>]) -> Option<usize> {
     let mut w: Option<usize> = None;
     for s in v.iter().flatten() {
         let b = s.as_bytes();
@@ -286,9 +303,88 @@ pub fn encode_transform(data: &ColumnData, t: Transform) -> Result<Vec<u8>, Kore
                 for pair in s.as_bytes().chunks(2) { out.push(hexval(pair[0]) << 4 | hexval(pair[1])); }
             }
         }
+        (ColumnData::Str(v), Transform::TsText) => {
+            put_nulls(&mut out, v.len(), |i| v[i].is_none());
+            let mut prev = 0i64;
+            for s in v.iter().flatten() {
+                let x = parse_ts(s).ok_or_else(|| bad("TsText needs canonical YYYY-MM-DDTHH:MM:SSZ timestamps"))?;
+                put_varint(&mut out, zz(x.wrapping_sub(prev)));
+                prev = x;
+            }
+        }
+        (ColumnData::Str(v), Transform::Tokens) => {
+            let mut map: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+            let mut dict: Vec<&str> = Vec::new();
+            for s in v.iter().flatten() {
+                if s.is_empty() { continue; }
+                for t in s.split(',') {
+                    if !map.contains_key(t) {
+                        map.insert(t, dict.len() as u32);
+                        dict.push(t);
+                    }
+                }
+            }
+            put_nulls(&mut out, v.len(), |i| v[i].is_none());
+            put_varint(&mut out, dict.len() as u64);
+            for t in &dict { put_varint(&mut out, t.len() as u64); }
+            for t in &dict { out.extend_from_slice(t.as_bytes()); }
+            for s in v.iter().flatten() {
+                if s.is_empty() { put_varint(&mut out, 0); continue; }
+                put_varint(&mut out, s.split(',').count() as u64);
+                for t in s.split(',') { put_varint(&mut out, map[t] as u64); }
+            }
+        }
         _ => unreachable!("validated above"),
     }
     Ok(out)
+}
+
+// -- canonical timestamps (TsText) --------------------------------------------
+
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ` of epoch seconds; None outside years 0000-9999.
+pub(crate) fn fmt_ts(secs: i64) -> Option<String> {
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let z = days.checked_add(719_468)?;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    if m <= 2 { y += 1; }
+    if !(0..=9999).contains(&y) { return None; }
+    let mut o = Vec::with_capacity(20);
+    let two = |v: i64, o: &mut Vec<u8>| { o.push(b'0' + (v / 10) as u8); o.push(b'0' + (v % 10) as u8); };
+    two(y / 100, &mut o); two(y % 100, &mut o); o.push(b'-');
+    two(m, &mut o); o.push(b'-'); two(d, &mut o); o.push(b'T');
+    two(rem / 3600, &mut o); o.push(b':'); two(rem % 3600 / 60, &mut o); o.push(b':'); two(rem % 60, &mut o); o.push(b'Z');
+    Some(String::from_utf8(o).expect("ascii"))
+}
+
+/// Epoch seconds if `s` is exactly the canonical form (checked by formatting it back).
+pub(crate) fn parse_ts(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() != 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' || b[19] != b'Z' { return None; }
+    let num = |a: usize, z: usize| -> Option<i64> {
+        let mut v = 0i64;
+        for &c in &b[a..z] { if !c.is_ascii_digit() { return None; } v = v * 10 + (c - b'0') as i64; }
+        Some(v)
+    };
+    let (y, mo, d, h, mi, se) = (num(0, 4)?, num(5, 7)?, num(8, 10)?, num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || se > 59 { return None; }
+    let secs = days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60 + se;
+    if fmt_ts(secs).as_deref() == Some(s) { Some(secs) } else { None }
 }
 
 // ── transforms: decode ───────────────────────────────────────────────────────
@@ -413,6 +509,53 @@ pub fn decode_transform(d: &[u8], dtype: crate::DType, t: Transform, n: usize) -
             }
             Ok(ColumnData::Str(out))
         }
+        (DType::Str, Transform::TsText) => {
+            let (bm, _) = get_nulls(d, &mut pos, n)?;
+            let mut out = Vec::with_capacity(n);
+            let mut prev = 0i64;
+            for i in 0..n {
+                if is_null(bm, i) { out.push(None); continue; }
+                prev = prev.wrapping_add(unzz(get_varint(d, &mut pos)?));
+                out.push(Some(fmt_ts(prev).ok_or_else(|| bad("timestamp out of range"))?));
+            }
+            expect_end(d, pos)?;
+            Ok(ColumnData::Str(out))
+        }
+        (DType::Str, Transform::Tokens) => {
+            let (bm, _) = get_nulls(d, &mut pos, n)?;
+            let count = usize::try_from(get_varint(d, &mut pos)?).map_err(|_| bad("overflow"))?;
+            if count > d.len() { return Err(bad("implausible token dictionary size")); }
+            let mut lens = Vec::with_capacity(count);
+            let mut total = 0usize;
+            for _ in 0..count {
+                let l = usize::try_from(get_varint(d, &mut pos)?).map_err(|_| bad("overflow"))?;
+                total = total.checked_add(l).ok_or_else(|| bad("overflow"))?;
+                lens.push(l);
+            }
+            if pos.checked_add(total).map_or(true, |e| e > d.len()) { return Err(bad("truncated token dictionary")); }
+            let mut dict: Vec<&str> = Vec::with_capacity(count);
+            for l in lens {
+                dict.push(std::str::from_utf8(&d[pos..pos + l]).map_err(|_| bad("invalid UTF-8 in token dictionary"))?);
+                pos += l;
+            }
+            let mut out = Vec::with_capacity(n);
+            for i in 0..n {
+                if is_null(bm, i) { out.push(None); continue; }
+                let k = usize::try_from(get_varint(d, &mut pos)?).map_err(|_| bad("overflow"))?;
+                if k > d.len() - pos { return Err(bad("implausible token count")); }
+                let mut s = String::new();
+                for j in 0..k {
+                    if j > 0 { s.push(','); }
+                    let c = usize::try_from(get_varint(d, &mut pos)?).map_err(|_| bad("overflow"))?;
+                    s.push_str(dict.get(c).ok_or_else(|| bad("token code out of range"))?);
+                }
+                // one empty token would decode to "", which is the zero-token encoding
+                if k == 1 && s.is_empty() { return Err(bad("non-canonical token list")); }
+                out.push(Some(s));
+            }
+            expect_end(d, pos)?;
+            Ok(ColumnData::Str(out))
+        }
         _ => Err(bad(format!("transform {t:?} is not valid for {dtype:?} columns"))),
     }
 }
@@ -470,6 +613,9 @@ fn candidate_transforms(data: &ColumnData) -> Vec<Transform> {
 /// Encode one column: returns `(transform id, stage id, payload)`.
 pub fn encode_column(data: &ColumnData, codec: ColumnCodec) -> Result<(u8, u8, Vec<u8>), KoreError> {
     use rayon::prelude::*;
+    if codec.transform.v4_only() {
+        return Err(bad(format!("transform {:?} is only available in version-4 files (KoreWriter::to_bytes_compact)", codec.transform)));
+    }
     let transforms = match codec.transform {
         Transform::Auto => candidate_transforms(data),
         t => vec![t],

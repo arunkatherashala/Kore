@@ -1607,6 +1607,7 @@ dependencies = [
  "pbkdf2",
  "rand",
  "rayon",
+ "serde_json",
  "sha2",
  "thiserror 2.0.18",
  "zstd",
@@ -1684,7 +1685,7 @@ dependencies = [
 
 [[package]]
 name = "kore_fileformat"
-version = "1.8.15"
+version = "1.8.16"
 
 [[package]]
 name = "libc"
