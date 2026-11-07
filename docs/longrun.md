@@ -328,7 +328,22 @@ exactly during a commit, or a power loss, was not tested.
    quadratic in the run length. No cap bounds it (the candidate cap bounds candidates, not examples). **Fixed** on
    branch `rulescan-fix` by an exactly equivalent incremental scan, no cap; see "Rule scan fix" below.
 4. **Reward per energy declines slowly in a stationary world** (world 1: 4.098 -> 4.030 per window, regret from +0.060
-   to +0.128 between 50,000 and 390,000 steps; more skipping). Cause not established. Not fixed.
+   to +0.128 between 50,000 and 390,000 steps; more skipping). **Cause established and an opt-in fix measured on
+   branch `open-world`** (Track B11, `docs/measured.md`): an in-process copy of this run (same world, settings and
+   loop, a measurement side channel that is never logged) reproduces the windows (4.096 at 0-100k, 4.020 at
+   900k-1000k). The whole regret is in skip decisions (option choice loss 0.0 per 1000 steps after 100k): the planner
+   skips when the best optimistic score is below the full realized rate (about 4.07-4.09, nearly constant because it
+   is cumulative), while a skip itself costs energy, so the renewal-optimal bar is about `rate x (1 - 1/energy)` (3.0
+   to 3.6 here). Early, the optimism bonus `beta x sd` of the options it attempts (0.017 in the first 100k steps) lifts
+   good offers over the too-strict bar; that bonus shrinks with the evidence (0.0019 at 900k-1000k), offers that pay
+   more than a skip saves fall below the bar one cell at a time and stay there (a skipped cell gets no new data), so
+   the attempt share falls (0.427 -> 0.387, the oracle's stays 0.577) and over-skips rise (151 -> 191 per 1000
+   steps). Ruled out: estimate drift (mean error of the attempted cells' p falls 0.0020 -> 0.0009), counts (u64) or
+   float sums (integer-valued, far below 2^53), forgetting (none in this mode). Fix: `SkipRule::Settled(100)` in
+   `planner.rs` (off by default): the bar moves from the B1 bar to the calibrated one as the best option's own cell
+   fills up. 1,000,000 steps in-process, world 1: 4.164 -> 4.152 per 100k window (B1 test 4.096 -> 4.020); over
+   worlds 1..8 +0.208 [+0.066, +0.350] reward per energy over the B1 test. Not run through the real binary (the
+   switch is not in the genesis event of a first-world being).
 5. KILL latency on a large log: the kill check runs before each step, so a KILL file that appears while a call is still
    loading the log takes effect when loading ends (174 s at 300,000 steps). No step ran after the file appeared, so "no
    step after KILL" held; only the answer was slow. **Reduced on branch `restart-fix`**: the KILL check comes before

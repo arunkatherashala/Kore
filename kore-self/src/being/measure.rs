@@ -301,7 +301,7 @@ pub fn menu_row(seed: u64, budget: i64, beta: f64, skip_frac: f64) -> MenuRow {
         greedy_deep: run_menu(seed, budget, &mut GreedyMenu { strategy: Strategy::Deep }),
         ucb: run_menu(seed, budget, &mut UcbMenu::new(seed, super::chooser::DEFAULT_EXPLORE_C)),
         model: run_menu(seed, budget, &mut m),
-        model_noskip: run_menu(seed, budget, &mut ModelChooser { beta, skip_frac: 0.0, no_discovered: false, curiosity: 0.0, novelty: super::planner::DEFAULT_NOVELTY, advice: Default::default() }),
+        model_noskip: run_menu(seed, budget, &mut ModelChooser { beta, skip_frac: 0.0, no_discovered: false, curiosity: 0.0, novelty: super::planner::DEFAULT_NOVELTY, advice: Default::default(), skip_rule: Default::default() }),
         oracle: run_menu(seed, budget, &mut OracleMenu { truth: truth(seed), strategies: STRATEGIES.to_vec() }),
     }
 }
@@ -530,7 +530,7 @@ pub fn disc_row(seed: u64, budget: i64, beta: f64, every: u64, bonus: i64, curio
     DiscRow {
         seed,
         random: run_menu_ext(mk(), budget, &mut RandomMenu::new(seed), 0, &[]),
-        nodisc: run_menu_ext(mk(), budget, &mut ModelChooser { beta, skip_frac: DEFAULT_SKIP_FRAC, no_discovered: true, curiosity: 0.0, novelty: super::planner::DEFAULT_NOVELTY, advice: Default::default() }, 0, &[]),
+        nodisc: run_menu_ext(mk(), budget, &mut ModelChooser { beta, skip_frac: DEFAULT_SKIP_FRAC, no_discovered: true, curiosity: 0.0, novelty: super::planner::DEFAULT_NOVELTY, advice: Default::default(), skip_rule: Default::default() }, 0, &[]),
         oracle_rules: run_menu_ext(mk(), budget, &mut OracleMenu { truth: truth_in(&w, &perfect), strategies: STRATEGIES_EXT.to_vec() }, 0, &perfect),
         oracle_fixed: run_menu_ext(mk(), budget, &mut OracleMenu { truth: truth_in(&w, &[]), strategies: STRATEGIES.to_vec() }, 0, &[]),
         disc,

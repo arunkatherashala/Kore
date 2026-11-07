@@ -18,6 +18,8 @@ pub mod discover_scan;
 pub mod experiment;
 pub mod experiment_menu;
 pub mod measure_b9;
+/// Track B11: the long-run decline (measurement side channel; see docs/measured.md).
+pub mod measure_b11;
 /// Track B8: planning ahead (opt-in; see lookahead/mod.rs).
 pub mod lookahead;
 pub mod measure;
@@ -35,6 +37,8 @@ pub mod trust;
 pub mod world;
 /// World v2 (opt-in: separate files and log source; see docs/world_v2.md).
 pub mod world2;
+/// World O, the open-ended world (opt-in: separate files and log source; see docs/open_world.md).
+pub mod world_o;
 #[path = "loop.rs"]
 pub mod run_loop;
 #[cfg(test)]
@@ -51,6 +55,8 @@ mod tests_b3b;
 mod tests_scan;
 #[cfg(test)]
 mod tests_b9;
+#[cfg(test)]
+mod tests_b11;
 
 pub use chooser::{DomainPicker, Ucb1};
 pub use policy::{Policy, StopReason};
