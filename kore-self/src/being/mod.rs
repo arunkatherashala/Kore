@@ -15,6 +15,8 @@ pub mod chooser;
 pub mod controller;
 pub mod discover;
 pub mod discover_scan;
+/// Track B8: planning ahead (opt-in; see lookahead/mod.rs).
+pub mod lookahead;
 pub mod measure;
 pub mod measure_b5;
 pub mod measure_b6;

@@ -150,6 +150,8 @@ impl Controller {
                 "pruning" => c.pruning = parse_bool(v).ok_or_else(|| format!("line {n}: 'pruning' needs on or off"))?,
                 "transfer" => c.transfer = parse_bool(v).ok_or_else(|| format!("line {n}: 'transfer' needs on or off"))?,
                 "max_transfer_links" => c.max_transfer_links = num(HARD_LINKS as u64)? as usize,
+                // B8 keys (planning ahead) are read by `lookahead::ctl`; here they are only validated
+                _ if super::lookahead::ctl::is_key(k) => super::lookahead::ctl::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 _ => return Err(format!("line {n}: unknown key '{k}'")),
             }
             seen.push(k);
