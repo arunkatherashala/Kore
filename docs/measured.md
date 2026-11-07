@@ -1475,6 +1475,137 @@ At budget 600 B3b also gains in the stationary world (+0.046 [+0.028, +0.065], 1
 
 `being/adapt_b3b.rs` and `being/tests_b3b.rs`, `being_tools_b3b_tests.rs`: the switch fires on a window that disagrees with long evidence and not on a steady cell; the prior is rejected after surprising failures and kept when it fits; a switched cell holds only its window; after three failures in an untried hard cell B3b believes much less than B1; switch mode with both mechanisms off equals B1 bit for bit; a logged B3b run is deterministic, every decision is re-derived from the log, the refolded model and changes equal the live ones, every change is a note plus a `belief` revision (author `rule:being-detector`, tags `change_kind` and `difficulty`) citing the outcome events of its (domain, strategy); a run split over two calls equals one run; `adapt_mode` needs `adapt`, accepts only full or switch and is fixed once the being exists (`adapt: true` alone is still the B3 learner); the KILL switch is checked before every step (12 steps when it turns on at the 13th check) and the energy cap stops the run with a logged refusal; through the tool, a missing controller.txt fails closed and is audited, the step cap cuts the run and is audited, a KILL file refuses the run and is audited; the B3b sources name no hidden world parameter and use no file or network API; floors on report seeds 1..4 (whole life and post-change mean above -0.05, stationary above -0.03, the degradation flagged by a cell switch in at least 2 of 4 worlds; measured -0.009, +0.013, +0.001, 4 of 4).
 
+## Track B8: planning ahead (synthetic worlds, author-defined rewards)
+
+Question: does looking several steps ahead with the being's OWN learned model beat the one-step B1 planner (best `listed reward x min(1, p + 1.5 sd) / estimated energy`, skip below the realized rate), and where? Code: `kore-self/src/being/lookahead/` (new files; the only edits to existing files are the module line in `being/mod.rs` and one match arm in `controller.rs` that validates the three new keys). Measured with `cargo run -p kore-self --example measure_lookahead --offline --release -- report` (and `-- tune`, `-- cost`), 2026-11-07, branch `plan-ahead` (from ecf5f695). Tuning seeds 101..120, report seeds 1..20; intervals are 95% t-intervals of the mean over 20 worlds; differences are paired on identical worlds (better / worse / tie).
+
+### What was built
+
+* **Planner** (`lookahead/plan.rs`). Depth-limited expectimax over the learned model with sparse sampling of future menus: every affordable (offer, strategy) and skip at the root; at inner nodes the mean over `samples` menus drawn from the last 64 menus the being was shown (same draws for every branch: common random numbers) of the best of the `width` options with the highest myopic surplus `p x reward - rho x energy`, plus skip; leaf value `rho x energy left + token x tau`. `p` and the energy ratio are the existing model's cells (B1 hierarchy; World L adds a context, see below); `rho` is the reward per energy the learned model predicts for the stationary rule "largest `p x reward - rho x energy`" over the remembered menus (Dinkelbach fixed point); `tau` the learned surplus of using a held token. The immediate term at the root keeps the B1 optimism `min(1, p + 1.5 sd)`. Optional simulated learning: each simulated attempt adds one success or failure to the simulated posterior of its cell (Bayes-adaptive), so information gets value. Iterative deepening 1, 2, ... under a hard node cap; when the cap is reached the running depth is dropped and the deepest completed depth is used; if depth 1 does not fit, the B1 planner decides.
+* **Two decision modes.** `pure`: take the option with the highest simulated value (depth 1 = the one-step opportunity-cost rule `p x reward - rho x energy`, not the B1 ratio rule). `hybrid`: the B1 score plus `lambda x (Q_depth - Q_1) / energy`, the value the simulated future steps add beyond depth 1, per unit of the option's energy; the B1 skip rule on the result. At depth 1 the hybrid is the B1 planner exactly (tested).
+* **Controller** (`controller.txt`, `lookahead/ctl.rs`): `lookahead = on|off` (default off), `max_lookahead_nodes` (default 20000, hard maximum 2000000), `max_lookahead_depth` (default 3, hard maximum 6). Bad values make the whole file unparseable (B5 rule); missing or unparseable file = fail closed (lookahead off, and the World L run itself is refused and the refusal logged). A request the file does not allow, a depth above the cap and the first node-cap cut of a run are `controller_refusal` events in the being's log. Kill switch: checked before every step (`Policy::gate_cost`), stop logged.
+* **Evidence.** Every World L decision is a decision event (with the menu it was shown) and a `decision` revision citing the genesis event and the latest outcomes, whose rationale is the plan: every root option with posterior, energy, immediate value, value after success and after failure, `Q` at the depth used and at depth 1, the decision score, depth wanted / done, nodes, `rho`, `tau`, the learned token rule per family, every model cell the search read (pseudo-counts, reads) and the memory steps of the menus it drew. The being's state (model, token, context, menu memory) folds back from its log exactly, also across a resumed run (tested).
+* **World L** (`lookahead/worldl.rs`), opt-in, seeded, its own log source `being:worldl`. A menu per step (fixed offers plus 2 or 3 drawn ones), listed cost and reward per family, the three strategies with the usual energy factors, success drawn from a hidden per-(family, strategy) probability with the world's own hash (identical draws for every policy). Settings: `plain` (control: 4 ordinary families); `keys` (a key family, reward 1 for 4 energy, gives a token on success, at most one held; a vault family, reward 18..26 for 4 energy, can be attempted only with a token, which it uses up; ordinary families pay 0.6..1.2 per listed energy; the menu shows which offers need a token, the being is not told which family gives tokens); `probe` (a job, cost 10, reward 20..28, on every menu: `fast` works in hidden phase 0, `careful` in phase 1, `deep` in both at twice the energy, the phase is drawn again after each job attempt; a probe, cost 1, on every menu, succeeds exactly in phase 0); `sizes` (small offers, cost 2..3, 1.5..1.9 per listed energy, drawn half as often as large ones, cost 12..16, 1.3..1.7). The World L model is the B1 model with one more level: cell (family, strategy, context), context = (family, result) of the previous attempt, shrunk to the (family, strategy) group; all World L planners read the same model.
+* **Oracles.** `oracle-dp`: knows every hidden probability, the menu distribution and the token and phase rules (not the phase; it sees probe results like the being) and maximizes expected total reward exactly by dynamic programming over (energy left, token, phase belief), every menu enumerated; a test checks it against an independent memoized expectimax. `oracle-one-step`: same knowledge, best expected reward per energy now, never skips. In the first world and World v2 the existing oracles (`oracle`, `oracle-planner`) are used.
+
+### Tuning (seeds 101..120 only)
+
+First grid (pure mode, simulated learning on, World L budget 400; mean over the four settings of planner minus B1): `beta_root` 0 / 0.75 / 1.5 gave -0.13 / +0.03 / +0.15 at depth 3 (without the B1 optimism the probe setting collapses: -0.9); samples 2 or 4 and width 3 or 5 changed little; depth 3 with 1.5, 2, 3 was best (+0.148). The same planner lost on the controls' tuning seeds: first world (budget 600) -0.10 to -0.24, World v2 (12 families, 3000, noise 50, drift 10) -0.05 to -0.35. The hybrid mode was then added and a second grid run (beta_root 1.5, samples 2, width 3):
+
+| mode | simulated learning | depth | lambda | plain | keys | probe | sizes | World L mean | first world 600 | World v2 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| pure | on | 2 | | -0.035 | +0.455 | +0.015 | +0.043 | +0.120 | -0.215 | -0.052 |
+| pure | on | 3 | | -0.032 | +0.424 | +0.173 | +0.028 | +0.148 | -0.240 | -0.047 |
+| pure | off | 2 | | -0.023 | +0.452 | +0.213 | +0.037 | +0.170 | -0.210 | -0.052 |
+| pure | off | 3 | | -0.022 | +0.423 | +0.225 | +0.033 | +0.165 | -0.212 | -0.052 |
+| hybrid | on | 2 | 0.5 | -0.016 | +0.018 | +0.189 | -0.002 | +0.047 | -0.041 | -0.052 |
+| hybrid | on | 2 | 1 | -0.046 | +0.033 | +0.163 | +0.057 | +0.052 | -0.117 | -0.040 |
+| hybrid | on | 3 | 1 | -0.053 | +0.062 | -0.621 | +0.063 | -0.137 | -0.092 | -0.080 |
+| hybrid | off | 2 | 0.5 | -0.015 | +0.018 | +0.189 | -0.004 | +0.047 | -0.039 | -0.052 |
+| hybrid | off | 2 | 1 | -0.043 | +0.032 | +0.193 | +0.049 | +0.058 | +0.002 | -0.040 |
+| hybrid | off | 3 | 0.5 | -0.016 | +0.041 | +0.113 | -0.004 | +0.034 | -0.012 | -0.027 |
+| hybrid | off | 3 | 1 | -0.061 | +0.073 | -0.760 | +0.066 | -0.171 | -0.020 | -0.077 |
+
+Chosen: simulated learning off (it did not help anywhere: the Bayes-adaptive variant was equal or worse in every column), beta_root 1.5, samples 2, width 3, lambda 1; reported: pure at depths 1, 2, 3 and hybrid at depths 2 and 3. No configuration was at or above zero on both controls and on World L at once, so the report is of planners that were already known (on tuning seeds) to cost something on the controls.
+
+### Results, report seeds 1..20 (reward per energy, mean [95% interval])
+
+World L, budget 400 (about 100 to 150 steps per life):
+
+| policy | plain | keys | probe | sizes |
+|---|---|---|---|---|
+| greedy B1 planner | 2.060 [1.855, 2.265] | 1.105 [0.932, 1.277] | 2.147 [1.877, 2.418] | 1.922 [1.778, 2.066] |
+| UCB1 (family, strategy) | 1.566 [1.358, 1.775] | 0.921 [0.811, 1.030] | 1.524 [1.246, 1.803] | 1.430 [1.319, 1.540] |
+| pure d1 | 2.021 [1.773, 2.269] | 1.368 [1.210, 1.526] | 1.938 [1.648, 2.227] | 1.978 [1.808, 2.148] |
+| pure d2 | 2.010 [1.762, 2.257] | 1.328 [1.171, 1.485] | 2.040 [1.784, 2.296] | 1.958 [1.776, 2.139] |
+| pure d3 | 2.041 [1.808, 2.274] | 1.329 [1.177, 1.482] | 2.150 [1.938, 2.362] | 1.957 [1.778, 2.136] |
+| hybrid d2 | 2.054 [1.863, 2.244] | 1.127 [0.960, 1.293] | 2.098 [1.818, 2.379] | 1.973 [1.846, 2.101] |
+| hybrid d3 | 2.046 [1.865, 2.226] | 1.140 [0.977, 1.302] | 1.328 [0.898, 1.757] | 1.903 [1.759, 2.047] |
+| oracle one-step (knows parameters) | 2.209 [2.032, 2.387] | 1.230 [1.123, 1.336] | 2.379 [2.190, 2.567] | 2.120 [1.991, 2.248] |
+| oracle DP (knows parameters, plans exactly) | 2.242 [2.061, 2.422] | 1.972 [1.856, 2.088] | 2.718 [2.537, 2.899] | 2.166 [2.048, 2.284] |
+
+| paired difference (better / worse / tie) | plain | keys | probe | sizes |
+|---|---|---|---|---|
+| pure d1 - B1 | -0.039 [-0.197, +0.119] 7/13/0 | +0.264 [+0.058, +0.469] 16/4/0 | -0.210 [-0.411, -0.008] 3/13/4 | +0.056 [-0.112, +0.224] 11/9/0 |
+| pure d2 - B1 | -0.050 [-0.218, +0.117] 5/15/0 | +0.224 [+0.018, +0.430] 13/7/0 | -0.107 [-0.342, +0.127] 5/11/4 | +0.036 [-0.144, +0.216] 10/10/0 |
+| pure d3 - B1 | -0.019 [-0.165, +0.128] 5/14/1 | +0.225 [+0.014, +0.436] 12/8/0 | +0.003 [-0.181, +0.186] 7/9/4 | +0.035 [-0.143, +0.213] 11/9/0 |
+| hybrid d2 - B1 | -0.006 [-0.063, +0.050] 6/14/0 | +0.022 [-0.006, +0.050] 11/6/3 | -0.049 [-0.192, +0.094] 5/11/4 | +0.052 [-0.048, +0.152] 11/9/0 |
+| hybrid d3 - B1 | -0.014 [-0.071, +0.042] 10/10/0 | +0.035 [-0.001, +0.071] 12/6/2 | -0.820 [-1.245, -0.394] 1/17/2 | -0.019 [-0.134, +0.096] 7/13/0 |
+| pure d3 - UCB1 | +0.475 [+0.310, +0.640] 19/1/0 | +0.409 [+0.251, +0.566] 18/2/0 | +0.626 [+0.427, +0.825] 19/1/0 | +0.527 [+0.400, +0.654] 19/1/0 |
+| hybrid d2 - UCB1 | +0.487 [+0.274, +0.701] 19/1/0 | +0.206 [+0.078, +0.334] 16/4/0 | +0.574 [+0.257, +0.891] 16/4/0 | +0.544 [+0.435, +0.652] 20/0/0 |
+| oracle DP - pure d3 | +0.201 [+0.114, +0.287] 19/1/0 | +0.643 [+0.507, +0.778] 20/0/0 | +0.568 [+0.369, +0.767] 20/0/0 | +0.209 [+0.104, +0.314] 17/3/0 |
+| oracle DP - hybrid d2 | +0.188 [+0.065, +0.311] 18/2/0 | +0.845 [+0.663, +1.028] 20/0/0 | +0.620 [+0.402, +0.837] 19/1/0 | +0.192 [+0.070, +0.315] 17/3/0 |
+| oracle DP - B1 | +0.182 [+0.054, +0.310] 19/1/0 | +0.867 [+0.677, +1.058] 20/0/0 | +0.571 [+0.377, +0.764] 19/1/0 | +0.244 [+0.110, +0.378] 20/0/0 |
+| oracle DP - oracle one-step (what planning is worth when the parameters are known) | +0.032 [+0.011, +0.054] 14/4/2 | +0.742 [+0.616, +0.868] 20/0/0 | +0.339 [+0.248, +0.430] 19/1/0 | +0.046 [-0.005, +0.097] 12/8/0 |
+
+World L, budget 1600 (about 400 to 600 steps per life):
+
+| paired difference (better / worse / tie) | plain | keys | probe | sizes |
+|---|---|---|---|---|
+| pure d1 - B1 | +0.004 [-0.150, +0.158] 10/10/0 | +0.424 [+0.225, +0.622] 19/1/0 | -0.372 [-0.771, +0.027] 4/16/0 | +0.022 [-0.110, +0.154] 12/8/0 |
+| pure d2 - B1 | -0.003 [-0.150, +0.144] 8/12/0 | +0.465 [+0.251, +0.678] 19/1/0 | -0.203 [-0.562, +0.156] 6/11/3 | +0.054 [-0.065, +0.173] 11/9/0 |
+| pure d3 - B1 | +0.040 [-0.089, +0.168] 9/11/0 | +0.467 [+0.254, +0.679] 20/0/0 | -0.011 [-0.245, +0.224] 7/12/1 | +0.039 [-0.080, +0.157] 11/9/0 |
+| hybrid d2 - B1 | -0.008 [-0.041, +0.026] 9/11/0 | +0.018 [-0.008, +0.045] 11/6/3 | -0.186 [-0.421, +0.049] 4/16/0 | +0.068 [-0.025, +0.161] 12/8/0 |
+| hybrid d3 - B1 | -0.045 [-0.085, -0.006] 4/16/0 | +0.029 [-0.006, +0.064] 11/7/2 | -1.034 [-1.430, -0.637] 0/20/0 | +0.015 [-0.093, +0.122] 8/12/0 |
+| oracle DP - pure d3 | +0.112 [+0.063, +0.160] 20/0/0 | +0.427 [+0.320, +0.535] 20/0/0 | +0.521 [+0.313, +0.729] 20/0/0 | +0.173 [+0.107, +0.239] 18/2/0 |
+| oracle DP - B1 | +0.151 [+0.030, +0.273] 19/1/0 | +0.894 [+0.679, +1.109] 20/0/0 | +0.510 [+0.327, +0.693] 20/0/0 | +0.211 [+0.116, +0.306] 19/1/0 |
+| oracle DP - oracle one-step | +0.025 [+0.008, +0.041] 16/3/1 | +0.777 [+0.636, +0.919] 20/0/0 | +0.348 [+0.288, +0.409] 20/0/0 | +0.045 [+0.014, +0.077] 16/4/0 |
+
+Means at 1600: B1 2.073 / 1.108 / 2.214 / 1.975 (plain / keys / probe / sizes); pure d3 2.112 / 1.575 / 2.203 / 2.014; hybrid d2 2.065 / 1.126 / 2.028 / 2.043; oracle DP 2.224 / 2.002 / 2.724 / 2.186; UCB1 1.871 / 0.951 / 1.982 / 1.691.
+
+Controls: the existing worlds (the B1 / learner rows are the published numbers, unchanged):
+
+| world | B1 planner | UCB1 | pure d2 - B1 | hybrid d2 - B1 | hybrid d3 - B1 | oracle - hybrid d2 |
+|---|---|---|---|---|---|---|
+| first menu world, 600 | 3.117 [2.757, 3.477] | 1.593 | -0.212 [-0.552, +0.127] 6/14/0 | -0.077 [-0.193, +0.039] 6/14/0 | -0.106 [-0.252, +0.041] 5/15/0 | +0.453 [+0.215, +0.692] 17/3/0 |
+| first menu world, 3000 | 3.377 [3.057, 3.697] | 1.672 | +0.013 [-0.307, +0.333] 11/9/0 | -0.033 [-0.147, +0.082] 3/17/0 | -0.067 [-0.184, +0.050] 1/19/0 | +0.191 [+0.011, +0.371] 15/5/0 |
+| World v2 small clean (6 families, 1500) | 2.777 [2.248, 3.307] | 2.284 | -0.122 [-0.472, +0.228] 6/14/0 | +0.062 [-0.152, +0.277] 5/15/0 | +0.018 [-0.208, +0.244] 5/15/0 | +0.485 [+0.316, +0.654] 20/0/0 |
+| World v2 medium clean (12, 3000) | 2.755 [2.335, 3.176] | 2.220 | -0.032 [-0.405, +0.341] 12/8/0 | +0.055 [-0.146, +0.257] 6/14/0 | +0.099 [-0.138, +0.336] 7/13/0 | +0.421 [+0.204, +0.638] 20/0/0 |
+| World v2 medium noisy | 2.713 [2.292, 3.133] | 2.091 | +0.087 [-0.149, +0.322] 10/10/0 | +0.032 [-0.216, +0.279] 6/14/0 | +0.173 [-0.051, +0.396] 9/11/0 | +0.487 [+0.274, +0.701] 20/0/0 |
+| World v2 medium hard (noise, drift, rising difficulty) | 2.876 [2.447, 3.304] | 2.183 | +0.083 [-0.186, +0.353] 10/10/0 | -0.052 [-0.331, +0.227] 6/14/0 | +0.172 [-0.075, +0.420] 9/11/0 | +0.724 [+0.455, +0.993] 20/0/0 |
+
+World v2 rows are true reward per energy with rule discovery every 10 steps for all three learners; pure d1 equals pure d2 to within 0.001 in every World v2 condition.
+
+### Cost per step
+
+Sequential, one thread, seeds 1..5, wall clock on the measuring machine (other jobs were running; the microseconds include the world, the solver and the model, not only the planner):
+
+| world | planner | steps per life | nodes per step (mean / max) | microseconds per step |
+|---|---|---|---|---|
+| World L keys 400 | B1 | 80 | 0 / 0 | 19 |
+| World L keys 400 | pure d1 / d2 / d3 | 134 / 123 / 123 | 9 / 183 / 3229 (max 4526) | 97 / 252 / 972 |
+| World L keys 400 | hybrid d2 / d3 | 80 / 80 | 188 / 3402 | 238 / 932 |
+| World L probe 400 | B1 | 71 | 0 / 0 | 37 |
+| World L probe 400 | pure d1 / d2 / d3 | 92 / 91 / 75 | 13 / 304 / 5542 (max 5975) | 110 / 294 / 1608 |
+| World L probe 400 | hybrid d2 / d3 | 89 / 265 | 301 / 5541 | 372 / 1764 |
+| first menu world 600 | B1 | 231 | 0 / 0 | 77 |
+| first menu world 600 | pure d2, hybrid d2 / d3 | 186, 227 / 226 | 222 / 3156 (max 3239) | 258, 261 / 942 |
+| World v2 medium clean | learner (B1) | 760 | 0 / 0 | 117 |
+| World v2 medium clean | pure d2, hybrid d2 / d3 | 820, 832 / 842 | 297 / 4246 (max 4275) | 436, 447 / 1434 |
+
+Energy share on the special families (report seeds 1..20, budget 400): keys setting, key + vault: B1 0.005 + 0.003, UCB1 0.092 + 0.057, pure d1 0.148 + 0.112, pure d2 / d3 0.138 + 0.105, hybrid d2 0.006 + 0.003, hybrid d3 0.015 + 0.008, oracle one-step 0.033 + 0.017, oracle DP 0.355 + 0.333. Probe setting, probe / job: B1 0.000 / 0.983, pure d1 0.080 / 0.914, pure d2 0.055 / 0.936, pure d3 0.007 / 0.986, hybrid d2 0.032 / 0.933, hybrid d3 0.355 / 0.566, oracle DP 0.114 / 0.842.
+
+The node cap (20000) was never reached in any report run (0 cut decisions in every table): depth 3 needs about 3000 to 6000 nodes per step with 2 samples and width 3.
+
+### What the numbers say (verdict)
+
+1. **Where lookahead helps: the unlock setting (`keys`), and only in pure mode.** Pure d2/d3 minus B1: +0.22 [+0.01, +0.44] at budget 400 (12 or 13 of 20 worlds better) and +0.47 [+0.25, +0.68] at 1600 (19 or 20 of 20). The B1 planner never takes the key (energy share 0.8%), the pure planner spends 24% (400) to 39% (1600) of its energy on keys and vaults. But depth 1 already gets most of it (+0.26 at 400, +0.42 at 1600): the gain comes from the leaf value of a held token (`tau`, learned) and the opportunity-cost rule, not from searching deeper; depth 2 or 3 adds +0.04 at 1600 and nothing at 400. The oracle DP is still +0.43 to +0.64 above (it spends about 70% of its energy on keys and vaults): the learned planner discovers the token rule late and does not chain key and vault reliably.
+2. **The information setting (`probe`): no gain; deeper is less bad, never better.** Pure d1 -0.21 [-0.41, -0.01], d2 -0.11, d3 +0.00 [-0.18, +0.19] at 400 (similar at 1600). With known parameters planning is worth +0.34 here (oracle DP minus oracle one-step), but the learned planner does not capture it: the probe's value runs through the context cells (job after a successful probe), which are learned only from probes actually made; pure d1 and d2 probe (8% and 6% of energy, the oracle DP 11%) and lose, pure d3 almost stops probing (0.7%) and ties B1. Turning simulated learning on (Bayes-adaptive search, the mechanism meant to value information) did not help on the tuning seeds (+0.17 vs +0.23 at depth 3).
+3. **The energy trade-off (`sizes`) and the control (`plain`): within noise.** Differences -0.05 to +0.07, every interval contains 0. With known parameters planning is worth only +0.03 to +0.05 there, so there was little to gain.
+4. **Hybrid mode is the safe one, and it gains nothing.** On World L hybrid d2 stays within [-0.19, +0.07] of B1 with intervals that contain 0, but gives up the `keys` gain (+0.02). Hybrid d3 is clearly worse in `probe` (-0.82 [-1.25, -0.39] at 400, -1.03 [-1.43, -0.64] at 1600, worse in 17 and 20 of 20 worlds) and in `plain` at 1600 (-0.045 [-0.085, -0.006]): the added future term per energy makes the probe (energy 1) look far better than it is: hybrid d3 spends 35% of its energy on probes (oracle DP 11%).
+5. **Controls (must not get worse): mixed, not established either way.** In the first menu world every variant is below B1 on the mean except pure d2 at budget 3000 (+0.01): pure d2 -0.21 and hybrid d2 -0.08 [-0.19, +0.04] at 600; hybrid d2 -0.03 and hybrid d3 -0.07 [-0.18, +0.05] at 3000, worse in 17 and 19 of 20 worlds; every interval contains 0. In World v2 the means are slightly positive for hybrid d3 (+0.02 to +0.17) and mixed for the others, again all intervals contain 0, and the hybrid variants are worse than B1 in 11 to 15 of 20 worlds in every World v2 condition. So: **the lookahead planner is not shown to keep the existing worlds' results; it loses small amounts in most worlds of the first world and of World v2**, and it is not on by default.
+6. **Cost:** a depth-2 decision reads about 200 to 300 simulated evaluations and a depth-3 one 3000 to 6000, against one pass over the menu for B1 (see the cost table).
+
+Read with the limits: World L and its settings were designed by the same author to make lookahead matter, and the B1 planner, the World L model and the lookahead planner were also written by that author; the keys result shows what a token-value leaf does in a world built around tokens, not a general benefit of planning. The oracle DP is exact only for World L (finite state, enumerated menus); in the existing worlds the oracles are the existing references.
+
+### What is tested (not measured)
+
+With lookahead off (or the hybrid at depth 1) every chooser is the existing planner: World v2 decision by decision (labels, decision revisions, events, truth records, rule passes, final state), the logged World v2 run (identical event ids, texts and tags), the first menu world (rewards, costs, skips, strategies, predictions bit for bit), World L greedy; the B1 and World v2 learner rows of the report are the published numbers. Controller keys: validated, default off, bad values make the file unparseable, fail closed when missing or invalid, a disallowed request is a refusal, the node cap is never exceeded and a cut is logged once, the depth cap; the World L run is refused and logged without a controller file, stops on the kill switch before the next step and logs it; plans with evidence are in every decision revision; the state folds back from the log and a resumed run equals one long run; the planner is deterministic; the oracle DP equals an independent memoized expectimax; World L rules (vault needs a token, probe tells the phase, menus pure functions of seed and step); the lookahead sources use no file, network, process or clock API and the planner files name no hidden parameter of any world.
+
+### What B8 does not show
+
+A benefit of planning ahead outside a world built to reward it; that the simulated-learning variant values information usefully (it did not here); that the controls are unharmed (they are not shown to be); any real-world task. No tool exposes the World L being yet (library and measurement only); replay re-derivation of lookahead decisions from the log is not implemented (the state folds back, the decisions are not re-checked).
+
 ## Long run (unattended, with restarts; synthetic world, author-defined rewards)
 
 Details, commands and all tables: `docs/longrun.md`. Harness `kore-self/examples/longrun_being.rs`, branch `longrun`,

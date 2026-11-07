@@ -6,8 +6,8 @@
 //! from them), a learned rule for tokens (World L only: how often a success at a family has given a
 //! token), and the energy left.
 //!
-//! Method: depth-limited expectimax with sparse sampling (Kearns, Mansour and Ng, 2002), Bayes-adaptive
-//! inside the tree: every simulated attempt updates the simulated posterior of its cell by one success or
+//! Method: depth-limited expectimax with sparse sampling (Kearns, Mansour and Ng, 2002), optionally
+//! Bayes-adaptive inside the tree (`learn`; off by default, it did not help on the tuning seeds): every simulated attempt updates the simulated posterior of its cell by one success or
 //! one failure, so a deeper node sees what the being would have learned on that branch, and the value of
 //! a branch weighs both outcomes by the posterior predictive probability. That is how information (a
 //! probe, an untried cell) gets value: by changing later simulated choices.
@@ -107,6 +107,9 @@ pub struct LookCfg {
     pub mode: Mode,
     /// Hybrid only: weight of the simulated future.
     pub lambda: f64,
+    /// Simulated outcomes update the simulated posteriors (Bayes-adaptive). Off: the model is held fixed
+    /// inside the tree, so only tokens, contexts and energy carry value forward.
+    pub learn: bool,
 }
 
 /// `Pure`: take the alternative with the highest simulated value. `Hybrid`: keep the B1 score
@@ -120,6 +123,7 @@ pub enum Mode {
 }
 
 pub const DEFAULT_LAMBDA: f64 = 1.0;
+pub const DEFAULT_LEARN: bool = false;
 pub const DEFAULT_MODE: Mode = Mode::Hybrid;
 
 /// The hybrid choice among attempts: B1 scores (`scores`: slot, strategy, score, affordable) plus the
@@ -140,14 +144,14 @@ pub fn hybrid_pick(p: &Plan, scores: &[(usize, Strategy, f64, bool)], lambda: f6
 }
 
 /// Chosen on tuning seeds 101..120 only (see docs/measured.md, Track B8).
-pub const DEFAULT_SAMPLES: usize = 4;
-pub const DEFAULT_WIDTH: usize = 4;
+pub const DEFAULT_SAMPLES: usize = 2;
+pub const DEFAULT_WIDTH: usize = 3;
 pub const DEFAULT_BETA_ROOT: f64 = 1.5;
 pub const DEFAULT_MEMORY: usize = 64;
 
 impl LookCfg {
     pub fn new(depth: u32, max_nodes: u64) -> LookCfg {
-        LookCfg { depth, max_nodes, samples: DEFAULT_SAMPLES, width: DEFAULT_WIDTH, beta_root: DEFAULT_BETA_ROOT, memory: DEFAULT_MEMORY, mode: DEFAULT_MODE, lambda: DEFAULT_LAMBDA }
+        LookCfg { depth, max_nodes, samples: DEFAULT_SAMPLES, width: DEFAULT_WIDTH, beta_root: DEFAULT_BETA_ROOT, memory: DEFAULT_MEMORY, mode: DEFAULT_MODE, lambda: DEFAULT_LAMBDA, learn: DEFAULT_LEARN }
     }
 }
 
@@ -251,7 +255,9 @@ impl<'a> Search<'a> {
     fn after(&self, s: &Sim, o: &AOffer, k: Key, energy: f64, ok: bool) -> Sim {
         let mut n = s.clone();
         n.budget -= energy;
-        if let Some(e) = n.overlay.iter_mut().find(|e| e.0 == k) {
+        if !self.cfg.learn {
+            // the model is held fixed inside the tree
+        } else if let Some(e) = n.overlay.iter_mut().find(|e| e.0 == k) {
             if ok { e.1 += 1.0 } else { e.2 += 1.0 }
         } else {
             n.overlay.push((k, ok as u8 as f64, (!ok) as u8 as f64));
@@ -547,7 +553,7 @@ impl Plan {
         json!({
             "planner": "lookahead (B8): depth-limited expectimax with sparse menu sampling over the learned model, Bayes-adaptive (simulated outcomes update simulated posteriors)",
             "depth_wanted": self.depth_wanted, "depth_done": self.depth_done, "nodes": self.nodes, "node_cap": cfg.max_nodes, "truncated": self.truncated,
-            "mode": format!("{:?}", cfg.mode), "lambda": cfg.lambda, "samples_per_node": cfg.samples, "width": cfg.width, "beta_root": cfg.beta_root, "memory_menus": cfg.memory,
+            "mode": format!("{:?}", cfg.mode), "lambda": cfg.lambda, "simulated_learning": cfg.learn, "samples_per_node": cfg.samples, "width": cfg.width, "beta_root": cfg.beta_root, "memory_menus": cfg.memory,
             "rho_learned_reward_per_energy": r3(self.rho), "tau_learned_token_value": r3(self.tau),
             "chosen": self.label(), "alternatives": alts, "cells_read": cells, "cells_read_total": self.cells.len(), "menus_drawn_from_steps": self.menus_drawn,
         })

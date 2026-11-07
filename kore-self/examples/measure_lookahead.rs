@@ -258,34 +258,31 @@ fn report_v2(c: &Cond, seeds: std::ops::RangeInclusive<u64>, t: Tun, label: &str
 
 fn tune() {
     println!("### Tuning (seeds 101..120): World L, all four settings, budget 400; mean over seeds of (planner - greedy-b1); controls: menu world 600 and World v2 (12 families, 3000, noise 50, drift 10)\n");
-    println!("| mode | depth | beta_root | samples | width | lambda | plain | keys | probe | sizes | World L mean | menu world | World v2 |");
-    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    println!("| mode | simulated learning | depth | beta_root | samples | width | lambda | plain | keys | probe | sizes | World L mean | menu world | World v2 |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     let greedy: Vec<Vec<f64>> = SETTINGS.iter().map(|s| col(&table_wl(*s, 400, 101..=120, &["greedy-b1"], CHOSEN), 0)).collect();
     let tc = Cond { name: "tuning", families: 12, budget: 3000, noise_pm: 50, drift: 10, curve: 0 };
     let seeds: Vec<u64> = (101..=120).collect();
     let g1: Vec<f64> = seeds.par_iter().map(|s| run_m1("greedy-b1", *s, 600, CHOSEN).rate).collect();
     let g2: Vec<f64> = seeds.par_iter().map(|s| run_v2p("learner-b1", &tc.cfg(*s), CHOSEN).rate).collect();
     let only = std::env::args().nth(2).unwrap_or_default();
-    let mut grid: Vec<(&str, u32, Tun, f64)> = vec![];
-    for depth in [2u32, 3] {
-        for samples in [2usize, 4] {
-            for width in [3usize, 5] {
-                for lambda in [0.5, 1.0, 2.0] {
-                    grid.push(("hybrid", depth, Tun { beta_root: 1.5, samples, width }, lambda));
-                }
+    let mut grid: Vec<(&str, u32, Tun, f64, bool)> = vec![];
+    for learn in [true, false] {
+        for depth in [2u32, 3] {
+            grid.push(("pure", depth, Tun { beta_root: 1.5, samples: 2, width: 3 }, 1.0, learn));
+            for lambda in [0.5, 1.0] {
+                grid.push(("hybrid", depth, Tun { beta_root: 1.5, samples: 2, width: 3 }, lambda, learn));
             }
         }
     }
-    for beta_root in [1.5, 3.0] {
-        grid.push(("pure", 3, Tun { beta_root, samples: 2, width: 3 }, 1.0));
-    }
-    for (mode, depth, t, lambda) in grid {
+    for (mode, depth, t, lambda, learn) in grid {
         if !only.is_empty() && only != mode {
             continue;
         }
         let name = format!("{mode}-d{depth}");
         let mut c = lcfg_of(&name, t);
         c.lambda = lambda;
+        c.learn = learn;
         let mut ds = vec![];
         for (si, s) in SETTINGS.iter().enumerate() {
             let l: Vec<f64> = seeds.par_iter().map(|sd| run_wl(&WLCfg { seed: *sd, setting: *s, budget: 400 }, &mut LookL::new(Some(c))).per_energy()).collect();
@@ -296,11 +293,34 @@ fn tune() {
         let l2: Vec<f64> = seeds.par_iter().map(|s| run_w2(&tc.cfg(*s), &mut Look2::new(Some(c)), 10, None).per_energy()).collect();
         let d1 = l1.iter().zip(&g1).map(|(a, b)| a - b).sum::<f64>() / 20.0;
         let d2 = l2.iter().zip(&g2).map(|(a, b)| a - b).sum::<f64>() / 20.0;
-        println!("| {mode} | {depth} | {} | {} | {} | {lambda} | {:+.3} | {:+.3} | {:+.3} | {:+.3} | {m:+.3} | {d1:+.3} | {d2:+.3} |", t.beta_root, t.samples, t.width, ds[0], ds[1], ds[2], ds[3]);
+        println!("| {mode} | {learn} | {depth} | {} | {} | {} | {lambda} | {:+.3} | {:+.3} | {:+.3} | {:+.3} | {m:+.3} | {d1:+.3} | {d2:+.3} |", t.beta_root, t.samples, t.width, ds[0], ds[1], ds[2], ds[3]);
     }
 }
 
 fn cost() {
+    println!("
+### Where the energy goes (report seeds 1..20, budget 400): share of energy on key, vault, probe, job families
+");
+    println!("| setting | policy | key | vault | probe | job |");
+    println!("|---|---|---|---|---|---|");
+    for s in [Setting::Keys, Setting::Probe] {
+        for p in WL_POL {
+            let ks: Vec<[f64; 4]> = (1..=20u64).collect::<Vec<_>>().par_iter().map(|seed| {
+                let cfg = WLCfg { seed: *seed, setting: s, budget: 400 };
+                let r = match p {
+                    "greedy-b1" => run_wl(&cfg, &mut GreedyL::default()),
+                    "ucb1" => run_wl(&cfg, &mut Ucb1L { c: 0.05 }),
+                    "oracle-one-step" => run_wl(&cfg, &mut OracleMyopicL::new(WorldL::new(cfg.clone()))),
+                    "oracle-dp" => run_wl(&cfg, &mut OracleL::new(WorldL::new(cfg.clone()))),
+                    _ => run_wl(&cfg, &mut LookL::new(Some(lcfg_of(p, CHOSEN)))),
+                };
+                let t = r.cost.max(1) as f64;
+                [r.kind_energy[1] as f64 / t, r.kind_energy[2] as f64 / t, r.kind_energy[3] as f64 / t, r.kind_energy[4] as f64 / t]
+            }).collect();
+            let m = |i: usize| ks.iter().map(|k| k[i]).sum::<f64>() / ks.len() as f64;
+            println!("| {} | {p} | {:.3} | {:.3} | {:.3} | {:.3} |", s.name(), m(0), m(1), m(2), m(3));
+        }
+    }
     println!("\n### Cost per step (sequential, one thread, seeds 1..5; wall clock on the measuring machine)\n");
     println!("| world | policy | steps per life | nodes per step (mean / max) | microseconds per step |");
     println!("|---|---|---|---|---|");
