@@ -22,6 +22,9 @@
 //! experiments           = on      # may the being choose tasks on purpose to test its hypotheses (B9, default off)
 //! max_experiment_energy_pm = 100  # experiments may spend at most this share (per mille) of the life budget (B9, default 0)
 //! max_experiments_per_run  = 200  # experiments in one run (B9, default 0)
+//! rules_use             = on      # World v2: may the learner use its rules (B7 switches; B10, default off)
+//! adaptation            = on      # World v2: may the model adapt to changes (B3b; B10, default off)
+//! rule_retirement       = on      # World v2: may the being retire rules its later answers contradict (B10, default off)
 //! ```
 //!
 //! The B9 keys fail closed on their own: without `experiments = on` AND a non-zero energy share AND a
@@ -176,6 +179,8 @@ impl Controller {
                 "max_experiments_per_run" => c.max_experiments_per_run = num(HARD_EXP_N)?,
                 // B8 keys (planning ahead) are read by `lookahead::ctl`; here they are only validated
                 _ if super::lookahead::ctl::is_key(k) => super::lookahead::ctl::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
+                // B10 keys (World v2 rules use, adaptation, rule retirement) are read by `world2::skills`; here they are only validated
+                _ if super::world2::skills::is_key(k) => super::world2::skills::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 _ => return Err(format!("line {n}: unknown key '{k}'")),
             }
             seen.push(k);

@@ -52,12 +52,16 @@ pub struct Exp2 {
     pub refusals: Vec<Refusal>,
     refused_kinds: Vec<&'static str>,
     pub compose_blocks: bool,
+    /// B10: the exploit choice comes from the lookahead planner (over the same learner) instead of the learner itself.
+    pub look: Option<crate::being::lookahead::adapt::Look2>,
+    /// B10: retirements seen by the hypothesis cache (a retirement removes examples from the search set: the cache starts over).
+    seen_retirements: usize,
 }
 
 impl Exp2 {
     /// `world` must be built from the being's logged config (`World2::new(state.cfg)`): only offers are read from it.
     pub fn new(base: Learner2, cfg: ExpCfg, world: World2, life_budget: i64) -> Exp2 {
-        Exp2 { base, cfg, world, cache: HypCache::new(), book: ExpBook::default(), life_budget, recs: vec![], refusals: vec![], refused_kinds: vec![], compose_blocks: false }
+        Exp2 { base, cfg, world, cache: HypCache::new(), book: ExpBook::default(), life_budget, recs: vec![], refusals: vec![], refused_kinds: vec![], compose_blocks: false, look: None, seen_retirements: 0 }
     }
 
     fn probes(&self, st: &State2, offers: &[Offer2]) -> Vec<Probe> {
@@ -79,9 +83,16 @@ impl Chooser2 for Exp2 {
         EXP_POLICY.into()
     }
     fn choose(&mut self, st: &State2, offers: &[Offer2]) -> Option<Choice2> {
-        let base = self.base.choose(st, offers)?;
+        let base = match self.look.as_mut() {
+            Some(l) => l.choose(st, offers)?,
+            None => self.base.choose(st, offers)?,
+        };
         let blocks = if self.compose_blocks { st.blocks() } else { vec![] };
-        self.cache.update(&st.examples, &blocks);
+        if st.retirements.len() != self.seen_retirements {
+            self.cache = HypCache::new();
+            self.seen_retirements = st.retirements.len();
+        }
+        self.cache.update(&st.search_examples(), &blocks);
         let probes = self.probes(st, offers);
         let opts: Vec<Opt> = self
             .base

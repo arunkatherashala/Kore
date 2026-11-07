@@ -54,7 +54,7 @@ pub fn rederive_rules2(rows: &[EventRow]) -> Vec<(String, bool)> {
             if let Some(c) = const_from_event(e).filter(|_| e.tags.split(',').any(|t| t == "const_rule")) {
                 // B7 C: the constant search over the formula examples logged before it
                 let theta = st.learner.use_.robust_milli;
-                let ok = search_const(&st.cexamples, crate::being::discover::K_TRAIN, crate::being::discover::K_VAL, theta)
+                let ok = search_const(&st.search_cexamples(), crate::being::discover::K_TRAIN, crate::being::discover::K_VAL, theta)
                     .iter()
                     .any(|f| const_rule_id(f.fam, f.g) == c.id && f.train_ok == c.train_ok && f.val_ok == c.val_ok && f.wrong == c.wrong);
                 out.push((c.id.clone(), ok));
@@ -63,12 +63,12 @@ pub fn rederive_rules2(rows: &[EventRow]) -> Vec<(String, bool)> {
                 let missed: u32 = tag(&e.tags, "missed").and_then(|x| x.parse().ok()).unwrap_or(0);
                 let ok = if theta > 0 && r.xf.is_id() {
                     // B7 B: the robust search
-                    search_robust(&st.examples, theta).iter().any(|f| rule_id_x(f.found.sig, f.found.xf, &f.found.form) == r.id && f.found.train_ok == r.train_ok && f.found.val_ok == r.val_ok && f.wrong == missed)
+                    search_robust(&st.search_examples(), theta).iter().any(|f| rule_id_x(f.found.sig, f.found.xf, &f.found.form) == r.id && f.found.train_ok == r.train_ok && f.found.val_ok == r.val_ok && f.wrong == missed)
                 } else if r.xf.is_id() {
-                    search(&st.examples).iter().any(|f| rule_id_x(f.sig, f.xf, &f.form) == r.id && f.train_ok == r.train_ok && f.val_ok == r.val_ok)
+                    search(&st.search_examples()).iter().any(|f| rule_id_x(f.sig, f.xf, &f.form) == r.id && f.train_ok == r.train_ok && f.val_ok == r.val_ok)
                 } else {
                     let blocks: Vec<Form> = st.blocks().into_iter().take(r.nblocks as usize).collect();
-                    search_composed(&st.examples, &blocks, usize::MAX).found.iter().any(|f| rule_id_x(f.sig, f.xf, &f.form) == r.id && f.train_ok == r.train_ok && f.val_ok == r.val_ok)
+                    search_composed(&st.search_examples(), &blocks, usize::MAX).found.iter().any(|f| rule_id_x(f.sig, f.xf, &f.form) == r.id && f.train_ok == r.train_ok && f.val_ok == r.val_ok)
                 };
                 out.push((r.id.clone(), ok));
             }

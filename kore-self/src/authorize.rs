@@ -46,7 +46,7 @@ pub const HUMAN: &str = "human";
 const MAX_POLICY_BYTES: u64 = 64 * 1024;
 
 /// Tools a thinker may propose in A1, with their built-in tier (1 read-only, 2 note into own log).
-pub const CHAT_TOOLS: [(&str, u8); 4] = [("self_sql", 1), ("self_belief_history", 1), ("being_status", 1), ("self_event_add", 2)];
+pub const CHAT_TOOLS: [(&str, u8); 5] = [("self_sql", 1), ("self_belief_history", 1), ("being_status", 1), ("self_event_add", 2), ("being_observe", 1)];
 /// Tools that only the being loop itself requests (never the chat thinker): asking the configured advisor
 /// for advice (L1: it sends the visible task features to a program the owner chose; it changes nothing in the world).
 /// `world_v2_run` (L2): a World v2 run of the being, which appends to its own log (`being_v2_tools.rs`).
@@ -56,7 +56,7 @@ pub const BEING_ACTOR: &str = "being";
 /// Tools only the human actor may use.
 pub const HUMAN_ONLY: [&str; 4] = ["chat_say", "chat_approve", "chat_history", "chat_pending"];
 /// What still works while the kill switch file exists (read-only).
-const KILL_ALLOWED: [&str; 3] = ["being_status", "chat_history", "chat_pending"];
+const KILL_ALLOWED: [&str; 4] = ["being_status", "chat_history", "chat_pending", "being_observe"];
 
 pub fn is_reserved_source(source: &str) -> bool {
     source == SOURCE || source == "thinker" || source == "advisor" || source.starts_with("chat:")

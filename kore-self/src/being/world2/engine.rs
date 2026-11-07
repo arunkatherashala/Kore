@@ -16,6 +16,7 @@
 use super::learner::{Act2, Choice2, Chooser2, Learner2, Offer2};
 use super::model::FamModel;
 use super::rules_use::{self, CExample, ConstRule, UseCfg};
+use super::skills::SkillsCfg;
 use super::solve::{self, sig2, sig2_split};
 use super::world::{FType, Task2, W2Cfg, World2, SKIP_COST, SOURCE2, TYPE_CYCLE};
 use crate::being::controller::{Limits, Refusal};
@@ -26,6 +27,7 @@ use crate::being::state::{tag, EVIDENCE_WINDOW};
 use crate::being::world::{iso_at, SECS_PER_ENERGY};
 use crate::versioned::{event_id, prediction_id, Batch, EventRow, LogError, NewEvent, NewOutcome, NewPrediction, NewRevision, VersionedLog};
 use serde_json::json;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 pub const FLUSH_EVERY: usize = 25;
@@ -45,12 +47,14 @@ pub struct LearnerCfg {
     pub skip_milli: u32,
     /// Track B7 switches (all off by default; see `rules_use.rs`).
     pub use_: UseCfg,
+    /// Track B10 switches (adaptation, rule retirement; all off by default; see `skills.rs`).
+    pub skills: SkillsCfg,
 }
 
 impl Default for LearnerCfg {
     fn default() -> Self {
         let l = Learner2::default();
-        LearnerCfg { beta_milli: (l.beta * 1000.0).round() as u32, skip_milli: (l.skip_frac * 1000.0).round() as u32, use_: UseCfg::default() }
+        LearnerCfg { beta_milli: (l.beta * 1000.0).round() as u32, skip_milli: (l.skip_frac * 1000.0).round() as u32, use_: UseCfg::default(), skills: SkillsCfg::default() }
     }
 }
 
@@ -112,11 +116,31 @@ pub struct State2 {
     /// B7 C: revealed formula examples and accepted constants.
     pub cexamples: Vec<CExample>,
     pub const_rules: Vec<ConstRule>,
+    /// B10 retirement: number of examples (sequence rules) or formula/grid examples (constants) when each rule was accepted.
+    pub rule_since: HashMap<String, usize>,
+    /// B10 retirement: examples of a signature (sequence) or family (constants) before this index are no longer searched.
+    pub sig_floor: HashMap<u8, usize>,
+    pub const_floor: HashMap<usize, usize>,
+    /// B10: retired constants (ids; never accepted again) and every retirement in order (rule id, step).
+    pub retired_consts: Vec<String>,
+    pub retirements: Vec<(String, u64)>,
+    /// B10 adaptation: every change of the B3b mechanisms with the step and the outcome events it rests on.
+    pub changes: Vec<Change2>,
     recent: VecDeque<String>,
     group_recent: HashMap<(usize, usize), VecDeque<String>>,
 }
 
 /// `compose` families whose base is `fam` (family types are observable: the type cycle is public).
+/// One B3b change in World v2 (B10), with the step and the outcome events it rests on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Change2 {
+    pub index: usize,
+    pub step: u64,
+    pub clock: i64,
+    pub change: super::model::FamChange,
+    pub cites: Vec<String>,
+}
+
 pub fn compose_children(fam: usize, families: usize) -> Vec<usize> {
     (0..families).filter(|&i| TYPE_CYCLE[i % TYPE_CYCLE.len()] == FType::Compose && i >= 1 && i - 1 == fam).collect()
 }
@@ -124,7 +148,7 @@ pub fn compose_children(fam: usize, families: usize) -> Vec<usize> {
 impl State2 {
     pub fn start(&mut self, cfg: W2Cfg, learner: LearnerCfg, event: String) {
         self.budget_left = cfg.budget;
-        self.model = FamModel::new(cfg.families);
+        self.model = if learner.skills.adapt { FamModel::with_switch(cfg.families, crate::being::adapt_b3b::DEFAULT_SWITCH) } else { FamModel::new(cfg.families) };
         self.arms = vec![[ArmStat::default(); 4]; cfg.families];
         self.cfg = Some(cfg);
         self.learner = learner;
@@ -176,6 +200,57 @@ impl State2 {
         while q.len() > EVIDENCE_WINDOW {
             q.pop_front();
         }
+        // B10 adaptation: the changes this outcome caused, citing the latest outcomes of the (family, strategy) group
+        while self.changes.len() < self.model.changes.len() {
+            let c = self.model.changes[self.changes.len()].clone();
+            let cites: Vec<String> = self.group_recent.get(&(fam, s.idx())).map(|q| q.iter().cloned().collect()).unwrap_or_default();
+            self.changes.push(Change2 { index: self.changes.len(), step: o.step, clock: o.clock, change: c, cites });
+        }
+    }
+
+    /// The examples the rule search uses: all of them, except (B10 retirement) those of a signature before its floor.
+    pub fn search_examples(&self) -> Cow<'_, [Example]> {
+        if self.sig_floor.is_empty() {
+            return Cow::Borrowed(&self.examples);
+        }
+        Cow::Owned(self.examples.iter().enumerate().filter(|(i, e)| *i >= self.sig_floor.get(&e.sig).copied().unwrap_or(0)).map(|(_, e)| e.clone()).collect())
+    }
+
+    /// The formula and grid examples the constant search uses (B10: those of a family before its floor are left out).
+    pub fn search_cexamples(&self) -> Cow<'_, [CExample]> {
+        if self.const_floor.is_empty() {
+            return Cow::Borrowed(&self.cexamples);
+        }
+        Cow::Owned(self.cexamples.iter().enumerate().filter(|(i, e)| *i >= self.const_floor.get(&e.fam).copied().unwrap_or(0)).map(|(_, e)| e.clone()).collect())
+    }
+
+    /// B10: retire rule (or constant) `id` at `step`: it is never applied again, its `discovered` cells start over and
+    /// the examples of its signature (family) logged so far are no longer searched. False if no live rule has this id.
+    pub fn retire_rule(&mut self, id: &str, step: u64) -> bool {
+        let families = self.cfg.as_ref().map_or(0, |c| c.families);
+        if let Some(r) = self.rules.iter_mut().find(|r| r.id == id && !r.retired) {
+            r.retired = true;
+            let sig = r.sig;
+            let (fam, d) = sig2_split(sig);
+            self.model.reset_cell(fam, d, Strategy::Discovered);
+            for c in compose_children(fam, families) {
+                self.model.reset_cell(c, d, Strategy::Discovered);
+            }
+            self.sig_floor.insert(sig, self.examples.len());
+            self.retirements.push((id.to_string(), step));
+            return true;
+        }
+        if let Some(i) = self.const_rules.iter().position(|c| c.id == id) {
+            let c = self.const_rules.remove(i);
+            for d in 1..=5 {
+                self.model.reset_cell(c.fam, d, Strategy::Discovered);
+            }
+            self.const_floor.insert(c.fam, self.cexamples.len());
+            self.retired_consts.push(c.id);
+            self.retirements.push((id.to_string(), step));
+            return true;
+        }
+        false
     }
 
     /// Take an accepted rule in; the `discovered` cells it changes start over (as `BeingState::apply_rule`),
@@ -189,17 +264,23 @@ impl State2 {
         for c in compose_children(fam, self.cfg.as_ref().map_or(0, |c| c.families)) {
             self.model.reset_cell(c, d, Strategy::Discovered);
         }
+        if self.learner.skills.retire {
+            self.rule_since.insert(r.id.clone(), self.examples.len());
+        }
         self.rules.push(r);
         true
     }
 
     /// B7 C: take an accepted constant in; the `discovered` cells of its family start over.
     pub fn apply_const(&mut self, c: ConstRule) -> bool {
-        if self.const_rules.iter().any(|x| x.id == c.id) {
+        if self.const_rules.iter().any(|x| x.id == c.id) || self.retired_consts.contains(&c.id) {
             return false;
         }
         for d in 1..=5 {
             self.model.reset_cell(c.fam, d, Strategy::Discovered);
+        }
+        if self.learner.skills.retire {
+            self.rule_since.insert(c.id.clone(), self.cexamples.len());
         }
         self.const_rules.push(c);
         true
@@ -251,7 +332,8 @@ impl State2 {
         if e.kind == "note" && has("w2_genesis") && self.cfg.is_none() {
             if let (Some(c), Some(b), Some(s)) = (W2Cfg::from_tags(&e.tags), tag(&e.tags, "w2_beta_milli").and_then(|x| x.parse().ok()), tag(&e.tags, "w2_skip_milli").and_then(|x| x.parse().ok())) {
                 let use_ = tag(&e.tags, "w2_use").and_then(UseCfg::parse).unwrap_or_default();
-                self.start(c, LearnerCfg { beta_milli: b, skip_milli: s, use_ }, e.event_id.clone());
+                let skills = tag(&e.tags, "w2_skills").and_then(SkillsCfg::parse).unwrap_or_default();
+                self.start(c, LearnerCfg { beta_milli: b, skip_milli: s, use_, skills }, e.event_id.clone());
             }
         } else if e.kind == "outcome" {
             if let Some(o) = outcome_from_event(e) {
@@ -267,6 +349,10 @@ impl State2 {
         } else if e.kind == "note" && has("const_rule") && has("world2") {
             if let Some(c) = const_from_event(e) {
                 self.apply_const(c);
+            }
+        } else if e.kind == "note" && has("rule_retired") && has("world2") {
+            if let (Some(id), Some(step)) = (tag(&e.tags, "rule_id"), tag(&e.tags, "at_step").and_then(|x| x.parse().ok())) {
+                self.retire_rule(id, step);
             }
         }
     }
@@ -327,12 +413,18 @@ pub fn genesis_event2(cfg: &W2Cfg, l: &LearnerCfg) -> (NewEvent, String) {
     if l.use_.any() {
         tags.push(l.use_.tag());
     }
+    if l.skills.any() {
+        tags.push(l.skills.tag());
+    }
     let mut text = format!(
         "world v2 being created: seed {}, {} task families, budget {} energy units, feedback noise {} per mille, drift {} changes per 10000 energy, difficulty curve {}%, menu of {}; learner beta {:.3}, skip fraction {:.3}. Simulated world with author-defined families and rewards",
         cfg.seed, cfg.families, cfg.budget, cfg.noise_pm, cfg.drift_per_10k, cfg.curve_pct, cfg.menu, l.beta_milli as f64 / 1000.0, l.skip_milli as f64 / 1000.0
     );
     if l.use_.any() {
         text.push_str(&l.use_.words());
+    }
+    if l.skills.any() {
+        text.push_str(&l.skills.words());
     }
     let ev = NewEvent { source: SOURCE2.into(), occurred_at: iso_at(0), kind: "note".into(), text, tags, redacted: false };
     let id = event_id(&ev.source, &ev.occurred_at, &ev.text);
@@ -412,6 +504,8 @@ pub struct Engine2 {
     pub reference_scan: bool,
     /// B7 B: incremental state of the robust search.
     pub rscan: rules_use::RobustCache,
+    /// B10 adaptation: changes of the state already handed out for the log.
+    pub changes_logged: usize,
 }
 
 pub fn offers_of2(tasks: &[Task2]) -> Vec<Offer2> {
@@ -425,7 +519,8 @@ fn fin(x: f64) -> String {
 impl Engine2 {
     pub fn new(state: State2, limits: Option<Limits>) -> Engine2 {
         let world = World2::new(state.cfg.clone().expect("a started state"));
-        Engine2 { world, state, limits, refusals: vec![], refusals_total: vec![], refused: HashSet::new(), last_blocks: 0, max_candidates_seen: 0, scan: Default::default(), reference_scan: crate::being::discover_scan::reference_default(), rscan: Default::default() }
+        let changes_logged = state.changes.len();
+        Engine2 { changes_logged, world, state, limits, refusals: vec![], refusals_total: vec![], refused: HashSet::new(), last_blocks: 0, max_candidates_seen: 0, scan: Default::default(), reference_scan: crate::being::discover_scan::reference_default(), rscan: Default::default() }
     }
 
     pub fn refuse(&mut self, r: Refusal) {
@@ -654,10 +749,11 @@ impl Engine2 {
 
     /// `discover::search_composed` over the being's examples: incremental, or the full rescan with `reference_scan`.
     pub fn search_examples(&mut self, blocks: &[discover::Form], max_candidates: usize) -> discover::SearchOut {
+        let ex = self.state.search_examples();
         if self.reference_scan {
-            discover::search_composed(&self.state.examples, blocks, max_candidates)
+            discover::search_composed(&ex, blocks, max_candidates)
         } else {
-            self.scan.search(&self.state.examples, discover::K_TRAIN, discover::K_VAL, blocks, max_candidates, &[])
+            self.scan.search(&ex, discover::K_TRAIN, discover::K_VAL, blocks, max_candidates, &[])
         }
     }
 
@@ -686,11 +782,12 @@ impl Engine2 {
         };
         if theta > 0 {
             // B7 B: plain grammar forms under the robust guard; composed candidates as found above
-            let mut sigs: Vec<u8> = self.state.examples.iter().map(|e| e.sig).collect();
+            let ex = self.state.search_examples();
+            let mut sigs: Vec<u8> = ex.iter().map(|e| e.sig).collect();
             sigs.sort_unstable();
             sigs.dedup();
             let keep: Vec<u8> = sigs.into_iter().take(allowed_sigs.unwrap_or(usize::MAX)).collect();
-            let mut all: Vec<(Found, u32)> = self.rscan.search(&self.state.examples, discover::K_TRAIN, discover::K_VAL, theta).into_iter().filter(|r| keep.contains(&r.found.sig)).map(|r| (r.found, r.wrong)).collect();
+            let mut all: Vec<(Found, u32)> = self.rscan.search(&ex, discover::K_TRAIN, discover::K_VAL, theta).into_iter().filter(|r| keep.contains(&r.found.sig)).map(|r| (r.found, r.wrong)).collect();
             all.extend(found.into_iter().filter(|f| !f.xf.is_id()).map(|f| (f, 0)));
             all.sort_by_key(|(f, _)| f.sig);
             let mut out = vec![];
@@ -717,9 +814,10 @@ impl Engine2 {
         }
         let theta = self.state.learner.use_.robust_milli;
         let mut out = vec![];
-        for f in rules_use::search_const(&self.state.cexamples, discover::K_TRAIN, discover::K_VAL, theta) {
+        let found = rules_use::search_const(&self.state.search_cexamples(), discover::K_TRAIN, discover::K_VAL, theta);
+        for f in found {
             let id = rules_use::const_rule_id(f.fam, f.g);
-            if self.state.const_rules.iter().any(|c| c.id == id) {
+            if self.state.const_rules.iter().any(|c| c.id == id) || self.state.retired_consts.contains(&id) {
                 continue;
             }
             if let Some(l) = &self.limits {
@@ -944,7 +1042,16 @@ pub fn run_v2(log: &mut VersionedLog, cfg: &Run2Cfg, policy: &Policy, chooser: O
                 pending.predictions.extend(out.prediction);
                 pending.outcomes.extend(out.resolved);
                 pending_steps += 1;
+                // B10 (only when switched on at creation): changes of the adaptive model, then retirements before discovery
+                for (ev, rv) in engine.take_change_records() {
+                    pending.events.push(ev);
+                    pending.revisions.push(rv);
+                }
                 if cfg.discover_every > 0 && engine.state.step % cfg.discover_every == 0 {
+                    for nr in engine.retire_pass() {
+                        pending.events.push(nr.event);
+                        pending.revisions.push(nr.revision);
+                    }
                     for nr in engine.discover_pass() {
                         pending.events.push(nr.event);
                         pending.revisions.push(nr.revision);

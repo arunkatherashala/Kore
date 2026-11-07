@@ -19,7 +19,7 @@ use crate::log_tools::{err, log_err, open, text};
 use crate::versioned::EventRow;
 use serde_json::{json, Value};
 
-pub const TOOLS: [&str; 2] = ["being_run_v2", "being_status_v2"];
+pub const TOOLS: [&str; 3] = ["being_run_v2", "being_status_v2", "being_observe"];
 /// The internal tool name the run is authorized as.
 pub const AUTH_TOOL: &str = "world_v2_run";
 const MAX_STEPS: u64 = 5000;
@@ -28,6 +28,7 @@ pub fn handle(name: &str, args: &Value, owner: &str) -> Result<Value, Value> {
     match name {
         "being_run_v2" => run(args, owner),
         "being_status_v2" => status(owner),
+        "being_observe" => observe(args, owner),
         _ => Err(err("unknown tool")),
     }
 }
@@ -58,6 +59,16 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         Some(Value::Bool(b)) => *b,
         Some(_) => return Err(err("'experiments' must be a boolean")),
     };
+    // B10: the all-skills profile (each part needs its own controller key; see world2/all_skills.rs)
+    let profile = match args.get("profile") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(s)) if s == "all_skills" => true,
+        Some(Value::String(s)) if s == "default" => false,
+        Some(_) => return Err(err("'profile' must be \"default\" or \"all_skills\"")),
+    };
+    if profile && want_exp {
+        return Err(err("'experiments' is part of the all_skills profile; do not pass both"));
+    }
     let u32_of = |k: &str| -> Result<Option<u32>, Value> { Ok(opt_u64(args, k)?.map(|x| x.min(u32::MAX as u64) as u32)) };
     let world = W2Cfg {
         seed: opt_u64(args, "world_seed")?.unwrap_or(1),
@@ -99,7 +110,36 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
     policy.max_energy = Some(ctl.max_energy_per_run);
     let owner_k = owner.to_string();
     policy.kill = Some(KillCheck(std::sync::Arc::new(move || authorize::kill_active(&owner_k))));
-    let cfg = Run2Cfg { world: Some(world), learner: Some(LearnerCfg::default()), discover_every: if discover { DEFAULT_DISCOVER_EVERY } else { 0 }, ctl: Some(limits) };
+    let mut cfg = Run2Cfg { world: Some(world), learner: Some(LearnerCfg::default()), discover_every: if discover { DEFAULT_DISCOVER_EVERY } else { 0 }, ctl: Some(limits) };
+    if profile {
+        let rows: Vec<EventRow> = log.open_latest().rows();
+        let st0 = State2::from_events(&rows);
+        let existing = st0.cfg.as_ref().map(|_| st0.learner);
+        let ctl_text = load_controller_text(owner);
+        let g = crate::being::world2::all_skills::grant(ctl_text.as_deref(), crate::being::world2::all_skills::Want::all(), existing);
+        cfg.learner = Some(g.learner);
+        let o = crate::being::world2::all_skills::run_v2_all(&mut log, &cfg, &policy, &g.all).map_err(log_err)?;
+        drop(log);
+        let s = o.summary;
+        for r in &s.refusals {
+            refused.push((r.cap.clone(), r.limit, r.requested, r.what.clone()));
+        }
+        if s.stopped == being::StopReason::Killed {
+            refused.push(("kill_switch".into(), 0, s.steps_run, format!("the KILL file stopped the World v2 run after {} steps", s.steps_run)));
+        }
+        for r in &refused {
+            audit(owner, &r.0, r.1, r.2, &r.3);
+        }
+        let mut out = s.to_json();
+        out["profile"] = json!({
+            "name": "all_skills", "rules_use": s.state.learner.use_.any(), "adaptation": s.state.learner.skills.adapt, "rule_retirement": s.state.learner.skills.retire,
+            "experiments": g.all.exp.map(|e| json!({ "kappa": e.kappa, "energy_pm": e.energy_pm, "max_experiments": e.max_experiments })), "experiments_run": o.experiments.len(),
+            "lookahead": g.all.look.map(|c| json!({ "mode": "hybrid", "depth": c.depth, "max_nodes": c.max_nodes })), "lookahead_decisions": o.look.decisions,
+            "rules_retired_this_run": o.retired, "model_changes_this_run": o.changes,
+        });
+        out["controller"] = json!({ "refusals_audited": refused.iter().map(|r| json!({ "cap": r.0, "limit": r.1, "requested": r.2, "what": r.3 })).collect::<Vec<_>>() });
+        return Ok(text(out));
+    }
     // B9: experiments only if asked for AND allowed with a budget by controller.txt (else refused, audited, and the run is passive)
     let exp_budget = if want_exp {
         match ctl.experiment_budget() {
@@ -138,6 +178,37 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
     Ok(text(out))
 }
 
+/// The text of `controller.txt` (None: missing, too large, unsafe permissions or unreadable: the B10 parts then fail closed).
+fn load_controller_text(owner: &str) -> Option<String> {
+    let p = crate::safety::owner_dir(owner).join(controller::FILE);
+    let meta = std::fs::metadata(&p).ok()?;
+    if meta.len() > 16 * 1024 || authorize::perm_problem(&p).is_some() {
+        return None;
+    }
+    std::fs::read(&p).ok().and_then(|b| String::from_utf8(b).ok())
+}
+
+/// B10: the behaviour report of the World v2 being, built only from the log (read-only).
+fn observe(args: &Value, owner: &str) -> Result<Value, Value> {
+    let window = opt_u64(args, "window")?.unwrap_or(0);
+    let max_items = opt_u64(args, "max_items")?.unwrap_or(20).min(500) as usize;
+    let format = match args.get("format") {
+        None | Some(Value::Null) => "markdown",
+        Some(Value::String(s)) if s == "markdown" || s == "json" => s.as_str(),
+        Some(_) => return Err(err("'format' must be \"markdown\" or \"json\"")),
+    };
+    let log = open(owner)?;
+    let snap = log.open_latest();
+    let rows: Vec<EventRow> = snap.rows();
+    let revs: Vec<crate::versioned::RevisionRow> = snap.rows();
+    drop(log);
+    let o = crate::being::world2::observe::observe(&rows, &revs, window);
+    Ok(match format {
+        "json" => text(o.to_json()),
+        _ => crate::log_tools::plain(o.to_md(max_items)),
+    })
+}
+
 fn status(owner: &str) -> Result<Value, Value> {
     let log = open(owner)?;
     let rows: Vec<EventRow> = log.open_latest().rows();
@@ -168,8 +239,16 @@ pub fn tool_defs() -> Vec<Value> {
             "budget": { "type": "integer", "minimum": 1, "maximum": 1000000 }, "noise_pm": { "type": "integer", "minimum": 0, "maximum": 400 },
             "drift_per_10k": { "type": "integer", "minimum": 0, "maximum": 200 }, "curve_pct": { "type": "integer", "minimum": 0, "maximum": 100 },
             "menu": { "type": "integer", "minimum": 2, "maximum": 8 }, "discover": { "type": "boolean" },
-            "experiments": { "type": "boolean", "description": "B9 (opt-in): choose some tasks on purpose to test the being's own rule hypotheses; needs experiments = on and a budget in controller.txt, otherwise refused and audited" }
+            "experiments": { "type": "boolean", "description": "B9 (opt-in): choose some tasks on purpose to test the being's own rule hypotheses; needs experiments = on and a budget in controller.txt, otherwise refused and audited" },
+            "profile": { "type": "string", "enum": ["default", "all_skills"], "description": "B10 (opt-in): all_skills asks for every skill (rules use, adaptation, rule retirement, experiments, lookahead); each part runs only if its own controller.txt key allows it (rules_use, adaptation, rule_retirement, experiments with a budget, lookahead), otherwise it stays off and the refusal is logged and audited. Rules use, adaptation and retirement are fixed when the being is created" }
           }, "required": ["steps"] } }),
+        json!({ "name": "being_observe",
+          "description": "Read-only behaviour report of the World v2 being, built only from its log: choices per task type and strategy over windows of steps, reported rewards, the being's own estimated regret, rules accepted/used/retired with their evidence, experiments and what they decided, lookahead plans, model changes, controller refusals and stops (kill switch). Writes nothing.",
+          "inputSchema": { "type": "object", "properties": {
+            "window": { "type": "integer", "minimum": 0, "description": "steps per window (0 or absent: about a tenth of the life)" },
+            "max_items": { "type": "integer", "minimum": 0, "maximum": 500 },
+            "format": { "type": "string", "enum": ["markdown", "json"] }
+          } } }),
         json!({ "name": "being_status_v2",
           "description": "State of the World v2 being folded from its log, with a replay check of every decision and rule.",
           "inputSchema": { "type": "object", "properties": {} } }),
@@ -183,3 +262,7 @@ mod tests;
 #[cfg(test)]
 #[path = "being_v2_exp_tools_tests.rs"]
 mod tests_exp;
+
+#[cfg(test)]
+#[path = "being_v2_all_tools_tests.rs"]
+mod tests_all;

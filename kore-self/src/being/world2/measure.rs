@@ -33,6 +33,19 @@ pub struct W2Run {
     pub state: State2,
     /// B7 C: accepted constants, checked like the rules.
     pub consts: Vec<ConstCheck>,
+    /// B10: retirements, each checked against the world at the time (was the rule really stale?).
+    pub retired: Vec<RetireCheck>,
+}
+
+/// One B10 retirement as the measurement sees it.
+#[derive(Debug, Clone)]
+pub struct RetireCheck {
+    pub rule_id: String,
+    pub kind: &'static str,
+    pub step: u64,
+    pub clock: i64,
+    /// Share right on fresh tasks of its signature (family) at the retirement (None: never applies).
+    pub right_share_then: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +119,7 @@ pub fn run_w2_with(cfg: &W2Cfg, chooser: &mut dyn Chooser2, discover_every: u64,
     let mut recs = vec![];
     let mut rules = vec![];
     let mut consts = vec![];
+    let mut retired = vec![];
     while let Ok(o) = e.step(chooser) {
         steps += 1;
         tr += o.truth.true_reward;
@@ -113,6 +127,17 @@ pub fn run_w2_with(cfg: &W2Cfg, chooser: &mut dyn Chooser2, discover_every: u64,
         cost += o.outcome.cost;
         recs.push(o.truth);
         if discover_every > 0 && e.state.step % discover_every == 0 {
+            if e.state.learner.skills.retire {
+                let (rules_before, consts_before) = (e.state.rules.clone(), e.state.const_rules.clone());
+                for nr in e.retire_pass() {
+                    let share = match nr.rec.kind {
+                        "seq" => rules_before.iter().find(|r| r.id == nr.rec.rule_id).map(|r| rule_on_fresh(&e.world, r, e.state.clock, RULE_CHECK_TASKS)),
+                        _ => consts_before.iter().find(|c| c.id == nr.rec.rule_id).map(|c| const_on_fresh(&e.world, c, e.state.clock, RULE_CHECK_TASKS)),
+                    }
+                    .and_then(|(app, ok)| if app > 0 { Some(ok as f64 / app as f64) } else { None });
+                    retired.push(RetireCheck { rule_id: nr.rec.rule_id.clone(), kind: nr.rec.kind, step: nr.step, clock: e.state.clock, right_share_then: share });
+                }
+            }
             for nr in e.discover_pass() {
                 let (app, ok) = rule_on_fresh(&e.world, &nr.rule, e.state.clock, RULE_CHECK_TASKS);
                 rules.push(RuleCheck { rule: nr.rule, clock: e.state.clock, wrong_at_accept: ok < app, right_share_end: None });
@@ -132,5 +157,5 @@ pub fn run_w2_with(cfg: &W2Cfg, chooser: &mut dyn Chooser2, discover_every: u64,
         let (app, ok) = const_on_fresh(&e.world, &cc.rule, end, RULE_CHECK_TASKS);
         cc.right_share_end = Some(ok as f64 / app.max(1) as f64);
     }
-    W2Run { true_reward: tr, reported_reward: rr, cost, steps, skips: e.state.skips, recs, rules, refusals: e.refusals_total.len(), state: e.state, consts }
+    W2Run { true_reward: tr, reported_reward: rr, cost, steps, skips: e.state.skips, recs, rules, refusals: e.refusals_total.len(), state: e.state, consts, retired }
 }

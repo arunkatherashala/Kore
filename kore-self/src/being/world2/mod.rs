@@ -8,17 +8,22 @@
 //! B2/B5 rule search (`discover.rs`). Author-defined simulation; the only claims are the measured
 //! numbers in docs/measured.md.
 
+pub mod all_skills;
 pub mod baselines;
 pub mod engine;
 pub mod experiment;
 pub mod learner;
 pub mod measure;
 pub mod model;
+pub mod observe;
 pub mod replay;
 pub mod rules_use;
+pub mod skills;
 pub mod solve;
 pub mod world;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_use;
+#[cfg(test)]
+mod tests_all;

@@ -95,6 +95,7 @@ fn tool_desc(name: &str) -> &'static str {
         "self_sql" => "args {sql}: one read-only SELECT over events, revisions, beliefs_current",
         "self_belief_history" => "args {key}: every revision of a belief with its cited events",
         "being_status" => "args {}: status of the being loop",
+        "being_observe" => "args {window?, format?}: read-only behaviour report of the World v2 being from its log",
         "self_event_add" => "args {text, tags?}: append a note to the being's own log",
         _ => "",
     }
@@ -196,6 +197,7 @@ fn execute(owner: &str, tool: &str, args: &Value) -> Result<String, String> {
         "self_sql" => ("self_sql", json!({"sql": get("sql"), "as_of_version": get("as_of_version"), "as_of_time": get("as_of_time")})),
         "self_belief_history" => ("self_belief_history", json!({"key": get("key"), "entity_type": get("entity_type")})),
         "being_status" => ("being_status", json!({})),
+        "being_observe" => ("being_observe", json!({"window": get("window"), "format": get("format"), "max_items": get("max_items")})),
         "self_event_add" => {
             let mut tags = vec![json!("via_chat")];
             if let Some(Value::Array(t)) = args.get("tags") {

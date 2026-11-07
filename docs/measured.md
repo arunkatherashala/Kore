@@ -1866,6 +1866,118 @@ Secondary setting, not chosen by the tuning rule (kappa 1, budget 100 per mille;
 
 No reward gain; the hypothesis space, the families, the worlds and the oracle are the author's; experiments only choose among offered tasks (no free probe action exists in these worlds); the split term rarely separates applicable rules (the acceptance guard already makes forms rarely applicable to the same prefix); under feedback noise experiments can reject a right hypothesis because the told answer was wrong; the first world's logged loop does not run experiments (measured in memory with the same engine); 20 worlds per condition, one budget per World v2 size, a tuning grid over two worlds only.
 
+## Track B10: all skills together (synthetic world, author-defined families)
+
+Everything here is the World v2 simulation (author-defined families, rules, noise, drift and rewards) and the being's own learner. Question: with every skill built so far switched on together in World v2 (B7 rule use, B9 experiments, B3b adaptation, B8 lookahead, and a new rule retirement), does the combination beat B7 alone, and do the parts help or get in each other's way? Code: `kore-self/src/being/world2/{all_skills,skills,observe}.rs` (new), additive, switch-guarded hooks in `world2/{engine,model,experiment,measure,replay}.rs` and `lookahead/adapt.rs`, one validation arm in `controller.rs`; tools in `being_v2_tools.rs`. Measured with `cargo run -p kore-self --example measure_all_skills --offline --release -- report-look` (and `-- tune`), 2026-11-07, branch `all-skills` (from 4feb8daf). Tuning seeds 101..120 (only for the two choices below), report seeds 1..20, n = 20 worlds per condition, 95% t-intervals of the mean, paired differences on identical worlds (better/worse/tie). Score: TRUE reward per energy (the checker's verdict). Conditions: the 12 World v2 conditions of Track B7, plus three with strong drift (60 changes per 10 000 energy) for retirement. The report takes about 3 minutes.
+
+### What the profile turns on
+
+One request (`being_run_v2` with `"profile": "all_skills"`, or `all_skills::grant` in code) asks for every part; each part runs only if its own `controller.txt` key allows it, otherwise it stays off and a `controller_refusal` is logged in the being's log and audited (missing or invalid file: everything off, the run itself refused as before):
+
+| part | controller key(s) | what it does in World v2 | fixed when |
+|---|---|---|---|
+| B7 rule use | `rules_use = on` | switches A (rule-record estimate), A2 (no `discovered` arm without a rule), B (robust acceptance, Wilson bound 0.4), C (fitted formula constant), G (fitted grid move rule), rule prior cap 8: the B7 "all" setting | creation (genesis) |
+| B3b adaptation | `adaptation = on` | the B3b mechanisms (M1 windowed switch W 6 / 8 nats / min_old 8, M2 prior conflict 1 nat / keep 0.1 / max_n 16, the tuned `DEFAULT_SWITCH`) on the family-keyed model; every change is a `w2_change` note and a `belief` revision citing the outcomes of its (family, strategy) | creation |
+| rule retirement (new) | `rule_retirement = on` | see below | creation |
+| B9 experiments | `experiments = on`, `max_experiment_energy_pm`, `max_experiments_per_run` | the B9 experimenter around the B7 learner, kappa 0.1, at most min(50, controller) per mille of the life budget | per run |
+| B8 lookahead | `lookahead = on`, `max_lookahead_nodes`, `max_lookahead_depth` | the B8 planner in hybrid mode at depth min(2, cap), over the B7 learner: the tree reads the rule-record estimates, and with A2 a `discovered` option without a rule has success 0 in the tree | per run |
+
+B8 can run in World v2 as built (Track B8 measured it there); it is integrated as the exploit choice inside the experimenter (the experimenter still decides whether an offered sequence task is worth more as an experiment). Lookahead decisions are not re-derived by the replay (as in B8); everything else is.
+
+**Rule retirement.** At every discovery interval (10 steps), before the discovery pass, every live rule (sequence rule or fitted constant) is checked against the revealed answers logged since it was accepted, on the tasks of its signature (family for a constant) where it applies: over the last 6 such answers, if there are at least 4 and the 95% Wilson upper bound of its share right is below 0.5, the rule is retired. The retirement is a `rule_retired` note and a `rule` revision (author `rule:being-retire`) that cites the rule's note and every outcome event it got wrong in the window; the rule is never applied again, the `discovered` cells it served start over, and the examples of its signature logged before the retirement are no longer searched, so a rule for the new regime can be accepted from the answers that follow. Opt-in, fixed at creation, folded back from the log. Revealed answers are what the being was told (with feedback noise a right rule can look wrong on a few; the bound needs most of the window to be wrong).
+
+Tuning (seeds 101..120). Retirement: upper bound 0.3 / 0.4 / 0.5 / 0.6 with window 10 (min 6), and 0.5 with window 6 (min 4) and 16 (min 8), on medium clean, medium drift, medium hard, large drift, medium drift60; objective fixed before the runs: fewest rules stale at the end, then reward. All settings retired only stale rules (0 of 280 retirements, counted per setting, were of a rule still right on >= 90% of fresh tasks) and changed reward by -0.005 to +0.005; window 6 / min 4 / 0.5 left the fewest stale rules (3 / 4 / 14 / 10 against 11 / 12 / 24 / 27 for B7 alone) and was chosen. Experiments on top of B7 (medium conditions and large clean): kappa / budget 0.1 / 50 summed +0.035 over the five conditions, 0.25 / 50 -0.169, 0.25 / 100 -0.268, 1 / 50 -0.253, 1 / 100 -0.451; 0.1 / 50 chosen (B9's own tuning, without B7, had chosen 0.25 / 50).
+
+### Reward per energy, report seeds 1..20, mean [95% interval]
+
+| condition | learner (current) | B9 alone | B7-all | B7+B9 | B7+B3b | B7+retire | all (B7+B9+B3b+retire) | all + B8 | oracle-knows-rules |
+|---|---|---|---|---|---|---|---|---|---|
+| small clean | 2.777 [2.248, 3.307] | 2.757 [2.232, 3.282] | 3.114 [2.694, 3.534] | 3.080 [2.691, 3.469] | 3.111 [2.696, 3.526] | 3.114 [2.694, 3.534] | 3.079 [2.692, 3.466] | 3.056 [2.700, 3.413] | 3.496 [3.166, 3.827] |
+| small noisy | 2.780 [2.264, 3.295] | 2.795 [2.290, 3.300] | 3.080 [2.682, 3.478] | 3.108 [2.712, 3.504] | 3.079 [2.684, 3.475] | 3.080 [2.682, 3.478] | 3.104 [2.711, 3.496] | 3.024 [2.650, 3.398] | 3.496 [3.166, 3.827] |
+| small drift | 2.724 [2.172, 3.277] | 2.749 [2.210, 3.288] | 3.005 [2.530, 3.479] | 3.028 [2.611, 3.446] | 3.001 [2.528, 3.475] | 3.014 [2.543, 3.484] | 3.037 [2.625, 3.450] | 3.039 [2.658, 3.420] | 3.507 [3.188, 3.826] |
+| small hard | 2.883 [2.346, 3.420] | 2.904 [2.374, 3.434] | 3.093 [2.647, 3.538] | 3.175 [2.748, 3.602] | 3.093 [2.650, 3.536] | 3.099 [2.657, 3.541] | 3.169 [2.749, 3.589] | 3.093 [2.686, 3.499] | 3.664 [3.314, 4.013] |
+| medium clean | 2.755 [2.335, 3.176] | 2.818 [2.437, 3.199] | 3.182 [2.875, 3.488] | 3.188 [2.950, 3.426] | 3.177 [2.871, 3.484] | 3.182 [2.875, 3.488] | 3.187 [2.948, 3.425] | 3.164 [2.921, 3.408] | 3.389 [3.169, 3.610] |
+| medium noisy | 2.713 [2.292, 3.133] | 2.750 [2.361, 3.139] | 3.152 [2.883, 3.420] | 3.104 [2.828, 3.381] | 3.137 [2.866, 3.408] | 3.152 [2.883, 3.420] | 3.095 [2.818, 3.371] | 3.050 [2.806, 3.295] | 3.389 [3.169, 3.610] |
+| medium drift | 2.754 [2.324, 3.183] | 2.815 [2.421, 3.210] | 3.155 [2.823, 3.487] | 3.158 [2.921, 3.395] | 3.162 [2.827, 3.497] | 3.162 [2.836, 3.488] | 3.190 [2.953, 3.426] | 3.152 [2.922, 3.382] | 3.493 [3.277, 3.709] |
+| medium hard | 2.876 [2.447, 3.304] | 2.828 [2.415, 3.242] | 3.239 [2.959, 3.518] | 3.210 [2.928, 3.491] | 3.235 [2.951, 3.518] | 3.243 [2.966, 3.520] | 3.210 [2.930, 3.489] | 3.130 [2.873, 3.387] | 3.699 [3.474, 3.924] |
+| large clean | 2.987 [2.578, 3.396] | 3.006 [2.655, 3.357] | 3.203 [2.918, 3.488] | 3.166 [2.897, 3.435] | 3.195 [2.913, 3.478] | 3.203 [2.918, 3.488] | 3.162 [2.894, 3.430] | 3.196 [2.976, 3.415] | 3.416 [3.224, 3.608] |
+| large noisy | 2.967 [2.602, 3.332] | 2.876 [2.531, 3.222] | 3.218 [2.967, 3.469] | 3.134 [2.898, 3.370] | 3.211 [2.961, 3.462] | 3.218 [2.967, 3.469] | 3.145 [2.919, 3.371] | 3.124 [2.902, 3.346] | 3.416 [3.224, 3.608] |
+| large drift | 2.841 [2.437, 3.244] | 2.868 [2.527, 3.209] | 3.039 [2.738, 3.339] | 3.016 [2.749, 3.283] | 3.046 [2.746, 3.345] | 3.043 [2.747, 3.340] | 3.025 [2.763, 3.288] | 3.096 [2.897, 3.295] | 3.363 [3.200, 3.526] |
+| large hard | 2.928 [2.527, 3.328] | 2.835 [2.467, 3.202] | 3.232 [2.973, 3.490] | 3.121 [2.880, 3.361] | 3.210 [2.935, 3.485] | 3.236 [2.977, 3.494] | 3.128 [2.896, 3.360] | 3.162 [2.952, 3.373] | 3.560 [3.383, 3.737] |
+
+The learner, B7-all and oracle-knows-rules columns reproduce the published World v2 / B7 numbers exactly (same seeds, same code paths with the B10 parts off).
+
+Paired differences (mean [95% interval] better/worse/tie of 20):
+
+| condition | all - learner | all - B7-all | oracle - all | B7+B9 - B7-all | B7+B3b - B7-all | B7+retire - B7-all | all + B8 - all |
+|---|---|---|---|---|---|---|---|
+| small clean | +0.301 [-0.003, +0.606] 13/7/0 | -0.035 [-0.227, +0.156] 8/11/1 | +0.417 [+0.191, +0.643] 18/2/0 | -0.034 [-0.226, +0.157] 6/13/1 | -0.003 [-0.019, +0.012] 2/3/15 | +0.000 0/0/20 | -0.023 [-0.122, +0.076] 4/16/0 |
+| small noisy | +0.324 [+0.001, +0.647] 11/9/0 | +0.024 [-0.192, +0.240] 9/11/0 | +0.392 [+0.190, +0.595] 18/2/0 | +0.029 [-0.195, +0.252] 8/12/0 | -0.000 [-0.007, +0.007] 3/4/13 | +0.000 0/0/20 | -0.080 [-0.126, -0.034] 4/16/0 |
+| small drift | +0.313 [+0.014, +0.612] 11/9/0 | +0.033 [-0.174, +0.239] 8/12/0 | +0.470 [+0.228, +0.711] 18/2/0 | +0.024 [-0.183, +0.230] 5/14/1 | -0.003 [-0.023, +0.017] 4/4/12 | +0.009 [-0.006, +0.024] 2/0/18 | +0.002 [-0.120, +0.124] 6/14/0 |
+| small hard | +0.286 [-0.027, +0.599] 14/6/0 | +0.076 [-0.197, +0.350] 9/11/0 | +0.495 [+0.257, +0.732] 18/2/0 | +0.083 [-0.195, +0.360] 8/12/0 | +0.001 [-0.007, +0.008] 5/3/12 | +0.007 [-0.003, +0.016] 2/0/18 | -0.076 [-0.143, -0.010] 4/16/0 |
+| medium clean | +0.431 [+0.184, +0.679] 13/7/0 | +0.005 [-0.180, +0.191] 5/15/0 | +0.202 [+0.082, +0.323] 18/2/0 | +0.006 [-0.180, +0.192] 5/15/0 | -0.004 [-0.008, -0.000] 1/7/12 | +0.000 0/0/20 | -0.022 [-0.126, +0.081] 2/18/0 |
+| medium noisy | +0.382 [+0.145, +0.619] 13/7/0 | -0.057 [-0.090, -0.024] 2/18/0 | +0.295 [+0.136, +0.453] 19/1/0 | -0.047 [-0.080, -0.015] 3/17/0 | -0.015 [-0.032, +0.002] 3/8/9 | +0.000 0/0/20 | -0.044 [-0.096, +0.007] 4/16/0 |
+| medium drift | +0.436 [+0.190, +0.683] 15/5/0 | +0.035 [-0.179, +0.249] 7/13/0 | +0.303 [+0.157, +0.449] 20/0/0 | +0.003 [-0.223, +0.229] 5/15/0 | +0.007 [-0.012, +0.025] 6/6/8 | +0.007 [-0.007, +0.021] 1/0/19 | -0.038 [-0.167, +0.091] 3/17/0 |
+| medium hard | +0.334 [+0.102, +0.566] 15/5/0 | -0.029 [-0.074, +0.016] 8/12/0 | +0.489 [+0.272, +0.707] 20/0/0 | -0.029 [-0.069, +0.011] 7/13/0 | -0.004 [-0.020, +0.012] 5/7/8 | +0.005 [-0.001, +0.011] 3/0/17 | -0.080 [-0.149, -0.011] 4/16/0 |
+| large clean | +0.175 [-0.071, +0.421] 13/7/0 | -0.041 [-0.196, +0.115] 4/16/0 | +0.254 [+0.086, +0.422] 18/2/0 | -0.037 [-0.192, +0.119] 5/15/0 | -0.007 [-0.014, -0.001] 2/9/9 | +0.000 0/0/20 | +0.033 [-0.119, +0.186] 4/16/0 |
+| large noisy | +0.178 [-0.042, +0.398] 11/9/0 | -0.074 [-0.185, +0.037] 5/15/0 | +0.271 [+0.149, +0.394] 19/1/0 | -0.084 [-0.232, +0.063] 5/15/0 | -0.007 [-0.014, -0.000] 6/11/3 | +0.000 0/0/20 | -0.020 [-0.125, +0.084] 3/17/0 |
+| large drift | +0.185 [-0.063, +0.433] 14/6/0 | -0.013 [-0.182, +0.156] 8/12/0 | +0.338 [+0.155, +0.521] 20/0/0 | -0.022 [-0.190, +0.145] 8/12/0 | +0.007 [-0.009, +0.023] 8/8/4 | +0.005 [-0.003, +0.012] 3/1/16 | +0.071 [-0.086, +0.228] 5/15/0 |
+| large hard | +0.200 [-0.076, +0.476] 12/8/0 | -0.104 [-0.235, +0.027] 3/17/0 | +0.432 [+0.262, +0.602] 20/0/0 | -0.111 [-0.278, +0.057] 3/17/0 | -0.022 [-0.064, +0.020] 9/7/4 | +0.004 [-0.002, +0.010] 3/0/17 | +0.034 [-0.100, +0.169] 5/15/0 |
+
+Share of oracle-knows-rules (mean [95% interval]): learner 0.75-0.86, B7-all 0.84-0.94, all 0.86-0.94 (per condition within 0.03 of B7-all, either side).
+
+Interaction of B9 with B7: (B7+B9 - B7-all) - (B9 alone - learner), per world: -0.084 to +0.062 over the 12 conditions, every interval contains 0 (widest [-0.384, +0.267], medium drift). With B7 on, experiments still add sequence rules (large clean 81 -> 176, large noisy 103 -> 174 per 20 worlds; 0 wrong) but the rule answers barely move (4153 -> 4313, 3781 -> 4290), and they take energy from the formula families that the fitted constants serve (energy share on formula 0.187 -> 0.172 medium clean, 0.162 -> 0.160 medium hard; on sequence and compose 0.195 -> 0.216).
+
+### Rules, report seeds (20 worlds pooled per cell)
+
+Stale = live at the end of the life and right on fewer than 90% of 50 fresh tasks of its signature (family) then. A retirement counts as "of a stale rule" when the rule was right on fewer than 90% of fresh tasks at the moment it was retired.
+
+| condition | arm | seq rules (wrong at acceptance) | constants (wrong) | stale at end | retired (of a stale rule / of a rule still right) | rule answers (right by the checker) |
+|---|---|---|---|---|---|---|
+| medium drift | B7-all | 54 (0) | 57 (0) | 8 | 0 | 2102 (91.4%) |
+| medium drift | B7+retire | 53 (0) | 59 (0) | 5 | 3 (3 / 0) | 2093 (92.6%) |
+| medium drift | all | 88 (0) | 65 (0) | 4 | 4 (4 / 0) | 2040 (92.2%) |
+| medium hard | B7-all | 49 (0) | 60 (0) | 10 | 0 | 1797 (91.8%) |
+| medium hard | B7+retire | 49 (0) | 62 (0) | 6 | 4 (4 / 0) | 1819 (92.0%) |
+| large drift | B7-all | 97 (0) | 111 (0) | 25 | 0 | 3796 (91.1%) |
+| large drift | B7+retire | 97 (0) | 116 (0) | 14 | 11 (11 / 0) | 3854 (93.1%) |
+| large drift | all | 198 (0) | 115 (0) | 15 | 13 (13 / 0) | 4156 (93.2%) |
+| large hard | B7-all | 106 (0) | 119 (0) | 25 | 0 | 3151 (91.7%) |
+| large hard | B7+retire | 106 (0) | 125 (0) | 15 | 10 (10 / 0) | 3157 (92.2%) |
+| large hard | all | 177 (0) | 130 (0) | 15 | 15 (15 / 0) | 3515 (92.1%) |
+| medium drift60 | B7-all | 82 (0) | 66 (0) | 30 | 0 | 1955 (88.2%) |
+| medium drift60 | B7+retire | 83 (0) | 74 (0) | 14 | 21 (21 / 0) | 1986 (90.5%) |
+| medium drift60 | all | 118 (0) | 78 (1) | 13 | 25 (25 / 0) | 2142 (91.3%) |
+| large drift60 | B7-all | 150 (0) | 126 (0) | 53 | 0 | 4232 (89.3%) |
+| large drift60 | B7+retire | 147 (0) | 138 (0) | 25 | 38 (38 / 0) | 4101 (92.1%) |
+| large hard60 | B7-all | 136 (0) | 127 (1) | 57 | 0 | 3182 (89.1%) |
+| large hard60 | B7+retire | 136 (0) | 143 (0) | 32 | 35 (35 / 0) | 3181 (90.3%) |
+
+No retirement in any clean or noisy condition (0 in 6 conditions x 20 worlds for every arm with retirement): in those worlds a rule the guard accepted is never contradicted by most of its recent answers. Over all report runs, 351 retirements, all of rules that were stale at that moment, 0 of rules still right. The current learner (no B7) has no stale rules at the end even under strong drift (its sequence rules survived the regime changes here), so retirement alone changes nothing for it (learner+retire minus learner: +0.000, 20 ties, in all three strong-drift conditions). Wrong at acceptance: 0 sequence rules in every arm; 1 constant in "all" medium drift60 and 1 in B7-all large hard60 (both arms, of 66 to 144 constants), a B7 property under strong drift, not caused by retirement.
+
+Strong drift, reward per energy: B7-all 2.801 / 2.814 / 2.950 (medium drift60 / large drift60 / large hard60), B7+retire 2.824 / 2.821 / 2.960, all 2.860 / 2.819 / 2.927, oracle-knows-rules 3.249 / 3.333 / 3.515. B7+retire minus B7-all: **+0.023 [+0.005, +0.041] 7/0/13** (medium drift60), +0.007 [-0.014, +0.028] 9/3/8, +0.011 [-0.004, +0.025] 7/4/9; all minus B7-all: +0.059 [-0.173, +0.291], +0.005 [-0.178, +0.188], -0.023 [-0.180, +0.135].
+
+B3b changes (switches and prior conflicts) per 20 worlds: 37 (small clean) to 136 (large drift) with B7 (a prior conflict is not a world change, see Track B3b).
+
+### Verdict
+
+* **All skills together are not better than B7 alone.** All minus the current learner: +0.175 to +0.436, interval above 0 in 6 of 12 conditions (all four medium ones, small noisy and small drift; small clean -0.003 at the lower end), about the B7 gain. All minus B7-all: -0.104 to +0.076, interval containing 0 in 11 of 12, and below 0 in medium noisy (-0.057 [-0.090, -0.024], worse in 18 of 20). The gap to oracle-knows-rules stays +0.20 to +0.50 (oracle better in 18 to 20 of 20 worlds everywhere).
+* **B9 does not pay off with B7 on.** Its faster discovery still adds sequence rules (0 wrong) but no reward: B7+B9 minus B7-all -0.111 to +0.083, significantly negative in medium noisy (-0.047 [-0.080, -0.015]); the interaction with B7 is -0.084 to +0.062, no interval excludes 0. Most sequence rules duplicate `careful` (Track B7), and experiments take energy from the formula families where the fitted constants pay. At the B9 setting kappa 0.25 the loss was larger on the tuning seeds.
+* **B3b on top of B7: no gain, small measurable costs.** -0.022 to +0.007; below 0 by 0.004 to 0.007 in medium clean, large clean and large noisy (intervals just below 0). The B3b gain in its own world (+0.027) came from hard cells after visible changes; in World v2 the B7 parts already decide most of the rule cells.
+* **B8 on top of everything: mostly worse.** All + B8 minus all: -0.080 to +0.071; below 0 in small noisy (-0.080 [-0.126, -0.034]), small hard (-0.076 [-0.143, -0.010]) and medium hard (-0.080 [-0.149, -0.011]), worse in 14 to 18 of 20 worlds in every condition. Same as in Track B8: no lookahead benefit in a world that was not built around unlocks.
+* **Retirement works as a safety mechanism, with little reward effect.** It retired only stale rules (351 of 351, 0 false retirements, none in clean or noisy worlds) and roughly halved the stale rules left at the end under drift (8 -> 5, 10 -> 6, 25 -> 14, 25 -> 15; strong drift 30 -> 14, 53 -> 25, 57 -> 32), raising the share right of rule answers by 0.2 to 2.8 points; reward +0.000 to +0.009 in the standard conditions (no interval excludes 0) and +0.023 [+0.005, +0.041] in medium drift60 (the only significant gain), +0.007 and +0.011 elsewhere under strong drift. The A estimate already lowers the use of a stale rule through its reported failures, which is why removing it adds little reward.
+* **Conflicts found:** B9 competes with C/G for energy (above); B8's hybrid future term favours cheap options in the noisy and hard conditions (as in B8's `probe` setting); B3b's prior cut and B7's rule resets touch the same `discovered` cells (a rule acceptance or retirement now also clears that cell's B3b window, by design). Nothing broke a cap or the replay (tests below).
+
+Read with the limits: one author wrote the world, all the parts, their tuning and this measurement; two settings were tuned on seeds 101..120 (about 11 settings); 20 worlds per condition; the strong-drift conditions were added for retirement after seeing that the standard ones have few stale rules. The recommended controller for World v2 from these numbers is `rules_use = on` (with or without `rule_retirement = on`) and the other parts off; the profile is still useful as a test that everything runs together within the caps.
+
+### What is tested (not measured)
+
+`world2/tests_all.rs`, `world2/skills.rs`, `being_v2_all_tools_tests.rs`: with every part off the all-skills run writes exactly what `run_v2` writes (log digest), and a default being's genesis carries no B10 tag; the three published reports (`measure_world_v2`, `measure_rules_use`, `measure_experiment`) are byte-identical before and after the change (checked once by hand on this branch); the B3b model in World v2 equals `model.rs` in mode `Switch` bit for bit over 4000 observations with both mechanisms firing; the grant fails closed (no file, invalid file, valid file without the keys: everything off, 5 refusals), each part needs its own key, an existing being keeps its creation-time switches (refused otherwise); with everything on (lookahead off), two logged runs are identical, the state folded from the log equals the live state, every learner and experimenter decision replays, every rule and constant is re-derived from the examples logged before it (with the retired signatures' old examples left out), every retirement has a revision citing the rule's note and at least one failing outcome, every model change a revision, the profile note says what was on and what was refused; the kill switch stops the all-skills run (lookahead on) before the next step (30 steps when it turns on at the 31st check) and is logged; the caps hold together: live rules, energy per run, the experiment budget and the lookahead node cap, each with its refusal in the log; retirement retires (mostly stale) rules under drift, none in clean worlds, never when off; the observer's counts (steps, energy, experiments, rules accepted / retired, rule answers, model changes, stops, refusals) equal the run's and it writes nothing; tool level: the profile without the keys runs with every part off and audits five refusals, with the keys everything is on, a bad profile name writes nothing, KILL refuses the run and is audited while `being_observe` still answers; `being_observe` is allowed by `authorize()` for the thinker only when the owner lists it (also under KILL, as a read-only tool), denied otherwise and audited.
+
+### What B10 does not show
+
+A benefit of combining the parts (none was found); any world other than World v2; whether a different combination of settings (tuned jointly rather than one part at a time) would help; replay of lookahead decisions; real data or a real thinker.
+
 ## Not measured
 
 Real-life data of any kind (the free-text section above is also synthetic); the probabilities of the live ledger (`predict_make`/`predict_score` have not been run on real data; the S4 numbers above are synthetic sequences only; the older `self_ledger_snapshot` rows are not scored by any measurement); behaviour with

@@ -84,6 +84,38 @@ impl<'a> Source for Src2<'a> {
     }
 }
 
+/// B10: the World v2 source as the B7 learner sees it: where a live rule (or constant) covers a cell, `discovered`
+/// has the rule-record estimate (switch A); with A2, `discovered` where no rule covers the cell is an option that
+/// does not exist, so the tree gives it success 0 (it is never worth simulating).
+struct Src2U<'a> {
+    st: &'a State2,
+    use_: crate::being::world2::rules_use::UseCfg,
+}
+
+impl<'a> Source for Src2U<'a> {
+    fn base(&self, k: Key) -> Base {
+        use crate::being::world2::rules_use::{covered, rule_estimate};
+        use crate::being::world2::world::TYPE_CYCLE;
+        let s = strat(k.strat);
+        let mut e = self.st.model.estimate(k.fam as usize, k.diff, s);
+        if s == Strategy::Discovered {
+            let o = Offer2 { slot: 0, fam: k.fam as usize, ftype: TYPE_CYCLE[k.fam as usize % TYPE_CYCLE.len()], difficulty: k.diff, listed_cost: 0, listed_reward: 0 };
+            if self.use_.rule_only && !covered(self.st, &o) {
+                return Base::from_mean_sd(0.0, 0.0, e.cost_ratio, e.n);
+            }
+            if self.use_.rule_est {
+                if let Some(re) = rule_estimate(self.st, &o, self.use_.rule_k, &e) {
+                    e = re.est;
+                }
+            }
+        }
+        Base::from_mean_sd(e.p, e.sd, e.cost_ratio, e.n)
+    }
+    fn strategies(&self) -> &[Strategy] {
+        &STRATEGIES_EXT
+    }
+}
+
 pub struct Look2 {
     pub cfg: Option<LookCfg>,
     pub inner: Learner2,
@@ -95,6 +127,10 @@ pub struct Look2 {
 impl Look2 {
     pub fn new(cfg: Option<LookCfg>) -> Look2 {
         Look2 { cfg, inner: Learner2::default(), memory: Memory::default(), stats: LookStats::default(), refusals: vec![] }
+    }
+    /// B10: lookahead over the being's own learner (with its B7 switches: the tree reads the rule-aware estimates).
+    pub fn with_learner(cfg: Option<LookCfg>, inner: Learner2) -> Look2 {
+        Look2 { cfg, inner, memory: Memory::default(), stats: LookStats::default(), refusals: vec![] }
     }
     pub fn take_refusals(&mut self) -> Vec<Refusal> {
         std::mem::take(&mut self.refusals)
@@ -114,7 +150,12 @@ impl Chooser2 for Look2 {
         let mem = self.memory.before(st.step);
         self.memory.note(st.step, menu.clone(), cfg.memory);
         let rho0 = if st.total_cost >= SKIP_MIN_COST { st.total_reward as f64 / st.total_cost as f64 } else { 0.0 };
-        let Some(p) = plan::plan(&Src2 { st }, &cfg, &menu, &mem, &Sim::new(st.budget_left, 0, 0), st.step, rho0) else {
+        let planned = if self.inner.use_.any() {
+            plan::plan(&Src2U { st, use_: self.inner.use_ }, &cfg, &menu, &mem, &Sim::new(st.budget_left, 0, 0), st.step, rho0)
+        } else {
+            plan::plan(&Src2 { st }, &cfg, &menu, &mem, &Sim::new(st.budget_left, 0, 0), st.step, rho0)
+        };
+        let Some(p) = planned else {
             self.stats.fallbacks += 1;
             return self.inner.choose(st, offers);
         };
