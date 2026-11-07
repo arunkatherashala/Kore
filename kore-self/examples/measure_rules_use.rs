@@ -54,6 +54,8 @@ enum Pol {
     Learner,
     Use(UseCfg),
     OracleRules,
+    /// The B7 switches without any discovery pass (with A2: no `discovered` arm at all).
+    UseNoDisc(UseCfg),
 }
 
 fn run(p: Pol, cfg: &W2Cfg) -> W2Run {
@@ -65,6 +67,10 @@ fn run(p: Pol, cfg: &W2Cfg) -> W2Run {
             run_w2_with(cfg, &mut lc.learner(), EVERY, None, lc)
         }
         Pol::OracleRules => run_w2(cfg, &mut Oracle2::new(World2::new(cfg.clone()), true), 0, None),
+        Pol::UseNoDisc(u) => {
+            let lc = LearnerCfg { use_: u, ..LearnerCfg::default() };
+            run_w2_with(cfg, &mut lc.learner(), 0, None, lc)
+        }
     }
 }
 
@@ -170,7 +176,7 @@ fn tune() {
     }
 }
 
-const VARIANTS: [&str; 9] = ["A", "A+A2", "B", "C", "G", "A+A2+B", "A+A2+C", "A+A2+C+G", "A+A2+B+C+G"];
+const VARIANTS: [&str; 9] = ["A", "A+A2", "B", "A+B", "C", "G", "A+C+G", "A+B+C+G", "A+A2+B+C+G"];
 
 fn report(rule_k: u32, theta: u32) {
     let seeds: Vec<u64> = (1..=20).collect();
@@ -249,12 +255,46 @@ fn report(rule_k: u32, theta: u32) {
     }
 }
 
+/// What A2 does without rules: the learner with no `discovered` arm at all (no discovery), against the current learner.
+fn ablation(rule_k: u32, theta: u32) {
+    let seeds: Vec<u64> = (1..=20).collect();
+    let names = ["learner (current)", "A2 alone", "no discovered arm (A2, no discovery)", "A+A2", "A+C+G", "A+A2+C+G", "C+G, no discovered arm for seq (A2+C+G)"];
+    let pols = [
+        Pol::Learner,
+        Pol::Use(ucfg("A2", rule_k, theta)),
+        Pol::UseNoDisc(ucfg("A2", rule_k, theta)),
+        Pol::Use(ucfg("A+A2", rule_k, theta)),
+        Pol::Use(ucfg("A+C+G", rule_k, theta)),
+        Pol::Use(ucfg("A+A2+C+G", rule_k, theta)),
+        Pol::Use(ucfg("A2+C+G", rule_k, theta)),
+    ];
+    println!("### Ablation of A2 (seeds 1..20, n = 20; paired differences, mean [95% interval] better/worse/tie)\n");
+    println!("| condition | {} |", names[1..].iter().map(|n| format!("{n} - learner")).collect::<Vec<_>>().join(" | "));
+    println!("|---|{}", "---|".repeat(names.len() - 1));
+    let mut extra = vec![];
+    for cd in conds() {
+        let rs = rows(&cd, &seeds, &pols);
+        print!("| {} |", cd.name);
+        for i in 1..names.len() {
+            print!(" {} |", fmt_diff(&col(&rs, i), &col(&rs, 0)));
+        }
+        println!();
+        extra.push((cd.name, fmt_diff(&col(&rs, 3), &col(&rs, 2)), fmt_diff(&col(&rs, 5), &col(&rs, 2)), fmt_diff(&col(&rs, 5), &col(&rs, 4))));
+    }
+    println!("\n| condition | A+A2 - no discovered arm | A+A2+C+G - no discovered arm | A+A2+C+G - A+C+G |");
+    println!("|---|---|---|---|");
+    for (n, a, b, c) in extra {
+        println!("| {n} | {a} | {b} | {c} |");
+    }
+}
+
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "report".into());
     let rule_k: u32 = std::env::args().nth(2).and_then(|x| x.parse().ok()).unwrap_or(being::world2::rules_use::DEFAULT_RULE_K);
     let theta: u32 = std::env::args().nth(3).and_then(|x| x.parse().ok()).unwrap_or(400);
     match mode.as_str() {
         "tune" => tune(),
+        "ablation" => ablation(rule_k, theta),
         "dist" => {
             let v = std::env::args().nth(4).unwrap_or_else(|| "A+A2".into());
             let cname = std::env::args().nth(5).unwrap_or_else(|| "medium clean".into());
