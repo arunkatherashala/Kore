@@ -23,6 +23,7 @@ be burstier, messier and phrased differently.
 | Prediction: context-count vs frequency where context matters (Brier gain), synthetic | 20 seeds x 380 forecasts | frequency, uniform | +0.3936 [+0.3802, +0.4081] (mean over seeds, 95% bootstrap over seeds); better in 20 of 20 seeds | 2026-10-31 | c8fcade0 |
 | Prediction: any predictor beating uniform or frequency on pure noise, synthetic | 20 seeds x 380 forecasts | uniform, frequency | 0 of 20 seeds for either baseline; every learner slightly worse than uniform on average | 2026-10-31 | c8fcade0 |
 | Prediction: recency vs frequency under drift (Brier gain), synthetic | 20 seeds x 380 forecasts | frequency, uniform | +0.1937 [+0.1829, +0.2040]; better in 20 of 20 seeds | 2026-10-31 | c8fcade0 |
+| B9 experiments: rule targets covered per world, experiments minus passive discovery, World v2 large clean / B2 world budget 3000 (synthetic) | 20 worlds each | passive discovery (current learner); random probes with the same budget | +7.35 [+5.53, +9.17] / +1.70 [+1.02, +2.38]; reward per energy -0.044 [-0.316, +0.229] / -0.097 [-0.284, +0.090]; 0 wrong rules (Track B9) | 2026-11-06 | f4bb0f8a |
 
 ## How to reproduce
 
@@ -1537,6 +1538,83 @@ reached 150,000 steps of world 4 in 0.47 h (5,000-step calls of 6 to 25 s up to 
 code 239 s to 2,787 s up to 40,000); what still grows per call is the restart (log fold and memory, bugs 1 and 2, about
 15 KB per step), plus one full scan of the examples per new process (31 s at 64,411 examples).
 Note (merge of `restart-fix` and `rulescan-fix` on `brain-v3`): the restart growth mentioned here (bugs 1 and 2) is addressed by the Restart fix. The two fixes were measured separately; the combination has been tested (`cargo test`) but not measured in a long run.
+
+## Track B9: experiments (synthetic worlds, author-defined families)
+
+Everything here is a simulation written by one author: the worlds, the families, the 17-form grammar (plus the B5 transforms in the B5 world), the rewards and the learner. "Experiment" means: the being picks an offered sequence task because its revealed answer is expected to tell its own live rule hypotheses apart or give them the support the acceptance rule needs, not because it pays most. Rule acceptance is unchanged (same search, support, held-out split, never-applicable-and-wrong guard). Measured with `cargo run -p kore-self --example measure_experiment --offline --release -- report` (and `-- tune`, `-- report 1 100`), 2026-11-06, branch `experiment`, commit f4bb0f8a (built on ecf5f695). The whole report takes about 75 s. Report seeds 1..20, tuning seeds 101..120. Intervals: 95% t-interval of the mean over 20 worlds; paired differences on identical worlds, wins/losses/ties.
+
+Design (`kore-self/src/being/experiment.rs`, `experiment_menu.rs`, `world2/experiment.rs`). For each signature the being keeps every candidate of the search space that has never been applicable-and-wrong on its revealed examples (the live hypotheses), weight 2^-(size) x 0.5^(examples where it was not applicable). For an offered sequence task it sees the prefix and computes each hypothesis's prediction; the predictions split the hypotheses into groups (predict v / not applicable). Value = expected information gain of the revealed answer in bits (sum_v P(G_v) log2 1/(P(G_v)+P(N)) + P(N) log2 1/P(N)) + the expected share of the missing minimum support (3 training + 1 held-out) it supplies; 0 if the being's own accepted rule already applies to the prefix. The unchanged B1 planner proposes its choice; the experimenter scores (p x reward + kappa x value x reward) / estimated energy per (offered sequence task, strategy) with the planner's own estimates and runs the experiment only if that beats the best exploit option (highest p x reward / energy) and the budget allows it. Controls: random probe = a uniformly random offered sequence task (seeded), best strategy for it, paced to the same budget: either the experimenter's realised energy share in that world (random-matched) or the cap (random-cap). Ablations: split term only, support term only. Oracle-knows-rules as in World v2 / B2 (no rule oracle exists for the B5 world). "Targets": (family, difficulty) signatures of sequence families with an in-grammar rule (World v2), or the hidden families the search space can express (B2: 6, B5: 10). A target counts as covered when an accepted rule is right on at least 90% of fresh tasks (World v2: 50 tasks at acceptance; menu worlds: 100 tasks, as in B2/B5). Wrong rule at acceptance: applicable and wrong on fresh tasks of its signature (World v2: 50 at acceptance; menu worlds: 300). Energy share until covered: energy spent before the target was covered over the life budget, 1 if never, mean over targets.
+
+Tuning (seeds 101..120, World v2 medium clean and B2 budget 3000; objective fixed before the runs: the sum over the two worlds of the paired reward-per-energy difference against passive, ties broken by the energy share): kappa 0.1 / 0.25 / 0.5 / 1 / 2 x budget 50 / 100 / 200 per mille of the life budget. World v2 lost reward in all 15 settings (-0.065 to -0.323; 0.1/50 best), B2 changed by -0.073 to +0.096 (+0.096 [+0.023, +0.169] at 2/50); larger kappa and budget covered more targets (World v2 +1.35 to +10.7 per world). Chosen: kappa 0.25, budget 50 per mille (sum -0.057; 0.1/50 gave -0.059). One wrong rule appeared on the tuning seeds (World v2, kappa 1, budgets 100 and 200), none in any other setting.
+
+### Report seeds 1..20, kappa 0.25, budget 50 per mille (n = 20 worlds per row)
+
+True reward per energy, mean [95% interval]:
+
+| world | passive (current learner) | experiments | random-matched | random-cap | oracle-knows-rules |
+|---|---|---|---|---|---|
+| World v2 small clean | 2.777 [2.248, 3.307] | 2.878 [2.412, 3.344] | 2.708 [2.206, 3.210] | 2.685 [2.178, 3.191] | 3.496 [3.166, 3.827] |
+| World v2 medium clean | 2.755 [2.335, 3.176] | 2.734 [2.318, 3.151] | 2.668 [2.256, 3.080] | 2.659 [2.250, 3.068] | 3.389 [3.169, 3.610] |
+| World v2 medium noisy | 2.713 [2.292, 3.133] | 2.642 [2.267, 3.018] | 2.552 [2.148, 2.956] | 2.549 [2.144, 2.955] | 3.389 [3.169, 3.610] |
+| World v2 medium drift | 2.754 [2.324, 3.183] | 2.742 [2.326, 3.159] | 2.666 [2.240, 3.093] | 2.655 [2.232, 3.078] | 3.493 [3.277, 3.709] |
+| World v2 medium hard | 2.876 [2.447, 3.304] | 2.725 [2.315, 3.136] | 2.666 [2.244, 3.089] | 2.656 [2.237, 3.074] | 3.699 [3.474, 3.924] |
+| World v2 large clean | 2.987 [2.578, 3.396] | 2.943 [2.601, 3.286] | 2.922 [2.534, 3.310] | 2.919 [2.528, 3.309] | 3.416 [3.224, 3.608] |
+| World v2 large hard | 2.928 [2.527, 3.328] | 2.951 [2.601, 3.301] | 2.855 [2.491, 3.218] | 2.853 [2.490, 3.217] | 3.560 [3.383, 3.737] |
+| B2 world, budget 3000 | 3.943 [3.583, 4.303] | 3.846 [3.500, 4.193] | 3.877 [3.577, 4.178] | 3.920 [3.578, 4.261] | 4.272 [3.920, 4.624] |
+| B2 world, budget 600 | 3.142 [2.773, 3.512] | 2.998 [2.644, 3.353] | 3.097 [2.732, 3.462] | 3.073 [2.715, 3.431] | 4.270 [3.901, 4.639] |
+| B5 world, budget 3000 (composition on) | 3.654 [3.301, 4.007] | 3.547 [3.171, 3.923] | 3.646 [3.300, 3.991] | 3.638 [3.293, 3.984] | - |
+
+Paired differences, experiments minus the other arm, mean [95% interval] wins/losses/ties of 20:
+
+| world | reward/energy vs passive | vs random-matched | vs random-cap | regret (oracle minus arm): passive / experiments |
+|---|---|---|---|---|
+| World v2 small clean | +0.101 [-0.094, +0.296] 7/13/0 | +0.170 [+0.019, +0.322] 17/3/0 | +0.194 [+0.016, +0.371] 19/1/0 | +0.719 / +0.618 |
+| World v2 medium clean | -0.021 [-0.186, +0.144] 4/16/0 | +0.067 [-0.094, +0.227] 15/5/0 | +0.076 [-0.085, +0.236] 17/3/0 | +0.634 / +0.655 |
+| World v2 medium noisy | -0.070 [-0.230, +0.089] 7/13/0 | +0.090 [-0.113, +0.293] 17/3/0 | +0.093 [-0.112, +0.298] 17/3/0 | +0.677 / +0.747 |
+| World v2 medium drift | -0.011 [-0.179, +0.157] 5/15/0 | +0.076 [-0.085, +0.237] 18/2/0 | +0.088 [-0.073, +0.249] 19/1/0 | +0.740 / +0.751 |
+| World v2 medium hard | -0.150 [-0.373, +0.073] 6/14/0 | +0.059 [-0.174, +0.292] 17/3/0 | +0.070 [-0.165, +0.305] 16/4/0 | +0.823 / +0.973 |
+| World v2 large clean | -0.044 [-0.316, +0.229] 6/14/0 | +0.021 [-0.237, +0.280] 16/4/0 | +0.025 [-0.235, +0.285] 16/4/0 | +0.429 / +0.473 |
+| World v2 large hard | +0.024 [-0.173, +0.220] 8/12/0 | +0.097 [-0.091, +0.284] 11/9/0 | +0.098 [-0.090, +0.286] 11/9/0 | +0.632 / +0.608 |
+| B2 world, budget 3000 | -0.097 [-0.284, +0.090] 5/15/0 | -0.031 [-0.246, +0.184] 9/11/0 | -0.074 [-0.260, +0.113] 9/11/0 | +0.328 / +0.425 |
+| B2 world, budget 600 | -0.144 [-0.282, -0.006] 5/12/3 | -0.099 [-0.239, +0.042] 10/10/0 | -0.075 [-0.226, +0.077] 10/10/0 | +1.128 / +1.272 |
+| B5 world, budget 3000 | -0.107 [-0.332, +0.118] 9/11/0 | -0.099 [-0.321, +0.123] 11/9/0 | -0.092 [-0.311, +0.128] 11/9/0 | - |
+
+Rule learning (targets covered per world by the end of the life, and energy share until covered; means, paired differences with 95% intervals and wins/losses/ties):
+
+| world | targets | covered: passive / experiments / random-matched | covered, experiments minus passive | energy share until covered: passive / experiments / random-matched | energy share, experiments minus passive | minus random-matched |
+|---|---|---|---|---|---|---|
+| World v2 small clean | 10 in world 1 | 2.20 / 3.10 / 3.25 | +0.90 [-0.28, +2.08] 10/1/9 | 0.831 / 0.707 / 0.760 | -0.123 [-0.223, -0.024] 1/17/2 | -0.053 [-0.117, +0.011] |
+| World v2 medium clean | 15 in world 1 | 3.70 / 5.30 / 5.40 | +1.60 [+0.52, +2.68] 12/2/6 | 0.801 / 0.722 / 0.759 | -0.078 [-0.126, -0.031] 3/17/0 | -0.037 [-0.077, +0.002] |
+| World v2 medium noisy | 15 in world 1 | 2.35 / 3.70 / 3.85 | +1.35 [+0.63, +2.07] 13/1/6 | 0.884 / 0.814 / 0.837 | -0.070 [-0.098, -0.043] 3/17/0 | -0.023 [-0.052, +0.006] |
+| World v2 medium drift | 15 in world 1 | 3.85 / 5.75 / 5.70 | +1.90 [+0.82, +2.98] 14/2/4 | 0.800 / 0.708 / 0.764 | -0.092 [-0.140, -0.044] 2/18/0 | -0.056 [-0.097, -0.015] |
+| World v2 medium hard | 15 in world 1 | 1.75 / 3.30 / 3.45 | +1.55 [+0.88, +2.22] 15/1/4 | 0.906 / 0.829 / 0.857 | -0.076 [-0.107, -0.046] 2/18/0 | -0.027 [-0.057, +0.002] |
+| World v2 large clean | 35 in world 1 | 5.20 / 12.55 / 10.40 | +7.35 [+5.53, +9.17] 19/0/1 | 0.862 / 0.679 / 0.796 | -0.183 [-0.222, -0.144] 0/20/0 | -0.116 [-0.150, -0.083] |
+| World v2 large hard | 35 in world 1 | 4.35 / 8.10 / 6.05 | +3.75 [+2.21, +5.29] 18/2/0 | 0.898 / 0.793 / 0.865 | -0.105 [-0.139, -0.070] 1/19/0 | -0.071 [-0.098, -0.045] |
+| B2 world, budget 3000 | 6 | 3.10 / 4.80 / 3.50 | +1.70 [+1.02, +2.38] 15/1/4 | 0.581 / 0.374 / 0.536 | -0.207 [-0.297, -0.117] 4/16/0 | -0.162 [-0.240, -0.083] |
+| B2 world, budget 600 | 6 | 2.25 / 2.35 / 2.45 | +0.10 [-0.16, +0.36] 4/2/14 | 0.838 / 0.852 / 0.839 | +0.014 [-0.013, +0.041] 8/7/5 | +0.013 [-0.020, +0.046] |
+| B5 world, budget 3000 | 10 | 2.75 / 5.60 / 3.20 | +2.85 [+1.61, +4.10] 17/1/2 | 0.806 / 0.617 / 0.802 | -0.189 [-0.260, -0.118] 1/19/0 | -0.184 [-0.260, -0.109] |
+
+Mean step count at coverage (the life's step count if never), passive -> experiments: World v2 372 -> 305 (small), 718 -> 606 (medium clean), 1759 -> 1291 (large clean); B2 3000: 655 -> 352; B5: 923 -> 602. Experiments per world: 14 (small), 27 to 30 (medium), 62 to 65 (large), 28 (B2 3000), 7 (B2 600), 31 (B5); energy share spent on them 0.047 to 0.050 (the cap is 0.050 of the life budget; the budget refused 307 to 2,120 further wanted experiments per condition over 20 worlds).
+
+Wrong rules. Rules accepted (all 20 worlds) / wrong at acceptance, passive vs experiments: World v2 44/0 vs 62/0, 77/0 vs 111/0, 54/0 vs 81/0, 89/0 vs 126/0, 36/0 vs 70/0, 104/0 vs 254/0, 92/0 vs 169/0; B2 3000 99/0 vs 141/0, B2 600 75/0 vs 78/0, B5 81/0 vs 147/0. Random arms, ablations and the secondary setting below: 0 wrong as well. **No wrong rule was accepted in any report arm**; the only wrong rule seen in this track was on the tuning seeds at kappa 1 (see Tuning).
+
+What the value is made of. Mean value of a chosen experiment: 0.16 to 0.29 bits of expected split plus 0.06 to 0.16 of expected support. Only 0 to 3 experiments per condition (of 140 to 1,251) actually rejected a live hypothesis of the plain grammar in the clean worlds; in the noisy conditions 65, 66 and 126 did, mostly a told-wrong answer rejecting a right hypothesis (feedback noise, see World v2 finding 5). The split term mostly measures "the leading hypotheses apply to this prefix and could be refuted" (P(N) against the rest), not competition between applicable rules: with 3 spare equations competing forms are rarely applicable to the same prefix. Ablations, experiments minus split-only / minus support-only, targets covered: World v2 large clean +1.75 [+0.80, +2.70] / +2.90 [+1.14, +4.66]; medium clean +0.45 [+0.04, +0.87] / +0.20 [-0.51, +0.91]; B2 3000 +0.25 [-0.15, +0.65] / +0.20 [-0.40, +0.80]; B5 +0.55 [-0.19, +1.29] / -0.35 [-1.86, +1.16]; in the noisy and hard World v2 conditions the full value is not better than either part (intervals include 0). Reward: no ablation differs significantly from the full value.
+
+Secondary setting, not chosen by the tuning rule (kappa 1, budget 100 per mille; on the tuning seeds it lost -0.255 [-0.482, -0.029] reward per energy in World v2 medium clean and gained +0.040 in B2). Report seeds 1..20, experiments minus passive, reward per energy: small -0.228 [-0.524, +0.068], medium clean -0.049 [-0.291, +0.193], noisy +0.069 [-0.172, +0.310], drift -0.108 [-0.383, +0.168], hard +0.042 [-0.229, +0.314], large clean -0.067 [-0.358, +0.224], large hard +0.072 [-0.174, +0.319], B2 3000 +0.072 [-0.044, +0.188], B2 600 -0.042 [-0.156, +0.073], B5 +0.037 [-0.072, +0.147] (none significant). Targets covered: +3.25 (small), +7.95 (medium clean: 11.65 of 15 against 3.70), +5.25, +8.00, +5.80, +20.45 (large clean: 25.65 of 35 against 5.20), +12.95, +2.60 (B2 3000: 5.70 of 6 against 3.10), +0.30 (B2 600, interval includes 0), +5.75 (B5: 8.50 of 10 against 2.75); energy share until covered -0.26 to -0.49 except B2 600 (-0.055). Against random-matched it covers more in every condition but B2 600 and earns more in 12 to 18 of 20 worlds (significant in medium noisy +0.314 [+0.063, +0.564], medium hard +0.370 [+0.098, +0.642], large hard +0.250 [+0.043, +0.458] and B2 600 +0.115 [+0.010, +0.220]). 0 wrong rules (523 rules in World v2 large clean).
+
+### Verdict
+
+* **Rules are learned faster, and more of them**: in 10 of 10 conditions experiments covered more targets than passive discovery on average (interval above 0 in 8) and reached them with less energy (interval below 0 in 9), with 0 wrong rules in every arm. In the B2 world at budget 600 there is no effect (7 experiments per world).
+* **Against random probes with the same budget**: in the menu worlds (B2 3000, B5) and the large World v2 conditions the information-gain choice covers clearly more (+1.25 to +2.40 targets); in the small and medium World v2 conditions random probes cover as many (differences -0.25 to +0.35, intervals include 0) but earn less (experiments earn more in 15 to 19 of 20 worlds, significant only in small clean).
+* **It does not earn more**: at the tuned setting reward per energy against passive is within [-0.373, +0.296] everywhere, the point estimate is negative in 8 of 10 conditions and significantly negative in the B2 world at budget 600 (-0.144 [-0.282, -0.006]); regret to oracle-knows-rules is not reduced. The extra rules are not turned into reward because the planner barely uses rules (World v2 finding 1; that is the subject of B7) while experiments cost about 5% of the energy. The secondary setting learns far more rules (+8 to +20 targets in medium and large World v2) at no measured reward cost or gain. **Negative result for reward, positive for rule-learning speed.**
+
+### What is tested (not measured)
+
+`kore-self/src/being/tests_b9.rs`, `kore-self/src/being_v2_exp_tools_tests.rs`: the value of information (split, support, resolved signatures, verdict kept/rejected), the incremental hypothesis cache equals a fresh one; the decision obeys kappa, the energy share and the count (zero budget = never); experiments off by default: with a zero budget the experimenter makes exactly the current learner's decisions over whole lives in World v2 and in both menu worlds (identical records and state), plain `run_v2` logs are unchanged and carry no experiment records, the B9 measurement runner reproduces the B2 runner; controller.txt keys `experiments`, `max_experiment_energy_pm`, `max_experiments_per_run` (default off and 0, hard maxima 500 and 5000; bad, repeated or out-of-range values make the file unparseable, fail closed); determinism of two logged runs; replay from the log alone of every experimenter decision (400 of 400), of the learner's own decisions by the existing replay and of every rule; each experiment has a note and a revision citing its decision, outcome and note events with the predicted split and the kept and rejected hypotheses; each rule resting on an experiment's example has a credit revision citing the rule and the experiment notes; budget refusals are `controller_refusal` events; KILL stops an experiment run before the next step (checked before every step) and a KILL file refuses it at the tool; tool: experiments refused and audited unless `experiments = on` with a budget, then logged and replayed in `being_status_v2`; the experiment sources name no hidden world parameter (the core names no world at all).
+
+### What B9 does not show
+
+No reward gain; the hypothesis space, the families, the worlds and the oracle are the author's; experiments only choose among offered tasks (no free probe action exists in these worlds); the split term rarely separates applicable rules (the acceptance guard already makes forms rarely applicable to the same prefix); under feedback noise experiments can reject a right hypothesis because the told answer was wrong; the first world's logged loop does not run experiments (measured in memory with the same engine); 20 worlds per condition, one budget per World v2 size, a tuning grid over two worlds only.
 
 ## Not measured
 
