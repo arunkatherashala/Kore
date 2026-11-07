@@ -174,6 +174,8 @@ impl Controller {
                 "experiments" => c.experiments = parse_bool(v).ok_or_else(|| format!("line {n}: 'experiments' needs on or off"))?,
                 "max_experiment_energy_pm" => c.max_experiment_energy_pm = num(HARD_EXP_PM as u64)? as u32,
                 "max_experiments_per_run" => c.max_experiments_per_run = num(HARD_EXP_N)?,
+                // B8 keys (planning ahead) are read by `lookahead::ctl`; here they are only validated
+                _ if super::lookahead::ctl::is_key(k) => super::lookahead::ctl::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 _ => return Err(format!("line {n}: unknown key '{k}'")),
             }
             seen.push(k);

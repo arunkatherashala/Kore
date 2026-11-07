@@ -18,6 +18,8 @@ pub mod discover_scan;
 pub mod experiment;
 pub mod experiment_menu;
 pub mod measure_b9;
+/// Track B8: planning ahead (opt-in; see lookahead/mod.rs).
+pub mod lookahead;
 pub mod measure;
 pub mod measure_b5;
 pub mod measure_b6;
