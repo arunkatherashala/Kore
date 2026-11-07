@@ -9,6 +9,7 @@
 //! It uses only observable offer features and the log-derived state.
 
 use super::engine::State2;
+use super::rules_use::{covered, rule_estimate, RuleEst, UseCfg};
 use super::world::FType;
 use crate::being::planner::{DEFAULT_BETA, DEFAULT_SKIP_FRAC, SKIP_MIN_COST};
 use crate::being::solver::{Strategy, STRATEGIES_EXT};
@@ -75,11 +76,13 @@ pub fn plain(name: &str, why: &str, act: Act2, p: f64, score: f64) -> Choice2 {
 pub struct Learner2 {
     pub beta: f64,
     pub skip_frac: f64,
+    /// Track B7 switches (`rules_use.rs`); off by default. Only `rule_est` changes what the planner computes.
+    pub use_: UseCfg,
 }
 
 impl Default for Learner2 {
     fn default() -> Self {
-        Learner2 { beta: DEFAULT_BETA, skip_frac: DEFAULT_SKIP_FRAC }
+        Learner2 { beta: DEFAULT_BETA, skip_frac: DEFAULT_SKIP_FRAC, use_: UseCfg::default() }
     }
 }
 
@@ -96,6 +99,8 @@ pub struct Cand2 {
     pub score: f64,
     pub mean_score: f64,
     pub affordable: bool,
+    /// B7 A: the rule record the estimate of `discovered` came from.
+    pub rule: Option<RuleEst>,
 }
 
 impl Learner2 {
@@ -103,7 +108,17 @@ impl Learner2 {
         let mut v = vec![];
         for o in offers {
             for &s in STRATEGIES_EXT.iter() {
-                let e = st.model.estimate(o.fam, o.difficulty, s);
+                if self.use_.rule_only && s == Strategy::Discovered && !covered(st, o) {
+                    continue;
+                }
+                let mut e = st.model.estimate(o.fam, o.difficulty, s);
+                let mut rule = None;
+                if self.use_.rule_est && s == Strategy::Discovered {
+                    if let Some(re) = rule_estimate(st, o, self.use_.rule_k, &e) {
+                        e = re.est;
+                        rule = Some(re);
+                    }
+                }
                 let cost_est = (o.listed_cost as f64 * e.cost_ratio).max(1.0);
                 let pu = (e.p + self.beta * e.sd).min(1.0);
                 v.push(Cand2 {
@@ -116,6 +131,7 @@ impl Learner2 {
                     score: o.listed_reward as f64 * pu / cost_est,
                     mean_score: o.listed_reward as f64 * e.p / cost_est,
                     affordable: cost_est.round() as i64 <= st.budget_left,
+                    rule,
                 });
             }
         }
@@ -142,17 +158,28 @@ impl Chooser2 for Learner2 {
             .iter()
             .map(|c| {
                 let o = offers.iter().find(|o| o.slot == c.slot).expect("candidate of an offer");
-                json!({
+                let mut a = json!({
                     "slot": c.slot, "family": o.fam, "type": o.ftype.name(), "difficulty": o.difficulty, "strategy": c.strategy.name(),
                     "listed_cost": o.listed_cost, "listed_reward": o.listed_reward, "n_cell": c.n, "p_success": r3(c.p), "uncertainty_sd": r3(c.sd),
                     "est_energy": r3(c.cost_est), "mean_reward_per_energy": r3(c.mean_score), "score": r3(c.score), "affordable": c.affordable,
-                })
+                });
+                if let Some(r) = &c.rule {
+                    a["estimate_from_rule"] = json!({
+                        "rule_id": r.rule_id, "rule_event": r.event_id, "support": r.support, "missed": r.missed, "answered_since": r.post_n, "reported_right_since": r.post_succ,
+                        "prior_p": r3(r.prior_p), "prior_weight": r3(r.prior_k),
+                    });
+                }
+                a
             })
             .collect();
         let rationale = json!({
             "policy": LEARNER_NAME, "learner": "B1 world model (model.rs, mode off) keyed by family, B1 planner (planner.rs)", "beta": self.beta, "skip_frac": self.skip_frac,
             "reported_reward_per_energy": r3(rate), "attempts_in_model": st.model.attempts(), "alternatives": alts,
         });
+        let mut rationale = rationale;
+        if self.use_.any() {
+            rationale["rules_in_use"] = json!({ "rule_estimate": self.use_.rule_est, "robust_milli": self.use_.robust_milli, "fitted_constants": self.use_.fit_const, "rule_prior_weight_cap": self.use_.rule_k });
+        }
         if skip {
             return Some(Choice2 {
                 act: Act2::Skip,

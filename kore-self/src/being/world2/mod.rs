@@ -14,7 +14,10 @@ pub mod learner;
 pub mod measure;
 pub mod model;
 pub mod replay;
+pub mod rules_use;
 pub mod solve;
 pub mod world;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_use;

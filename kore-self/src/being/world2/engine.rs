@@ -15,6 +15,7 @@
 
 use super::learner::{Act2, Choice2, Chooser2, Learner2, Offer2};
 use super::model::FamModel;
+use super::rules_use::{self, CExample, ConstRule, UseCfg};
 use super::solve::{self, sig2, sig2_split};
 use super::world::{FType, Task2, W2Cfg, World2, SKIP_COST, SOURCE2, TYPE_CYCLE};
 use crate::being::controller::{Limits, Refusal};
@@ -42,18 +43,20 @@ pub struct ArmStat {
 pub struct LearnerCfg {
     pub beta_milli: u32,
     pub skip_milli: u32,
+    /// Track B7 switches (all off by default; see `rules_use.rs`).
+    pub use_: UseCfg,
 }
 
 impl Default for LearnerCfg {
     fn default() -> Self {
         let l = Learner2::default();
-        LearnerCfg { beta_milli: (l.beta * 1000.0).round() as u32, skip_milli: (l.skip_frac * 1000.0).round() as u32 }
+        LearnerCfg { beta_milli: (l.beta * 1000.0).round() as u32, skip_milli: (l.skip_frac * 1000.0).round() as u32, use_: UseCfg::default() }
     }
 }
 
 impl LearnerCfg {
     pub fn learner(&self) -> Learner2 {
-        Learner2 { beta: self.beta_milli as f64 / 1000.0, skip_frac: self.skip_milli as f64 / 1000.0 }
+        Learner2 { beta: self.beta_milli as f64 / 1000.0, skip_frac: self.skip_milli as f64 / 1000.0, use_: self.use_ }
     }
 }
 
@@ -73,6 +76,10 @@ pub struct Outcome2 {
     pub clock: i64,
     pub event_id: String,
     pub example: Option<Example>,
+    /// The rule that answered (tag `rule_used`), if any.
+    pub rule_used: Option<String>,
+    /// B7 C: a revealed formula example (only logged with `fit_const` on).
+    pub cex: Option<CExample>,
 }
 
 impl Outcome2 {
@@ -98,6 +105,13 @@ pub struct State2 {
     pub arms: Vec<[ArmStat; 4]>,
     pub examples: Vec<Example>,
     pub rules: Vec<Rule>,
+    /// B7: reported (attempts, successes) of the attempts each rule answered, per (family, difficulty, rule id).
+    pub rule_post: HashMap<(usize, u8, String), (u64, u64)>,
+    /// B7 B: examples a robustly accepted rule missed at acceptance (rule id -> count; absent: 0).
+    pub rule_missed: HashMap<String, u32>,
+    /// B7 C: revealed formula examples and accepted constants.
+    pub cexamples: Vec<CExample>,
+    pub const_rules: Vec<ConstRule>,
     recent: VecDeque<String>,
     group_recent: HashMap<(usize, usize), VecDeque<String>>,
 }
@@ -141,6 +155,14 @@ impl State2 {
         if let Some(ex) = &o.example {
             self.examples.push(ex.clone());
         }
+        if let Some(cx) = &o.cex {
+            self.cexamples.push(cx.clone());
+        }
+        if let Some(r) = &o.rule_used {
+            let e = self.rule_post.entry((fam, o.difficulty.clamp(1, 5), r.clone())).or_default();
+            e.0 += 1;
+            e.1 += (o.result == "correct") as u64;
+        }
         self.model.observe(fam, o.difficulty, s, o.result == "correct", o.listed, o.cost);
         if fam >= self.arms.len() {
             self.arms.resize(fam + 1, [ArmStat::default(); 4]);
@@ -171,8 +193,20 @@ impl State2 {
         true
     }
 
+    /// B7 C: take an accepted constant in; the `discovered` cells of its family start over.
+    pub fn apply_const(&mut self, c: ConstRule) -> bool {
+        if self.const_rules.iter().any(|x| x.id == c.id) {
+            return false;
+        }
+        for d in 1..=5 {
+            self.model.reset_cell(c.fam, d, Strategy::Discovered);
+        }
+        self.const_rules.push(c);
+        true
+    }
+
     pub fn live_rules(&self) -> usize {
-        self.rules.iter().filter(|r| !r.retired).count()
+        self.rules.iter().filter(|r| !r.retired).count() + self.const_rules.len()
     }
 
     pub fn blocks(&self) -> Vec<discover::Form> {
@@ -216,7 +250,8 @@ impl State2 {
         let has = |t: &str| e.tags.split(',').any(|x| x == t);
         if e.kind == "note" && has("w2_genesis") && self.cfg.is_none() {
             if let (Some(c), Some(b), Some(s)) = (W2Cfg::from_tags(&e.tags), tag(&e.tags, "w2_beta_milli").and_then(|x| x.parse().ok()), tag(&e.tags, "w2_skip_milli").and_then(|x| x.parse().ok())) {
-                self.start(c, LearnerCfg { beta_milli: b, skip_milli: s }, e.event_id.clone());
+                let use_ = tag(&e.tags, "w2_use").and_then(UseCfg::parse).unwrap_or_default();
+                self.start(c, LearnerCfg { beta_milli: b, skip_milli: s, use_ }, e.event_id.clone());
             }
         } else if e.kind == "outcome" {
             if let Some(o) = outcome_from_event(e) {
@@ -224,7 +259,14 @@ impl State2 {
             }
         } else if e.kind == "note" && has("rule") && has("world2") {
             if let Some(r) = rule_from_event(e) {
+                if let Some(m) = tag(&e.tags, "missed").and_then(|x| x.parse::<u32>().ok()) {
+                    self.rule_missed.insert(r.id.clone(), m);
+                }
                 self.apply_rule(r);
+            }
+        } else if e.kind == "note" && has("const_rule") && has("world2") {
+            if let Some(c) = const_from_event(e) {
+                self.apply_const(c);
             }
         }
     }
@@ -243,6 +285,10 @@ pub fn outcome_from_event(e: &EventRow) -> Option<Outcome2> {
         }
         _ => None,
     };
+    let cex = match (t("x").and_then(|x| x.split(';').map(|y| y.parse().ok()).collect::<Option<Vec<i64>>>()), t("fkind"), t("revealed").and_then(|x| x.parse().ok()), fam) {
+        (Some(x), Some(k), Some(rv), Some(f)) => Some(CExample { event_id: e.event_id.clone(), fam: f, kind: k.to_string(), x, revealed: rv }),
+        _ => None,
+    };
     Some(Outcome2 {
         step,
         fam,
@@ -256,7 +302,21 @@ pub fn outcome_from_event(e: &EventRow) -> Option<Outcome2> {
         clock: t("clock")?.parse().ok()?,
         event_id: e.event_id.clone(),
         example,
+        rule_used: t("rule_used").map(|x| x.to_string()),
+        cex,
     })
+}
+
+/// A B7 constant from its note event (tags `const_rule`, `world2`, `rule_id`, `fam`, `g`, `train`, `val`, `missed`, `at_step`).
+pub fn const_from_event(e: &EventRow) -> Option<ConstRule> {
+    let t = |k: &str| tag(&e.tags, k);
+    let fam: usize = t("fam")?.parse().ok()?;
+    let g: i64 = t("g")?.parse().ok()?;
+    let id = t("rule_id")?.to_string();
+    if id != rules_use::const_rule_id(fam, g) {
+        return None;
+    }
+    Some(ConstRule { id, fam, g, train_ok: t("train")?.parse().ok()?, val_ok: t("val")?.parse().ok()?, wrong: t("missed")?.parse().ok()?, step: t("at_step")?.parse().ok()?, event_id: e.event_id.clone() })
 }
 
 pub fn genesis_event2(cfg: &W2Cfg, l: &LearnerCfg) -> (NewEvent, String) {
@@ -264,10 +324,16 @@ pub fn genesis_event2(cfg: &W2Cfg, l: &LearnerCfg) -> (NewEvent, String) {
     tags.extend(cfg.tags());
     tags.push(format!("w2_beta_milli:{}", l.beta_milli));
     tags.push(format!("w2_skip_milli:{}", l.skip_milli));
-    let text = format!(
+    if l.use_.any() {
+        tags.push(l.use_.tag());
+    }
+    let mut text = format!(
         "world v2 being created: seed {}, {} task families, budget {} energy units, feedback noise {} per mille, drift {} changes per 10000 energy, difficulty curve {}%, menu of {}; learner beta {:.3}, skip fraction {:.3}. Simulated world with author-defined families and rewards",
         cfg.seed, cfg.families, cfg.budget, cfg.noise_pm, cfg.drift_per_10k, cfg.curve_pct, cfg.menu, l.beta_milli as f64 / 1000.0, l.skip_milli as f64 / 1000.0
     );
+    if l.use_.any() {
+        text.push_str(&l.use_.words());
+    }
     let ev = NewEvent { source: SOURCE2.into(), occurred_at: iso_at(0), kind: "note".into(), text, tags, redacted: false };
     let id = event_id(&ev.source, &ev.occurred_at, &ev.text);
     (ev, id)
@@ -324,6 +390,13 @@ pub struct NewRule2 {
     pub revision: NewRevision,
 }
 
+/// B7 C: an accepted constant with its note and revision.
+pub struct NewConst2 {
+    pub rule: ConstRule,
+    pub event: NewEvent,
+    pub revision: NewRevision,
+}
+
 pub struct Engine2 {
     pub world: World2,
     pub state: State2,
@@ -337,6 +410,8 @@ pub struct Engine2 {
     pub scan: crate::being::discover_scan::ScanCache,
     /// true: rescan every example on every pass (the code before the rule scan fix; tests compare both).
     pub reference_scan: bool,
+    /// B7 B: incremental state of the robust search.
+    pub rscan: rules_use::RobustCache,
 }
 
 pub fn offers_of2(tasks: &[Task2]) -> Vec<Offer2> {
@@ -350,7 +425,7 @@ fn fin(x: f64) -> String {
 impl Engine2 {
     pub fn new(state: State2, limits: Option<Limits>) -> Engine2 {
         let world = World2::new(state.cfg.clone().expect("a started state"));
-        Engine2 { world, state, limits, refusals: vec![], refusals_total: vec![], refused: HashSet::new(), last_blocks: 0, max_candidates_seen: 0, scan: Default::default(), reference_scan: crate::being::discover_scan::reference_default() }
+        Engine2 { world, state, limits, refusals: vec![], refusals_total: vec![], refused: HashSet::new(), last_blocks: 0, max_candidates_seen: 0, scan: Default::default(), reference_scan: crate::being::discover_scan::reference_default(), rscan: Default::default() }
     }
 
     pub fn refuse(&mut self, r: Refusal) {
@@ -373,6 +448,11 @@ impl Engine2 {
         let label = ch.act.label();
         let budget0 = self.state.budget_left;
         let rules = self.state.rules.clone();
+        let use_ = self.state.learner.use_;
+        let consts = self.state.const_rules.clone();
+        let mut rule_cite: Option<String> = None;
+        let mut cex: Option<CExample> = None;
+        let mut rule_record: Option<String> = None;
         // act and check
         let (slot, strategy, oracle) = match ch.act {
             Act2::Attempt { slot, strategy } => (Some(slot), Some(strategy), false),
@@ -403,7 +483,7 @@ impl Engine2 {
                     (budget0, "unpaid".into(), format!("attempt task {} with {}: energy ran out before the answer ({budget0} left, {energy} needed)", v.id, label), tg, None, None)
                 } else {
                     let prop = match strategy {
-                        Some(s) => solve::attempt(&self.world, task, s, &rules),
+                        Some(s) => solve::attempt_c(&self.world, task, s, &rules, &consts),
                         None => solve::attempt_oracle(&self.world, task),
                     };
                     let fb = self.world.feedback(task, prop.answer);
@@ -430,9 +510,31 @@ impl Engine2 {
                         }
                     } else {
                         tg.push(format!("revealed:{}", fb.revealed));
+                        let fit = match v.ftype {
+                            FType::Formula => use_.fit_const,
+                            FType::Grid => use_.fit_grid,
+                            _ => false,
+                        };
+                        if let (true, false, Some(kind)) = (fit, oracle, rules_use::kind_of(v)) {
+                            tg.push(format!("x:{}", discover::terms_tag(&v.params)));
+                            tg.push(format!("fkind:{kind}"));
+                            cex = Some(CExample { event_id: String::new(), fam: v.fam, kind: kind.to_string(), x: v.params.clone(), revealed: fb.revealed });
+                        }
                     }
                     if let Some(r) = &prop.rule_id {
                         tg.push(format!("rule_used:{r}"));
+                        if use_.any() {
+                            // the record the rule use rests on, and the rule's own note as evidence of the decision
+                            let (ev, sup, miss) = match self.state.rules.iter().find(|x| &x.id == r) {
+                                Some(x) => (x.event_id.clone(), x.train_ok + x.val_ok, self.state.rule_missed.get(r).copied().unwrap_or(0)),
+                                None => consts.iter().find(|c| &c.id == r).map_or((String::new(), 0, 0), |c| (c.event_id.clone(), c.train_ok + c.val_ok, c.wrong)),
+                            };
+                            let (pn, ps) = self.state.rule_post.get(&(v.fam, v.difficulty.clamp(1, 5), r.clone())).copied().unwrap_or((0, 0));
+                            rule_record = Some(format!("rule_record:support{sup}/missed{miss}/used{pn}/reported_right{ps}"));
+                            if !ev.is_empty() {
+                                rule_cite = Some(ev);
+                            }
+                        }
                     }
                     let txt = format!("attempt task {} ({}) using {}: answer {}", v.id, v.prompt, prop.method, prop.answer);
                     (energy, res.into(), txt, tg, ex, prop.rule_id.clone())
@@ -448,7 +550,12 @@ impl Engine2 {
             (Some(f), Some(s)) => Some((f, s)),
             _ => None,
         };
-        let evidence = self.state.evidence(group);
+        let mut evidence = self.state.evidence(group);
+        if let Some(ev) = &rule_cite {
+            if !evidence.contains(ev) {
+                evidence.push(ev.clone());
+            }
+        }
         let chosen_txt = match (slot, truth.fam) {
             (Some(sl), Some(f)) => {
                 let v = &tasks[sl].view;
@@ -466,6 +573,9 @@ impl Engine2 {
         let mut atags = vec![format!("step:{step}"), format!("action:{label}")];
         if let Some(r) = &rule_used {
             atags.push(format!("rule_used:{r}"));
+        }
+        if let Some(rr) = &rule_record {
+            atags.push(rr.clone());
         }
         let aev = NewEvent { source: SOURCE2.into(), occurred_at: iso_at(t0), kind: "action".into(), text: format!("step {step}: {answer_text}"), tags: atags, redacted: false };
         let mut tags = vec![format!("step:{step}")];
@@ -532,6 +642,11 @@ impl Engine2 {
                 e.event_id = oev_id.clone();
                 e
             }),
+            rule_used: rule_used.clone(),
+            cex: cex.map(|mut c| {
+                c.event_id = oev_id.clone();
+                c
+            }),
         };
         self.state.apply(&outcome);
         Ok(Step2Out { outcome, truth, label, events: vec![dev, aev, oev], revision, prediction, resolved })
@@ -548,6 +663,8 @@ impl Engine2 {
 
     /// One discovery pass over the being's own revealed examples (as `Engine::discover_pass`, with the caps).
     pub fn discover_pass(&mut self) -> Vec<NewRule2> {
+        let theta = self.state.learner.use_.robust_milli;
+        let mut allowed_sigs: Option<usize> = None;
         let found: Vec<Found> = match self.limits.clone() {
             None => self.search_examples(&[], usize::MAX).found,
             Some(l) => {
@@ -559,12 +676,31 @@ impl Engine2 {
                 let o = self.search_examples(&blocks, l.max_candidates);
                 if o.truncated {
                     self.refuse(Refusal::new("max_search_candidates", l.max_candidates as u64, o.wanted as u64, format!("a discovery pass would try {} candidates; it stopped after {}", o.wanted, o.candidates)));
+                    // B7 B keeps to the signatures the capped search covered completely
+                    allowed_sigs = Some(o.candidates / discover::candidates_for(&blocks).len().max(1));
                 }
                 self.last_blocks = blocks.len();
                 self.max_candidates_seen = self.max_candidates_seen.max(o.candidates);
                 o.found
             }
         };
+        if theta > 0 {
+            // B7 B: plain grammar forms under the robust guard; composed candidates as found above
+            let mut sigs: Vec<u8> = self.state.examples.iter().map(|e| e.sig).collect();
+            sigs.sort_unstable();
+            sigs.dedup();
+            let keep: Vec<u8> = sigs.into_iter().take(allowed_sigs.unwrap_or(usize::MAX)).collect();
+            let mut all: Vec<(Found, u32)> = self.rscan.search(&self.state.examples, discover::K_TRAIN, discover::K_VAL, theta).into_iter().filter(|r| keep.contains(&r.found.sig)).map(|r| (r.found, r.wrong)).collect();
+            all.extend(found.into_iter().filter(|f| !f.xf.is_id()).map(|f| (f, 0)));
+            all.sort_by_key(|(f, _)| f.sig);
+            let mut out = vec![];
+            for (f, missed) in all {
+                if let Some(nr) = self.accept_found_m(&f, missed) {
+                    out.push(nr);
+                }
+            }
+            return out;
+        }
         let mut out = vec![];
         for f in found {
             if let Some(nr) = self.accept_found(&f) {
@@ -574,7 +710,67 @@ impl Engine2 {
         out
     }
 
+    /// B7 C: one pass of the constant search over the being's revealed formula examples.
+    pub fn const_pass(&mut self) -> Vec<NewConst2> {
+        if !self.state.learner.use_.fit_const && !self.state.learner.use_.fit_grid {
+            return vec![];
+        }
+        let theta = self.state.learner.use_.robust_milli;
+        let mut out = vec![];
+        for f in rules_use::search_const(&self.state.cexamples, discover::K_TRAIN, discover::K_VAL, theta) {
+            let id = rules_use::const_rule_id(f.fam, f.g);
+            if self.state.const_rules.iter().any(|c| c.id == id) {
+                continue;
+            }
+            if let Some(l) = &self.limits {
+                let live = self.state.live_rules();
+                if live >= l.max_live_rules {
+                    let cap = l.max_live_rules as u64;
+                    self.refuse(Refusal::new("max_live_rules", cap, live as u64 + 1, format!("constant {id} ({} = {}) for family f{:02} is verified but was not added: {live} rules are live", if TYPE_CYCLE[f.fam % TYPE_CYCLE.len()] == FType::Grid { "move rule" } else { "g" }, f.g, f.fam)));
+                    continue;
+                }
+            }
+            let at = iso_at(self.state.clock);
+            let grid = TYPE_CYCLE[f.fam % TYPE_CYCLE.len()] == FType::Grid;
+            let what = if grid { format!("grid family f{:02}: moves to {} neighbours (shortest path by breadth-first search under that move rule)", f.fam, f.g) } else { format!("formula family f{:02}: g = {}", f.fam, f.g) };
+            let text = format!(
+                "world v2 constant {id} for {what}; reproduced the revealed answer exactly on {} training and {} held-out logged examples{} (one integer fitted inside the author-defined task statement)", f.train_ok, f.val_ok, if f.wrong == 0 { " and missed none".to_string() } else { format!(" and missed {} (robust acceptance, Wilson lower bound {:.3})", f.wrong, rules_use::wilson_lb(f.train_ok + f.val_ok, f.train_ok + f.val_ok + f.wrong)) }
+            );
+            let tags = vec!["const_rule".to_string(), "world2".into(), format!("rule_id:{id}"), format!("fam:{}", f.fam), format!("g:{}", f.g), format!("train:{}", f.train_ok), format!("val:{}", f.val_ok), format!("missed:{}", f.wrong), format!("at_step:{}", self.state.step)];
+            let event = NewEvent { source: SOURCE2.into(), occurred_at: at.clone(), kind: "note".into(), text, tags, redacted: false };
+            let ev_id = event_id(&event.source, &event.occurred_at, &event.text);
+            let rule = ConstRule { id: id.clone(), fam: f.fam, g: f.g, train_ok: f.train_ok, val_ok: f.val_ok, wrong: f.wrong, step: self.state.step, event_id: ev_id.clone() };
+            let mut caused_by = f.cite.clone();
+            caused_by.push(ev_id);
+            let rationale = json!({
+                "rule_id": id, "family": f.fam, "constant_g": f.g, "training_examples_reproduced": f.train_ok, "held_out_examples_reproduced": f.val_ok, "examples_missed": f.wrong,
+                "robust_threshold_milli": theta, "cited_examples": f.cite.len(), "accepted_at_step": self.state.step,
+                "note": "examples are the answers the being was TOLD; with feedback noise some are wrong",
+            });
+            let n = (f.train_ok + f.val_ok + f.wrong) as f64;
+            let revision = NewRevision {
+                entity_type: "rule".into(),
+                key: format!("being/world2/rule/{id}"),
+                stance: if grid { format!("family f{:02}: move rule {} neighbours", f.fam, f.g) } else { format!("family f{:02}: g = {}", f.fam, f.g) },
+                confidence: (((f.train_ok + f.val_ok) as f64 + 1.0) / (n + 2.0)).clamp(0.0, 1.0),
+                rationale: rationale.to_string(),
+                supersedes: None,
+                valid_from: at,
+                author: "rule:being-discover".into(),
+                caused_by,
+            };
+            self.state.apply_const(rule.clone());
+            out.push(NewConst2 { rule, event, revision });
+        }
+        out
+    }
+
     fn accept_found(&mut self, f: &Found) -> Option<NewRule2> {
+        self.accept_found_m(f, 0)
+    }
+
+    /// `missed` > 0 only for B7 B (robust acceptance): the examples the form missed.
+    fn accept_found_m(&mut self, f: &Found, missed: u32) -> Option<NewRule2> {
         let nblocks = if f.xf.is_id() { 0 } else { self.last_blocks as u32 };
         let mut rule = Rule::new_x(f.sig, f.xf, f.form, f.train_ok, f.val_ok, self.state.step, nblocks);
         if self.state.rules.iter().any(|r| r.id == rule.id) {
@@ -590,14 +786,25 @@ impl Engine2 {
             }
         }
         let at = iso_at(self.state.clock);
-        let text = format!(
+        let mut text = format!(
             "world v2 rule {} for family f{fam:02} difficulty {d}: {}{}; coefficients fitted per task from its own prefix; reproduced the revealed next term exactly on {} training and {} held-out logged examples and was never applicable-and-wrong on them (search inside the author-defined grammar of discover.rs)",
             rule.id, if f.xf.is_id() { String::new() } else { format!("take {} of the prefix, then ", f.xf.words()) }, f.form.dsl(), f.train_ok, f.val_ok
         );
+        let theta = self.state.learner.use_.robust_milli;
+        if missed > 0 {
+            text = format!(
+                "world v2 rule {} for family f{fam:02} difficulty {d}: {}; coefficients fitted per task from its own prefix; reproduced the revealed next term exactly on {} training and {} held-out logged examples and missed it on {} (robust acceptance: Wilson lower bound {:.3} of the share right, threshold {:.3}; search inside the author-defined grammar of discover.rs)",
+                rule.id, f.form.dsl(), f.train_ok, f.val_ok, missed, rules_use::wilson_lb(f.train_ok + f.val_ok, f.train_ok + f.val_ok + missed), theta as f64 / 1000.0
+            );
+        }
         let mut tags = vec!["rule".to_string(), "world2".into(), format!("rule_id:{}", rule.id), format!("sig:{}", rule.sig), format!("form:{}", rule.form.code()), format!("train:{}", rule.train_ok), format!("val:{}", rule.val_ok), format!("at_step:{}", rule.step), format!("fam:{fam}"), format!("difficulty:{d}")];
         if !f.xf.is_id() {
             tags.push(format!("xf:{}", f.xf.code()));
             tags.push(format!("blocks:{nblocks}"));
+        }
+        if missed > 0 {
+            tags.push(format!("missed:{missed}"));
+            tags.push(format!("robust_milli:{theta}"));
         }
         let event = NewEvent { source: SOURCE2.into(), occurred_at: at.clone(), kind: "note".into(), text, tags, redacted: false };
         let ev_id = event_id(&event.source, &event.occurred_at, &event.text);
@@ -621,6 +828,9 @@ impl Engine2 {
             author: "rule:being-discover".into(),
             caused_by,
         };
+        if missed > 0 {
+            self.state.rule_missed.insert(rule.id.clone(), missed);
+        }
         self.state.apply_rule(rule.clone());
         Some(NewRule2 { rule, event, revision })
     }
@@ -739,6 +949,10 @@ pub fn run_v2(log: &mut VersionedLog, cfg: &Run2Cfg, policy: &Policy, chooser: O
                         pending.events.push(nr.event);
                         pending.revisions.push(nr.revision);
                         new_rules.push(nr.rule);
+                    }
+                    for nc in engine.const_pass() {
+                        pending.events.push(nc.event);
+                        pending.revisions.push(nc.revision);
                     }
                 }
                 for r in engine.take_refusals() {

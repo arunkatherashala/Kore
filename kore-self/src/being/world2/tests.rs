@@ -383,7 +383,7 @@ fn learner_chooses_exactly_what_the_b1_planner_chooses() {
         let o = Outcome { step, domain: slot.map_or(Domain::Arithmetic, |s| offers[s].0), task_id: "t".into(), difficulty: slot.map_or(1, |s| offers[s].1), correct: ok, reward, cost, budget_left: budget, clock, event_id: format!("e{step}"), strategy, listed_cost: slot.map_or(cost, |s| offers[s].2), skipped: slot.is_none(), example: None, rule_used: None };
         bs.apply(&o);
         let res = if slot.is_none() { "skip" } else if ok { "correct" } else { "wrong" };
-        let o2 = super::engine::Outcome2 { step, fam: slot.map(|s| offers[s].0.idx()), difficulty: o.difficulty, strategy, result: res.into(), reward, cost, listed: o.listed_cost, budget_left: budget, clock, event_id: o.event_id.clone(), example: None };
+        let o2 = super::engine::Outcome2 { step, fam: slot.map(|s| offers[s].0.idx()), difficulty: o.difficulty, strategy, result: res.into(), reward, cost, listed: o.listed_cost, budget_left: budget, clock, event_id: o.event_id.clone(), example: None, rule_used: None, cex: None };
         s2.apply(&o2);
     }
     assert!(bs.model.attempts() > 1000 && skips > 0, "both branches exercised: {} attempts, {skips} skips", bs.model.attempts());

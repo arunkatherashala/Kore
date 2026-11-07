@@ -14,6 +14,7 @@
 //! solver computed by an exact method (as in `solver.rs`).
 
 use super::world::{bfs, knap_exact, FType, FormulaKind, Task2, TaskView2, World2};
+use super::rules_use::{const_for, formula_answer, ConstRule};
 use crate::being::discover::{self, Rule};
 use crate::being::solver::Strategy;
 
@@ -49,8 +50,13 @@ pub fn slip_pm(s: Strategy, fam_slip: u64) -> u64 {
 
 /// Answer `task` with strategy `s`, slips included.
 pub fn attempt(w: &World2, task: &Task2, s: Strategy, rules: &[Rule]) -> Prop2 {
+    attempt_c(w, task, s, rules, &[])
+}
+
+/// As `attempt`, with the being's accepted constants (B7 C; empty: exactly `attempt`).
+pub fn attempt_c(w: &World2, task: &Task2, s: Strategy, rules: &[Rule], consts: &[ConstRule]) -> Prop2 {
     let v = &task.view;
-    let mut p = solve(v, s, rules);
+    let mut p = solve_c(v, s, rules, consts);
     if p.exact && w.slip_noise(v.step, v.slot) % 1000 < slip_pm(s, w.fams[v.fam].slip_pm) {
         p.answer += 1;
         p.method.push_str("+slip");
@@ -71,7 +77,20 @@ pub fn attempt_oracle(w: &World2, task: &Task2) -> Prop2 {
 }
 
 pub fn solve(v: &TaskView2, s: Strategy, rules: &[Rule]) -> Prop2 {
+    solve_c(v, s, rules, &[])
+}
+
+/// As `solve`; with B7 C, `discovered` on a formula task answers with the latest accepted constant of its family.
+pub fn solve_c(v: &TaskView2, s: Strategy, rules: &[Rule], consts: &[ConstRule]) -> Prop2 {
     let name = s.name();
+    if let (FType::Formula, Strategy::Discovered, Some(c)) = (v.ftype, s, const_for(consts, v.fam)) {
+        let a = formula_answer(v.formula == Some(FormulaKind::Fall), c.g, v.params[0]);
+        return Prop2 { answer: a, exact: true, method: format!("{name}/rule:{}:const-g{}", c.id, c.g), rule_id: Some(c.id.clone()) };
+    }
+    if let (FType::Grid, Strategy::Discovered, Some(c)) = (v.ftype, s, const_for(consts, v.fam)) {
+        let a = grid_bfs(v, c.g == 8);
+        return Prop2 { answer: a, exact: true, method: format!("{name}/rule:{}:bfs-{}", c.id, c.g), rule_id: Some(c.id.clone()) };
+    }
     let mk = |(a, e, m): (i64, bool, String)| Prop2 { answer: a, exact: e, method: format!("{name}/{m}"), rule_id: None };
     match (v.ftype, s) {
         (FType::Seq | FType::Compose, Strategy::Discovered) => {

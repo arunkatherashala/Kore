@@ -3,6 +3,8 @@
 
 use super::engine::{Engine2, LearnerCfg, State2, TrueRec};
 use super::learner::Chooser2;
+use super::rules_use::{formula_answer, ConstRule};
+use super::world::FormulaKind;
 use super::solve::sig2_split;
 use super::world::{W2Cfg, World2};
 use crate::being::controller::Limits;
@@ -29,6 +31,30 @@ pub struct W2Run {
     pub rules: Vec<RuleCheck>,
     pub refusals: usize,
     pub state: State2,
+    /// B7 C: accepted constants, checked like the rules.
+    pub consts: Vec<ConstCheck>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstCheck {
+    pub rule: ConstRule,
+    pub clock: i64,
+    pub wrong_at_accept: bool,
+    pub right_share_end: Option<f64>,
+}
+
+/// (applicable, right) of one constant on `n` fresh tasks of its family at `clock`.
+pub fn const_on_fresh(w: &World2, c: &ConstRule, clock: i64, n: u64) -> (u64, u64) {
+    let mut ok = 0;
+    for i in 0..n {
+        let t = w.task(2_000_000 + i, 0, c.fam, None, clock, 0x5EC_C4EC);
+        let a = match t.view.ftype {
+            super::world::FType::Grid => super::world::bfs(t.view.params[0] as usize, t.view.params[1] as usize, &t.view.params[2..], c.g == 8).unwrap_or(-1),
+            _ => formula_answer(t.view.formula == Some(FormulaKind::Fall), c.g, t.view.params[0]),
+        };
+        ok += t.check(a) as u64;
+    }
+    (n, ok)
 }
 
 impl W2Run {
@@ -68,12 +94,18 @@ pub fn rule_on_fresh(w: &World2, r: &Rule, clock: i64, n: u64) -> (u64, u64) {
 
 /// One life in World v2 with `chooser`, without a log.
 pub fn run_w2(cfg: &W2Cfg, chooser: &mut dyn Chooser2, discover_every: u64, limits: Option<Limits>) -> W2Run {
+    run_w2_with(cfg, chooser, discover_every, limits, LearnerCfg::default())
+}
+
+/// As `run_w2`, with the being's learner constants (the B7 switches act in the engine through them).
+pub fn run_w2_with(cfg: &W2Cfg, chooser: &mut dyn Chooser2, discover_every: u64, limits: Option<Limits>, learner: LearnerCfg) -> W2Run {
     let mut st = State2::default();
-    st.start(cfg.clone(), LearnerCfg::default(), "genesis".into());
+    st.start(cfg.clone(), learner, "genesis".into());
     let mut e = Engine2::new(st, limits);
     let (mut tr, mut rr, mut cost, mut steps) = (0i64, 0i64, 0i64, 0u64);
     let mut recs = vec![];
     let mut rules = vec![];
+    let mut consts = vec![];
     while let Ok(o) = e.step(chooser) {
         steps += 1;
         tr += o.truth.true_reward;
@@ -85,6 +117,10 @@ pub fn run_w2(cfg: &W2Cfg, chooser: &mut dyn Chooser2, discover_every: u64, limi
                 let (app, ok) = rule_on_fresh(&e.world, &nr.rule, e.state.clock, RULE_CHECK_TASKS);
                 rules.push(RuleCheck { rule: nr.rule, clock: e.state.clock, wrong_at_accept: ok < app, right_share_end: None });
             }
+            for nc in e.const_pass() {
+                let (app, ok) = const_on_fresh(&e.world, &nc.rule, e.state.clock, RULE_CHECK_TASKS);
+                consts.push(ConstCheck { rule: nc.rule, clock: e.state.clock, wrong_at_accept: ok < app, right_share_end: None });
+            }
         }
     }
     let end = e.state.clock;
@@ -92,5 +128,9 @@ pub fn run_w2(cfg: &W2Cfg, chooser: &mut dyn Chooser2, discover_every: u64, limi
         let (app, ok) = rule_on_fresh(&e.world, &rc.rule, end, RULE_CHECK_TASKS);
         rc.right_share_end = if app > 0 { Some(ok as f64 / app as f64) } else { None };
     }
-    W2Run { true_reward: tr, reported_reward: rr, cost, steps, skips: e.state.skips, recs, rules, refusals: e.refusals_total.len(), state: e.state }
+    for cc in &mut consts {
+        let (app, ok) = const_on_fresh(&e.world, &cc.rule, end, RULE_CHECK_TASKS);
+        cc.right_share_end = Some(ok as f64 / app.max(1) as f64);
+    }
+    W2Run { true_reward: tr, reported_reward: rr, cost, steps, skips: e.state.skips, recs, rules, refusals: e.refusals_total.len(), state: e.state, consts }
 }
