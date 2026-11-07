@@ -15,6 +15,7 @@
 #   STORE_EXE bench_kore_size.exe built from this branch
 #   GEN_DIR   kore-self/benches of the Digital Life checkout (generators)
 #   PY_STD    stdlib Python for the generators; PY_ENG Python with pyarrow + duckdb (optional)
+#   PY_SET    all (default) or ref = only SQLite, Parquet zstd (default level), DuckDB (docs/kore_speed_v4.md)
 set -e
 OUT=${1:?outdir}; SIZES=${2:-"10000 100000"}; SETS=${3:-"r u"}
 DL_EXE=${DL_EXE:-C:/Users/skathera/kw/target-ff2-dl/release/examples/dl_log_side.exe}
@@ -22,6 +23,7 @@ STORE_EXE=${STORE_EXE:-C:/Users/skathera/kw/target-ff2/release/examples/bench_ko
 GEN_DIR=${GEN_DIR:-C:/Users/skathera/kw/ff2-dl/kore-self/benches}
 PY_STD=${PY_STD:-C:/Users/skathera/Downloads/asistent/.venv/Scripts/python.exe}
 PY_ENG=${PY_ENG:-C:/Users/skathera/AppData/Local/miniconda3/envs/engines/python.exe}
+PY_SET=${PY_SET:-all}
 HERE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$OUT/data"
 load() { typeperf "\\Processor(_Total)\\% Processor Time" -sc 3 2>/dev/null | grep '^"[0-9]' | sed "s/^/$1 /" >> "$OUT/load.txt" || true; }
@@ -43,7 +45,7 @@ for set in $SETS; do
     echo "== $set $n: store default vs v4"; "$STORE_EXE" --log "$w/f1/log/bench/log" --work "$w/store" --out "$OUT/store_${set}_$n.json" --reps $reps --lookups $lk --dump "$w/dump" --max-level 19
     rm -rf "$w/store"
     load "mid_${set}_$n"
-    echo "== $set $n: other formats"; "$PY_ENG" -I "$HERE/py_side.py" --dump "$w/dump" --work "$w/py" --out "$OUT/py_${set}_$n.json" --reps $reps --lookups $lk --scan-lookups $slk
+    echo "== $set $n: other formats"; "$PY_ENG" -I "$HERE/py_side.py" --dump "$w/dump" --work "$w/py" --out "$OUT/py_${set}_$n.json" --reps $reps --lookups $lk --scan-lookups $slk --set "$PY_SET"
     load "end_${set}_$n"
     rm -rf "$w"
   done

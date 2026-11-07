@@ -67,7 +67,9 @@ def main():
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--lookups", type=int, default=20)
     ap.add_argument("--scan-lookups", type=int, default=None, help="lookups for full-scan formats (CSV); default = --lookups")
+    ap.add_argument("--set", choices=["all", "ref"], default="all", help="ref = only SQLite, Parquet zstd (default level) and DuckDB (reference rows of docs/kore_speed_v4.md)")
     a = ap.parse_args()
+    ALL = a.set == "all"
     shutil.rmtree(a.work, ignore_errors=True)
     os.makedirs(a.work)
     cols = json.load(open(os.path.join(a.dump, "columns.json")))
@@ -119,98 +121,99 @@ def main():
     def check_proj(got):
         assert dict(got) == want_proj, "projection mismatch"
 
-    # ---------------------------------------------------------------- CSV and compressed CSV
-    cd = os.path.join(a.work, "csv")
-    os.makedirs(cd)
+    if ALL:
+        # ---------------------------------------------------------------- CSV and compressed CSV
+        cd = os.path.join(a.work, "csv")
+        os.makedirs(cd)
 
-    def cell(v):
-        if v is None:
-            return ""
-        if v is True:
-            return "1"
-        if v is False:
-            return "0"
-        return v
+        def cell(v):
+            if v is None:
+                return ""
+            if v is True:
+                return "1"
+            if v is False:
+                return "0"
+            return v
 
-    t0 = time.perf_counter()
-    for t, rows in tables.items():
-        with open(os.path.join(cd, f"{t}.csv"), "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow([c[0] for c in schema[t]])
-            for r in rows:
-                w.writerow([cell(v) for v in r])
-    csv_write = time.perf_counter() - t0
-    csv_files = {t: os.path.join(cd, f"{t}.csv") for t in tables}
+        t0 = time.perf_counter()
+        for t, rows in tables.items():
+            with open(os.path.join(cd, f"{t}.csv"), "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow([c[0] for c in schema[t]])
+                for r in rows:
+                    w.writerow([cell(v) for v in r])
+        csv_write = time.perf_counter() - t0
+        csv_files = {t: os.path.join(cd, f"{t}.csv") for t in tables}
 
-    def csv_full(opener):
-        out = {}
-        for t, p in csv_files.items():
-            with opener(p) as f:
+        def csv_full(opener):
+            out = {}
+            for t, p in csv_files.items():
+                with opener(p) as f:
+                    r = csv.reader(io.TextIOWrapper(f, encoding="utf-8", newline=""))
+                    next(r)
+                    out[t] = len(list(r))
+            return out
+
+        def csv_proj(opener):
+            c = collections.Counter()
+            with opener(csv_files["events"]) as f:
                 r = csv.reader(io.TextIOWrapper(f, encoding="utf-8", newline=""))
                 next(r)
-                out[t] = len(list(r))
-        return out
+                for row in r:
+                    c[row[I_KIND]] += 1
+            return c
 
-    def csv_proj(opener):
-        c = collections.Counter()
-        with opener(csv_files["events"]) as f:
-            r = csv.reader(io.TextIOWrapper(f, encoding="utf-8", newline=""))
-            next(r)
-            for row in r:
-                c[row[I_KIND]] += 1
-        return c
+        def csv_lookup():
+            s = 0
+            for id_ in lk_ids[:SL]:
+                with open(csv_files["events"], "rb") as f:
+                    for row in csv.reader(io.TextIOWrapper(f, encoding="utf-8", newline="")):
+                        if row[I_ID] == id_:
+                            s += len(row[I_TEXT].encode())
+                            break
+            return s
 
-    def csv_lookup():
-        s = 0
-        for id_ in lk_ids[:SL]:
-            with open(csv_files["events"], "rb") as f:
-                for row in csv.reader(io.TextIOWrapper(f, encoding="utf-8", newline="")):
-                    if row[I_ID] == id_:
-                        s += len(row[I_TEXT].encode())
-                        break
-        return s
+        plain = lambda p: open(p, "rb")
+        check_full(csv_full(plain))
+        check_proj(csv_proj(plain))
+        assert csv_lookup() == want_lk_scan
+        record("CSV (3 files)", dsize(cd), csv_write, stats(timed(lambda: csv_full(plain), a.reps)),
+               stats(timed(lambda: csv_proj(plain), a.reps)),
+               stats([x / SL for x in timed(csv_lookup, a.reps)]), note=f"lookup = scan of events.csv until found ({SL} ids)")
 
-    plain = lambda p: open(p, "rb")
-    check_full(csv_full(plain))
-    check_proj(csv_proj(plain))
-    assert csv_lookup() == want_lk_scan
-    record("CSV (3 files)", dsize(cd), csv_write, stats(timed(lambda: csv_full(plain), a.reps)),
-           stats(timed(lambda: csv_proj(plain), a.reps)),
-           stats([x / SL for x in timed(csv_lookup, a.reps)]), note=f"lookup = scan of events.csv until found ({SL} ids)")
+        def compressed(name, suffix, open_w, open_r):
+            t0 = time.perf_counter()
+            for p in csv_files.values():
+                with open(p, "rb") as fi, open_w(p + suffix) as fo:
+                    shutil.copyfileobj(fi, fo, 1 << 20)
+            comp = time.perf_counter() - t0
+            size = sum(dsize(p + suffix) for p in csv_files.values())
+            rd = lambda p: open_r(p + suffix)
+            check_full(csv_full(rd))
+            check_proj(csv_proj(rd))
+            record(name, size, csv_write + comp, stats(timed(lambda: csv_full(rd), a.reps)), stats(timed(lambda: csv_proj(rd), a.reps)), None,
+                   note=f"write = CSV {csv_write:.3f}s + compress {comp:.3f}s; reads decompress the whole file; point lookup not available without full decompression")
+            for p in csv_files.values():
+                os.remove(p + suffix)
 
-    def compressed(name, suffix, open_w, open_r):
-        t0 = time.perf_counter()
-        for p in csv_files.values():
-            with open(p, "rb") as fi, open_w(p + suffix) as fo:
-                shutil.copyfileobj(fi, fo, 1 << 20)
-        comp = time.perf_counter() - t0
-        size = sum(dsize(p + suffix) for p in csv_files.values())
-        rd = lambda p: open_r(p + suffix)
-        check_full(csv_full(rd))
-        check_proj(csv_proj(rd))
-        record(name, size, csv_write + comp, stats(timed(lambda: csv_full(rd), a.reps)), stats(timed(lambda: csv_proj(rd), a.reps)), None,
-               note=f"write = CSV {csv_write:.3f}s + compress {comp:.3f}s; reads decompress the whole file; point lookup not available without full decompression")
-        for p in csv_files.values():
-            os.remove(p + suffix)
-
-    compressed("CSV + gzip -6", ".gz6", lambda p: gzip.GzipFile(p, "wb", compresslevel=6, mtime=0), lambda p: gzip.open(p, "rb"))
-    compressed("CSV + gzip -9", ".gz9", lambda p: gzip.GzipFile(p, "wb", compresslevel=9, mtime=0), lambda p: gzip.open(p, "rb"))
-    compressed("CSV + bz2 -9", ".bz2", lambda p: bz2.BZ2File(p, "wb", compresslevel=9), lambda p: bz2.open(p, "rb"))
-    compressed("CSV + xz -9 (lzma preset 9)", ".xz", lambda p: lzma.LZMAFile(p, "wb", preset=9), lambda p: lzma.open(p, "rb"))
-    if pa is not None:
-        for lvl in (3, 19):
-            class ZW:
-                def __init__(self, p, lvl=lvl):
-                    self.p, self.buf, self.lvl = p, io.BytesIO(), lvl
-                def __enter__(self):
-                    return self.buf
-                def __exit__(self, *x):
-                    data = pa.Codec("zstd", compression_level=self.lvl).compress(self.buf.getvalue(), asbytes=True)
-                    with open(self.p, "wb") as f:
-                        f.write(data)
-            compressed(f"CSV + zstd -{lvl} (pyarrow codec)", f".zst{lvl}", ZW, lambda p: pa.CompressedInputStream(pa.OSFile(p, "rb"), "zstd"))
-    else:
-        R["formats"]["CSV + zstd"] = "not measured (pyarrow not importable)"
+        compressed("CSV + gzip -6", ".gz6", lambda p: gzip.GzipFile(p, "wb", compresslevel=6, mtime=0), lambda p: gzip.open(p, "rb"))
+        compressed("CSV + gzip -9", ".gz9", lambda p: gzip.GzipFile(p, "wb", compresslevel=9, mtime=0), lambda p: gzip.open(p, "rb"))
+        compressed("CSV + bz2 -9", ".bz2", lambda p: bz2.BZ2File(p, "wb", compresslevel=9), lambda p: bz2.open(p, "rb"))
+        compressed("CSV + xz -9 (lzma preset 9)", ".xz", lambda p: lzma.LZMAFile(p, "wb", preset=9), lambda p: lzma.open(p, "rb"))
+        if pa is not None:
+            for lvl in (3, 19):
+                class ZW:
+                    def __init__(self, p, lvl=lvl):
+                        self.p, self.buf, self.lvl = p, io.BytesIO(), lvl
+                    def __enter__(self):
+                        return self.buf
+                    def __exit__(self, *x):
+                        data = pa.Codec("zstd", compression_level=self.lvl).compress(self.buf.getvalue(), asbytes=True)
+                        with open(self.p, "wb") as f:
+                            f.write(data)
+                compressed(f"CSV + zstd -{lvl} (pyarrow codec)", f".zst{lvl}", ZW, lambda p: pa.CompressedInputStream(pa.OSFile(p, "rb"), "zstd"))
+        else:
+            R["formats"]["CSV + zstd"] = "not measured (pyarrow not importable)"
 
     # ---------------------------------------------------------------- SQLite
     sp = os.path.join(a.work, "log.db")
@@ -308,11 +311,11 @@ def main():
         pqn = "lookup = pq.read_table(columns=['text'], filters=[event_id == id]) (row-group statistics cannot prune random ids: scans the id column)"
         arrow_format("Parquet zstd (default level)", "parquet", lambda tb, p: pq.write_table(tb, p, compression="zstd"),
                      pq.read_table, lambda p, c: pq.read_table(p, columns=c), pq_lookup, note=pqn)
-        arrow_format("Parquet zstd level 22 (max)", "parquet", lambda tb, p: pq.write_table(tb, p, compression="zstd", compression_level=22),
+        ALL and arrow_format("Parquet zstd level 22 (max)", "parquet", lambda tb, p: pq.write_table(tb, p, compression="zstd", compression_level=22),
                      pq.read_table, lambda p, c: pq.read_table(p, columns=c), pq_lookup, note=pqn)
-        arrow_format("Parquet snappy", "parquet", lambda tb, p: pq.write_table(tb, p, compression="snappy"),
+        ALL and arrow_format("Parquet snappy", "parquet", lambda tb, p: pq.write_table(tb, p, compression="snappy"),
                      pq.read_table, lambda p, c: pq.read_table(p, columns=c), pq_lookup, note=pqn)
-        arrow_format("Parquet zstd (default), ids as binary(32)", "parquet", lambda tb, p: pq.write_table(tb, p, compression="zstd"),
+        ALL and arrow_format("Parquet zstd (default), ids as binary(32)", "parquet", lambda tb, p: pq.write_table(tb, p, compression="zstd"),
                      pq.read_table, lambda p, c: pq.read_table(p, columns=c), pq_lookup, tables_in=at_bin,
                      note=pqn + "; 64-hex id columns stored as fixed_size_binary(32), like KORE v4 HexFixed")
 
@@ -321,7 +324,7 @@ def main():
             i = pc.index(tb.column("event_id"), id_).as_py()
             return len(tb.column("text")[i].as_py().encode())
 
-        arrow_format("ORC zstd", "orc", lambda tb, p: orc.write_table(tb, p, compression="zstd"), orc.read_table,
+        ALL and arrow_format("ORC zstd", "orc", lambda tb, p: orc.write_table(tb, p, compression="zstd"), orc.read_table,
                      lambda p, c: orc.read_table(p, columns=c), orc_lookup, note="lookup = read event_id+text columns, pc.index (no predicate pushdown in pyarrow.orc)")
 
         def ipc_lookup(p, id_):
@@ -329,7 +332,7 @@ def main():
             i = pc.index(tb.column("event_id"), id_).as_py()
             return len(tb.column("text")[i].as_py().encode())
 
-        for comp in ("uncompressed", "lz4", "zstd"):
+        for comp in (("uncompressed", "lz4", "zstd") if ALL else ()):
             arrow_format(f"Arrow IPC / Feather v2 {comp}", "arrow", lambda tb, p, comp=comp: feather.write_feather(tb, p, compression=comp),
                          lambda p: feather.read_table(p, memory_map=True), lambda p, c: feather.read_table(p, columns=c, memory_map=True), ipc_lookup,
                          note="lookup = memory-mapped read of event_id+text, pc.index")

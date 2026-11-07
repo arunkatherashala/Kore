@@ -166,8 +166,9 @@ fn main() {
     };
     let mut w_def = vec![];
     let mut w_v4 = vec![];
-    let (mut w_v4_ref, mut w_v4_batch, mut w_v4_fast, mut w_def_batch) = (vec![], vec![], vec![], vec![]);
-    let mut fast_bytes = 0u64;
+    let (mut w_v4_batch, mut w_def_batch) = (vec![], vec![]);
+    let mut w_v4_fast: [Vec<f64>; 2] = [vec![], vec![]];
+    let mut fast_bytes = [0u64; 2];
     let mut identical = 0usize;
     let mut v4_bytes: Vec<Vec<u8>> = vec![];
     let mut dict = mk_dict();
@@ -183,30 +184,15 @@ fn main() {
         }
         w_def.push(t.elapsed().as_secs_f64());
         identical = eq;
-        // v4 with the current writer and with the bbbefd2c reference writer (v4::write_reference), in
-        // alternating order per repetition; both must give the same bytes
-        let run_v4 = |reference: bool, dv: &Path| -> (f64, Vec<Vec<u8>>, SharedDict) {
-            let t = Instant::now();
-            let d = mk_dict();
-            std::fs::write(dv.join("dicts").join(d.file_name()), d.to_bytes()).unwrap();
-            let outv: Vec<Vec<u8>> = segs.iter().map(|s| {
-                let o = opts_for(&d, &s.table);
-                let b = if reference { kore_store::v4::write_reference(&s.block, &o).unwrap() } else { KoreWriter::to_bytes_compact(&s.block, &o).unwrap() };
-                std::fs::write(dv.join(&s.table).join(&s.file), &b).unwrap();
-                b
-            }).collect();
-            (t.elapsed().as_secs_f64(), outv, d)
-        };
-        let dr = wdir("v4ref", rep);
-        std::fs::create_dir_all(dr.join("dicts")).unwrap();
-        let ((tv, outv, d), (tr, outr, _)) = if rep % 2 == 0 {
-            let a = run_v4(false, &dv); let b = run_v4(true, &dr); (a, b)
-        } else {
-            let b = run_v4(true, &dr); let a = run_v4(false, &dv); (a, b)
-        };
-        assert!(outv == outr, "v4 writer differs from the bbbefd2c reference writer");
-        w_v4.push(tv);
-        w_v4_ref.push(tr);
+        let t = Instant::now();
+        let d = mk_dict();
+        std::fs::write(dv.join("dicts").join(d.file_name()), d.to_bytes()).unwrap();
+        let outv: Vec<Vec<u8>> = segs.iter().map(|s| {
+            let b = KoreWriter::to_bytes_compact(&s.block, &opts_for(&d, &s.table)).unwrap();
+            std::fs::write(dv.join(&s.table).join(&s.file), &b).unwrap();
+            b
+        }).collect();
+        w_v4.push(t.elapsed().as_secs_f64());
         // batch API: all segments encoded concurrently, then written (same bytes)
         let db = wdir("v4batch", rep);
         std::fs::create_dir_all(db.join("dicts")).unwrap();
@@ -219,23 +205,28 @@ fn main() {
         for (s, b) in segs.iter().zip(&outb) { std::fs::write(db.join(&s.table).join(&s.file), b).unwrap(); }
         w_v4_batch.push(t.elapsed().as_secs_f64());
         assert!(outb == outv, "batch writer output differs");
-        // explicit fast preset (different bytes): one timed write per repetition, size from rep 0
-        let df = wdir("v4fast", rep);
-        std::fs::create_dir_all(df.join("dicts")).unwrap();
-        let t = Instant::now();
-        let d3 = mk_dict();
-        std::fs::write(df.join("dicts").join(d3.file_name()), d3.to_bytes()).unwrap();
-        let outf: Vec<Vec<u8>> = segs.iter().map(|s| {
-            let o = if s.table == "events" { CompactOptions::fast().with_zstd_level(level).with_dict("text", d3.clone()) } else { CompactOptions::fast().with_zstd_level(level) };
-            let b = KoreWriter::to_bytes_compact(&s.block, &o).unwrap();
-            std::fs::write(df.join(&s.table).join(&s.file), &b).unwrap();
-            b
-        }).collect();
-        w_v4_fast.push(t.elapsed().as_secs_f64());
-        if rep == 0 {
-            let ds = DictSet::new().with(d3.clone());
-            for (s, b) in segs.iter().zip(&outf) { assert!(same(&KoreReader::from_bytes_with_dicts(b, &ds).unwrap(), &s.block)); }
-            fast_bytes = outf.iter().map(|b| b.len() as u64).sum();
+        // explicit faster settings (different bytes): CompactOptions::fast(), and fast() with level 3 for
+        // large payloads; one timed write each per repetition, sizes from rep 0
+        let mut fast_dirs = vec![];
+        for (k, large) in [level, 3].into_iter().enumerate() {
+            let df = wdir(&format!("v4fast{k}"), rep);
+            std::fs::create_dir_all(df.join("dicts")).unwrap();
+            let t = Instant::now();
+            let d3 = mk_dict();
+            std::fs::write(df.join("dicts").join(d3.file_name()), d3.to_bytes()).unwrap();
+            let outf: Vec<Vec<u8>> = segs.iter().map(|s| {
+                let o = if s.table == "events" { CompactOptions::fast().with_zstd_level(large).with_dict("text", d3.clone()) } else { CompactOptions::fast().with_zstd_level(large) };
+                let b = KoreWriter::to_bytes_compact(&s.block, &o).unwrap();
+                std::fs::write(df.join(&s.table).join(&s.file), &b).unwrap();
+                b
+            }).collect();
+            w_v4_fast[k].push(t.elapsed().as_secs_f64());
+            if rep == 0 {
+                let ds = DictSet::new().with(d3.clone());
+                for (s, b) in segs.iter().zip(&outf) { assert!(same(&KoreReader::from_bytes_with_dicts(b, &ds).unwrap(), &s.block)); }
+                fast_bytes[k] = outf.iter().map(|b| b.len() as u64).sum();
+            }
+            fast_dirs.push(df);
         }
         // default writer, segments encoded concurrently (the fair reference for the batch row)
         let dq = wdir("defbatch", rep);
@@ -243,7 +234,7 @@ fn main() {
         let outd: Vec<Vec<u8>> = { use rayon::prelude::*; segs.par_iter().map(|s| KoreWriter::to_bytes(&s.block)).collect() };
         for (s, b) in segs.iter().zip(&outd) { std::fs::write(dq.join(&s.table).join(&s.file), b).unwrap(); }
         w_def_batch.push(t.elapsed().as_secs_f64());
-        for x in [&dd, &dv, &dr, &db, &df, &dq] { let _ = std::fs::remove_dir_all(x); }
+        for x in [&dd, &dv, &db, &dq].into_iter().chain(&fast_dirs) { let _ = std::fs::remove_dir_all(x); }
         if rep == 0 {
             let ds = DictSet::new().with(d.clone());
             for (s, b) in segs.iter().zip(&outv) {
@@ -255,8 +246,8 @@ fn main() {
         } else {
             assert!(outv == v4_bytes, "v4 output not deterministic");
         }
-        eprintln!("[store] write rep {rep}: default {:.3}s v4 {:.3}s v4-reference {:.3}s v4-batch {:.3}s v4-fast {:.3}s default-batch {:.3}s",
-            w_def[rep], w_v4[rep], w_v4_ref[rep], w_v4_batch[rep], w_v4_fast[rep], w_def_batch[rep]);
+        eprintln!("[store] write rep {rep}: default {:.3}s v4 {:.3}s v4-batch {:.3}s v4-fast {:.3}s v4-fast-l3 {:.3}s default-batch {:.3}s",
+            w_def[rep], w_v4[rep], w_v4_batch[rep], w_v4_fast[0][rep], w_v4_fast[1][rep], w_def_batch[rep]);
     }
 
     // ---- lay out the v4 copy on disk
@@ -456,11 +447,12 @@ fn main() {
         "paired_ratio_v4_over_default": {"write": ratio(&w_def, &w_v4), "full_read": ratio(&f_def, &f_v4),
             "projection": ratio(&p_def, &p_v4), "lookup": ratio(&l_def, &l_v4)},
         "v4_max_level": max_level,
-        "v4_reference_writer": {"write_s": stats(&w_v4_ref), "paired_ratio_v4_over_reference": ratio(&w_v4_ref, &w_v4)},
-        "v4_batch_writer": {"write_s": stats(&w_v4_batch), "paired_ratio_over_default": ratio(&w_def, &w_v4_batch), "paired_ratio_over_reference": ratio(&w_v4_ref, &w_v4_batch)},
+        "v4_batch_writer": {"write_s": stats(&w_v4_batch), "paired_ratio_over_default": ratio(&w_def, &w_v4_batch), "paired_ratio_over_v4": ratio(&w_v4, &w_v4_batch)},
         "default_batch_writer": {"write_s": stats(&w_def_batch), "paired_ratio_v4_batch_over_default_batch": ratio(&w_def_batch, &w_v4_batch)},
-        "v4_fast": {"size_bytes": dir_size(&v4dir) - v4_bytes.iter().map(|b| b.len() as u64).sum::<u64>() + fast_bytes,
-            "write_s": stats(&w_v4_fast), "paired_ratio_over_default": ratio(&w_def, &w_v4_fast), "paired_ratio_over_reference": ratio(&w_v4_ref, &w_v4_fast)},
+        "v4_fast": {"size_bytes": dir_size(&v4dir) - v4_bytes.iter().map(|b| b.len() as u64).sum::<u64>() + fast_bytes[0],
+            "write_s": stats(&w_v4_fast[0]), "paired_ratio_over_default": ratio(&w_def, &w_v4_fast[0]), "paired_ratio_over_v4": ratio(&w_v4, &w_v4_fast[0])},
+        "v4_fast_level3": {"size_bytes": dir_size(&v4dir) - v4_bytes.iter().map(|b| b.len() as u64).sum::<u64>() + fast_bytes[1],
+            "write_s": stats(&w_v4_fast[1]), "paired_ratio_over_default": ratio(&w_def, &w_v4_fast[1]), "paired_ratio_over_v4": ratio(&w_v4, &w_v4_fast[1])},
         "key_index": index_res,
         "projection_result": pr, "lookup_check": want_lk,
     });

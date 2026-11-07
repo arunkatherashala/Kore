@@ -137,10 +137,8 @@ fn stage_bytes(raw: &[u8], stage: u8, level: i32, small: i32, dict: Option<&Shar
     out
 }
 
-/// Encode one column: `(transform id, stage id, uses_dict, payload)`. This is the writer of bbbefd2c,
-/// kept unchanged as the reference: `encode_column_fast` (used by `write`) must give the same bytes
-/// (tested on every option and on the benchmark data).
-fn encode_column_reference(data: &ColumnData, codec: ColumnCodec, dict: Option<&SharedDict>, level: i32, small: i32) -> Result<(u8, u8, bool, Vec<u8>), KoreError> {
+/// Encode one column: `(transform id, stage id, uses_dict, payload)`.
+fn encode_column(data: &ColumnData, codec: ColumnCodec, dict: Option<&SharedDict>, level: i32, small: i32) -> Result<(u8, u8, bool, Vec<u8>), KoreError> {
     use rayon::prelude::*;
     let transforms = match codec.transform { Transform::Auto => candidate_transforms(data), t => vec![t] };
     // Two phases (cost): with several transforms, each is scored by min(raw, zstd level 1) and only the
@@ -188,94 +186,6 @@ fn encode_column_reference(data: &ColumnData, codec: ColumnCodec, dict: Option<&
     best.ok_or_else(|| bad("no codec candidate"))
 }
 
-/// Stages the writer tries on one transformed payload (same rule as `encode_column_reference`).
-fn stage_list(raw_len: usize, stage: Stage, has_dict: bool) -> Vec<u8> {
-    match stage {
-        Stage::Auto => {
-            let mut s = vec![0u8, 1];
-            if !has_dict || raw_len < SMALL { s.push(3); }
-            if raw_len < HZ_MAX { s.push(2); }
-            if has_dict { s.push(STAGE_ZSTD_DICT); }
-            s
-        }
-        Stage::Zstd if has_dict => vec![STAGE_ZSTD_DICT],
-        s => vec![s.id().expect("concrete stage")],
-    }
-}
-
-/// Best stage for one transformed payload: all stages in parallel, smallest wins, ties keep the earlier.
-fn stage_search(t: Transform, raw: Vec<u8>, stage: Stage, dict: Option<&SharedDict>, level: i32, small: i32) -> (u8, u8, bool, Vec<u8>) {
-    use rayon::prelude::*;
-    let stages = stage_list(raw.len(), stage, dict.is_some());
-    let staged: Vec<(u8, Option<Vec<u8>>)> = stages.par_iter()
-        .map(|&s| (s, if s == 0 { None } else { Some(stage_bytes(&raw, s, level, small, dict)) })).collect();
-    let size_of = |c: &(u8, Option<Vec<u8>>)| c.1.as_ref().map_or(raw.len(), |p| p.len());
-    let mut win = 0;
-    for i in 1..staged.len() { if size_of(&staged[i]) < size_of(&staged[win]) { win = i; } }
-    let (s, p) = staged.into_iter().nth(win).unwrap();
-    (t.id().unwrap(), s, s == STAGE_ZSTD_DICT, p.unwrap_or(raw))
-}
-
-/// Plain payloads at least this large get their stage search started while the other transforms are
-/// still being scored (speculation: only the timing changes, never the result).
-const SPECULATE_MIN: usize = 64 << 10;
-
-/// Same result as `encode_column_reference`, shorter critical path: when a column has several candidate
-/// transforms, `Plain` is the first of them and its payload is large, the stage search of `Plain` runs
-/// concurrently with the scoring. If `Plain` wins the scoring (the usual case for free text) that result
-/// is used, otherwise it is dropped and the winner is searched as before. Columns with a `HexFixed` or
-/// `Dict` candidate (ids, low-cardinality strings) are not speculated on: `Plain` rarely wins there.
-fn encode_column_fast(data: &ColumnData, codec: ColumnCodec, dict: Option<&SharedDict>, level: i32, small: i32) -> Result<(u8, u8, bool, Vec<u8>), KoreError> {
-    use rayon::prelude::*;
-    let transforms = match codec.transform { Transform::Auto => candidate_transforms(data), t => vec![t] };
-    if transforms.len() == 1 {
-        let t = transforms[0];
-        return Ok(stage_search(t, codec::encode_transform(data, t)?, codec.stage, dict, level, small));
-    }
-    let score_of = |raw: &[u8]| if raw.len() < 64 { raw.len() } else { raw.len().min(zstd::bulk::compress(raw, 1).expect("zstd").len() + 4) };
-    let try_spec = transforms[0] == Transform::Plain
-        && !transforms.iter().any(|t| matches!(t, Transform::HexFixed | Transform::Dict));
-    let plain = if try_spec { Some(codec::encode_transform(data, Transform::Plain)?) } else { None };
-    let speculate = plain.as_ref().map_or(false, |p| p.len() >= SPECULATE_MIN);
-    let score_all = || -> Result<Vec<(Transform, Option<Vec<u8>>, usize)>, KoreError> {
-        transforms.par_iter().enumerate().map(|(i, &t)| {
-            if i == 0 && plain.is_some() { return Ok((t, None, score_of(plain.as_ref().unwrap()))); }
-            let raw = codec::encode_transform(data, t)?;
-            let sc = score_of(&raw);
-            Ok((t, Some(raw), sc))
-        }).collect()
-    };
-    let (scored, spec) = if speculate {
-        let p = plain.as_ref().unwrap();
-        let (a, b) = rayon::join(score_all, || stage_search(Transform::Plain, p.clone(), codec.stage, dict, level, small));
-        (a?, Some(b))
-    } else {
-        (score_all()?, None)
-    };
-    let mut win = 0;
-    for i in 1..scored.len() { if scored[i].2 < scored[win].2 { win = i; } }
-    if win == 0 { if let Some(r) = spec { return Ok(r); } }
-    let (t, raw, _) = scored.into_iter().nth(win).unwrap();
-    let raw = match raw { Some(r) => r, None => plain.expect("plain payload") };
-    Ok(stage_search(t, raw, codec.stage, dict, level, small))
-}
-
-/// Which column encoder `write_with` uses.
-#[doc(hidden)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Encoder { Fast, Reference }
-
-pub fn write(block: &DataBlock, opts: &CompactOptions) -> Result<Vec<u8>, KoreError> {
-    write_with(block, opts, Encoder::Fast)
-}
-
-/// The version-4 writer exactly as of bbbefd2c (reference for tests and benchmarks; `write` produces
-/// the same bytes).
-#[doc(hidden)]
-pub fn write_reference(block: &DataBlock, opts: &CompactOptions) -> Result<Vec<u8>, KoreError> {
-    write_with(block, opts, Encoder::Reference)
-}
-
 /// Several files at once: the blocks are encoded concurrently (more parallel work than one file
 /// offers); every output is byte-identical to `write` of that block alone.
 pub fn write_many(items: &[(&DataBlock, &CompactOptions)]) -> Result<Vec<Vec<u8>>, KoreError> {
@@ -283,8 +193,7 @@ pub fn write_many(items: &[(&DataBlock, &CompactOptions)]) -> Result<Vec<Vec<u8>
     items.par_iter().map(|(b, o)| write(b, o)).collect()
 }
 
-#[doc(hidden)]
-pub fn write_with(block: &DataBlock, opts: &CompactOptions, enc: Encoder) -> Result<Vec<u8>, KoreError> {
+pub fn write(block: &DataBlock, opts: &CompactOptions) -> Result<Vec<u8>, KoreError> {
     use rayon::prelude::*;
     for col in &block.columns {
         if col.data.len() != block.num_rows {
@@ -296,10 +205,7 @@ pub fn write_with(block: &DataBlock, opts: &CompactOptions, enc: Encoder) -> Res
         if !block.columns.iter().any(|c| &c.name == name) { return Err(bad(format!("option given for unknown column '{name}'"))); }
     }
     let encoded: Result<Vec<(u8, u8, bool, Vec<u8>)>, KoreError> = block.columns.par_iter()
-        .map(|c| {
-            let f = match enc { Encoder::Fast => encode_column_fast, Encoder::Reference => encode_column_reference };
-            f(&c.data, opts.codecs.codec_for(&c.name), opts.dict_for(&c.name), opts.zstd_level, opts.small_zstd_level)
-        })
+        .map(|c| encode_column(&c.data, opts.codecs.codec_for(&c.name), opts.dict_for(&c.name), opts.zstd_level, opts.small_zstd_level))
         .collect();
     let encoded = encoded?;
 
