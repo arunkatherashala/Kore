@@ -70,7 +70,11 @@ pub fn select_raw(data: &[u8], target: u64) -> Result<&[u8], KoreError> {
 /// List (timestamp, row_count) for every version, oldest first.
 pub fn list_versions(data: &[u8]) -> Result<Vec<(u64, usize)>, KoreError> {
     entries(data)?.into_iter()
-        .map(|(ts, b)| Ok((ts, KoreReader::from_bytes(b)?.num_rows)))
+        .map(|(ts, b)| {
+            // version-4 entries: row count from the checksummed header (their dictionaries may be elsewhere)
+            if crate::v4::is_v4(b) { return Ok((ts, crate::v4::info(b)?.num_rows)); }
+            Ok((ts, KoreReader::from_bytes(b)?.num_rows))
+        })
         .collect()
 }
 
@@ -84,6 +88,21 @@ pub fn read_latest(data: &[u8]) -> Result<DataBlock, KoreError> {
     let e = entries(data)?;
     let (_, bytes) = e.last().ok_or_else(|| bad("empty version log"))?;
     KoreReader::from_bytes(bytes)
+}
+
+/// Time travel over entries that may be version-4 files referencing shared dictionaries.
+pub fn read_at_with_dicts(data: &[u8], target: u64, dicts: &crate::dict::DictSet) -> Result<DataBlock, KoreError> {
+    KoreReader::from_bytes_with_dicts(select_raw(data, target)?, dicts)
+}
+
+/// Projection at a point in time (only the dictionaries of the requested columns are needed).
+pub fn read_at_columns_with_dicts(data: &[u8], target: u64, columns: &[&str], dicts: &crate::dict::DictSet) -> Result<DataBlock, KoreError> {
+    KoreReader::from_bytes_columns_with_dicts(select_raw(data, target)?, columns, dicts)
+}
+
+/// Latest version, with shared dictionaries.
+pub fn read_latest_with_dicts(data: &[u8], dicts: &crate::dict::DictSet) -> Result<DataBlock, KoreError> {
+    read_at_with_dicts(data, u64::MAX, dicts)
 }
 
 #[cfg(test)]

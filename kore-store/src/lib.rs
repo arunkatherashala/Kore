@@ -22,10 +22,14 @@ pub mod rowgroups;
 pub mod codec;
 pub mod hz;
 pub mod v3;
+pub mod v4;
+pub mod dict;
 
 pub use reader::KoreReader;
 pub use writer::KoreWriter;
 pub use codec::{ColumnCodec, Stage, Transform, WriteOptions};
+pub use v4::CompactOptions;
+pub use dict::{DictSet, SharedDict};
 
 use kore_core::KoreError;
 
@@ -35,6 +39,10 @@ pub const VERSION: u16       = 2;   // v2: native StrDict + f64 dict + NaN senti
 /// Opt-in container version with per-column codecs and a column directory (see `v3`). Readers that
 /// predate it reject the file at the version field.
 pub const VERSION_V3: u16    = 3;
+
+/// Opt-in compact container (see `v4`): version 3 plus timestamp/token transforms and shared
+/// dictionaries. Readers that predate it reject the file at the version field.
+pub const VERSION_V4: u16    = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

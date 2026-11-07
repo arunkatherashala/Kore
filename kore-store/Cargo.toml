@@ -16,3 +16,6 @@ rand      = "0.8.5"
 rayon     = { workspace = true }
 memmap2   = "0.9.11"
 memchr    = "2.7"
+
+[dev-dependencies]
+serde_json = { workspace = true }
