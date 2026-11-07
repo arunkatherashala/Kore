@@ -39,6 +39,8 @@ pub mod world;
 pub mod world2;
 /// World O, the open-ended world (opt-in: separate files and log source; see docs/open_world.md).
 pub mod world_o;
+/// Track V1: versus standard methods (measurement only; see docs/vs_world.md).
+pub mod vs_world;
 #[path = "loop.rs"]
 pub mod run_loop;
 #[cfg(test)]
