@@ -10,6 +10,7 @@
 
 pub mod baselines;
 pub mod engine;
+pub mod experiment;
 pub mod learner;
 pub mod measure;
 pub mod model;

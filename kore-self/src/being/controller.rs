@@ -19,7 +19,13 @@
 //! pruning               = on      # may the being retire and merge its own rules (default off)
 //! transfer              = on      # may the model start a new domain from a similar learned one (B6, default off)
 //! max_transfer_links    = 16      # (domain, difficulty) links that may exist at the same time (B6)
+//! experiments           = on      # may the being choose tasks on purpose to test its hypotheses (B9, default off)
+//! max_experiment_energy_pm = 100  # experiments may spend at most this share (per mille) of the life budget (B9, default 0)
+//! max_experiments_per_run  = 200  # experiments in one run (B9, default 0)
 //! ```
+//!
+//! The B9 keys fail closed on their own: without `experiments = on` AND a non-zero energy share AND a
+//! non-zero count, no experiment is run (a request for experiments is refused and audited).
 //!
 //! * A key that is missing takes the SAFE DEFAULT above (the numbers in the example, composition and
 //!   pruning off). A value above the hard maximum, an unknown key, a repeated key or a line that is not
@@ -46,6 +52,11 @@ pub const DEFAULT_CANDIDATES: usize = 2000;
 pub const DEFAULT_STEPS: u64 = 2000;
 pub const DEFAULT_ENERGY: i64 = 100_000;
 pub const DEFAULT_LINKS: usize = 16;
+/// B9: experiments are off and have no budget unless the owner writes the lines.
+pub const DEFAULT_EXP_PM: u32 = 0;
+pub const DEFAULT_EXP_N: u64 = 0;
+pub const HARD_EXP_PM: u32 = 500;
+pub const HARD_EXP_N: u64 = 5000;
 /// Hard maxima: a file that asks for more is unparseable.
 pub const HARD_LIVE_RULES: usize = 1000;
 pub const HARD_BLOCKS: usize = 100;
@@ -72,6 +83,10 @@ pub struct Controller {
     pub pruning: bool,
     pub transfer: bool,
     pub max_transfer_links: usize,
+    /// B9: experiments allowed, their energy share of the life budget (per mille) and count per run.
+    pub experiments: bool,
+    pub max_experiment_energy_pm: u32,
+    pub max_experiments_per_run: u64,
     pub origin: Origin,
 }
 
@@ -96,6 +111,9 @@ impl Controller {
             pruning: false,
             transfer: false,
             max_transfer_links: 0,
+            experiments: false,
+            max_experiment_energy_pm: 0,
+            max_experiments_per_run: 0,
             origin: Origin::FailClosed(reason.into()),
         }
     }
@@ -112,6 +130,9 @@ impl Controller {
             pruning: false,
             transfer: false,
             max_transfer_links: DEFAULT_LINKS,
+            experiments: false,
+            max_experiment_energy_pm: DEFAULT_EXP_PM,
+            max_experiments_per_run: DEFAULT_EXP_N,
             origin: Origin::File,
         }
     }
@@ -150,6 +171,9 @@ impl Controller {
                 "pruning" => c.pruning = parse_bool(v).ok_or_else(|| format!("line {n}: 'pruning' needs on or off"))?,
                 "transfer" => c.transfer = parse_bool(v).ok_or_else(|| format!("line {n}: 'transfer' needs on or off"))?,
                 "max_transfer_links" => c.max_transfer_links = num(HARD_LINKS as u64)? as usize,
+                "experiments" => c.experiments = parse_bool(v).ok_or_else(|| format!("line {n}: 'experiments' needs on or off"))?,
+                "max_experiment_energy_pm" => c.max_experiment_energy_pm = num(HARD_EXP_PM as u64)? as u32,
+                "max_experiments_per_run" => c.max_experiments_per_run = num(HARD_EXP_N)?,
                 _ => return Err(format!("line {n}: unknown key '{k}'")),
             }
             seen.push(k);
@@ -164,6 +188,17 @@ impl Controller {
 
     pub fn is_closed(&self) -> bool {
         matches!(self.origin, Origin::FailClosed(_))
+    }
+
+    /// B9: the experiment budget for one run, or the refusal when experiments were requested but are not allowed.
+    pub fn experiment_budget(&self) -> Result<(u32, u64), Refusal> {
+        if !self.experiments {
+            return Err(Refusal::new("experiments", 0, 1, "experiments were requested but controller.txt does not allow them (experiments = off)"));
+        }
+        if self.max_experiment_energy_pm == 0 || self.max_experiments_per_run == 0 {
+            return Err(Refusal::new("max_experiment_energy_pm", self.max_experiment_energy_pm as u64, 1, "experiments were requested but controller.txt gives them no budget (max_experiment_energy_pm and max_experiments_per_run must both be above 0)"));
+        }
+        Ok((self.max_experiment_energy_pm, self.max_experiments_per_run))
     }
 
     /// The limits the loop obeys for one run. `want_compose` / `want_prune`: what the caller asked for;

@@ -53,6 +53,11 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         Some(Value::Bool(b)) => *b,
         Some(_) => return Err(err("'discover' must be a boolean")),
     };
+    let want_exp = match args.get("experiments") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(err("'experiments' must be a boolean")),
+    };
     let u32_of = |k: &str| -> Result<Option<u32>, Value> { Ok(opt_u64(args, k)?.map(|x| x.min(u32::MAX as u64) as u32)) };
     let world = W2Cfg {
         seed: opt_u64(args, "world_seed")?.unwrap_or(1),
@@ -95,7 +100,25 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
     let owner_k = owner.to_string();
     policy.kill = Some(KillCheck(std::sync::Arc::new(move || authorize::kill_active(&owner_k))));
     let cfg = Run2Cfg { world: Some(world), learner: Some(LearnerCfg::default()), discover_every: if discover { DEFAULT_DISCOVER_EVERY } else { 0 }, ctl: Some(limits) };
-    let s = run_v2(&mut log, &cfg, &policy, None).map_err(log_err)?;
+    // B9: experiments only if asked for AND allowed with a budget by controller.txt (else refused, audited, and the run is passive)
+    let exp_budget = if want_exp {
+        match ctl.experiment_budget() {
+            Ok(b) => Some(b),
+            Err(r) => {
+                refused.push((r.cap.clone(), r.limit, r.requested, r.what.clone()));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let (s, n_exp) = match exp_budget {
+        Some((pm, n)) => {
+            let (s, recs) = crate::being::world2::experiment::run_v2_exp(&mut log, &cfg, &policy, crate::being::experiment::ExpCfg::eig(crate::being::experiment::DEFAULT_KAPPA, pm, n)).map_err(log_err)?;
+            (s, Some(recs.len()))
+        }
+        None => (run_v2(&mut log, &cfg, &policy, None).map_err(log_err)?, None),
+    };
     drop(log);
     for r in &s.refusals {
         refused.push((r.cap.clone(), r.limit, r.requested, r.what.clone()));
@@ -108,6 +131,7 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
     }
     let mut out = s.to_json();
     out["controller"] = json!({
+        "experiments_run": n_exp, "experiments_allowed": ctl.experiments, "max_experiment_energy_pm": ctl.max_experiment_energy_pm, "max_experiments_per_run": ctl.max_experiments_per_run,
         "max_live_rules": ctl.max_live_rules, "max_search_candidates": ctl.max_search_candidates, "max_steps_per_run": ctl.max_steps_per_run, "max_energy_per_run": ctl.max_energy_per_run,
         "refusals_audited": refused.iter().map(|r| json!({ "cap": r.0, "limit": r.1, "requested": r.2, "what": r.3 })).collect::<Vec<_>>(),
     });
@@ -123,11 +147,13 @@ fn status(owner: &str) -> Result<Value, Value> {
     };
     let rep = replay_decisions2(&rows);
     let rr = rederive_rules2(&rows);
+    let rx = crate::being::world2::experiment::replay_experiments2(&rows);
     Ok(text(json!({
         "exists": true, "world": { "seed": c.seed, "families": c.families, "budget": c.budget, "noise_pm": c.noise_pm, "drift_per_10k": c.drift_per_10k, "curve_pct": c.curve_pct, "menu": c.menu },
         "steps": st.step, "budget_left": st.budget_left, "reported_reward": st.total_reward, "energy_spent": st.total_cost, "skips": st.skips,
         "model_attempts": st.model.attempts(), "rules": st.rules.len(), "revealed_examples": st.examples.len(),
-        "replay": { "decisions": rep.len(), "rederived_identically": rep.iter().filter(|r| r.matches()).count(), "rules": rr.len(), "rules_rederived": rr.iter().filter(|r| r.1).count() },
+        "replay": { "decisions": rep.len(), "rederived_identically": rep.iter().filter(|r| r.matches()).count(), "rules": rr.len(), "rules_rederived": rr.iter().filter(|r| r.1).count(),
+                    "experimenter_decisions": rx.len(), "experimenter_rederived_identically": rx.iter().filter(|r| r.1 == r.2).count() },
         "note": "World v2 is a deterministic simulated world with author-defined task families; reported reward is what the being was told (feedback noise can make it wrong)",
     })))
 }
@@ -141,7 +167,8 @@ pub fn tool_defs() -> Vec<Value> {
             "world_seed": { "type": "integer", "minimum": 0 }, "families": { "type": "integer", "minimum": 1, "maximum": 48 },
             "budget": { "type": "integer", "minimum": 1, "maximum": 1000000 }, "noise_pm": { "type": "integer", "minimum": 0, "maximum": 400 },
             "drift_per_10k": { "type": "integer", "minimum": 0, "maximum": 200 }, "curve_pct": { "type": "integer", "minimum": 0, "maximum": 100 },
-            "menu": { "type": "integer", "minimum": 2, "maximum": 8 }, "discover": { "type": "boolean" }
+            "menu": { "type": "integer", "minimum": 2, "maximum": 8 }, "discover": { "type": "boolean" },
+            "experiments": { "type": "boolean", "description": "B9 (opt-in): choose some tasks on purpose to test the being's own rule hypotheses; needs experiments = on and a budget in controller.txt, otherwise refused and audited" }
           }, "required": ["steps"] } }),
         json!({ "name": "being_status_v2",
           "description": "State of the World v2 being folded from its log, with a replay check of every decision and rule.",
@@ -152,3 +179,7 @@ pub fn tool_defs() -> Vec<Value> {
 #[cfg(test)]
 #[path = "being_v2_tools_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "being_v2_exp_tools_tests.rs"]
+mod tests_exp;
