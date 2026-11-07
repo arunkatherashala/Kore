@@ -39,6 +39,10 @@ impl KoreReader {
         if crate::v4::is_v4(data) {
             return crate::v4::read(data, wanted, &crate::dict::DictSet::new());
         }
+        if crate::keyindex::is_key_index(data) {
+            return Err(KoreError::InvalidArgument(
+                "this is a KORE key index object (.kidx), not a data file; open it with KeyIndex::from_bytes".into()));
+        }
         // Check for encryption marker
         if data.len() >= 4 && &data[0..4] == b"KENC" {
             return Err(KoreError::InvalidArgument(
