@@ -59,7 +59,7 @@ impl LearnerOCfg {
         LearnerO { inner: Learner2 { beta: self.beta_milli as f64 / 1000.0, skip_frac: self.skip_milli as f64 / 1000.0, use_: self.use_ }, skip_rule: self.skip_rule }
     }
     fn w2(&self) -> LearnerCfg {
-        LearnerCfg { beta_milli: self.beta_milli, skip_milli: self.skip_milli, use_: self.use_ }
+        LearnerCfg { beta_milli: self.beta_milli, skip_milli: self.skip_milli, use_: self.use_, ..LearnerCfg::default() }
     }
 }
 
