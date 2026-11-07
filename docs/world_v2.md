@@ -73,3 +73,7 @@ random (uniform over affordable (offer, fixed strategy)); always-fast / always-c
 ## Known limits of the design
 
 Author-defined families and grammar; the B2 grammar covers 10 of the 12 sequence classes by construction; feedback noise is independent per attempt; drift re-draws a whole regime at once (no gradual drift); the formula constant is a single integer; grid and knapsack have no learnable rule beyond strategy choice; no real data, no language model.
+
+## Track B7 switches (opt-in)
+
+`world2/rules_use.rs` adds five learner switches, all off by default and logged in the genesis event (`w2_use`) when on: a rule-record estimate for `discovered` (A), no `discovered` arm where no rule applies (A2), noise-robust acceptance (B), fitted formula constants (C) and fitted grid move rules (G). With all off every log and measurement is byte-identical to the design above. Results: `docs/measured.md`, section "Track B7".

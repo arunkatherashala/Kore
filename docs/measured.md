@@ -1538,6 +1538,125 @@ code 239 s to 2,787 s up to 40,000); what still grows per call is the restart (l
 15 KB per step), plus one full scan of the examples per new process (31 s at 64,411 examples).
 Note (merge of `restart-fix` and `rulescan-fix` on `brain-v3`): the restart growth mentioned here (bugs 1 and 2) is addressed by the Restart fix. The two fixes were measured separately; the combination has been tested (`cargo test`) but not measured in a long run.
 
+## Track B7: using discovered rules (synthetic world, author-defined families)
+
+Everything here is the World v2 simulation (author-defined families, rules, noise, drift and rewards) and the existing learner of the section "World v2". Question: the being discovers correct rules but its reward barely changes (discovery minus no discovery +0.044 small, +0.024 medium, -0.000 large clean). Is that because the planner does not use the rules, and does using them raise reward? Code: `kore-self/src/being/world2/rules_use.rs` and additive, switch-guarded branches in `world2/{engine,learner,solve,measure,replay}.rs`; nothing outside `world2/` changed. Measured with `cargo run -p kore-self --example measure_rules_use --offline --release -- report` (also `-- tune`, `-- ablation`) and the diagnostics `--example diag_rules_use -- report|tune`, 2026-11-06, branch `rules-use` (from ecf5f695), commits 50d16758 and b5c770bc. Tuning seeds 101..120 (used only for the choices below), report seeds 1..20, n = 20 worlds per condition, 95% t-intervals of the mean, paired differences on identical worlds (better/worse/tie). Score: TRUE reward per energy (the checker's verdict). Conditions: the World v2 ones (small 6 families budget 1500, medium 12 / 3000, large 24 / 6000; clean, noisy = feedback noise 100 per mille, drift = 20 changes per 10 000 energy, hard = noise, drift and a rising difficulty curve), all 12 combinations.
+
+### Diagnosis (cause confirmed)
+
+Measured on the existing learner, report seeds (the same lives as the World v2 section), counting every offer of a seq or compose cell for which a live rule existed:
+
+| | small clean | medium clean | medium noisy | large clean |
+|---|---|---|---|---|
+| offers in a cell with a live rule | 1910 | 3979 | 2488 | 7325 |
+| rule applies to the prefix / gives the checker's answer (no slip) | 99.8% / 99.8% | 99.8% / 99.8% | 99.3% / 99.3% | 99.8% / 99.8% |
+| careful / deep would be right on the same tasks | 84.7% / 85.8% | 92.2% / 92.2% | 80.9% / 80.9% | 88.9% / 93.0% |
+| planner's estimate for `discovered` there (mean) | 0.446 | 0.516 | 0.443 | 0.326 |
+| best estimate of the other strategies (mean) | 0.806 | 0.714 | 0.717 | 0.869 |
+| `discovered` cell never tried since the rule (share of these offers) | 88% | 76% | 82% | 100% |
+| offers taken / taken with `discovered` | 974 / 168 | 2143 / 577 | 1135 / 324 | 3527 / 0 |
+| accepted rules in classes `careful` already solves (arithmetic, geometric, quadratic, Fibonacci-like) | 31 of 44 | 59 of 77 | 29 of 54 | 89 of 104 |
+
+So: the rule is right on almost every task it covers, but the planner never learns that. Accepting a rule resets the (family, difficulty, discovered) cell, and the reset cell's prior is the pooled estimate of the `discovered` strategy, which is built from attempts where no rule applied (then `discovered` is `careful` under another name) on every family and type. In the large clean world the 84 `discovered` attempts made before any rule existed left the pooled estimate low (mean 0.33 on the covered offers), and none of the 104 correct rules was ever used. Second finding: most accepted rules (54% to 86%) are for classes that `careful` already answers at the same energy, so even perfect use of them changes little.
+
+### What was changed (each a switch, off by default)
+
+* **A, rule estimate**: when a live rule covers an offer's (base family, difficulty), the planner's estimate for `discovered` on that offer is a Beta posterior with prior mean (S + 1) / (S + M + 2) from the rule's own record (S examples reproduced at acceptance, training plus held out; M examples missed, 0 under the B2 guard) and prior weight min(S + M + 2, rule_k), updated by the reported outcomes of the attempts this rule answered on this (family, difficulty).
+* **A2, discovered only where a rule applies**: without a covering rule `discovered` is not offered to the planner (it would be `careful` at the same energy).
+* **B, noise-robust acceptance**: a plain grammar form that misses some revealed answers is also accepted if the 95% Wilson lower bound of its share right (where it applies) is at least theta, with B2's support rule (3 new training, 1 new held-out examples); with no miss it is judged exactly as by B2 (a test checks that theta = 0 is the B2 search).
+* **C, fitted formula constant**: formula outcomes also log the visible input and the task kind; a pass fits one integer g per family from the revealed answers (candidates implied by single examples, 1..1000, smallest first, same split and guard as a rule); `discovered` then answers with it.
+* **G, fitted grid move rule**: the same for grid families with the two candidate move rules (4 or 8 neighbours; breadth-first search under the fitted rule at the listed energy).
+
+Every rule use is logged: the action and outcome carry `rule_used:<id>` and the action `rule_record:support../missed../used../reported_right..`; the decision revision cites the rule's note event and its rationale lists the record behind every rule-based estimate; constants are notes and revisions citing their examples. All uses go through the same step: controller caps (constants count as live rules for `max_live_rules`), energy cap, and the KILL check before every step (tested with the switches on). With every switch off, logs, states and measurements are byte-identical to ecf5f695 (golden digests in `world2/tests_use.rs`).
+
+Tuning (seeds 101..120, medium conditions): rule_k in 2, 4, 8, 16, 32 changed nothing beyond 0.001 (8 kept); theta in 300..800: lower theta accepted more rules under noise (87 at 300 and 400, 80 at 500, 75 at 600, 65 at 800 in medium noisy) with 0 wrong at every value; reward differences between thetas were within 0.03 and inside the noise; 400 chosen.
+
+### Reward per energy, report seeds 1..20, mean [95% interval]
+
+| condition | learner (current) | A+C+G | A+A2+B+C+G (all) | oracle-knows-rules |
+|---|---|---|---|---|
+| small clean | 2.777 [2.248, 3.307] | 3.003 [2.561, 3.444] | 3.114 [2.694, 3.534] | 3.496 [3.166, 3.827] |
+| small noisy | 2.780 [2.264, 3.295] | 2.980 [2.564, 3.397] | 3.080 [2.682, 3.478] | 3.496 [3.166, 3.827] |
+| small drift | 2.724 [2.172, 3.277] | 2.898 [2.411, 3.386] | 3.005 [2.530, 3.479] | 3.507 [3.188, 3.826] |
+| small hard | 2.883 [2.346, 3.420] | 3.021 [2.566, 3.477] | 3.093 [2.647, 3.538] | 3.664 [3.314, 4.013] |
+| medium clean | 2.755 [2.335, 3.176] | 3.022 [2.714, 3.330] | 3.182 [2.875, 3.488] | 3.389 [3.169, 3.610] |
+| medium noisy | 2.713 [2.292, 3.133] | 2.850 [2.491, 3.209] | 3.152 [2.883, 3.420] | 3.389 [3.169, 3.610] |
+| medium drift | 2.754 [2.324, 3.183] | 2.967 [2.624, 3.310] | 3.155 [2.823, 3.487] | 3.493 [3.277, 3.709] |
+| medium hard | 2.876 [2.447, 3.304] | 2.918 [2.534, 3.303] | 3.239 [2.959, 3.518] | 3.699 [3.474, 3.924] |
+| large clean | 2.987 [2.578, 3.396] | 3.191 [2.899, 3.483] | 3.203 [2.918, 3.488] | 3.416 [3.224, 3.608] |
+| large noisy | 2.967 [2.602, 3.332] | 3.019 [2.696, 3.342] | 3.218 [2.967, 3.469] | 3.416 [3.224, 3.608] |
+| large drift | 2.841 [2.437, 3.244] | 3.025 [2.715, 3.335] | 3.039 [2.738, 3.339] | 3.363 [3.200, 3.526] |
+| large hard | 2.928 [2.527, 3.328] | 2.948 [2.588, 3.308] | 3.232 [2.973, 3.490] | 3.560 [3.383, 3.737] |
+
+Paired differences to the current learner (mean [95% interval] better/worse/tie of 20). "No arm" = the learner without discovery and without a `discovered` arm (A2 with no discovery pass); the column "A+A2 - no arm" is what the sequence rules themselves add once the redundant arm is gone.
+
+| condition | A | B | A+B | no arm | A+A2 - no arm | C | G | A+C+G | all |
+|---|---|---|---|---|---|---|---|---|---|
+| small clean | +0.004 [-0.007, +0.015] 2/5/13 | +0.000 0/0/20 | +0.004 [-0.007, +0.015] 2/5/13 | +0.019 [-0.153, +0.191] 10/3/7 | +0.009 [-0.009, +0.027] 2/1/17 | +0.124 [+0.028, +0.219] 7/2/11 | +0.122 [-0.034, +0.278] 3/0/17 | +0.225 [+0.055, +0.395] 10/2/8 | +0.337 [+0.118, +0.556] 14/1/5 |
+| small noisy | +0.004 [-0.011, +0.019] 3/3/14 | +0.019 [-0.014, +0.053] 2/3/15 | +0.019 [-0.012, +0.051] 5/3/12 | -0.017 [-0.255, +0.222] 8/7/5 | +0.036 [-0.014, +0.085] 4/1/15 | +0.084 [+0.001, +0.166] 5/1/14 | +0.121 [-0.043, +0.285] 3/0/17 | +0.200 [+0.037, +0.363] 7/1/12 | +0.300 [+0.018, +0.582] 13/3/4 |
+| small drift | +0.005 [-0.015, +0.025] 3/3/14 | +0.000 0/0/20 | +0.005 [-0.015, +0.025] 3/3/14 | +0.022 [-0.137, +0.182] 11/2/7 | +0.005 [-0.017, +0.027] 3/2/15 | +0.096 [+0.016, +0.176] 7/2/11 | +0.120 [-0.034, +0.274] 3/1/16 | +0.174 [+0.010, +0.338] 8/5/7 | +0.280 [+0.065, +0.496] 14/1/5 |
+| small hard | -0.057 [-0.148, +0.033] 1/5/14 | -0.009 [-0.024, +0.006] 0/3/17 | -0.058 [-0.148, +0.033] 3/8/9 | -0.033 [-0.267, +0.200] 11/5/4 | +0.017 [-0.020, +0.055] 2/3/15 | +0.073 [-0.009, +0.155] 5/0/15 | +0.111 [-0.044, +0.266] 4/0/16 | +0.138 [-0.053, +0.329] 9/2/9 | +0.209 [-0.078, +0.497] 12/4/4 |
+| medium clean | -0.002 [-0.019, +0.016] 4/4/12 | +0.000 0/0/20 | -0.002 [-0.019, +0.016] 4/4/12 | +0.262 [+0.044, +0.480] 12/4/4 | +0.025 [-0.001, +0.050] 5/1/14 | +0.102 [+0.016, +0.188] 9/1/10 | +0.119 [-0.020, +0.258] 5/1/14 | +0.267 [+0.087, +0.446] 13/3/4 | +0.426 [+0.170, +0.683] 15/2/3 |
+| medium noisy | -0.003 [-0.021, +0.016] 5/5/10 | +0.014 [-0.010, +0.038] 3/1/16 | +0.004 [-0.032, +0.039] 5/7/8 | +0.229 [+0.037, +0.420] 11/6/3 | +0.027 [-0.008, +0.062] 5/3/12 | +0.048 [-0.005, +0.101] 6/3/11 | +0.057 [-0.016, +0.131] 4/0/16 | +0.137 [+0.012, +0.263] 9/7/4 | +0.439 [+0.196, +0.682] 12/6/2 |
+| medium drift | -0.012 [-0.037, +0.012] 3/4/13 | +0.000 0/0/20 | -0.012 [-0.037, +0.012] 3/4/13 | +0.251 [+0.040, +0.463] 15/1/4 | +0.017 [-0.023, +0.058] 5/1/14 | +0.072 [+0.003, +0.140] 10/1/9 | +0.112 [-0.021, +0.245] 5/1/14 | +0.214 [+0.035, +0.393] 12/4/4 | +0.401 [+0.139, +0.664] 16/1/3 |
+| medium hard | +0.012 [-0.020, +0.044] 4/7/9 | +0.007 [-0.001, +0.015] 5/0/15 | +0.003 [-0.046, +0.052] 6/8/6 | +0.198 [+0.019, +0.377] 15/3/2 | +0.021 [-0.008, +0.050] 4/4/12 | +0.065 [+0.001, +0.129] 7/1/12 | -0.006 [-0.118, +0.106] 3/1/16 | +0.043 [-0.100, +0.186] 9/7/4 | +0.363 [+0.133, +0.593] 15/4/1 |
+| large clean | +0.014 [-0.015, +0.043] 4/6/10 | +0.000 0/0/20 | +0.014 [-0.015, +0.043] 4/6/10 | +0.005 [-0.003, +0.014] 14/3/3 | +0.016 [-0.002, +0.033] 6/2/12 | +0.094 [+0.004, +0.185] 6/0/14 | +0.103 [-0.007, +0.213] 5/0/15 | +0.204 [+0.066, +0.342] 15/3/2 | +0.216 [+0.069, +0.363] 17/2/1 |
+| large noisy | -0.021 [-0.039, -0.003] 1/9/10 | +0.016 [-0.008, +0.039] 3/2/15 | +0.005 [-0.026, +0.037] 5/9/6 | +0.086 [-0.055, +0.228] 14/4/2 | +0.004 [+0.000, +0.009] 8/1/11 | +0.025 [-0.006, +0.055] 4/1/15 | +0.020 [-0.023, +0.063] 4/1/15 | +0.053 [-0.010, +0.115] 8/9/3 | +0.252 [+0.094, +0.409] 16/4/0 |
+| large drift | +0.023 [-0.004, +0.049] 8/3/9 | +0.000 0/0/20 | +0.023 [-0.004, +0.049] 8/3/9 | +0.014 [+0.003, +0.024] 12/6/2 | +0.014 [-0.003, +0.032] 9/1/10 | +0.083 [+0.013, +0.153] 6/0/14 | +0.084 [-0.013, +0.180] 4/1/15 | +0.184 [+0.067, +0.302] 16/3/1 | +0.198 [+0.068, +0.328] 17/3/0 |
+| large hard | +0.001 [-0.021, +0.022] 5/8/7 | +0.015 [-0.008, +0.039] 2/2/16 | -0.025 [-0.082, +0.033] 5/10/5 | +0.160 [-0.028, +0.349] 13/6/1 | +0.014 [-0.002, +0.031] 9/2/9 | +0.031 [-0.028, +0.090] 4/1/15 | +0.037 [-0.001, +0.076] 5/0/15 | +0.020 [-0.046, +0.085] 7/11/2 | +0.304 [+0.100, +0.508] 17/3/0 |
+
+Against oracle-knows-rules (paired, report seeds):
+
+| condition | oracle - learner | oracle - all | learner / oracle | all / oracle |
+|---|---|---|---|---|
+| small clean | +0.719 [+0.425, +1.013] 18/2/0 | +0.382 [+0.177, +0.587] 18/2/0 | 0.774 [0.682, 0.866] | 0.883 [0.825, 0.941] |
+| small noisy | +0.717 [+0.411, +1.022] 18/2/0 | +0.417 [+0.184, +0.650] 18/2/0 | 0.777 [0.681, 0.873] | 0.877 [0.817, 0.937] |
+| small drift | +0.783 [+0.471, +1.094] 18/2/0 | +0.502 [+0.251, +0.754] 18/2/0 | 0.753 [0.656, 0.851] | 0.843 [0.766, 0.920] |
+| small hard | +0.781 [+0.479, +1.082] 18/2/0 | +0.571 [+0.272, +0.871] 18/2/0 | 0.768 [0.676, 0.861] | 0.839 [0.762, 0.917] |
+| medium clean | +0.634 [+0.341, +0.927] 18/2/0 | +0.208 [+0.063, +0.353] 16/4/0 | 0.800 [0.707, 0.894] | 0.933 [0.885, 0.981] |
+| medium noisy | +0.677 [+0.373, +0.980] 18/2/0 | +0.238 [+0.082, +0.393] 17/3/0 | 0.789 [0.693, 0.884] | 0.929 [0.883, 0.974] |
+| medium drift | +0.740 [+0.433, +1.046] 20/0/0 | +0.338 [+0.139, +0.537] 18/2/0 | 0.776 [0.680, 0.872] | 0.897 [0.835, 0.959] |
+| medium hard | +0.823 [+0.491, +1.156] 20/0/0 | +0.460 [+0.238, +0.683] 20/0/0 | 0.769 [0.673, 0.864] | 0.876 [0.821, 0.932] |
+| large clean | +0.429 [+0.175, +0.683] 16/4/0 | +0.213 [+0.074, +0.353] 17/3/0 | 0.859 [0.773, 0.945] | 0.932 [0.888, 0.976] |
+| large noisy | +0.449 [+0.236, +0.663] 16/4/0 | +0.198 [+0.087, +0.309] 18/2/0 | 0.857 [0.787, 0.926] | 0.939 [0.905, 0.973] |
+| large drift | +0.522 [+0.252, +0.793] 19/1/0 | +0.324 [+0.145, +0.504] 18/2/0 | 0.830 [0.739, 0.922] | 0.896 [0.838, 0.955] |
+| large hard | +0.632 [+0.359, +0.905] 20/0/0 | +0.328 [+0.178, +0.478] 19/1/0 | 0.811 [0.728, 0.894] | 0.905 [0.863, 0.947] |
+
+### Rules: wrong acceptances and rule-answer accuracy (report seeds, 12 conditions x 20 worlds pooled)
+
+Wrong = applicable and wrong on at least one of 50 fresh tasks of its signature (constants: of its family) at acceptance. Rule-answer accuracy = true-correct share of the attempts a rule (or constant) answered; it includes execution slips (3% to 10% per family) and, under drift, rules that went stale.
+
+| policy | sequence rules accepted (wrong) | constants accepted (wrong) | attempts answered by a rule | right by the checker |
+|---|---|---|---|---|
+| learner (current) | 791 (0) | - | 2662 | 92.3% |
+| A | 909 (0) | - | 7888 | 92.8% |
+| B (robust, theta 0.4) | 985 (0) | - | 3795 | 92.8% |
+| A+B | 1147 (0) | - | 10246 | 93.0% |
+| A+C+G | 787 (0) | 658 (0) | 29844 | 92.1% |
+| all (A+A2+B+C+G) | 710 (0) | 768 (0) | 28739 | 92.6% |
+
+Per condition: the current learner answered 0 tasks with a rule in large clean and large drift (104 and 114 rules accepted); with A, 1179 and 1126 (93.2% right). Under noise B accepted more sequence rules than B2 (medium noisy 82 against 54, medium hard 67 against 36, large hard 136 against 92) with 0 wrong. Rules right on fewer than 90% of fresh tasks at the end of the life: current learner 0 in every condition; "all" 5 (small drift), 6 (small hard), 8 (medium drift), 10 (medium hard), 25 (large drift), 25 (large hard), 0 elsewhere (stale after drift; no retirement exists in World v2).
+
+### Original worlds
+
+No file outside `world2/` and the two new examples changed (`git diff --stat ecf5f695` lists nothing else). Rerun on this branch, the original measurements reproduce their recorded numbers exactly: B2 (`measure_being -- discover`, budget 3000, report seeds) discovery minus no discovery +0.162 [+0.000, +0.324] 8/7/5; B5 (`-- b5-compose`) composition minus grammar only +0.006 [-0.008, +0.019] 2/1/17; B6 (`-- b6`) transfer minus no transfer, first 100 steps, +0.211 [+0.054, +0.367] 11/0/9. The B7 switches were not applied to the original worlds.
+
+### Verdict
+
+* **Cause confirmed, fix works mechanically, reward effect of using sequence rules: none measurable.** With A the planner uses the rules (large clean: 0 to 1179 rule answers, 93% right), but A minus the current learner is between -0.057 and +0.023 in every condition, significant only once and negative (large noisy -0.021 [-0.039, -0.003]). With the redundant arm removed, the sequence rules add +0.004 to +0.036 (A+A2 minus no arm); no interval clearly excludes 0 (closest: large noisy +0.004 [+0.000, +0.009]). Reason: most accepted rules duplicate `careful`, and for the rest `deep` (twice the energy) or the being's choice of other families already earns about as much.
+* **Robust acceptance (B)** finds more correct rules under noise (up to +50%), 0 wrong of 985, but its reward effect is -0.009 to +0.019, none significant.
+* **The largest gain does not come from rules: it comes from removing the `discovered` arm where no rule applies.** That arm is `careful` under another name; the B1 planner explores it separately and in some worlds locks into the careful-like arms instead of `fast`. Without it (no arm): +0.20 to +0.26 in the medium conditions (significant), small and large mostly not. The per-world differences are large in both directions (tuning seeds: +1.06 to -1.38), i.e. this is a change of exploration path more than a steady gain, and it says the B1 planner is sensitive to a redundant option. It is reported as a planner finding, not as rule use.
+* **Fitting hidden constants from revealed answers pays.** C (formula g) +0.025 to +0.124, significant in 8 of 12 conditions; G (grid move rule) -0.006 to +0.122, no interval excludes 0; A+C+G +0.020 to +0.267, significant in 8 of 12 (all clean and drift conditions, small and medium noisy), not in the hard conditions or large noisy; 658 constants, 0 wrong.
+* **All switches together**: +0.198 to +0.439, better in 12 to 17 of 20 worlds, significant in 11 of 12 conditions (not small hard); share of oracle-knows-rules from 0.75-0.86 to 0.84-0.94. The gap to oracle-knows-rules is about halved, not closed: +0.20 to +0.57 remains (oracle better in 16 to 20 of 20).
+
+### Caveats
+
+The fitted constant and move rule are each one integer chosen from a candidate set the author knows contains the truth (g in 1..1000, move rule 4 or 8); the formula kinds are visible in the task. Rules and constants are never retired, so drift leaves stale ones (up to 25 per 20 large-drift worlds); the A estimate lowers their score through reported failures but nothing removes them. The A2 gain is a property of the B1 planner (pooled priors, a duplicated arm), not of rules, and its size varies strongly per world. The robust guard was tuned and measured only on this world's noise model (independent flips, revealed answers off by 1 to 3); no wrong rule was accepted, which bounds nothing beyond these 240 report lives (0 of 985 rules, 95% upper bound about 0.3%). One author wrote the world, the learner, the switches and the measurement.
+
+### What is tested (not measured)
+
+`world2/tests_use.rs`: with every switch off, two logged runs and three measured lives hash to the digests taken on ecf5f695 (events, revisions with rationale, causes; every TrueRec and RuleCheck field); with all switches on, two logged runs are identical, the unlogged measurement takes the same steps, the state folded from the log equals the live state, the switches are read back from the genesis event, every decision replays and every rule and constant is re-derived from the examples logged before it (also after a continued run), every rule use carries the rule id and its record and its decision cites the rule's note; `max_live_rules` holds with constants counted and refusals are logged, the kill switch stops before the next step, the energy cap stops the run; the robust search at threshold 0 equals the B2 search on 400 random examples and accepts a form with one corrupted example only under the robust guard; the constant search fits g and the grid move rule and rejects inconsistent answers; `rules_use.rs` names no hidden parameter.
+
 ## Not measured
 
 Real-life data of any kind (the free-text section above is also synthetic); the probabilities of the live ledger (`predict_make`/`predict_score` have not been run on real data; the S4 numbers above are synthetic sequences only; the older `self_ledger_snapshot` rows are not scored by any measurement); behaviour with
