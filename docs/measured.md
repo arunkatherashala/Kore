@@ -1524,6 +1524,20 @@ long run **reached 1,000,000 steps** (5.22 h, 101 cold restarts, shared disk-bou
 replayed decisions 0 mismatches, KILL at 300,000 steps: 0 steps, answered after 72 s (old 174 s). Reward per energy
 per window 4.000-4.098 over the whole run, no improvement after the first 50,000 steps.
 
+**Rule scan fix** (branch `rulescan-fix`, 2026-11-06; details in `docs/longrun.md`, section "Rule scan fix"). The world 4
+slowdown came from the rule search and the merge check predicting every candidate and rule on every revealed example
+again at every pass (in-process, old code: 4.3 ms per step at 2,500 steps, 78.7 ms at 10,000, growing). They now keep
+what they computed per (candidate, example) and only scan new examples (`being/discover_scan.rs`); no cap, no window.
+Results are bit-identical to the old code: same sha256 over all being events and revisions for world 4 (20,000 steps)
+and world 3 (10,000 steps); the same 132,055 being events as the old binary's 44,275-step world 4 log over its first
+44,000 steps; byte-identical output of the B2 (`discover`), B5 (`b5`, `b5-prune-wide`), B6 and World v2 report measurements;
+11 tests against the old code kept as reference. After the fix, in-process: 0.2 to 1.0 ms per step from 10,000 to
+200,000 steps (64,411 examples), not growing with the examples (it moves with the machine's load). The real binary
+reached 150,000 steps of world 4 in 0.47 h (5,000-step calls of 6 to 25 s up to 40,000 steps, 90 s at 150,000; old
+code 239 s to 2,787 s up to 40,000); what still grows per call is the restart (log fold and memory, bugs 1 and 2, about
+15 KB per step), plus one full scan of the examples per new process (31 s at 64,411 examples).
+Note (merge of `restart-fix` and `rulescan-fix` on `brain-v3`): the restart growth mentioned here (bugs 1 and 2) is addressed by the Restart fix. The two fixes were measured separately; the combination has been tested (`cargo test`) but not measured in a long run.
+
 ## Not measured
 
 Real-life data of any kind (the free-text section above is also synthetic); the probabilities of the live ledger (`predict_make`/`predict_score` have not been run on real data; the S4 numbers above are synthetic sequences only; the older `self_ledger_snapshot` rows are not scored by any measurement); behaviour with

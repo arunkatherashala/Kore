@@ -204,7 +204,8 @@ impl ModelChooser {
         let full = st.model.mode() == AdaptMode::Full;
         let discovering = !self.no_discovered && st.genesis.as_ref().map_or(false, |g| g.extended);
         let mut seen = [0u64; 6];
-        if discovering {
+        // the counts are read only for the curiosity bonus (off by default): without it, no scan of every example per step
+        if discovering && self.curiosity > 0.0 {
             for e in &st.examples {
                 seen[(e.sig as usize).min(5)] += 1;
             }

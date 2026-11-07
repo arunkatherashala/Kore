@@ -83,6 +83,7 @@ $E cut --src <data>/w1 --root <data2>/base/v6000 --at 6000  # copy of a log hold
 LONGRUN_BIN=<old or new kore-self.exe> $E restart --root <copy> --chunk 5000 [--kill-ms 100|0]   # one cold restart, timed
 $E compare --root <copy A> --other <copy B> --at 6000      # rows after version 6000, field by field
 $E memfold --root <copy>                                   # the new restart read path in-process (peak memory, times)
+$E digest --root <data>/dig --world 4 --steps 20000 --chunk 5000   # sha256 of every being event and revision (bit-identity checks)
 ```
 
 `run` resumes on an existing root (`--steps` and `--kill-at` count the being's total steps). Below the disk floor
@@ -324,8 +325,8 @@ exactly during a commit, or a power loss, was not tested.
    5,000 steps, 557 ms per step at 35,000 to 40,000 steps; in-process profile: 0.25 ms for the step itself, 60 ms discovery and 69 ms housekeeping per step at 10,000 steps). `discover_pass` evaluates every candidate on every
    logged example of each signature every 10 steps, and `housekeeping` re-checks every live rule for a merge against
    all examples of its signature at every step (and every simpler rule against each of them), so the total time is
-   quadratic in the run length. No cap bounds it (the candidate cap bounds candidates, not examples). Not fixed (needs an
-   incremental search or a bounded example window: a design change).
+   quadratic in the run length. No cap bounds it (the candidate cap bounds candidates, not examples). **Fixed** on
+   branch `rulescan-fix` by an exactly equivalent incremental scan, no cap; see "Rule scan fix" below.
 4. **Reward per energy declines slowly in a stationary world** (world 1: 4.098 -> 4.030 per window, regret from +0.060
    to +0.128 between 50,000 and 390,000 steps; more skipping). Cause not established. Not fixed.
 5. KILL latency on a large log: the kill check runs before each step, so a KILL file that appears while a call is still
@@ -475,6 +476,145 @@ was 0.4 to 1.0 (below 0.7 for most of the second half: the processes waited on a
 * A KILL file that appears while a call loads the log is honoured after the load (at most one open and one fold).
 * A state checkpoint (snapshot of the folded state as a log entry) would remove the fold part only; not built.
 
+## Rule scan fix
+
+Branch `rulescan-fix` (from `048855f2`), 2026-11-06, same machine, again shared with other agents' builds and tests
+(wall times are upper bounds; where a table row ran while an 8-thread test suite was running it says so). Fixes bug 3.
+Data under `C:\Users\skathera\kw\longrun-data3\` (not committed).
+
+**Cause, confirmed.** `prof` (in-process engine, no log, world 4) with the code of `048855f2`: the step itself stays at
+0.14 to 0.18 ms, while the discovery pass (every 10 steps, shown per step) and housekeeping (every step) grow with the
+revealed examples:
+
+| steps | revealed examples | step | discovery per step | housekeeping per step | total ms per step |
+|---|---|---|---|---|---|
+| 2,500 | 466 | 0.18 | 2.53 | 1.63 | 4.33 |
+| 5,000 | 1,352 | 0.15 | 9.76 | 9.15 | 19.07 |
+| 7,500 | 2,186 | 0.14 | 18.88 | 21.38 | 40.40 |
+| 10,000 | 2,959 | 0.18 | 36.26 | 42.24 | 78.68 |
+
+`discover::search_core` computes `predict_x` (an exact Gauss-Jordan fit) for every candidate on every example of each
+signature on every pass, and the merge check in `housekeeping` predicts every live rule and every simpler rule on every
+example of its signature at every step. A third, smaller scan: the planner counted the examples per signature on every
+decision, for a curiosity bonus that is off by default.
+
+**Fix (exactly equivalent, no cap).** New `being/discover_scan.rs`, `ScanCache`, held by the engine (`Engine.scan`,
+`Engine2.scan` for World v2). The search and the merge check are pure functions of the example list, the list only grows
+at its end, and the status of a candidate on one example depends on that example alone. So the cache keeps, per
+signature: the positions of its examples and the held-out mask; per candidate `(transform, form)`: how far it has
+scanned, a bitset of the examples it reproduced, its training / held-out counts, and whether it was ever
+applicable-and-wrong (then its scan stops: such a candidate can never be accepted again, and the full search uses
+nothing else of it); per live rule of the merge check: its prediction on every example, the number of examples where it
+applies and the first 24 of them; per (rule, simpler rule) pair: whether they have agreed so far. A pass only predicts
+the examples that arrived since the last pass, then runs the same loop as the full search (same candidate order,
+transferred hypotheses first, same cap and truncation, same "new support" through the same `covered` set, now a bitset,
+same cited examples in the same order). If the example list is not an extension of the scanned one, the cache starts
+over. The planner counts examples only when the curiosity bonus is on. Between two `being_run` calls of one process the
+cache is kept and reused only if the new run's examples begin with exactly the scanned ones (compared example for
+example); a new process starts empty, and its first pass then scans every example once (on one thread: the being's
+sources start no threads, a test checks it). The old code is kept as the reference (`Engine.reference_scan`, `discover_scan::with_reference`);
+the tests run both. Pruning by low success was already incremental (latest uses per rule) and is unchanged.
+
+**Bit-identical, shown four ways.**
+
+* Digest (`longrun_being digest`: the being in-process with a real log, in calls of 5,000 steps with a new engine per
+  call as `being_run` does; sha256 over every being event and every revision): world 4, 20,000 steps, old and new code
+  give the same digest `b77b7b60...` (60,032 events, 20,012 revisions, 12 rules, same reward); world 3, 10,000 steps,
+  `bdf12c04...` both.
+* Against the old long run: `control` on a copy of the world 4 log of the first long run (written by the old binary in
+  calls over 6 processes, 44,275 steps): the new code in-process for 44,000 steps gives the same 132,055 being event
+  tuples (id, kind, world time, text, tags; audit notes excluded), first difference none.
+* The measurement programs, old and new build, same seeds: `measure_being discover` (B2, seeds 1..20), `b6` (B6, seeds
+  1..20, budget 3000), `b5-prune-wide` and `measure_world_v2 report` (World v2, seeds 1..20, all 7 conditions):
+  the printed output is byte for byte the same, and so is `b5` (B5 composition, pruning, caps and kill switch, seeds
+  1..20; the old build took 2.6 h for it, the new one 7 minutes, both on the loaded machine). These were run with the
+  build just before the last change (the first pass of a new process then used threads, since removed); the digests,
+  `control` and the tests were repeated with the final build.
+* Tests (`being/tests_scan.rs`, 11): the incremental search equals the full rescan after every new example (3 example
+  sets, 3 block sets, with and without a candidate cap, with and without transferred hypotheses), on a cold start over a
+  long history (the first pass of a new engine), and when the list is replaced; no example is predicted twice; the merge check
+  answers equal the full rescan for every pair of 9 rules after every 3rd example; housekeeping on a crowded rule book
+  (about 115 rules) merges the same rules with the same records after every example; B5 runs (8 configurations: no
+  controller, default caps, the long-run controller, tight pruning, live-rule and candidate caps, narrow and wide rule
+  drift; they include low-success retirements, both caps and composed rules), B6 runs (3 arms, 2 seeds), World v2 runs
+  (3 discovery arms, clean and hard) and logged runs through `run` in 4 calls (all events and revisions) are identical
+  with the reference; a stashed cache is reused only for exactly the same examples.
+
+**Per-step time after the fix.** `prof`, world 4, new code, one engine (no restarts), up to 200,000 steps and 64,411
+revealed examples. The table is the run with the planner change and without the between-call reuse (which does not
+apply to one engine); a second run with a later build gave 0.25 to 0.30 ms per step up to 50,000 steps and 1.0 to 2.8
+ms in rows that ran while an 8-thread test suite ran (the unchanged step itself went from 0.15 to 1.39 ms there):
+
+| steps | revealed examples | live rules | step | discovery per step | housekeeping per step | total ms per step | scan cache MB | process peak MB |
+|---|---|---|---|---|---|---|---|---|
+| 10,000 | 2,959 | 12 | 0.12 | 0.06 | 0.04 | 0.22 | 0.3 | 7 |
+| 50,000 | 15,947 | 12 | 0.52 | 0.23 | 0.18 | 0.93 | 2.0 | 12 |
+| 100,000 | 32,186 | 12 | 0.43 | 0.25 | 0.17 | 0.85 | 3.9 | 17 |
+| 150,000 | 48,230 | 11 | 0.47 | 0.25 | 0.18 | 0.90 | 4.3 | 20 |
+| 200,000 | 64,411 | 11 | 0.39 | 0.19 | 0.14 | 0.72 | 7.3 | 25 |
+
+Before the fix, 10,000 steps took 78.68 ms per step and grew; after it, the cost per step does not grow with the
+examples in this range (it moves with the machine's load). One rule was retired for low success between 100,000 and
+110,000 steps (the same in every run).
+
+In calls of 5,000 steps with a real log (`digest`, world 4, a new engine per call):
+
+| steps at the end of the call | old code: ms per step | new code: ms per step |
+|---|---|---|
+| 5,000 | 12.44 | 1.92 |
+| 10,000 | 61.28 | 1.86 |
+| 15,000 | 205.87 | 1.61 |
+| 20,000 | 358.59 | 2.58 |
+
+Old: 3,191 s for 20,000 steps; new: 40 s, most of it the log (opening and folding it at every call, bug 2).
+
+The real binary (`run`, world 4, same harness and settings as the first long run, a cold restart every 10,000 steps,
+final build): **150,000 steps in 0.47 h** (the first long run stopped by hand at 44,275 steps after 4.3 h). Wall time of
+a 5,000-step call, and the child process of the restart that ends there:
+
+| steps at the end of the call | first long run (old code): s per call | this run: s per call | ms per step | child CPU s (2 calls) | child peak MB |
+|---|---|---|---|---|---|
+| 5,000 | 239 | 6.4 | 1.3 | - | - |
+| 10,000 | 648 | 11.3 | 2.3 | 13 | 156 |
+| 20,000 | 1,527 | 13.3 | 2.7 | 24 | 301 |
+| 40,000 | 2,787 (35,000-40,000) | 22.6 | 4.5 | 49 | 584 |
+| 60,000 | - | 29.8 | 6.0 | 76 | 893 |
+| 80,000 | - | 28.6 | 5.7 | 103 | 1,209 |
+| 100,000 | - | 34.3 | 6.9 | 134 | 1,530 |
+| 120,000 | - | 55.2 | 11.0 | 172 | 1,864 |
+| 150,000 | - | 89.7 | 17.9 | 255 | 2,318 |
+
+Three calls took much longer than their neighbours (108.3 s at 55,000, 155.6 s and 115.0 s at 85,000 and 90,000
+steps); their processes had a machine busy share of 0.84 and 0.65 (the others 0.96 to 1.00): the machine was waiting
+on something else, the being did not compute more. What still grows per call is the restart: opening and folding the
+log twice per call and the memory of bug 1 (about 15 KB per step here; bugs 1 and 2, not changed here), plus the first
+scan of the examples in each new process (below). The being itself: checkpoints at 30,000 to 150,000 steps all `verify`
+ok, 1,800 logged decisions re-derived with 0 mismatches, steps consecutive, no cap exceeded (live rules at most 12), no
+refusal, no stop; one rule retired for low success at about 110,000 steps; cumulative reward per energy 3.781 (30,000),
+3.801 (50,000), 3.812 (80,000), 3.816 (100,000), 3.809 (130,000), 3.808 (150,000) against 3.904 for the skip oracle with
+the same rules. Two earlier builds of the fix (one without the planner change and the reuse between calls, to 120,000
+steps, where one call took 1,360 s while the machine was 16% busy and its process used 238 s of CPU for both of its calls; one with a
+threaded first pass, to 150,000 steps, 450,156 being events) gave the same checkpoint values at the
+same steps and, for the second, the same number of events.
+
+**What still grows (not changed here).**
+
+* A new process (every restart) has an empty cache, so its first pass scans every example once: at 64,411 examples
+  3.8 million predictions, 31.3 s on the loaded machine. Per restart, not per step; it adds to the restart cost of
+  bugs 1 and 2. A second call in the same process reuses the cache.
+* Per pass, the bitset work (AND and popcount over the reproduced examples of each live candidate) is linear in the
+  examples with a small constant (64 examples per word); it is inside the discovery column above.
+* The cache holds a few bytes to 16 bytes per example and tracked rule: 7.3 MB at 64,411 examples. Between calls it
+  also keeps a copy of the examples.
+* Not touched: the B6 transfer similarity (`transfer::rule_fit`, a scan of the `pattern_b` examples after attempts,
+  only in transfer worlds), the advisor's rule-proposal verdict when a proposal is rejected (`judge_rule` evaluates the
+  form on the signature's examples, once per proposal), and the replay check `replay::rederive_rules` (runs the full
+  search once per rule note, measurement only).
+
+No cap was needed, so none was added: the rules, decisions and events are those of the old code.
+
+Note (merge of `restart-fix` and `rulescan-fix` on `brain-v3`): the restart growth mentioned here (bugs 1 and 2) is addressed by the Restart fix. The two fixes were measured separately; the combination has been tested (`cargo test`) but not measured in a long run.
+
 ## Not measured
 
 * With the code of `c7e5d8c3`: 1,000,000 steps (that run ended at 390,000 on memory). With the restart fix world 1 reached
@@ -486,4 +626,5 @@ was 0.4 to 1.0 (below 0.7 for most of the second half: the processes waited on a
 * Drift, advice and transfer worlds over a long run; more than one world seed per configuration (one long run each, so
   no intervals).
 * The cause of the slow decline in world 1, and whether other `beta` / `skip_frac` values or forgetting remove it.
-* The rule world past 44,275 steps, and rule worlds other than world 4 (world 3 also finds rules).
+* The rule world past 150,000 steps with the real binary (200,000 in-process with `prof`, after the rule scan fix), and
+  rule worlds other than world 4 over a long run (world 3 only in the 10,000-step bit-identity check).

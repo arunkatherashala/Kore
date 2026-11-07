@@ -20,6 +20,7 @@ use super::advice::{self, Advice, AdviceRequest, AdviceSetup, Advisor, AdvisorKi
 use super::chooser::{DomainPicker, Pick, Ucb1, DEFAULT_EXPLORE_C};
 use super::controller::{self, Limits, Refusal};
 use super::discover::{self, terms_tag, Found, Rule};
+use super::discover_scan;
 use super::planner::{Action, MenuChooser, ModelChooser, Offer, DEFAULT_BETA};
 use super::policy::{Policy, StopReason};
 use super::solver::{Context, Strategy, Thinker, STRATEGIES, STRATEGIES_EXT};
@@ -147,11 +148,15 @@ pub struct Engine<'a> {
     last_blocks: usize,
     /// Most candidates a single capped discovery pass evaluated (for the cap checks of the measurement).
     pub max_candidates_seen: usize,
+    /// Incremental scan of the revealed examples for discovery and the merge check (same answers as a full rescan).
+    pub scan: discover_scan::ScanCache,
+    /// true: rescan every example on every pass and check (the code before the rule scan fix; tests compare both).
+    pub reference_scan: bool,
 }
 
 impl<'a> Engine<'a> {
     pub fn new(world: World, state: BeingState, thinker: &'a dyn Thinker) -> Engine<'a> {
-        Engine { world, state, thinker, advisor: None, carry: vec![], carry_rules: vec![], limits: None, refusals: vec![], refusals_total: vec![], refused: Default::default(), last_blocks: 0, max_candidates_seen: 0 }
+        Engine { world, state, thinker, advisor: None, carry: vec![], carry_rules: vec![], limits: None, refusals: vec![], refusals_total: vec![], refused: Default::default(), last_blocks: 0, max_candidates_seen: 0, scan: Default::default(), reference_scan: discover_scan::reference_default() }
     }
 
     pub fn with_limits(mut self, limits: Option<Limits>) -> Engine<'a> {
@@ -622,7 +627,8 @@ impl<'a> Engine<'a> {
         if self.state.rules.iter().any(|r| r.id == discover::rule_id(sig, &form)) {
             return (vec![advice::verdict_event(who, at, advice_id, sig, &form, "held", "The rule is already in the rule book; nothing to do.")], vec![]);
         }
-        match discover::verify_proposal(&self.state.examples, sig, &form) {
+        let verified = if self.reference_scan { discover::verify_proposal(&self.state.examples, sig, &form) } else { self.search_examples(&[], usize::MAX, &[]).found.into_iter().find(|f| f.sig == sig && f.form == form && f.xf.is_id()) };
+        match verified {
             Some(f) => {
                 let nr = self.accept_found(&f, Some((advice_id, who)));
                 self.state.note_rule_verdict(who, true);
@@ -669,8 +675,7 @@ impl<'a> Engine<'a> {
         let mut out = vec![];
         let prefer = self.transfer_hypotheses();
         let found = match self.limits.clone() {
-            None if prefer.is_empty() => discover::search(&self.state.examples),
-            None => discover::search_transfer(&self.state.examples, &[], usize::MAX, &prefer).found,
+            None => self.search_examples(&[], usize::MAX, &prefer).found,
             Some(l) => {
                 let all = self.blocks();
                 let blocks: Vec<discover::Form> = if l.compose { all.iter().take(l.max_blocks).cloned().collect() } else { vec![] };
@@ -682,7 +687,7 @@ impl<'a> Engine<'a> {
                         format!("{} verified building blocks exist; only the first {} are used for composition", all.len(), l.max_blocks),
                     ));
                 }
-                let o = if prefer.is_empty() { discover::search_composed(&self.state.examples, &blocks, l.max_candidates) } else { discover::search_transfer(&self.state.examples, &blocks, l.max_candidates, &prefer) };
+                let o = self.search_examples(&blocks, l.max_candidates, &prefer);
                 if o.truncated {
                     self.refuse(Refusal::new(
                         "max_search_candidates",
@@ -702,6 +707,16 @@ impl<'a> Engine<'a> {
             }
         }
         out
+    }
+
+    /// The search of `discover` over the being's examples (`search`, `search_composed` and `search_transfer` are
+    /// all this with fewer arguments): incremental, or the full rescan with `reference_scan`.
+    pub fn search_examples(&mut self, blocks: &[discover::Form], max_candidates: usize, prefer: &[(u8, discover::Xf, discover::Form)]) -> discover::SearchOut {
+        if self.reference_scan {
+            discover::search_transfer(&self.state.examples, blocks, max_candidates, prefer)
+        } else {
+            self.scan.search(&self.state.examples, discover::K_TRAIN, discover::K_VAL, blocks, max_candidates, prefer)
+        }
     }
 
     /// B6: the rules accepted in `pattern` become the first hypotheses tried for the same difficulty in `pattern_b`
@@ -779,6 +794,19 @@ impl<'a> Engine<'a> {
                 continue;
             }
             // merge into a simpler live rule of the same signature that always agrees
+            if !self.reference_scan {
+                let (napplies, cites) = self.scan.applies(&self.state.examples, rule.sig, rule.xf, &rule.form);
+                if (napplies as u32) < cfg.merge_min {
+                    continue;
+                }
+                let (scan, examples) = (&mut self.scan, &self.state.examples);
+                let simpler = self.state.rules.iter().filter(|s| !s.retired && s.id != rule.id && s.sig == rule.sig && s.key() < rule.key()).find(|s| scan.agrees(examples, rule.sig, (rule.xf, rule.form), (s.xf, s.form)));
+                if let Some(s) = simpler.cloned() {
+                    let reason = format!("on all {} logged examples of difficulty {} where it applies, the simpler rule {} applies and gives the identical prediction, so it adds nothing", napplies, rule.sig, s.id);
+                    out.push(self.retire(&rule, "merged", &reason, cites, Some(s.id.clone()), json!({ "merged_into": s.id, "examples_where_it_applies": napplies })));
+                }
+                continue;
+            }
             let exs: Vec<&discover::Example> = self.state.examples.iter().filter(|e| e.sig == rule.sig).collect();
             let mut applies: Vec<(String, i64)> = vec![];
             for e in &exs {
@@ -1153,6 +1181,10 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
     let menu = g.chooser == Chooser::Model;
     let mut mc = ModelChooser::for_genesis(&g);
     let mut engine = Engine::new(world_for(&g), state, thinker).with_advisor(advisor).with_limits(cfg.ctl.clone());
+    if !engine.reference_scan {
+        // the scan of the previous run in this process, if it scanned exactly the first of these examples
+        engine.scan = discover_scan::adopt(&engine.state.examples);
+    }
     let mut new_rules: Vec<Rule> = vec![];
     let mut retired: Vec<String> = vec![];
     let mut pending = Batch::default();
@@ -1241,6 +1273,9 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
     }
     if !pending.events.is_empty() {
         log.commit_batch(pending)?;
+    }
+    if !engine.reference_scan {
+        discover_scan::stash(std::mem::take(&mut engine.scan), &engine.state.examples);
     }
     Ok(RunSummary { steps_run: done, stopped, reward, cost, state: engine.state, version_before, version_after: log.latest_version(), created, new_rules, refusals: engine.refusals_total, retired })
 }
