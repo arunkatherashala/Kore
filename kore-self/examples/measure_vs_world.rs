@@ -192,7 +192,7 @@ pub fn run_ours2(p: Ours2, cfg: &W2Cfg) -> f64 {
         Ours2::Current => run_w2(cfg, &mut Learner2::default(), EVERY, None).per_energy(),
         Ours2::Recommended => {
             let lc = LearnerCfg { use_: profile_use(), ..LearnerCfg::default() };
-            let mut l = LearnerO { inner: lc.learner(), skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K) };
+            let mut l = LearnerO { inner: lc.learner(), skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), l2l: being::world_o::b12::L2LCfg::default(), view: None };
             run_w2_with(cfg, &mut l, EVERY, None, lc).per_energy()
         }
         Ours2::AllSkills => {
