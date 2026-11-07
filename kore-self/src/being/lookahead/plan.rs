@@ -103,6 +103,40 @@ pub struct LookCfg {
     pub beta_root: f64,
     /// Remembered menus future menus are drawn from.
     pub memory: usize,
+    /// How the plan is turned into a decision.
+    pub mode: Mode,
+    /// Hybrid only: weight of the simulated future.
+    pub lambda: f64,
+}
+
+/// `Pure`: take the alternative with the highest simulated value. `Hybrid`: keep the B1 score
+/// (optimistic reward per estimated energy) and add `lambda * (Q_depth - Q_1) / energy`, the value the
+/// simulated future steps add beyond the one-step leaf, per unit of the option's energy; the B1 skip
+/// rule then applies to the best hybrid score. At depth 1 the hybrid is the B1 planner exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Pure,
+    Hybrid,
+}
+
+pub const DEFAULT_LAMBDA: f64 = 1.0;
+pub const DEFAULT_MODE: Mode = Mode::Hybrid;
+
+/// The hybrid choice among attempts: B1 scores (`scores`: slot, strategy, score, affordable) plus the
+/// simulated future per energy. Returns (slot, strategy, hybrid score, added term).
+pub fn hybrid_pick(p: &Plan, scores: &[(usize, Strategy, f64, bool)], lambda: f64) -> Option<(usize, Strategy, f64, f64)> {
+    let mut best: Option<(usize, Strategy, f64, f64)> = None;
+    for (slot, st, sc, ok) in scores {
+        if !ok {
+            continue;
+        }
+        let add = p.alts.iter().find(|a| a.act == Some((*slot, *st))).map_or(0.0, |a| lambda * (a.q - a.q1) / a.energy.max(1.0));
+        let h = sc + add;
+        if best.map_or(true, |b| h > b.2) {
+            best = Some((*slot, *st, h, add));
+        }
+    }
+    best
 }
 
 /// Chosen on tuning seeds 101..120 only (see docs/measured.md, Track B8).
@@ -113,7 +147,7 @@ pub const DEFAULT_MEMORY: usize = 64;
 
 impl LookCfg {
     pub fn new(depth: u32, max_nodes: u64) -> LookCfg {
-        LookCfg { depth, max_nodes, samples: DEFAULT_SAMPLES, width: DEFAULT_WIDTH, beta_root: DEFAULT_BETA_ROOT, memory: DEFAULT_MEMORY }
+        LookCfg { depth, max_nodes, samples: DEFAULT_SAMPLES, width: DEFAULT_WIDTH, beta_root: DEFAULT_BETA_ROOT, memory: DEFAULT_MEMORY, mode: DEFAULT_MODE, lambda: DEFAULT_LAMBDA }
     }
 }
 
@@ -149,6 +183,9 @@ pub struct Alt {
     pub immediate: f64,
     pub v_ok: f64,
     pub v_fail: f64,
+    /// Q minus the leaf at depth 1 (the one-step opportunity-cost value); `q - q1` is what the simulated
+    /// future steps add.
+    pub q1: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -413,6 +450,7 @@ pub fn plan(src: &dyn Source, cfg: &LookCfg, menu: &[AOffer], memory: &[(u64, Ve
     let mut se = Search { src, cfg: *cfg, memory, step, rho, tau, nodes: 0, abort: false, cache: HashMap::new(), drawn: vec![], top: 1 };
     let leaf0 = se.leaf(s0);
     let mut best: Option<(Option<(usize, Strategy)>, Vec<Alt>, u32)> = None;
+    let mut first: Vec<Alt> = vec![];
     let mut truncated = false;
     for depth in 1..=cfg.depth.max(1) {
         se.top = depth;
@@ -421,14 +459,14 @@ pub fn plan(src: &dyn Source, cfg: &LookCfg, menu: &[AOffer], memory: &[(u64, Ve
         for (o, st, k, p, sd, e, b) in se.actions(s0, menu) {
             let p_imm = (p + cfg.beta_root * sd).min(1.0);
             let (q, imm, vo, vf) = se.q_parts(s0, &o, k, p_imm, p, e, depth);
-            alts.push(Alt { act: Some((o.slot, st)), key: Some(k), n: b.n, p, sd, energy: e, reward: o.reward, q: q - leaf0, immediate: imm, v_ok: vo - leaf0, v_fail: vf - leaf0 });
+            alts.push(Alt { act: Some((o.slot, st)), key: Some(k), n: b.n, p, sd, energy: e, reward: o.reward, q: q - leaf0, immediate: imm, v_ok: vo - leaf0, v_fail: vf - leaf0, q1: 0.0 });
             if se.abort {
                 break;
             }
         }
         if s0.budget >= 1.0 && !se.abort {
             let q = se.q_skip(s0, depth);
-            alts.push(Alt { act: None, key: None, n: 0, p: 0.0, sd: 0.0, energy: 1.0, reward: 0, q: q - leaf0, immediate: 0.0, v_ok: q - leaf0, v_fail: q - leaf0 });
+            alts.push(Alt { act: None, key: None, n: 0, p: 0.0, sd: 0.0, energy: 1.0, reward: 0, q: q - leaf0, immediate: 0.0, v_ok: q - leaf0, v_fail: q - leaf0, q1: 0.0 });
         }
         if se.abort {
             truncated = true;
@@ -444,9 +482,15 @@ pub fn plan(src: &dyn Source, cfg: &LookCfg, menu: &[AOffer], memory: &[(u64, Ve
                 bi = i;
             }
         }
+        if depth == 1 {
+            first = alts.clone();
+        }
         best = Some((alts[bi].act, alts, depth));
     }
-    let (act, alts, depth_done) = best?;
+    let (act, mut alts, depth_done) = best?;
+    for a in alts.iter_mut() {
+        a.q1 = first.iter().find(|f| f.act == a.act).map_or(a.q, |f| f.q);
+    }
     let mut cells: Vec<(Key, Base, u64)> = se.cache.iter().map(|(k, (b, c))| (*k, *b, *c)).collect();
     cells.sort_by(|x, y| x.0.cmp(&y.0));
     let mut drawn = se.drawn.clone();
@@ -456,6 +500,20 @@ pub fn plan(src: &dyn Source, cfg: &LookCfg, menu: &[AOffer], memory: &[(u64, Ve
 
 fn r3(x: f64) -> f64 {
     (x * 1000.0).round() / 1000.0
+}
+
+/// The decision of a plan under `cfg.mode`: (action, None = skip; the score it was chosen on; the added
+/// future term for the hybrid). `scores` are the B1 scores, `skip_ok(score)` the B1 skip rule.
+/// None (hybrid only): no attempt is affordable by the B1 estimate; the caller lets the B1 planner answer.
+pub fn decide(p: &Plan, cfg: &LookCfg, scores: &[(usize, Strategy, f64, bool)], skip_ok: &dyn Fn(f64) -> bool) -> Option<(Option<(usize, Strategy)>, f64, f64)> {
+    match cfg.mode {
+        Mode::Pure => Some((p.act, p.chosen().q, 0.0)),
+        Mode::Hybrid => match hybrid_pick(p, scores, cfg.lambda) {
+            Some((sl, st, h, add)) if !skip_ok(h) => Some((Some((sl, st)), h, add)),
+            Some((_, _, h, add)) => Some((None, h, add)),
+            None => None,
+        },
+    }
 }
 
 impl Plan {
@@ -480,7 +538,7 @@ impl Plan {
                 json!({
                     "action": match a.act { Some((sl, s)) => format!("{sl}:{}", s.name()), None => "skip".into() },
                     "cell": a.key.as_ref().map(|k| cell_names(k)), "n_cell": a.n, "p_success": r3(a.p), "uncertainty_sd": r3(a.sd), "est_energy": r3(a.energy), "listed_reward": a.reward,
-                    "immediate": r3(a.immediate), "value_if_success": r3(a.v_ok), "value_if_failure": r3(a.v_fail), "q_minus_leaf": r3(a.q),
+                    "immediate": r3(a.immediate), "value_if_success": r3(a.v_ok), "value_if_failure": r3(a.v_fail), "q_minus_leaf": r3(a.q), "q1_minus_leaf": r3(a.q1),
                 })
             })
             .collect();
@@ -489,7 +547,7 @@ impl Plan {
         json!({
             "planner": "lookahead (B8): depth-limited expectimax with sparse menu sampling over the learned model, Bayes-adaptive (simulated outcomes update simulated posteriors)",
             "depth_wanted": self.depth_wanted, "depth_done": self.depth_done, "nodes": self.nodes, "node_cap": cfg.max_nodes, "truncated": self.truncated,
-            "samples_per_node": cfg.samples, "width": cfg.width, "beta_root": cfg.beta_root, "memory_menus": cfg.memory,
+            "mode": format!("{:?}", cfg.mode), "lambda": cfg.lambda, "samples_per_node": cfg.samples, "width": cfg.width, "beta_root": cfg.beta_root, "memory_menus": cfg.memory,
             "rho_learned_reward_per_energy": r3(self.rho), "tau_learned_token_value": r3(self.tau),
             "chosen": self.label(), "alternatives": alts, "cells_read": cells, "cells_read_total": self.cells.len(), "menus_drawn_from_steps": self.menus_drawn,
         })

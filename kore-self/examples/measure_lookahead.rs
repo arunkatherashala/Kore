@@ -14,7 +14,7 @@ mod being;
 use being::chooser::{UcbMenu, DEFAULT_EXPLORE_C};
 use being::lookahead::adapt::{Look2, LookMenu};
 use being::lookahead::beingl::{run_wl, GreedyL, LookL, OracleL, OracleMyopicL, RunL, Ucb1L};
-use being::lookahead::plan::LookCfg;
+use being::lookahead::plan::{LookCfg, Mode};
 use being::lookahead::worldl::{Setting, WLCfg, WorldL, SETTINGS};
 use being::measure::{mean_ci, run_menu, truth, OracleMenu};
 use being::planner::ModelChooser;
@@ -41,6 +41,14 @@ fn lcfg(depth: u32, t: Tun) -> LookCfg {
     LookCfg { samples: t.samples, width: t.width, beta_root: t.beta_root, ..LookCfg::new(depth, NODES) }
 }
 
+/// "pure-dN" or "hybrid-dN"
+fn lcfg_of(p: &str, t: Tun) -> LookCfg {
+    let d: u32 = p[p.len() - 1..].parse().unwrap();
+    let mut c = lcfg(d, t);
+    c.mode = if p.starts_with("pure") { Mode::Pure } else { Mode::Hybrid };
+    c
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct Res {
     rate: f64,
@@ -60,19 +68,16 @@ fn res_l(r: &RunL, us: f64) -> Res {
 
 // ---- World L ----
 
-const WL_POL: [&str; 7] = ["greedy-b1", "ucb1", "lookahead-d1", "lookahead-d2", "lookahead-d3", "oracle-one-step", "oracle-dp"];
+const WL_POL: [&str; 9] = ["greedy-b1", "ucb1", "pure-d1", "pure-d2", "pure-d3", "hybrid-d2", "hybrid-d3", "oracle-one-step", "oracle-dp"];
 
 fn run_wl_pol(p: &str, cfg: &WLCfg, t: Tun) -> Res {
     let t0 = Instant::now();
     let r = match p {
         "greedy-b1" => run_wl(cfg, &mut GreedyL::default()),
         "ucb1" => run_wl(cfg, &mut Ucb1L { c: 0.05 }),
-        "lookahead-d1" => run_wl(cfg, &mut LookL::new(Some(lcfg(1, t)))),
-        "lookahead-d2" => run_wl(cfg, &mut LookL::new(Some(lcfg(2, t)))),
-        "lookahead-d3" => run_wl(cfg, &mut LookL::new(Some(lcfg(3, t)))),
         "oracle-one-step" => run_wl(cfg, &mut OracleMyopicL::new(WorldL::new(cfg.clone()))),
         "oracle-dp" => run_wl(cfg, &mut OracleL::new(WorldL::new(cfg.clone()))),
-        _ => unreachable!(),
+        _ => run_wl(cfg, &mut LookL::new(Some(lcfg_of(p, t)))),
     };
     res_l(&r, t0.elapsed().as_secs_f64() * 1e6)
 }
@@ -114,25 +119,24 @@ fn report_wl(setting: Setting, budget: i64, t: Tun) {
     println!("\n| paired difference | mean | 95% interval | better / worse / tie (of 20) |");
     println!("|---|---|---|---|");
     let g = col(&rs, 0);
-    for d in [2usize, 3, 4] {
-        let l = col(&rs, d);
-        diff(&format!("{} - greedy-b1", WL_POL[d]), &l, &g);
+    for d in 2..=6usize {
+        diff(&format!("{} - greedy-b1", WL_POL[d]), &col(&rs, d), &g);
     }
-    let l2 = col(&rs, 3);
-    let l3 = col(&rs, 4);
-    diff("lookahead-d2 - ucb1", &l2, &col(&rs, 1));
-    diff("lookahead-d3 - ucb1", &l3, &col(&rs, 1));
-    diff("oracle-dp - lookahead-d2", &col(&rs, 6), &l2);
-    diff("oracle-dp - lookahead-d3", &col(&rs, 6), &l3);
-    diff("oracle-dp - greedy-b1", &col(&rs, 6), &g);
-    diff("oracle-dp - oracle-one-step (value of planning with known parameters)", &col(&rs, 6), &col(&rs, 5));
-    let tr: u64 = rs.iter().map(|r| r[4].trunc).sum();
-    println!("\nnode cap {NODES}: depth-3 searches cut by the cap: {tr} decisions in total");
+    for d in [3usize, 4, 5, 6] {
+        diff(&format!("{} - ucb1", WL_POL[d]), &col(&rs, d), &col(&rs, 1));
+    }
+    for d in [3usize, 4, 5, 6] {
+        diff(&format!("oracle-dp - {}", WL_POL[d]), &col(&rs, 8), &col(&rs, d));
+    }
+    diff("oracle-dp - greedy-b1", &col(&rs, 8), &g);
+    diff("oracle-dp - oracle-one-step (value of planning with known parameters)", &col(&rs, 8), &col(&rs, 7));
+    let tr: Vec<u64> = (2..=6).map(|i| rs.iter().map(|r| r[i].trunc).sum()).collect();
+    println!("\nnode cap {NODES}: decisions whose search was cut by the cap (pure d1, d2, d3, hybrid d2, d3): {tr:?}");
 }
 
 // ---- controls: first menu world ----
 
-const M1_POL: [&str; 6] = ["greedy-b1", "ucb1-domain", "lookahead-d1", "lookahead-d2", "lookahead-d3", "oracle"];
+const M1_POL: [&str; 7] = ["greedy-b1", "ucb1-domain", "pure-d1", "pure-d2", "hybrid-d2", "hybrid-d3", "oracle"];
 
 fn run_m1(p: &str, seed: u64, budget: i64, t: Tun) -> Res {
     let t0 = Instant::now();
@@ -143,8 +147,7 @@ fn run_m1(p: &str, seed: u64, budget: i64, t: Tun) -> Res {
         "ucb1-domain" => run_menu(seed, budget, &mut UcbMenu::new(seed, DEFAULT_EXPLORE_C)),
         "oracle" => run_menu(seed, budget, &mut OracleMenu { truth: truth(seed), strategies: STRATEGIES.to_vec() }),
         _ => {
-            let d: u32 = p[p.len() - 1..].parse().unwrap();
-            let mut c = LookMenu::new(Some(lcfg(d, t)), ModelChooser::new(1.5));
+            let mut c = LookMenu::new(Some(lcfg_of(p, t)), ModelChooser::new(1.5));
             let r = run_menu(seed, budget, &mut c);
             nodes = c.stats.nodes as f64 / c.stats.decisions.max(1) as f64;
             mx = c.stats.max_nodes;
@@ -169,17 +172,19 @@ fn report_m1(budget: i64, seeds: std::ops::RangeInclusive<u64>, t: Tun, label: &
     println!("\n| paired difference | mean | 95% interval | better / worse / tie |");
     println!("|---|---|---|---|");
     let g = col(&rs, 0);
-    for d in [2usize, 3, 4] {
+    for d in 2..=5usize {
         diff(&format!("{} - greedy-b1", M1_POL[d]), &col(&rs, d), &g);
     }
-    diff("lookahead-d2 - ucb1-domain", &col(&rs, 3), &col(&rs, 1));
-    diff("oracle - lookahead-d2", &col(&rs, 5), &col(&rs, 3));
+    diff("hybrid-d2 - ucb1-domain", &col(&rs, 4), &col(&rs, 1));
+    diff("hybrid-d3 - ucb1-domain", &col(&rs, 5), &col(&rs, 1));
+    diff("oracle - hybrid-d2", &col(&rs, 6), &col(&rs, 4));
+    diff("oracle - hybrid-d3", &col(&rs, 6), &col(&rs, 5));
     rs
 }
 
 // ---- controls: World v2 ----
 
-const W2_POL: [&str; 6] = ["learner-b1", "ucb1", "lookahead-d1", "lookahead-d2", "lookahead-d3", "oracle-planner"];
+const W2_POL: [&str; 7] = ["learner-b1", "ucb1", "pure-d1", "pure-d2", "hybrid-d2", "hybrid-d3", "oracle-planner"];
 
 fn run_v2p(p: &str, cfg: &W2Cfg, t: Tun) -> Res {
     let t0 = Instant::now();
@@ -189,8 +194,7 @@ fn run_v2p(p: &str, cfg: &W2Cfg, t: Tun) -> Res {
         "ucb1" => run_w2(cfg, &mut Ucb2 { c: 0.05 }, 0, None),
         "oracle-planner" => run_w2(cfg, &mut Oracle2::new(World2::new(cfg.clone()), false), 0, None),
         _ => {
-            let d: u32 = p[p.len() - 1..].parse().unwrap();
-            let mut c = Look2::new(Some(lcfg(d, t)));
+            let mut c = Look2::new(Some(lcfg_of(p, t)));
             let r = run_w2(cfg, &mut c, 10, None);
             nodes = c.stats.nodes as f64 / c.stats.decisions.max(1) as f64;
             mx = c.stats.max_nodes;
@@ -240,50 +244,59 @@ fn report_v2(c: &Cond, seeds: std::ops::RangeInclusive<u64>, t: Tun, label: &str
     println!("\n| paired difference | mean | 95% interval | better / worse / tie |");
     println!("|---|---|---|---|");
     let g = col(&rs, 0);
-    for d in [2usize, 3, 4] {
+    for d in 2..=5usize {
         diff(&format!("{} - learner-b1", W2_POL[d]), &col(&rs, d), &g);
     }
-    diff("lookahead-d2 - ucb1", &col(&rs, 3), &col(&rs, 1));
-    diff("oracle-planner - lookahead-d2", &col(&rs, 5), &col(&rs, 3));
+    diff("hybrid-d2 - ucb1", &col(&rs, 4), &col(&rs, 1));
+    diff("hybrid-d3 - ucb1", &col(&rs, 5), &col(&rs, 1));
+    diff("oracle-planner - hybrid-d2", &col(&rs, 6), &col(&rs, 4));
+    diff("oracle-planner - hybrid-d3", &col(&rs, 6), &col(&rs, 5));
     rs
 }
 
 // ---- tuning ----
 
 fn tune() {
-    println!("### Tuning (seeds 101..120): World L, all four settings, budget 400; mean over settings of (lookahead - greedy-b1)\n");
-    println!("| depth | beta_root | samples | width | plain | keys | probe | sizes | mean |");
-    println!("|---|---|---|---|---|---|---|---|---|");
+    println!("### Tuning (seeds 101..120): World L, all four settings, budget 400; mean over seeds of (planner - greedy-b1); controls: menu world 600 and World v2 (12 families, 3000, noise 50, drift 10)\n");
+    println!("| mode | depth | beta_root | samples | width | lambda | plain | keys | probe | sizes | World L mean | menu world | World v2 |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     let greedy: Vec<Vec<f64>> = SETTINGS.iter().map(|s| col(&table_wl(*s, 400, 101..=120, &["greedy-b1"], CHOSEN), 0)).collect();
-    let mut best: Option<(f64, u32, Tun)> = None;
+    let tc = Cond { name: "tuning", families: 12, budget: 3000, noise_pm: 50, drift: 10, curve: 0 };
+    let seeds: Vec<u64> = (101..=120).collect();
+    let g1: Vec<f64> = seeds.par_iter().map(|s| run_m1("greedy-b1", *s, 600, CHOSEN).rate).collect();
+    let g2: Vec<f64> = seeds.par_iter().map(|s| run_v2p("learner-b1", &tc.cfg(*s), CHOSEN).rate).collect();
+    let only = std::env::args().nth(2).unwrap_or_default();
+    let mut grid: Vec<(&str, u32, Tun, f64)> = vec![];
     for depth in [2u32, 3] {
-        for beta_root in [0.0, 0.75, 1.5] {
-            for samples in [2usize, 4] {
-                for width in [3usize, 5] {
-                    let t = Tun { beta_root, samples, width };
-                    let pol = if depth == 2 { "lookahead-d2" } else { "lookahead-d3" };
-                    let mut ds = vec![];
-                    for (si, s) in SETTINGS.iter().enumerate() {
-                        let l = col(&table_wl(*s, 400, 101..=120, &[pol], t), 0);
-                        ds.push(l.iter().zip(&greedy[si]).map(|(a, b)| a - b).sum::<f64>() / 20.0);
-                    }
-                    let m = ds.iter().sum::<f64>() / ds.len() as f64;
-                    println!("| {depth} | {beta_root} | {samples} | {width} | {:+.3} | {:+.3} | {:+.3} | {:+.3} | {m:+.3} |", ds[0], ds[1], ds[2], ds[3]);
-                    if best.map_or(true, |b| m > b.0) {
-                        best = Some((m, depth, t));
-                    }
+        for samples in [2usize, 4] {
+            for width in [3usize, 5] {
+                for lambda in [0.5, 1.0, 2.0] {
+                    grid.push(("hybrid", depth, Tun { beta_root: 1.5, samples, width }, lambda));
                 }
             }
         }
     }
-    let (m, d, t) = best.unwrap();
-    println!("\nbest on World L tuning seeds: depth {d}, {t:?}, mean gain {m:+.3}");
-    // the chosen constants must not lose on the existing worlds' tuning seeds either
-    for beta_root in [0.0, 0.75, 1.5] {
-        let t = Tun { beta_root, ..t };
-        println!("\ncontrols on tuning seeds with beta_root {beta_root}:");
-        report_m1(600, 101..=120, t, "tuning seeds 101..120");
-        report_v2(&Cond { name: "tuning", families: 12, budget: 3000, noise_pm: 50, drift: 10, curve: 0 }, 101..=120, t, "tuning seeds 101..120");
+    for beta_root in [1.5, 3.0] {
+        grid.push(("pure", 3, Tun { beta_root, samples: 2, width: 3 }, 1.0));
+    }
+    for (mode, depth, t, lambda) in grid {
+        if !only.is_empty() && only != mode {
+            continue;
+        }
+        let name = format!("{mode}-d{depth}");
+        let mut c = lcfg_of(&name, t);
+        c.lambda = lambda;
+        let mut ds = vec![];
+        for (si, s) in SETTINGS.iter().enumerate() {
+            let l: Vec<f64> = seeds.par_iter().map(|sd| run_wl(&WLCfg { seed: *sd, setting: *s, budget: 400 }, &mut LookL::new(Some(c))).per_energy()).collect();
+            ds.push(l.iter().zip(&greedy[si]).map(|(a, b)| a - b).sum::<f64>() / 20.0);
+        }
+        let m = ds.iter().sum::<f64>() / ds.len() as f64;
+        let l1: Vec<f64> = seeds.par_iter().map(|s| run_menu(*s, 600, &mut LookMenu::new(Some(c), ModelChooser::new(1.5))).per_budget()).collect();
+        let l2: Vec<f64> = seeds.par_iter().map(|s| run_w2(&tc.cfg(*s), &mut Look2::new(Some(c)), 10, None).per_energy()).collect();
+        let d1 = l1.iter().zip(&g1).map(|(a, b)| a - b).sum::<f64>() / 20.0;
+        let d2 = l2.iter().zip(&g2).map(|(a, b)| a - b).sum::<f64>() / 20.0;
+        println!("| {mode} | {depth} | {} | {} | {} | {lambda} | {:+.3} | {:+.3} | {:+.3} | {:+.3} | {m:+.3} | {d1:+.3} | {d2:+.3} |", t.beta_root, t.samples, t.width, ds[0], ds[1], ds[2], ds[3]);
     }
 }
 
@@ -292,19 +305,19 @@ fn cost() {
     println!("| world | policy | steps per life | nodes per step (mean / max) | microseconds per step |");
     println!("|---|---|---|---|---|");
     for s in [Setting::Keys, Setting::Probe] {
-        for p in ["greedy-b1", "lookahead-d1", "lookahead-d2", "lookahead-d3"] {
+        for p in ["greedy-b1", "pure-d1", "pure-d2", "pure-d3", "hybrid-d2", "hybrid-d3"] {
             let rs: Vec<Res> = (1..=5).map(|seed| run_wl_pol(p, &WLCfg { seed, setting: s, budget: 400 }, CHOSEN)).collect();
             let n = rs.len() as f64;
             println!("| World L {} 400 | {p} | {:.0} | {:.0} / {} | {:.1} |", s.name(), rs.iter().map(|r| r.steps as f64).sum::<f64>() / n, rs.iter().map(|r| r.nodes).sum::<f64>() / n, rs.iter().map(|r| r.max_nodes).max().unwrap(), rs.iter().map(|r| r.micros).sum::<f64>() / n);
         }
     }
-    for p in ["greedy-b1", "lookahead-d1", "lookahead-d2", "lookahead-d3"] {
+    for p in ["greedy-b1", "pure-d2", "hybrid-d2", "hybrid-d3"] {
         let rs: Vec<Res> = (1..=5).map(|seed| run_m1(p, seed, 600, CHOSEN)).collect();
         let n = rs.len() as f64;
         println!("| menu world 600 | {p} | {:.0} | {:.0} / {} | {:.1} |", rs.iter().map(|r| r.steps as f64).sum::<f64>() / n, rs.iter().map(|r| r.nodes).sum::<f64>() / n, rs.iter().map(|r| r.max_nodes).max().unwrap(), rs.iter().map(|r| r.micros).sum::<f64>() / n);
     }
     let c = W2_CONDS[1];
-    for p in ["learner-b1", "lookahead-d1", "lookahead-d2", "lookahead-d3"] {
+    for p in ["learner-b1", "pure-d2", "hybrid-d2", "hybrid-d3"] {
         let rs: Vec<Res> = (1..=5).map(|seed| run_v2p(p, &c.cfg(seed), CHOSEN)).collect();
         let n = rs.len() as f64;
         println!("| World v2 medium clean | {p} | {:.0} | {:.0} / {} | {:.1} |", rs.iter().map(|r| r.steps as f64).sum::<f64>() / n, rs.iter().map(|r| r.nodes).sum::<f64>() / n, rs.iter().map(|r| r.max_nodes).max().unwrap(), rs.iter().map(|r| r.micros).sum::<f64>() / n);

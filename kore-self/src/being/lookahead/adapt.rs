@@ -124,13 +124,27 @@ impl Chooser2 for Look2 {
         }
         let mut rationale = p.to_json(&cfg, &cell_name);
         rationale["policy"] = json!(self.name());
-        let ch = p.chosen().clone();
-        let act = match p.act {
+        let cands = self.inner.candidates(st, offers);
+        let scores: Vec<(usize, Strategy, f64, bool)> = cands.iter().map(|c| (c.slot, c.strategy, c.score, c.affordable)).collect();
+        let rate = if st.total_cost > 0 { st.total_reward as f64 / st.total_cost as f64 } else { 0.0 };
+        let sf = self.inner.skip_frac;
+        let skip_ok = |h: f64| sf > 0.0 && st.total_cost >= SKIP_MIN_COST && h < sf * rate && st.budget_left >= crate::being::world2::world::SKIP_COST;
+        let Some((dec, score, add)) = plan::decide(&p, &cfg, &scores, &skip_ok) else { return self.inner.choose(st, offers) };
+        rationale["decided"] = json!({ "score": score, "future_term_per_energy": add });
+        let ch = p.alts.iter().find(|a| a.act == dec).cloned().unwrap_or_else(|| p.chosen().clone());
+        let act = match dec {
             Some((slot, strategy)) => Act2::Attempt { slot, strategy },
             None => Act2::Skip,
         };
-        let why = format!("lookahead depth {} of {} ({} nodes): highest simulated value {:+.3} over the leaf, learned rate {:.3}", p.depth_done, p.depth_wanted, p.nodes, ch.q, p.rho);
-        Some(Choice2 { act, policy: self.name(), why, p: ch.p, sd: ch.sd, cost_est: ch.energy, score: ch.q, rationale })
+        let why = format!("lookahead ({:?}) depth {} of {} ({} nodes): score {:.3}, future term {:+.3} per energy, simulated value {:+.3} over the leaf, learned rate {:.3}", cfg.mode, p.depth_done, p.depth_wanted, p.nodes, score, add, ch.q, p.rho);
+        // the model's own estimate of the chosen option (exact, for the prediction it is logged with)
+        let (pp, sd, ce) = match dec.and_then(|(sl, s)| cands.iter().find(|c| c.slot == sl && c.strategy == s)) {
+            Some(c) => (c.p, c.sd, c.cost_est),
+            None if dec.is_none() => (0.0, 0.0, crate::being::world2::world::SKIP_COST as f64),
+            None => (ch.p, ch.sd, ch.energy),
+        };
+        let score = if dec.is_none() && cfg.mode == plan::Mode::Hybrid { 0.0 } else { score };
+        Some(Choice2 { act, policy: self.name(), why, p: pp, sd, cost_est: ce, score, rationale })
     }
 }
 
@@ -186,12 +200,28 @@ impl MenuChooser for LookMenu {
         let names = |k: &Key| format!("{} d{} {}", ALL_DOMAINS_X[(k.fam as usize).min(ALL_DOMAINS_X.len() - 1)].name(), k.diff, strat(k.strat).name());
         let mut rationale = p.to_json(&cfg, &names);
         rationale["policy"] = json!(self.name());
-        let ch = p.chosen().clone();
-        let action = match p.act {
+        let cands = self.inner.candidates(st, offers);
+        let scores: Vec<(usize, Strategy, f64, bool)> = cands.iter().map(|c| (c.slot, c.strategy, c.score, c.affordable)).collect();
+        let rate = match st.model.recent_rate() {
+            Some(r) => r,
+            None => if st.total_cost > 0 { st.total_reward as f64 / st.total_cost as f64 } else { 0.0 },
+        };
+        let sf = self.inner.skip_frac;
+        let skip_ok = |h: f64| sf > 0.0 && st.total_cost >= SKIP_MIN_COST && h < sf * rate && st.budget_left >= crate::being::world::SKIP_COST;
+        let Some((dec, score, add)) = plan::decide(&p, &cfg, &scores, &skip_ok) else { return self.inner.choose(st, offers) };
+        rationale["decided"] = json!({ "score": score, "future_term_per_energy": add });
+        let ch = p.alts.iter().find(|a| a.act == dec).cloned().unwrap_or_else(|| p.chosen().clone());
+        let action = match dec {
             Some((slot, strategy)) => Action::Attempt { slot, strategy },
             None => Action::Skip,
         };
-        let why = format!("lookahead depth {} of {} ({} nodes): highest simulated value {:+.3} over the leaf, learned rate {:.3}", p.depth_done, p.depth_wanted, p.nodes, ch.q, p.rho);
-        Some(Choice { action, policy: self.name(), why, p: ch.p, sd: ch.sd, cost_est: ch.energy, score: ch.q, rationale, advice: None })
+        let why = format!("lookahead ({:?}) depth {} of {} ({} nodes): score {:.3}, future term {:+.3} per energy, simulated value {:+.3} over the leaf, learned rate {:.3}", cfg.mode, p.depth_done, p.depth_wanted, p.nodes, score, add, ch.q, p.rho);
+        let (pp, sd, ce) = match dec.and_then(|(sl, s)| cands.iter().find(|c| c.slot == sl && c.strategy == s)) {
+            Some(c) => (c.p, c.sd, c.cost_est),
+            None if dec.is_none() => (0.0, 0.0, crate::being::world::SKIP_COST as f64),
+            None => (ch.p, ch.sd, ch.energy),
+        };
+        let score = if dec.is_none() && cfg.mode == plan::Mode::Hybrid { 0.0 } else { score };
+        Some(Choice { action, policy: self.name(), why, p: pp, sd, cost_est: ce, score, rationale, advice: None })
     }
 }

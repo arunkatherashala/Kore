@@ -436,3 +436,21 @@ fn logged_run_obeys_the_controller_and_the_kill_switch() {
     let rows: Vec<EventRow> = log.open_latest().rows();
     assert!(rows.iter().any(|e| e.tags.contains("controller_stop")));
 }
+
+#[test]
+fn hybrid_at_depth_one_is_the_b1_planner() {
+    let mut c = LookCfg::new(1, 20_000);
+    c.mode = Mode::Hybrid;
+    for s in SETTINGS {
+        let cfg = WLCfg { seed: 3, setting: s, budget: 300 };
+        let a = run_wl(&cfg, &mut GreedyL::default());
+        let b = run_wl(&cfg, &mut LookL::new(Some(c)));
+        assert_eq!((a.reward, a.cost, a.steps, a.skips), (b.reward, b.cost, b.steps, b.skips), "{}", s.name());
+    }
+    let w = W2Cfg { noise_pm: 50, drift_per_10k: 10, ..W2Cfg::new(4, 12, 1500) };
+    let (r1, r2) = (run_w2(&w, &mut Learner2::default(), 10, None), run_w2(&w, &mut Look2::new(Some(c)), 10, None));
+    assert_eq!(r1.recs, r2.recs);
+    let a = run_menu(2, 600, &mut ModelChooser::new(1.5));
+    let b = run_menu(2, 600, &mut LookMenu::new(Some(c), ModelChooser::new(1.5)));
+    assert_eq!((a.reward, a.cost, a.skips), (b.reward, b.cost, b.skips));
+}

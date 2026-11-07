@@ -364,6 +364,24 @@ impl Default for GreedyL {
     }
 }
 
+impl GreedyL {
+    /// The B1 score of every (offer, strategy): (slot, strategy, score, affordable).
+    pub fn scores(&self, st: &StateL, offers: &[OfferL]) -> Vec<(usize, Strategy, f64, bool)> {
+        let mut v = vec![];
+        for o in offers {
+            if o.needs_token && st.token == 0 {
+                continue;
+            }
+            for s in STRATEGIES {
+                let (p, sd, ratio, _) = st.estimate(o.fam, s, st.ctx);
+                let e = (o.cost as f64 * ratio).max(1.0);
+                v.push((o.slot, s, o.reward as f64 * (p + self.beta * sd).min(1.0) / e, e.round() as i64 <= st.budget_left));
+            }
+        }
+        v
+    }
+}
+
 impl ChooserL for GreedyL {
     fn name(&self) -> String {
         "wl-model-ucb".into()
@@ -501,13 +519,22 @@ impl ChooserL for LookL {
         let mut rationale = p.to_json(&cfg, &names);
         rationale["policy"] = json!(self.name());
         rationale["token_rule"] = json!((0..st.families).map(|f| { let (s, g) = st.token_rule(f); json!({ "family": f, "successes_without_token": s, "tokens_after": g, "p_token": r3(st.token_p(f)) }) }).collect::<Vec<_>>());
-        let ch = p.chosen().clone();
-        let act = match p.act {
+        let scores = self.fallback.scores(st, offers);
+        let (rate, sf) = (st.rate(), self.fallback.skip_frac);
+        let skip_ok = |h: f64| sf > 0.0 && st.total_cost >= SKIP_MIN_COST && h < sf * rate && st.budget_left >= SKIP_COST;
+        let Some((dec, score, add)) = plan::decide(&p, &cfg, &scores, &skip_ok) else { return self.fallback.choose(st, offers) };
+        rationale["decided"] = json!({ "action": match dec { Some((sl, s)) => format!("{sl}:{}", s.name()), None => "skip".into() }, "score": r3(score), "future_term_per_energy": r3(add) });
+        let ch = p.alts.iter().find(|a| a.act == dec).cloned().unwrap_or_else(|| p.chosen().clone());
+        let act = match dec {
             Some((slot, strategy)) => ActL::Attempt { slot, strategy },
             None => ActL::Skip,
         };
-        let why = format!("lookahead depth {} of {} ({} nodes{}): {} has the highest simulated value, {:+.3} over the leaf (immediate {:.3}, if success {:+.3}, if failure {:+.3}); learned rate {:.3}", p.depth_done, p.depth_wanted, p.nodes, if p.truncated { ", node cap reached" } else { "" }, p.label(), ch.q, ch.immediate, ch.v_ok, ch.v_fail, p.rho);
-        Some(ChoiceL { act, policy: self.name(), why, p: ch.p, score: ch.q, rationale, nodes: p.nodes })
+        let why = format!("lookahead ({:?}) depth {} of {} ({} nodes{}): {} chosen on score {:.3} (future term {:+.3} per energy); simulated value {:+.3} over the leaf (immediate {:.3}, if success {:+.3}, if failure {:+.3}); learned rate {:.3}", cfg.mode, p.depth_done, p.depth_wanted, p.nodes, if p.truncated { ", node cap reached" } else { "" }, ActL::label(&act), score, add, ch.q, ch.immediate, ch.v_ok, ch.v_fail, p.rho);
+        let pp = match dec {
+            Some((sl, s)) => offers.iter().find(|o| o.slot == sl).map_or(ch.p, |o| st.estimate(o.fam, s, st.ctx).0),
+            None => 0.0,
+        };
+        Some(ChoiceL { act, policy: self.name(), why, p: pp, score, rationale, nodes: p.nodes })
     }
     fn take_refusals(&mut self) -> Vec<Refusal> {
         std::mem::take(&mut self.refusals)

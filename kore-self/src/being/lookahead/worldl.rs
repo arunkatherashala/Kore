@@ -13,15 +13,17 @@
 //! * `plain`   control: four ordinary families, independent menus. Planning ahead should not matter
 //!             beyond the energy trade-off of one step.
 //! * `keys`    unlocks: a key family (low reward) gives a token on success (at most one held); a vault
-//!             family pays much more but can be attempted only with a token, which it uses up. The menu
+//!             family pays much more (18..26 for 4 energy, against 0.6..1.2 per energy for the ordinary
+//!             families) but can be attempted only with a token, which it uses up. The menu
 //!             shows which offers need a token; the being is not told which family gives tokens.
 //! * `probe`   information before an expensive task: the job family is on every menu; it works with
 //!             `fast` in hidden phase 0 and with `careful` in phase 1 (`deep` works in both at twice the
 //!             energy); the phase is drawn again after every job attempt. A probe (cost 1, on every menu)
 //!             succeeds exactly in phase 0, so it reveals the phase before the job.
-//! * `sizes`   energy trade-off: small offers with a higher reward per energy and large offers with a
-//!             slightly lower one; a one-step ratio rule takes the small ones, but a large offer can be
-//!             worth more once the energy it uses is priced at the achievable rate.
+//! * `sizes`   energy trade-off: small offers (listed cost 2..3, 1.5..1.9 reward per listed energy,
+//!             drawn half as often) and large ones (cost 12..16, 1.3..1.7); a one-step ratio rule takes a
+//!             small one whenever it is shown, but a large offer can be worth more once the energy it uses
+//!             is priced at the achievable rate.
 //!
 //! The oracle knows every hidden probability, the menu distribution, the token rule and the phase rule,
 //! but not the phase itself (it sees probe results like the being). It maximises expected total reward
@@ -146,10 +148,10 @@ impl WorldL {
             }
             Setting::Keys => {
                 for i in 0..3 {
-                    fams.push(normal(&mut r, i, (3, 8), (1.0, 2.0), 2));
+                    fams.push(normal(&mut r, i, (3, 8), (0.6, 1.2), 2));
                 }
                 fams.push(FamL { idx: 3, kind: FKind::Key, cost: 4, reward: 1, p: [0.5, 0.95, 0.98], p1: [0.5, 0.95, 0.98], weight: 2 });
-                let vr = r.range(12, 20);
+                let vr = r.range(18, 26);
                 fams.push(FamL { idx: 4, kind: FKind::Vault, cost: 4, reward: vr, p: [0.6, 0.9, 0.97], p1: [0.6, 0.9, 0.97], weight: 2 });
             }
             Setting::Probe => {
@@ -164,10 +166,10 @@ impl WorldL {
             }
             Setting::Sizes => {
                 for i in 0..3 {
-                    fams.push(normal(&mut r, i, (1, 2), (1.6, 2.2), 1));
+                    fams.push(normal(&mut r, i, (2, 3), (1.5, 1.9), 1));
                 }
                 for i in 3..6 {
-                    fams.push(normal(&mut r, i, (10, 16), (1.3, 1.9), 1));
+                    fams.push(normal(&mut r, i, (12, 16), (1.3, 1.7), 2));
                 }
             }
         }
