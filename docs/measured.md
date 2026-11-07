@@ -1502,6 +1502,28 @@ the first two recover on the next run, the lost commit is redone with identical 
 **Not shown**: 1,000,000 steps (memory and restart time grow linearly with the history), a real crash during a
 commit, speeds on an idle machine, more than one world per configuration, the cause of the slow decline in world 1.
 
+**Restart fix** (branch `restart-fix`, 2026-11-06, same shared machine; details in `docs/longrun.md`, "Restart fix"):
+the log's open now streams the non-event tables into the index a chunk at a time, the being folds its state from an
+events-only read, `being_run` reads only the genesis before its checks (no load of the history) and opens and folds
+the log once per call. No format change. One 5,000-step `being_run` call on cut copies of the 390,000-step log, old ->
+new binary:
+
+| steps in the log | process peak MB | call s | KILL file present before the call: s to the refusal |
+|---|---|---|---|
+| 49,975 | 698 -> 109 | 19.4 -> 12.5 | 8.6 -> 2.9 |
+| 149,825 | 2,057 -> 280 | 69.4 -> 21.0 | 44.6 -> 7.5 |
+| 249,675 | 3,423 -> 403 | 185.4 -> 30.2 | 162.7 -> 24.9 |
+| 390,000 | 5,275 -> 566 | 774.6 -> 39.8 | 248.8 -> 25.4 |
+
+Restart memory is now the log's index, about 1.5 to 2 KB per step; open time still grows linearly (every segment file
+is read and hashed). The rows both binaries append from the same cut are identical field by field at all four sizes,
+and a 20,000-step smoke run from an empty log is identical (60,016 events, 20,000 revisions). With the fix the world-1
+long run **reached 1,000,000 steps** (5.22 h, 101 cold restarts, shared disk-bound machine): child peak 1,573 MB at
+1,000,000 steps (old: 5,201 MB at 390,000), 5,000-step call 8 s at 50,000 steps and 45-140 s from 500,000 on;
+`verify` ok, the restart's own fold equal to the incremental fold and steps consecutive at all 20 checkpoints, 6,000
+replayed decisions 0 mismatches, KILL at 300,000 steps: 0 steps, answered after 72 s (old 174 s). Reward per energy
+per window 4.000-4.098 over the whole run, no improvement after the first 50,000 steps.
+
 ## Not measured
 
 Real-life data of any kind (the free-text section above is also synthetic); the probabilities of the live ledger (`predict_make`/`predict_score` have not been run on real data; the S4 numbers above are synthetic sequences only; the older `self_ledger_snapshot` rows are not scored by any measurement); behaviour with

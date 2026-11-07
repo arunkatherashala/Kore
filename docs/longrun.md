@@ -79,6 +79,10 @@ $E prof --root <data>/prof --world 4 --steps 10000 --window 2500
 $E memstat --root <data>/smoke
 $E scan --root <data>/scan --world 8 --steps 6000           # which worlds find rules
 $E rulecheck --root <data>/w4                              # wrong rule answers: wrong rule or execution slip
+$E cut --src <data>/w1 --root <data2>/base/v6000 --at 6000  # copy of a log holding versions 0..6000 only
+LONGRUN_BIN=<old or new kore-self.exe> $E restart --root <copy> --chunk 5000 [--kill-ms 100|0]   # one cold restart, timed
+$E compare --root <copy A> --other <copy B> --at 6000      # rows after version 6000, field by field
+$E memfold --root <copy>                                   # the new restart read path in-process (peak memory, times)
 ```
 
 `run` resumes on an existing root (`--steps` and `--kill-at` count the being's total steps). Below the disk floor
@@ -310,10 +314,12 @@ exactly during a commit, or a power loss, was not tested.
 1. **Memory grows linearly with the history and is needed again at every restart** (about 13 KB per step; 5.2 GB at
    390,000 steps). This ended the long run. Extrapolated, not measured: about 13 GB at 1,000,000 steps. Cause:
    `VersionedLog::open` / `open_latest` materialise every table, `BeingState::from_snapshot` folds all events, and
-   decision revisions (rationale JSON) dominate. Not fixed (needs an events-only or lazy read path, or a state
-   checkpoint, in `versioned` and `being/loop.rs`; not small).
+   decision revisions (rationale JSON) dominate. **Fixed on branch `restart-fix`** (streamed open, events-only fold):
+   566 MB instead of 5.3 GB at 390,000 steps; see "Restart fix".
 2. **Restart time grows linearly** (17 s -> 446 s per 5,000-step call), same cause, plus the double fold in
-   `being_tools::run` (`load(owner)` and `run_full` each open and fold the log). Not fixed.
+   `being_tools::run` (`load(owner)` and `run_full` each open and fold the log). **Reduced on branch `restart-fix`**
+   (one open and one events-only fold per call: 40 s instead of 775 s per 5,000-step call at 390,000 steps); still
+   linear in the log (every segment is read and hashed at open). See "Restart fix".
 3. **Per-step cost grows with the number of revealed examples in a rule world** (world 4: 48 ms per step in the first
    5,000 steps, 557 ms per step at 35,000 to 40,000 steps; in-process profile: 0.25 ms for the step itself, 60 ms discovery and 69 ms housekeeping per step at 10,000 steps). `discover_pass` evaluates every candidate on every
    logged example of each signature every 10 steps, and `housekeeping` re-checks every live rule for a merge against
@@ -324,7 +330,9 @@ exactly during a commit, or a power loss, was not tested.
    to +0.128 between 50,000 and 390,000 steps; more skipping). Cause not established. Not fixed.
 5. KILL latency on a large log: the kill check runs before each step, so a KILL file that appears while a call is still
    loading the log takes effect when loading ends (174 s at 300,000 steps). No step ran after the file appeared, so "no
-   step after KILL" held; only the answer was slow. Not fixed (follows from 2).
+   step after KILL" held; only the answer was slow. **Reduced on branch `restart-fix`**: the KILL check comes before
+   the history is loaded; the refusal costs one open for its audit row (25 s instead of 249 s at 390,000 steps).
+   See "Restart fix".
 6. With an advisor and a KILL file, the refusal told the owner to edit `autonomy_policy.txt`, which was not the reason.
    **Fixed** in `being_tools.rs` (the hint names the KILL file when it exists), test
    `kill_file_with_an_advisor_names_the_kill_file_not_the_policy`.
@@ -335,9 +343,142 @@ exactly during a commit, or a power loss, was not tested.
 Side observation: the binary also writes `becoming.kore`, `learning_history.kore` and `memories.kore` into the owner
 directory (legacy files); their size was not tracked.
 
+## Restart fix
+
+Branch `restart-fix` (from `048855f2`), 2026-11-06. Bugs 1, 2 and 5 above. Same machine, again shared: the CPU busy
+share during the measured calls was 0.82 to 1.00 (other agents building and testing). Wall times are upper bounds.
+
+### Causes, confirmed by measurement
+
+`memstat` (old code, in-process) on cuts of the 390,000-step world-1 log (copies holding versions 0..V only, harness
+mode `cut`): after `VersionedLog::open` the process already held 556 MB at 50,000 steps; `open` decoded every
+revision, cause, prediction and outcome row of the whole log at once to build the index and only then dropped them.
+`open_latest()` then decoded the whole snapshot again (all tables, kept in the log handle for the rest of the call), and
+`rows::<EventRow>()` copied the events once more. Revision text (rationale, stance, key) was 193 MB at 50,000 steps
+(3.9 KB per step); the being's fold reads none of it. `being_run` did this twice per call (`load` for the genesis,
+then `run_full`), and every audit row opened the log once more.
+
+### Design chosen
+
+Measured first which part of a restart costs what (new code, in-process, `memfold`): reading and hashing every segment
+file (50k files at 250,000 steps) is most of the open; decoding is not. So a state checkpoint would only remove the
+fold (4.3 s at 390,000 steps), not the open (17.6 s), at the price of serialising the whole being state (model,
+trust, transfer, rules, examples, floats that must round-trip exactly) into a new kind of log entry. Not done; the
+simpler change below is enough for 1,000,000 steps (see the run below). What changed:
+
+* **Streamed open** (`versioned/mod.rs`, `load_state_streamed`): for a log whose events segments are all v2 (formats
+  2 and 3), open reads the other tables 512 segments at a time and folds each chunk into the index before reading the
+  next. Every segment is still read and sha256-checked at open. The index is exactly the one the full read builds if
+  every cause row is in the commit of its revision and no rev_id is stored twice (always so for logs written through
+  the API); otherwise the log is read the old way (test with a hand-made irregular log). Format 1 logs: unchanged.
+* **Events-only read** (`for_each_event`): the events segments a chunk at a time, checksums verified, nothing kept.
+  `BeingState::from_log` folds the being from it; `run_full` uses it instead of `open_latest()`.
+* **Genesis peek** (`peek_events`, `BeingState::genesis_peek`): `being_run` needs the genesis (which advisor) before
+  the advisor and KILL checks. It now reads the MANIFEST (hash chain checked) and only the events segments up to the
+  genesis, without opening the log. So a call opens and folds the log **once**.
+* **KILL before loading**: with the peek, the existing KILL check (refusal plus audit row) now comes before any load of
+  the history; the order of the checks is unchanged. The refusal's audit row still needs one open (an append needs the
+  index), so a refused call costs one open. A KILL file that appears during the open/fold is seen before the first
+  step, as before.
+* **Audit rows through the open log**: refusals of a run (KILL stop, caps) are written into the log the run has open,
+  not by a second open per row.
+* No format change: no new entry kind, nothing new on disk; `verify` and tamper detection are unchanged and every
+  segment is still checked at open. Old logs (format 1, the format 1 and 2 fixtures) open as before (tests).
+
+### Before / after, one 5,000-step `being_run` call on a cut copy of the log (real binary, cold process)
+
+Old = binary built from `048855f2`; new = this branch. Each size: two fresh copies of the same cut, one per binary.
+"KILL at 100 ms": the KILL file is created 100 ms after the call is sent; "KILL present": it exists before the call.
+Time is from the file to the answer.
+
+| steps in the log | process peak MB old -> new | call s old -> new | CPU s old -> new | `open` s old -> new (in-process) | fold s old -> new (old: open_latest + rows + fold) | KILL at 100 ms, s old -> new | KILL present, s old -> new |
+|---|---|---|---|---|---|---|---|
+| 49,975 | 698 -> 109 | 19.4 -> 12.5 | 31 -> 13 | 2.0 -> 2.1 | 1.4 -> 0.6 | 7.6 -> 3.3 | 8.6 -> 2.9 |
+| 149,825 | 2,057 -> 280 | 69.4 -> 21.0 | 135 -> 36 | 14.7 -> 9.2 | 13.4 -> 2.1 | 42.5 -> 9.5 | 44.6 -> 7.5 |
+| 249,675 | 3,423 -> 403 | 185.4 -> 30.2 | 300 -> 56 | 47.4 -> 44.0 | 48.8 -> 5.7 | 1,426.6 (*) -> 82.7 | 162.7 -> 24.9 |
+| 390,000 | 5,275 -> 566 | 774.6 -> 39.8 | 706 -> 106 | 69.8 -> 17.6 | 69.9 -> 4.3 | 398.5 -> 18.0 | 248.8 -> 25.4 |
+
+(*) That old call had 219 CPU s in 1,427 s with the machine only 13% busy: it waited on the disk (the copies had just
+been written; the old process held 3.5 GB). Shown as measured. The open times vary a lot with the disk cache: 44 s at
+249,675 steps on a fresh copy, 7.2 s on a warm one earlier the same day (new code both times).
+
+Memory of the new restart is the index (every event id, revision id, key and content digest, predictions, outcomes):
+about 1.45 to 2.1 KB per step (566 MB at 390,000 steps), against 13.5 KB per step before. Time still grows linearly
+with the log (every segment file is read and hashed at open), with a smaller slope: 5,000-step call 12.5 s -> 39.8 s
+from 50,000 to 390,000 steps, against 19 s -> 775 s.
+
+KILL answers: with the file present before the call the new binary refuses after one open (2.9 s to 25.4 s); the old
+one needed two opens and two full folds first. With the file appearing during the call: at 50,000 and 150,000 steps
+the new binary had already passed the KILL check and stopped before its first step (0 steps, controller_stop note,
+audit row); at the larger sizes the peek and process start took longer than 100 ms, so it was the refusal.
+
+### Bit identity
+
+* Each size above: the rows the two binaries appended in the 5,000-step call from the same cut, compared field by field
+  except the wall-clock `recorded_at` (harness `compare`): events 15,003 or 15,004 (audit rows excluded: they carry a
+  random nonce), revisions 5,000, causes 65,000, predictions and outcomes 1,880 to 2,348: **identical at all four
+  sizes**, and the version numbers are equal.
+* Smoke run, 20,000 steps from an empty log, world 1, both binaries through the harness (`run`, 2 processes, 4 calls):
+  60,016 being events, 20,000 revisions, 259,919 causes, 8,565 predictions and outcomes: **identical**; 807 versions
+  each.
+* Tests: the streamed index equals the full read (formats 2 and 3, after a forget, the three old fixtures, irregular
+  log falls back); the events-only read equals the snapshot rows (formats 1, 2, 3, after commits, with the snapshot in
+  memory); the events-only fold equals the old fold field by field in five worlds (UCB, B5 rules, rule drift, drift
+  with the switch learner, B6 transfer) in formats 1 and 3, after every chunk; 7 restarts give the same log content
+  hash as one run; an advisor being folds the same; the genesis peek equals the full fold's genesis; tampering is
+  detected by the peek, the events-only read and the streamed open; KILL refusal and KILL stop write one audit row each.
+* The long-run harness now checks at every checkpoint that the restart's own read (`from_log` of the whole log) equals
+  its incremental fold field by field ("restart fold equal").
+
+### Long run with the fix: world 1, 1,000,000 steps
+
+Same harness and settings as the long run above (`run --world 1 --steps 1000000 --checkpoint-every 50000 --window 50000
+--kill-at 300000 --heavy-every 4 --max-hours 9`), a fresh log, new binary only. Data under `kw\longrun-data2` (not
+committed). 2026-11-06, 20:00 to 01:13 UTC. The machine was shared again; the CPU busy share during the child processes
+was 0.4 to 1.0 (below 0.7 for most of the second half: the processes waited on a disk that other work kept busy).
+
+* **Reached 1,000,000 steps** in 5.22 h, 101 child processes (cold restarts), 201 `being_run` calls, stop reason
+  "steps reached". No pause (free disk 25.2 to 28.2 GB), the memory guard never triggered.
+* Child peak working set (one process = 2 calls of 5,000 steps): 105 MB at 50,000 steps, 307 MB at 200,000, 456 MB
+  at 300,000, 590 MB at 405,000, 900 MB at 605,000, 1,169 MB at 805,000, **1,573 MB at 1,000,000** (max 1,581 MB).
+  The old binary needed 5,201 MB at 390,000 steps. The growth is the index (hash tables grow in doublings, hence the
+  steps, e.g. 1,227 -> 1,561 MB between 905,000 and 925,000).
+* Wall time of a 5,000-step call: 7.8 s at 50,000 steps, 20 s at 200,000, 26 to 35 s at 300,000 to 405,000, then 45 to
+  140 s from 500,000 to 1,000,000 on the disk-bound machine (one call at 610,000 steps took 2,037 s with 258 CPU s
+  for its whole process: a stall, shown as measured). The old run: 446 s per call at 390,000 steps.
+* KILL test at 300,000 steps (file created 17 s into a call): `stopped: kill switch`, **0 steps**, answer 72 s after the
+  file (the call had not finished loading; process start 2.9 s, busy share 0.85); a second call with the file present
+  was refused; both audited (2 `authorize` rows in the whole log), `controller_stop` note at step 300,000. Old run at
+  the same size: 174 s.
+* Correctness, every checkpoint (20 of them): `verify` ok (hash chain and every segment checksum; at 1,000,000 steps
+  200,066 files, 609 MB, 474 s on the loaded disk); the restart's own events-only fold of the whole log equal field by
+  field to the harness's incremental fold: **20 of 20**; outcome steps consecutive from 0 to 999,999 (no gap, no
+  repeat) across 101 restarts; 6,000 logged decisions re-derived from the log alone, 0 mismatches; `open_at` of an
+  earlier version gave the same content hash and answers 19 of 19; full re-fold of the decoded snapshot equal on the 2
+  heavy checkpoints that fit in memory (50,000 and 250,000 steps; later ones skipped by the harness's memory rule:
+  the harness itself still decodes the whole snapshot for them). No cap exceeded. Log sources: `being:loop`
+  3,000,774 events, `authorize` 2, `longrun_probe` 60.
+* Log on disk: 609 to 618 bytes per step, flat; one-event probe commit 6 to 20 ms median (one 126 ms value), no growth.
+* Learning: the windows of 50,000 steps up to 300,000 have exactly the numbers of the old run (4.095, 4.098, 4.093,
+  4.090, 4.088, 4.066; same seeds, same events). Over 1,000,000 steps the reward per energy per window stays between
+  4.000 and 4.098 (regret +0.059 to +0.158 against the skip oracle at 4.158): it does not improve after the first
+  window and dips in some windows (500k-550k 4.016, 750k-800k 4.000, 900k-950k 4.012) with more skipping, and recovers
+  in others (600k-650k 4.098). Repeated known-bad attempts: 0 in every window. Cumulative reward per energy 4.095 at
+  50,000 -> 4.064 at 1,000,000.
+
+### What is still linear, not fixed
+
+* Open time: every segment file is read and hashed at every open (200,066 files at 1,000,000 steps); `verify` likewise.
+* The index: about 1.5 KB per step (event ids, revision ids, keys and content digests are kept as hex strings).
+* The fold re-reads all events at every restart (4.3 s at 390,000 steps on a warm cache in-process).
+* `being_status`, `being_explain` and `being_rules` still decode the whole snapshot (not on the restart path; not changed).
+* A KILL file that appears while a call loads the log is honoured after the load (at most one open and one fold).
+* A state checkpoint (snapshot of the folded state as a log entry) would remove the fold part only; not built.
+
 ## Not measured
 
-* 1,000,000 steps or more (the run ended at 390,000 on memory); anything beyond is extrapolation.
+* With the code of `c7e5d8c3`: 1,000,000 steps (that run ended at 390,000 on memory). With the restart fix world 1 reached
+  1,000,000 (see "Restart fix"); more than 1,000,000, and the rule world over a long run, are not measured.
 * A real crash during a commit (process killed, power loss); only simulated damage on copies.
 * Torn-write tests on the large log (only on the 20,000-step log, to keep disk use down).
 * Format 1 beyond 50,000 steps (its whole-MANIFEST rewrite per commit was not pushed to large version counts).

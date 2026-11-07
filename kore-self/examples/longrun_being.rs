@@ -683,6 +683,12 @@ fn checkpoint(o: &Opts, an: &mut Analyzer, recorded: &mut Vec<Recorded>, oracle_
     an.last_version = latest;
     // heavy: the full latest snapshot (what a restart folds), a re-fold, and its content hash for later open_at checks
     let (mut decode_ms, mut fold_ms, mut consistent, mut ch) = (0.0, 0.0, Value::Null, String::new());
+    // every checkpoint: the restart's own read (events-only fold of the whole log) equals the incremental fold
+    let t = Instant::now();
+    let restart_fold = BeingState::from_log(&log).expect("events-only fold");
+    let restart_fold_ms = ms(t);
+    let restart_fold_equal = format!("{restart_fold:?}") == format!("{:?}", an.st);
+    drop(restart_fold);
     if heavy {
         let t = Instant::now();
         let snap = log.open_latest();
@@ -742,7 +748,7 @@ fn checkpoint(o: &Opts, an: &mut Analyzer, recorded: &mut Vec<Recorded>, oracle_
         "type": "checkpoint", "label": label, "steps": an.st.step, "version": latest2, "events": an.events_seen,
         "verify_ok": verify.is_ok(), "verify_err": verify.err().map(|e| e.to_string()), "verify_ms": verify_ms,
         "open_ms": open_ms, "diff_ms": diff_ms, "feed_ms": feed_ms, "decode_latest_ms": decode_ms, "fold_ms": fold_ms,
-        "fold_consistent": consistent, "open_at": open_at, "probe_commit_ms_median": probe[1], "probe_commit_ms": probe,
+        "fold_consistent": consistent, "restart_fold_equal": restart_fold_equal, "restart_fold_ms": restart_fold_ms, "open_at": open_at, "probe_commit_ms_median": probe[1], "probe_commit_ms": probe,
         "log_bytes": bytes, "log_files": files, "bytes_per_event": bytes as f64 / an.events_seen.max(1) as f64, "bytes_per_step": bytes as f64 / an.st.step.max(1) as f64,
         "rules_total": an.st.rules.len(), "rules_live": an.st.live_rules(), "live_max": an.live_max, "examples": an.st.examples.len(),
         "oracle_never_skip_live_rules": orc.0, "oracle_skip_live_rules": orc.1, "oracle_lambda": orc.2, "heavy": heavy,
@@ -759,6 +765,12 @@ fn checkpoint(o: &Opts, an: &mut Analyzer, recorded: &mut Vec<Recorded>, oracle_
 fn mem_ok(last_peak: u64) -> bool {
     let (t, a) = win::memory();
     t == 0 || (a as f64) > 1.5 * last_peak as f64 + 3e9
+}
+
+/// Room for a full decode of the latest snapshot in this process (measured: about 25 x the log bytes).
+fn snapshot_mem_ok(o: &Opts) -> bool {
+    let (t, a) = win::memory();
+    t == 0 || (a as f64) > 1.3 * 25.0 * dir_stats(&o.root.join(OWNER).join("log")).0 as f64 + 3e9
 }
 
 // ─── run ─────────────────────────────────────────────────────────────────────
@@ -791,7 +803,7 @@ fn cmd_run(o: Opts) {
     let mut oracle_cache: HashMap<String, (f64, f64, f64)> = HashMap::new();
     let mut n_cp = 0u64;
     // resume: --steps and --kill-at count the being's total steps
-    let mut steps_done = BeingState::from_events(&VersionedLog::open(&o.root, OWNER).expect("open log").open_latest().rows::<EventRow>()).step;
+    let mut steps_done = BeingState::from_log(&VersionedLog::open(&o.root, OWNER).expect("open log")).expect("fold").step;
     let mut kill_done = o.kill_at.map_or(true, |k| k < steps_done);
     let mut next_cp = (steps_done / o.checkpoint_every + 1) * o.checkpoint_every;
     let mut proc_i = 0u64;
@@ -912,7 +924,7 @@ fn cmd_run(o: Opts) {
         }
         if steps_done >= next_cp || steps_done >= o.steps {
             n_cp += 1;
-            let cp = checkpoint(&o, &mut an, &mut recorded, &mut oracle_cache, &mut out, "periodic", (n_cp % o.heavy_every == 1 || o.heavy_every == 1) && mem_ok(last_peak));
+            let cp = checkpoint(&o, &mut an, &mut recorded, &mut oracle_cache, &mut out, "periodic", (n_cp % o.heavy_every == 1 || o.heavy_every == 1) && snapshot_mem_ok(&o));
             eprintln!("[{:.2} h] checkpoint at {} steps: verify {} rpe {:.3} free {:.1} GB log {:.1} MB", started.elapsed().as_secs_f64() / 3600.0, cp["steps"], cp["verify_ok"], cp["total_reward_per_energy"].as_f64().unwrap_or(0.0), cp["free_gb"].as_f64().unwrap_or(0.0), cp["log_bytes"].as_f64().unwrap_or(0.0) / 1e6);
             cps.push(cp);
             while next_cp <= steps_done {
@@ -925,7 +937,7 @@ fn cmd_run(o: Opts) {
         last_peak = dir_stats(&o.root.join(OWNER).join("log")).0 * 25;
     }
     if cps.last().map_or(true, |c| c["steps"].as_u64() != Some(steps_done)) || an.last_version == 0 {
-        cps.push(checkpoint(&o, &mut an, &mut recorded, &mut oracle_cache, &mut out, "final", mem_ok(last_peak)));
+        cps.push(checkpoint(&o, &mut an, &mut recorded, &mut oracle_cache, &mut out, "final", snapshot_mem_ok(&o)));
     }
     // windows
     for (k, w) in &an.windows {
@@ -1438,14 +1450,14 @@ fn cmd_compare(o: Opts, other: PathBuf, from: u64) {
     let b = VersionedLog::open(&std::fs::canonicalize(&other).unwrap(), OWNER).unwrap();
     let da = a.diff(from, a.latest_version()).unwrap();
     let db = b.diff(from, b.latest_version()).unwrap();
-    let ev = |d: &versioned::Diff| d.events.iter().filter(|e| e.source != "authorize").map(row_key_e).collect::<Vec<_>>();
+    let ev = |d: &versioned::Diff| d.events.iter().filter(|e| e.source != "authorize" && e.source != PROBE_SOURCE).map(row_key_e).collect::<Vec<_>>();
     let rv = |d: &versioned::Diff| d.revisions.iter().map(|r| format!("{}|{}|{}|{}|{:?}|{}|{:?}|{}|{}", r.rev_id, r.entity_type, r.key, r.stance, r.confidence, r.rationale, r.supersedes, r.valid_from, r.author)).collect::<Vec<_>>();
     let ca = |d: &versioned::Diff| d.causes.iter().map(|c| format!("{}|{}", c.rev_id, c.event_id)).collect::<Vec<_>>();
     let pr = |d: &versioned::Diff| d.predictions.iter().map(|p| format!("{:?}", p)).collect::<Vec<_>>();
     let oc = |d: &versioned::Diff| d.outcomes.iter().map(|p| format!("{:?}", p)).collect::<Vec<_>>();
     let cmp = |x: Vec<String>, y: Vec<String>| json!({ "a": x.len(), "b": y.len(), "identical": x == y, "first_diff": x.iter().zip(y.iter()).position(|(p, q)| p != q) });
     let v = json!({ "type": "compare", "from": from, "versions": [a.latest_version(), b.latest_version()],
-        "events_except_audit": cmp(ev(&da), ev(&db)), "revisions": cmp(rv(&da), rv(&db)), "causes": cmp(ca(&da), ca(&db)), "predictions": cmp(pr(&da), pr(&db)), "outcomes": cmp(oc(&da), oc(&db)) });
+        "events_except_audit_and_probes": cmp(ev(&da), ev(&db)), "revisions": cmp(rv(&da), rv(&db)), "causes": cmp(ca(&da), ca(&db)), "predictions": cmp(pr(&da), pr(&db)), "outcomes": cmp(oc(&da), oc(&db)) });
     println!("{v}");
 }
 
