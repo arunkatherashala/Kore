@@ -170,13 +170,20 @@ impl BitW {
     }
 }
 
+/// 64 bits starting at bit `pos` (LSB first); bits past the end read as zero. At least 57 are valid.
 #[inline]
-fn bit(d: &[u8], pos: u64) -> Option<bool> { d.get((pos >> 3) as usize).map(|b| (b >> (pos & 7)) & 1 == 1) }
+fn peek(d: &[u8], pos: u64) -> u64 {
+    let i = (pos >> 3) as usize;
+    let mut b = [0u8; 8];
+    if i + 8 <= d.len() { b.copy_from_slice(&d[i..i + 8]); } else if i < d.len() { b[..d.len() - i].copy_from_slice(&d[i..]); }
+    u64::from_le_bytes(b) >> (pos & 7)
+}
 
 fn get_bits(d: &[u8], pos: u64, nbits: u32) -> Option<u64> {
     if nbits == 0 { return Some(0); }
     let end = pos.checked_add(nbits as u64)?;
     if end > d.len() as u64 * 8 { return None; }
+    if nbits <= 56 { return Some(peek(d, pos) & ((1u64 << nbits) - 1)); }
     let mut v = 0u64;
     let mut got = 0u32;
     let mut p = pos;
@@ -429,15 +436,23 @@ impl KeyIndex {
         let first_entry = (b * self.block_keys) as u64;
         let count = (self.num_keys - first_entry).min(self.block_keys as u64);
         let (mut v, mut pos) = self.fences[b];
+        let nbits = rice.len() as u64 * 8;
         if !f(v, first_entry) { return Ok(pos); }
         for j in 1..count {
+            // unary part: count the ones 56 bits at a time
             let mut u = 0u64;
             loop {
-                match bit(rice, pos) {
-                    Some(true) => { u += 1; pos += 1; }
-                    Some(false) => { pos += 1; break; }
-                    None => return Err(bad("truncated key index Rice stream")),
+                if pos >= nbits { return Err(bad("truncated key index Rice stream")); }
+                let w = peek(rice, pos) | !((1u64 << 56) - 1);
+                let ones = w.trailing_ones() as u64;
+                if ones < 56 {
+                    if pos + ones >= nbits { return Err(bad("truncated key index Rice stream")); }
+                    u += ones;
+                    pos += ones + 1;
+                    break;
                 }
+                u += 56;
+                pos += 56;
                 if u > 1 << 40 { return Err(bad("corrupt key index Rice stream")); }
             }
             let low = get_bits(rice, pos, self.k).ok_or_else(|| bad("truncated key index Rice stream"))?;
