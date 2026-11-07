@@ -125,22 +125,73 @@ fn main() {
         if table == "events" { o.with_dict("text", d.clone()) } else { o }
     };
 
-    // ---- write: default vs v4, paired per repetition (in memory; the files are written once afterwards)
+    // ---- optional: dump the logical rows (JSON arrays, version = segment number first) for the other formats
+    if let Some(dump) = get("--dump") {
+        use std::io::Write;
+        let dump = PathBuf::from(dump);
+        std::fs::create_dir_all(&dump).unwrap();
+        let mut header = serde_json::Map::new();
+        for t in &tables {
+            let mut w = std::io::BufWriter::new(std::fs::File::create(dump.join(format!("{t}.jsonl"))).unwrap());
+            for s in segs.iter().filter(|s| &s.table == t) {
+                let version: u64 = s.file.trim_end_matches(".kore").parse().unwrap();
+                header.insert(t.clone(), json!(s.block.columns.iter().map(|c| (c.name.clone(), format!("{:?}", kore_store::codec::dtype_of(&c.data)))).collect::<Vec<_>>()));
+                for r in 0..s.block.num_rows {
+                    let mut row = vec![json!(version)];
+                    for c in &s.block.columns {
+                        row.push(match &c.data {
+                            ColumnData::Int64(v) => json!(v[r]),
+                            ColumnData::Float64(v) => json!(v[r]),
+                            ColumnData::Bool(v) => json!(v[r]),
+                            ColumnData::Str(v) => json!(v[r]),
+                            _ => unreachable!("materialized"),
+                        });
+                    }
+                    serde_json::to_writer(&mut w, &row).unwrap();
+                    w.write_all(b"
+").unwrap();
+                }
+            }
+        }
+        std::fs::write(dump.join("columns.json"), serde_json::to_string_pretty(&header).unwrap()).unwrap();
+        eprintln!("[store] dumped rows to {}", dump.display());
+    }
+
+    // ---- write: default vs v4, paired per repetition: encode + write every segment file (to the OS cache;
+    // no fsync), into fresh directories
+    let wdir = |name: &str, rep: usize| -> PathBuf {
+        let d = work.join(format!("w_{name}_{rep}"));
+        for t in &tables { std::fs::create_dir_all(d.join(t)).unwrap(); }
+        d
+    };
     let mut w_def = vec![];
     let mut w_v4 = vec![];
     let mut identical = 0usize;
     let mut v4_bytes: Vec<Vec<u8>> = vec![];
     let mut dict = mk_dict();
     for rep in 0..reps {
+        let (dd, dv) = (wdir("def", rep), wdir("v4", rep));
+        std::fs::create_dir_all(dv.join("dicts")).unwrap();
         let t = Instant::now();
         let mut eq = 0;
-        for s in &segs { let b = KoreWriter::to_bytes(&s.block); if b == s.bytes { eq += 1; } }
+        for s in &segs {
+            let b = KoreWriter::to_bytes(&s.block);
+            std::fs::write(dd.join(&s.table).join(&s.file), &b).unwrap();
+            if b == s.bytes { eq += 1; }
+        }
         w_def.push(t.elapsed().as_secs_f64());
         identical = eq;
         let t = Instant::now();
         let d = mk_dict();
-        let outv: Vec<Vec<u8>> = segs.iter().map(|s| KoreWriter::to_bytes_compact(&s.block, &opts_for(&d, &s.table)).unwrap()).collect();
+        std::fs::write(dv.join("dicts").join(d.file_name()), d.to_bytes()).unwrap();
+        let outv: Vec<Vec<u8>> = segs.iter().map(|s| {
+            let b = KoreWriter::to_bytes_compact(&s.block, &opts_for(&d, &s.table)).unwrap();
+            std::fs::write(dv.join(&s.table).join(&s.file), &b).unwrap();
+            b
+        }).collect();
         w_v4.push(t.elapsed().as_secs_f64());
+        let _ = std::fs::remove_dir_all(&dd);
+        let _ = std::fs::remove_dir_all(&dv);
         if rep == 0 {
             let ds = DictSet::new().with(d.clone());
             for (s, b) in segs.iter().zip(&outv) {
@@ -245,6 +296,32 @@ fn main() {
         assert_eq!(b, want_lk);
         eprintln!("[store] read rep {rep}: full {:.3}/{:.3} proj {:.3}/{:.3} lookup {:.4}/{:.4}", f_def[rep], f_v4[rep], p_def[rep], p_v4[rep], l_def[rep], l_v4[rep]);
     }
+    // optional: the same v4 files at a higher zstd level (size and one timed write only; reads are not
+    // repeated because the decoder work is the same kind)
+    let mut max_level = json!(null);
+    if let Some(ml) = get("--max-level") {
+        let ml: i32 = ml.parse().unwrap();
+        let dv = wdir("v4max", 0);
+        std::fs::create_dir_all(dv.join("dicts")).unwrap();
+        let t = Instant::now();
+        let d = mk_dict();
+        std::fs::write(dv.join("dicts").join(d.file_name()), d.to_bytes()).unwrap();
+        for s in &segs {
+            let o = if s.table == "events" { CompactOptions::new().with_zstd_level(ml).with_dict("text", d.clone()) } else { CompactOptions::new().with_zstd_level(ml) };
+            let b = KoreWriter::to_bytes_compact(&s.block, &o).unwrap();
+            std::fs::write(dv.join(&s.table).join(&s.file), &b).unwrap();
+        }
+        let w = t.elapsed().as_secs_f64();
+        for e in std::fs::read_dir(&log).unwrap().flatten() {
+            if e.path().is_file() { std::fs::copy(e.path(), dv.join(e.file_name())).unwrap(); }
+        }
+        // spot check: every file decodes
+        let ds = DictSet::load_dir(&dv.join("dicts")).unwrap();
+        for s in &segs { let b = std::fs::read(dv.join(&s.table).join(&s.file)).unwrap(); assert!(same(&KoreReader::from_bytes_with_dicts(&b, &ds).unwrap(), &s.block)); }
+        max_level = json!({"zstd_level": ml, "size_bytes": dir_size(&dv), "write_s": w});
+        eprintln!("[store] v4 at level {ml}: {} bytes, write {w:.2}s", max_level["size_bytes"]);
+        let _ = std::fs::remove_dir_all(&dv);
+    }
     let ratio = |a: &[f64], b: &[f64]| -> Value { stats(&a.iter().zip(b).map(|(x, y)| y / x).collect::<Vec<_>>()) };
 
     let res = json!({
@@ -257,6 +334,7 @@ fn main() {
             "write_s": stats(&w_v4), "full_read_s": stats(&f_v4), "projection_kind_s": stats(&p_v4), "lookup_per_op_s": stats(&l_v4)},
         "paired_ratio_v4_over_default": {"write": ratio(&w_def, &w_v4), "full_read": ratio(&f_def, &f_v4),
             "projection": ratio(&p_def, &p_v4), "lookup": ratio(&l_def, &l_v4)},
+        "v4_max_level": max_level,
         "projection_result": pr, "lookup_check": want_lk,
     });
     std::fs::write(&out, serde_json::to_string_pretty(&res).unwrap()).unwrap();

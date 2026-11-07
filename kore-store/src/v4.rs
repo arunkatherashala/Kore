@@ -34,6 +34,8 @@ const SMALL: usize = 256 << 10;
 /// Hz is only tried below this raw size (it is about 10x slower than zstd level 3 on large text).
 const HZ_MAX: usize = 128 << 10;
 const MAX_ROWS: usize = 1 << 28;
+/// Below this many kept payload bytes a file is decoded on the calling thread.
+const PAR_MIN_BYTES: usize = 64 * 1024;
 const MIN_ENTRY: usize = 2 + 1 + 1 + 1 + 1 + 8 + 4;
 
 fn bad(m: impl Into<String>) -> KoreError { KoreError::InvalidArgument(m.into()) }
@@ -355,14 +357,23 @@ fn read_inner(data: &[u8], wanted: Option<&[&str]>, dicts: &DictSet) -> Result<D
     }
 
     use rayon::prelude::*;
-    let cols: Result<Vec<Column>, KoreError> = entries.into_par_iter().filter(|e| keep(&e.name)).map(|e| {
+    let kept: Vec<Entry> = entries.into_iter().filter(|e| keep(&e.name)).collect();
+    let kept_bytes: usize = kept.iter().map(|e| e.payload.len()).sum();
+    let decode = |e: Entry| -> Result<Column, KoreError> {
         if compress::crc32(e.payload) != e.crc { return Err(bad(format!("checksum mismatch in column '{}'", e.name))); }
         let d = if e.dict == NO_DICT { None } else { resolved[e.dict as usize] };
         let data = decode_payload(e.payload, e.dtype, e.transform, e.stage, d, num_rows)
             .map_err(|er| bad(format!("column '{}': {er}", e.name)))?;
         if data.len() != num_rows { return Err(bad(format!("column '{}' has {} values, expected {num_rows}", e.name, data.len()))); }
         Ok(Column { name: e.name, data })
-    }).collect();
+    };
+    // one column or a small file: decode on the calling thread (the rayon hand-off costs more than it
+    // saves, and much more on a loaded machine); same rule as the version-2 reader
+    let cols: Result<Vec<Column>, KoreError> = if kept.len() <= 1 || kept_bytes < PAR_MIN_BYTES {
+        kept.into_iter().map(decode).collect()
+    } else {
+        kept.into_par_iter().map(decode).collect()
+    };
     let mut columns = cols?;
     if let Some(w) = wanted {
         let mut ordered: Vec<Column> = Vec::with_capacity(w.len());
