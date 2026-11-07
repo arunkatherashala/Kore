@@ -41,9 +41,10 @@ def st(x):
 def rt(x):
     if not isinstance(x, dict):
         return "-"
+    d = 2 if x["min"] >= 0.1 else 4
     if x["min"] == x["max"]:
-        return f"{x['median']:.2f}"
-    return f"{x['median']:.2f} [{x['min']:.2f}-{x['max']:.2f}]"
+        return f"{x['median']:.{d}f}"
+    return f"{x['median']:.{d}f} [{x['min']:.{d}f}-{x['max']:.{d}f}]"
 
 
 def sz(b, n):
