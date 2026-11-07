@@ -59,11 +59,16 @@ pub fn migrate_to_v2(src_root: &Path, dst_root: &Path, owner: &str) -> Result<Mi
         entries: vec![],
         manifest_raw: format!("{}\n", manifest::HEADER).into_bytes(),
         journal: false,
+        level: 1,
         torn: vec![],
         head: Mutex::new(None),
         index: Index::default(),
         ev_segs: vec![],
         format: LogFormat::V2,
+        dicts: kore_store::DictSet::new(),
+        cur_dict: None,
+        events_at_dict: 0,
+        dict_policy: DictPolicy::default(),
         clock: Box::new(now_iso),
     };
     let mut nseg = 0usize;
@@ -71,7 +76,7 @@ pub fn migrate_to_v2(src_root: &Path, dst_root: &Path, owner: &str) -> Result<Mi
         let mut new = Vec::new();
         for g in &e.segments {
             let t = seg_table(g)?;
-            new.push((t, load_segment(&src.dir, g)?));
+            new.push((t, load_seg(&src.dir, g, &src.dicts)?));
             nseg += 1;
         }
         dst.write_commit(new, e.recorded_at.clone(), LogFormat::V2, e.forget.clone())?;

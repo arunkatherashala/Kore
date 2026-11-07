@@ -20,6 +20,8 @@ pub mod model;
 pub mod sql;
 pub use forget::{forget_hash, recover_pending, ForgetReport};
 pub mod upgrade;
+pub mod v4log;
+pub use v4log::DictPolicy;
 pub use sql::{register_into, run_readonly_sql};
 pub use upgrade::{migrate_to_v2, MigrateReport};
 #[cfg(test)]
@@ -28,7 +30,10 @@ mod tests;
 mod tests_v2;
 #[cfg(test)]
 mod tests_restart;
+#[cfg(test)]
+mod tests_v4;
 
+use kore_store::{DictSet, SharedDict};
 use manifest::{Entry, SegRef, ZERO_HASH};
 pub use model::*;
 use codec::IdKey;
@@ -53,12 +58,19 @@ pub const FORMAT_V2: i64 = 2;
 /// longer grows with the number of versions. Reached only by creating a log with `LogFormat::V3`
 /// or by the explicit `upgrade_to_v3`; never silently. Older binaries refuse the header.
 pub const FORMAT_V3: i64 = 3;
+/// Log format 4: segments are kore-store version-4 ("compact") files (`"enc":4`); the event text may
+/// be coded with a shared dictionary, a content-addressed object in `dicts/` listed in the MANIFEST
+/// by the commit that first uses it. Journal MANIFEST with header `KORE-VLOG-MANIFEST 3`, which
+/// older binaries refuse. Reached only by creating a log with `LogFormat::V4` or by the explicit
+/// `upgrade_to_v4`; never silently.
+pub const FORMAT_V4: i64 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
     V1,
     V2,
     V3,
+    V4,
 }
 impl LogFormat {
     pub fn number(self) -> i64 {
@@ -66,16 +78,28 @@ impl LogFormat {
             LogFormat::V1 => FORMAT_VERSION,
             LogFormat::V2 => FORMAT_V2,
             LogFormat::V3 => FORMAT_V3,
+            LogFormat::V4 => FORMAT_V4,
         }
     }
     fn enc(self) -> Option<u8> {
         match self {
             LogFormat::V1 => None,
             LogFormat::V2 | LogFormat::V3 => Some(2),
+            LogFormat::V4 => Some(v4log::ENC_V4),
+        }
+    }
+    /// MANIFEST header level this format writes (see `manifest::header_for`).
+    fn manifest_level(self) -> u8 {
+        match self {
+            LogFormat::V4 => 3,
+            LogFormat::V3 => 2,
+            _ => 1,
         }
     }
     fn from_number(n: i64) -> LogFormat {
-        if n >= FORMAT_V3 {
+        if n >= FORMAT_V4 {
+            LogFormat::V4
+        } else if n >= FORMAT_V3 {
             LogFormat::V3
         } else if n >= FORMAT_V2 {
             LogFormat::V2
@@ -89,9 +113,11 @@ impl LogFormat {
     }
 }
 
-fn encode_seg(enc: Option<u8>, t: Table, rows: &[Vec<Cell>]) -> Vec<u8> {
+/// `dict` is used only by format-4 `events` segments.
+fn encode_seg(enc: Option<u8>, t: Table, rows: &[Vec<Cell>], dict: Option<&SharedDict>) -> Vec<u8> {
     match enc {
         Some(2) => codec::encode_segment(t, rows),
+        Some(v4log::ENC_V4) => v4log::encode(t, rows, dict),
         _ => kore_store::KoreWriter::to_bytes(&rows_to_block(t, rows)),
     }
 }
@@ -406,8 +432,10 @@ pub struct VersionedLog {
     entries: Vec<Entry>,
     /// Exact bytes of the MANIFEST as last written or read (header + one line per entry).
     manifest_raw: Vec<u8>,
-    /// Journal manifest (header 2): commits append. False for format 1/2 logs written before format 3.
+    /// Journal manifest (header 2 or 3): commits append. False for format 1/2 logs written before format 3.
     journal: bool,
+    /// MANIFEST header level (1, 2, or 3 = format 4), see `manifest::header_for`.
+    level: u8,
     /// Uncommitted partial tail found on disk at open (journal only); removed before the next append.
     torn: Vec<u8>,
     /// Latest snapshot, decoded lazily for all-v2 logs (see `open_latest`).
@@ -416,6 +444,12 @@ pub struct VersionedLog {
     /// (first event ordinal, entry index, segment index) of every events segment, in log order.
     ev_segs: Vec<(u32, usize, usize)>,
     format: LogFormat,
+    /// Every dictionary listed in the MANIFEST (verified when loaded).
+    dicts: DictSet,
+    /// Format 4: dictionary used for new events segments, and the event count when it was listed.
+    cur_dict: Option<SharedDict>,
+    events_at_dict: u64,
+    dict_policy: DictPolicy,
     clock: Box<dyn Fn() -> String + Send>,
 }
 
@@ -458,9 +492,10 @@ fn unreadable(seg: &SegRef, detail: impl Into<String>) -> VerifyError {
     VerifyError::SegmentUnreadable { file: seg.file.clone(), detail: detail.into() }
 }
 
-fn decode_seg_bytes(seg: &SegRef, table: Table, bytes: &[u8]) -> Result<Vec<Vec<Cell>>, VerifyError> {
+fn decode_seg_bytes(seg: &SegRef, table: Table, bytes: &[u8], dicts: &DictSet) -> Result<Vec<Vec<Cell>>, VerifyError> {
     let rows = match seg.enc {
         Some(2) => codec::decode_segment(table, bytes).map_err(|d| unreadable(seg, d))?,
+        Some(v4log::ENC_V4) => v4log::decode(table, bytes, dicts).map_err(|d| unreadable(seg, d))?,
         None => {
             let block = kore_store::KoreReader::from_bytes(bytes).map_err(|e| unreadable(seg, e.to_string()))?;
             block_to_rows(table, &block).map_err(|d| unreadable(seg, d))?
@@ -473,20 +508,32 @@ fn decode_seg_bytes(seg: &SegRef, table: Table, bytes: &[u8]) -> Result<Vec<Vec<
     Ok(rows)
 }
 
+/// Verified read + decode of a segment that uses no shared dictionary (formats 1-3; tests).
 fn load_segment(dir: &Path, seg: &SegRef) -> Result<Vec<Vec<Cell>>, VerifyError> {
+    load_seg(dir, seg, &DictSet::new())
+}
+
+/// Verified read + decode of any segment; `dicts` = the log's listed dictionaries.
+fn load_seg(dir: &Path, seg: &SegRef, dicts: &DictSet) -> Result<Vec<Vec<Cell>>, VerifyError> {
     let bytes = read_verified(dir, seg)?;
     let table = seg_table(seg)?;
-    decode_seg_bytes(seg, table, &bytes)
+    decode_seg_bytes(seg, table, &bytes, dicts)
+}
+
+/// Id-only read is available (v2 codec or format 4).
+fn ids_only(g: &SegRef) -> bool {
+    matches!(g.enc, Some(2) | Some(v4log::ENC_V4))
 }
 
 /// Verified read of just the id column of a v2 events segment.
 fn load_ids(dir: &Path, seg: &SegRef) -> Result<Vec<IdKey>, VerifyError> {
     let bytes = read_verified(dir, seg)?;
     let table = seg_table(seg)?;
-    if seg.enc != Some(2) {
-        return Err(unreadable(seg, "id-only read needs a v2 segment"));
-    }
-    let ids = codec::decode_first_col_ids(table, &bytes).map_err(|d| unreadable(seg, d))?;
+    let ids = match seg.enc {
+        Some(2) => codec::decode_first_col_ids(table, &bytes).map_err(|d| unreadable(seg, d))?,
+        Some(v4log::ENC_V4) => v4log::decode_ids(table, &bytes).map_err(|d| unreadable(seg, d))?,
+        _ => return Err(unreadable(seg, "id-only read needs a v2 or format-4 segment")),
+    };
     if ids.len() as u64 != seg.rows {
         return Err(VerifyError::RowCountMismatch { file: seg.file.clone() });
     }
@@ -525,7 +572,7 @@ fn check_chain(entries: &[Entry]) -> Result<(), VerifyError> {
         }
         prev = e.hash.clone();
     }
-    Ok(())
+    v4log::check_listings(entries)
 }
 
 /// List `<table>/<file>` entries on disk that are not in `entries`.
@@ -542,7 +589,23 @@ fn stray_files(dir: &Path, entries: &[Entry]) -> Vec<String> {
             }
         }
     }
+    out.extend(stray_dicts(dir, entries));
     out.sort();
+    out
+}
+
+/// Files in `dicts/` that no manifest entry lists.
+fn stray_dicts(dir: &Path, entries: &[Entry]) -> Vec<String> {
+    let known: HashSet<&str> = entries.iter().flat_map(|e| e.dicts.iter().map(|d| d.file.as_str())).collect();
+    let mut out = Vec::new();
+    if let Ok(rd) = fs::read_dir(dir.join(v4log::DICT_DIR)) {
+        for f in rd.flatten() {
+            let rel = format!("{}/{}", v4log::DICT_DIR, f.file_name().to_string_lossy());
+            if !known.contains(rel.as_str()) {
+                out.push(rel);
+            }
+        }
+    }
     out
 }
 
@@ -555,7 +618,26 @@ fn all_segs(entries: &[Entry]) -> Vec<(usize, usize)> {
 pub fn verify_dir(dir: &Path) -> Result<(), VerifyError> {
     let entries = read_manifest(dir)?;
     check_chain(&entries)?;
-    let results: Vec<Result<(), VerifyError>> = all_segs(&entries).par_iter().map(|&(ei, si)| load_segment(dir, &entries[ei].segments[si]).map(|_| ())).collect();
+    // dictionary objects: each listed one present, sha256 = id, length as listed
+    let dicts = v4log::load_dicts(dir, &entries)?;
+    let listed = v4log::listed_at(&entries);
+    let results: Vec<Result<(), VerifyError>> = all_segs(&entries)
+        .par_iter()
+        .map(|&(ei, si)| {
+            let g = &entries[ei].segments[si];
+            let bytes = read_verified(dir, g)?;
+            let table = seg_table(g)?;
+            if g.enc == Some(v4log::ENC_V4) {
+                // every dictionary the segment references is listed at or before its version
+                for id in v4log::seg_dict_ids(&bytes).map_err(|d| unreadable(g, d))? {
+                    if listed.get(&id).map_or(true, |&at| at > ei) {
+                        return Err(unreadable(g, format!("references dictionary {id} that is not listed at or before version {}", entries[ei].v)));
+                    }
+                }
+            }
+            decode_seg_bytes(g, table, &bytes, &dicts).map(|_| ())
+        })
+        .collect();
     for r in results {
         r?;
     }
@@ -579,9 +661,9 @@ fn assemble(entries: &[Entry], upto: usize, parts: Vec<Vec<Vec<Cell>>>, skip_eve
     tables
 }
 
-fn snapshot_from(dir: &Path, entries: &[Entry], upto: usize) -> Result<Snapshot, VerifyError> {
+fn snapshot_from(dir: &Path, entries: &[Entry], upto: usize, dicts: &DictSet) -> Result<Snapshot, VerifyError> {
     let segs = all_segs(&entries[..=upto]);
-    let results: Vec<Result<Vec<Vec<Cell>>, VerifyError>> = segs.par_iter().map(|&(ei, si)| load_segment(dir, &entries[ei].segments[si])).collect();
+    let results: Vec<Result<Vec<Vec<Cell>>, VerifyError>> = segs.par_iter().map(|&(ei, si)| load_seg(dir, &entries[ei].segments[si], dicts)).collect();
     let mut parts = Vec::with_capacity(results.len());
     for r in results {
         parts.push(r?);
@@ -597,6 +679,7 @@ struct State {
     index: Index,
     ev_segs: Vec<(u32, usize, usize)>,
     format: LogFormat,
+    dicts: DictSet,
 }
 
 enum Part {
@@ -610,7 +693,7 @@ enum Part {
 /// folded into the index, so open never holds the whole log in memory
 /// (`load_state_streamed`); otherwise everything is decoded now, as before.
 fn load_state(dir: &Path, entries: &[Entry]) -> Result<State, VerifyError> {
-    let lazy = entries.iter().flat_map(|e| e.segments.iter()).filter(|g| g.table == "events").all(|g| g.enc == Some(2));
+    let lazy = entries.iter().flat_map(|e| e.segments.iter()).filter(|g| g.table == "events").all(ids_only);
     if lazy {
         if let Some(st) = load_state_streamed(dir, entries)? {
             return Ok(st);
@@ -627,6 +710,7 @@ const READ_CHUNK: usize = 512;
 /// every log written through `commit_batch`); otherwise returns `None` and the caller falls back to
 /// the full read, so an irregular log still opens with the same index as before.
 fn load_state_streamed(dir: &Path, entries: &[Entry]) -> Result<Option<State>, VerifyError> {
+    let dicts = v4log::load_dicts(dir, entries)?;
     let segs = all_segs(entries);
     let mut ix = Index::default();
     let mut ev_segs = Vec::new();
@@ -653,7 +737,7 @@ fn load_state_streamed(dir: &Path, entries: &[Entry]) -> Result<Option<State>, V
                 if g.table == "events" {
                     load_ids(dir, g).map(Part::Ids)
                 } else {
-                    load_segment(dir, g).map(Part::Rows)
+                    load_seg(dir, g, &dicts).map(Part::Rows)
                 }
             })
             .collect();
@@ -700,13 +784,14 @@ fn load_state_streamed(dir: &Path, entries: &[Entry]) -> Result<Option<State>, V
     let format = meta.iter().map(|r| LogFormat::from_number(MetaRow::from_cells(r).format_version)).fold(LogFormat::V1, |a, b| if b.number() > a.number() { b } else { a });
     ix.forgotten = forget::forgotten_set(entries);
     ix.content_idem = format.content_idem();
-    Ok(Some(State { head: None, index: ix, ev_segs, format }))
+    Ok(Some(State { head: None, index: ix, ev_segs, format, dicts }))
 }
 
 /// Read and decode every segment at once (format 1 events, irregular logs).
 fn load_state_full(dir: &Path, entries: &[Entry]) -> Result<State, VerifyError> {
+    let dicts = v4log::load_dicts(dir, entries)?;
     let segs = all_segs(entries);
-    let lazy = entries.iter().flat_map(|e| e.segments.iter()).filter(|g| g.table == "events").all(|g| g.enc == Some(2));
+    let lazy = entries.iter().flat_map(|e| e.segments.iter()).filter(|g| g.table == "events").all(ids_only);
     let results: Vec<Result<Part, VerifyError>> = segs
         .par_iter()
         .map(|&(ei, si)| {
@@ -714,7 +799,7 @@ fn load_state_full(dir: &Path, entries: &[Entry]) -> Result<State, VerifyError> 
             if lazy && g.table == "events" {
                 load_ids(dir, g).map(Part::Ids)
             } else {
-                load_segment(dir, g).map(Part::Rows)
+                load_seg(dir, g, &dicts).map(Part::Rows)
             }
         })
         .collect();
@@ -748,7 +833,7 @@ fn load_state_full(dir: &Path, entries: &[Entry]) -> Result<State, VerifyError> 
     } else {
         Some(Snapshot { version: e.v, recorded_at: e.recorded_at.clone(), manifest_hash: e.hash.clone(), valid_at: e.recorded_at.clone(), tables: Arc::new(tables) })
     };
-    Ok(State { head, index, ev_segs, format })
+    Ok(State { head, index, ev_segs, format, dicts })
 }
 
 impl VersionedLog {
@@ -782,13 +867,18 @@ impl VersionedLog {
             let mut log = VersionedLog {
                 dir: dir.clone(),
                 entries: vec![],
-                manifest_raw: format!("{}\n", if format == LogFormat::V3 { manifest::HEADER_J } else { manifest::HEADER }).into_bytes(),
-                journal: format == LogFormat::V3,
+                manifest_raw: format!("{}\n", manifest::header_for(format.manifest_level())).into_bytes(),
+                journal: format.manifest_level() >= 2,
+                level: format.manifest_level(),
                 torn: vec![],
                 head: Mutex::new(Some(Snapshot { version: 0, recorded_at: String::new(), manifest_hash: String::new(), valid_at: String::new(), tables: Arc::new(vec![Vec::new(); ALL_TABLES.len()]) })),
                 index: Index { content_idem: format.content_idem(), ..Index::default() },
                 ev_segs: vec![],
                 format,
+                dicts: DictSet::new(),
+                cur_dict: None,
+                events_at_dict: 0,
+                dict_policy: DictPolicy::default(),
                 clock: Box::new(clock),
             };
             log.recover()?;
@@ -815,7 +905,7 @@ impl VersionedLog {
         recover_pending(&dir)?;
         let full = read_manifest_raw(&dir)?;
         let parsed = manifest::parse_ex(&full).map_err(VerifyError::ManifestCorrupt)?;
-        let (entries, journal) = (parsed.entries, parsed.journal);
+        let (entries, journal, level) = (parsed.entries, parsed.journal, parsed.level);
         let torn = full[parsed.valid_len..].to_vec();
         let mut raw = full;
         raw.truncate(parsed.valid_len);
@@ -824,7 +914,11 @@ impl VersionedLog {
             return Err(VerifyError::ManifestCorrupt("no entries".into()).into());
         }
         let st = load_state(&dir, &entries)?;
-        Ok(VersionedLog { dir, entries, manifest_raw: raw, journal, torn, head: Mutex::new(st.head), index: st.index, ev_segs: st.ev_segs, format: st.format, clock: Box::new(now_iso) })
+        let (cur_dict, events_at_dict) = v4log::current(&entries, &st.dicts);
+        Ok(VersionedLog {
+            dir, entries, manifest_raw: raw, journal, level, torn, head: Mutex::new(st.head), index: st.index, ev_segs: st.ev_segs, format: st.format,
+            dicts: st.dicts, cur_dict, events_at_dict, dict_policy: DictPolicy::default(), clock: Box::new(now_iso),
+        })
     }
 
     /// Read the first events of an existing log without opening it: the MANIFEST hash chain is
@@ -841,9 +935,10 @@ impl VersionedLog {
         let full = read_manifest_raw(&dir)?;
         let parsed = manifest::parse_ex(&full).map_err(VerifyError::ManifestCorrupt)?;
         check_chain(&parsed.entries)?;
+        let dicts = v4log::load_dicts(&dir, &parsed.entries)?;
         for e in &parsed.entries {
             for g in e.segments.iter().filter(|g| g.table == "events") {
-                for r in load_segment(&dir, g)? {
+                for r in load_seg(&dir, g, &dicts)? {
                     if !f(EventRow::from_cells(&r)) {
                         return Ok(());
                     }
@@ -860,6 +955,7 @@ impl VersionedLog {
         let entries = parsed.entries;
         self.torn = full[parsed.valid_len..].to_vec();
         self.journal = parsed.journal;
+        self.level = parsed.level;
         let mut raw = full;
         raw.truncate(parsed.valid_len);
         check_chain(&entries)?;
@@ -870,6 +966,10 @@ impl VersionedLog {
         self.index = st.index;
         self.ev_segs = st.ev_segs;
         self.format = st.format;
+        let (cur_dict, events_at_dict) = v4log::current(&self.entries, &st.dicts);
+        self.dicts = st.dicts;
+        self.cur_dict = cur_dict;
+        self.events_at_dict = events_at_dict;
         Ok(())
     }
 
@@ -918,7 +1018,7 @@ impl VersionedLog {
             let cells = codec::decode_row(seg_table(seg)?, &bytes, at).map_err(|d| unreadable(seg, d))?;
             return Ok(Some(EventRow::from_cells(&cells)));
         }
-        let rows = load_segment(&self.dir, seg)?;
+        let rows = load_seg(&self.dir, seg, &self.dicts)?;
         Ok(rows.get(at).map(|r| EventRow::from_cells(r)))
     }
 
@@ -943,8 +1043,8 @@ impl VersionedLog {
             let chunk = &self.ev_segs[at..(at + n).min(self.ev_segs.len())];
             at += chunk.len();
             n = (n * 2).min(READ_CHUNK);
-            let (dir, entries) = (&self.dir, &self.entries);
-            let parts: Vec<Result<Vec<Vec<Cell>>, VerifyError>> = chunk.par_iter().map(|&(_, ei, si)| load_segment(dir, &entries[ei].segments[si])).collect();
+            let (dir, entries, dicts) = (&self.dir, &self.entries, &self.dicts);
+            let parts: Vec<Result<Vec<Vec<Cell>>, VerifyError>> = chunk.par_iter().map(|&(_, ei, si)| load_seg(dir, &entries[ei].segments[si], dicts)).collect();
             for p in parts {
                 for r in p? {
                     if !f(EventRow::from_cells(&r)) {
@@ -1007,6 +1107,12 @@ impl VersionedLog {
             }
         }
         let _ = fs::remove_file(self.dir.join("MANIFEST.tmp"));
+        if self.format == LogFormat::V4 {
+            // a crashed commit may have left a dictionary object that no entry lists (few files)
+            for f in stray_dicts(&self.dir, &self.entries) {
+                let _ = fs::remove_file(self.dir.join(f));
+            }
+        }
     }
 
     pub fn verify(&self) -> Result<(), VerifyError> {
@@ -1048,7 +1154,7 @@ impl VersionedLog {
     pub fn try_open_latest(&self) -> Result<Snapshot, LogError> {
         let mut g = self.head.lock().unwrap_or_else(|e| e.into_inner());
         if g.is_none() {
-            *g = Some(snapshot_from(&self.dir, &self.entries, self.entries.len() - 1)?);
+            *g = Some(snapshot_from(&self.dir, &self.entries, self.entries.len() - 1, &self.dicts)?);
         }
         Ok(g.as_ref().expect("just set").clone())
     }
@@ -1075,7 +1181,7 @@ impl VersionedLog {
                 }
             }
         };
-        Ok(snapshot_from(&self.dir, &self.entries, upto)?)
+        Ok(snapshot_from(&self.dir, &self.entries, upto, &self.dicts)?)
     }
 
     /// Rows added by commits `v1+1 ..= v2`.
@@ -1086,7 +1192,7 @@ impl VersionedLog {
         let mut d = Diff { from: v1, to: v2, ..Default::default() };
         for e in &self.entries[(v1 as usize + 1)..=(v2 as usize)] {
             for g in &e.segments {
-                let rows = load_segment(&self.dir, g)?;
+                let rows = load_seg(&self.dir, g, &self.dicts)?;
                 match Table::from_name(&g.table) {
                     Some(Table::Events) => d.events.extend(rows.iter().map(|r| EventRow::from_cells(r))),
                     Some(Table::Revisions) => d.revisions.extend(rows.iter().map(|r| RevisionRow::from_cells(r))),
@@ -1154,7 +1260,7 @@ impl VersionedLog {
     /// segments, versions and hashes are untouched (a mixed-encoding log). Old
     /// binaries cannot read the new segments. Returns false if already format 2.
     pub fn upgrade_to_v2(&mut self) -> Result<bool, LogError> {
-        if self.format == LogFormat::V2 {
+        if self.format == LogFormat::V2 || self.format == LogFormat::V4 {
             return Ok(false);
         }
         self.check_manifest_unchanged()?;
@@ -1176,7 +1282,7 @@ impl VersionedLog {
     /// chain and every old version hash are unchanged). Later commits append. Segments written from
     /// here on use the format 2 encoding. Old binaries cannot read the result. False if already 3.
     pub fn upgrade_to_v3(&mut self) -> Result<bool, LogError> {
-        if self.format == LogFormat::V3 {
+        if self.format == LogFormat::V3 || self.format == LogFormat::V4 {
             return Ok(false);
         }
         self.check_manifest_unchanged()?;
@@ -1326,9 +1432,25 @@ impl VersionedLog {
         } else {
             self.recover_next(v);
         }
+        // format 4: the dictionary for the events segment (maybe a new object, listed by this commit)
+        let (dict, new_dict) = match (fmt, new.iter().find(|(t, _)| *t == Table::Events)) {
+            (LogFormat::V4, Some((_, rows))) => self.choose_dict(rows)?,
+            _ => (None, false),
+        };
+        let mut dict_refs = Vec::new();
+        if let (Some(d), true) = (&dict, new_dict) {
+            let r = v4log::dict_ref(d);
+            let ddir = self.dir.join(v4log::DICT_DIR);
+            fs::create_dir_all(&ddir)?;
+            let tmp = self.dir.join(format!("{}.tmp", r.file));
+            write_synced(&tmp, d.to_bytes())?;
+            fs::rename(&tmp, self.dir.join(&r.file))?;
+            sync_dir(&ddir);
+            dict_refs.push(r);
+        }
         let mut segs = Vec::new();
         for (t, rows) in &new {
-            let bytes = encode_seg(fmt.enc(), *t, rows);
+            let bytes = encode_seg(fmt.enc(), *t, rows, dict.as_ref());
             let rel = format!("{}/{:010}.kore", t.name(), v);
             let tdir = self.dir.join(t.name());
             fs::create_dir_all(&tdir)?;
@@ -1340,14 +1462,15 @@ impl VersionedLog {
         }
         let prev = self.entries.last().map(|e| e.hash.clone()).unwrap_or_else(|| ZERO_HASH.to_string());
         let mut entry = Entry::new(v, recorded_at, segs, &prev);
-        if forget.is_some() {
+        if forget.is_some() || !dict_refs.is_empty() {
             entry.forget = forget;
+            entry.dicts = dict_refs;
             entry.reseal(&prev);
         }
         let line = serde_json::to_string(&entry).expect("entry serialises");
-        let to_journal = fmt == LogFormat::V3;
+        let want_level = fmt.manifest_level();
         let path = self.dir.join("MANIFEST");
-        if self.journal && v > 0 {
+        if self.journal && v > 0 && self.level >= want_level {
             // Journal append: the segments are already durable; the commit exists once this line
             // (with its newline) is fsynced. A crash in between leaves an unterminated tail that
             // `open` ignores. No rename, no directory entry changes, nothing is rewritten.
@@ -1362,8 +1485,8 @@ impl VersionedLog {
         } else {
             // Atomic whole-file replacement (format 1/2 logs, genesis, or the switch to the journal header).
             let mut raw = Vec::with_capacity(self.manifest_raw.len() + line.len() + 1);
-            if to_journal && !self.journal {
-                raw.extend_from_slice(manifest::HEADER_J.as_bytes());
+            if want_level > self.level {
+                raw.extend_from_slice(manifest::header_for(want_level).as_bytes());
                 raw.push(b'\n');
                 let old_hdr = self.manifest_raw.iter().position(|&b| b == b'\n').map(|p| p + 1).unwrap_or(self.manifest_raw.len());
                 raw.extend_from_slice(&self.manifest_raw[old_hdr..]);
@@ -1377,12 +1500,18 @@ impl VersionedLog {
             fs::rename(&tmp, &path)?;
             sync_dir(&self.dir);
             self.manifest_raw = raw;
-            if to_journal {
-                self.journal = true;
+            if want_level > self.level {
+                self.level = want_level;
+                self.journal = want_level >= 2;
             }
             self.torn.clear();
         }
         // Commit point passed: update memory.
+        if let (Some(d), true) = (dict.as_ref(), new_dict) {
+            self.dicts.add(d.clone());
+            self.cur_dict = Some(d.clone());
+            self.events_at_dict = self.index.next_ord as u64;
+        }
         self.entries.push(entry);
         let e = self.entries.last().expect("just pushed");
         if let Some(h) = self.head.get_mut().unwrap_or_else(|e| e.into_inner()).as_mut() {
@@ -1405,7 +1534,7 @@ impl VersionedLog {
         let v = self.entries.len() as u64;
         let now = (self.clock)();
         let ev: Vec<Vec<Cell>> = batch.events.iter().map(|e| validate_event(e, &now).map(|r| r.to_cells())).collect::<Result<_, _>>()?;
-        let bytes = encode_seg(self.format.enc(), Table::Events, &ev);
+        let bytes = encode_seg(self.format.enc(), Table::Events, &ev, None);
         let tdir = self.dir.join("events");
         write_synced(&tdir.join(format!("{v:010}.kore")), &bytes)?;
         write_synced(&tdir.join(format!("{:010}.kore.tmp", v + 1)), b"partial")?;

@@ -1,0 +1,317 @@
+{
+  "event_ids": [
+    "c137b9e4e7208f41ff9408807ab9254b6221a27db10b0d4147a1cb4ba3f3db95",
+    "e603f8be2c76fc6c3940dd74c1c15d5e5e96cf64da933278d35f5937609eb9bb",
+    "7544a2c4762a7f8738d03fc2e60d01ce3f0ec3799ead3ad9b804ab427215c83b",
+    "fa4249746d6b726d0c95218131ff106301b95fe525c36fe17ce0abd2bb081425",
+    "8b198c1af659507b1871c8ec499ed4f3a9281a75d99f5d25375aac52c39a87e1",
+    "1585cea31caf6903a671a4a0f34e0808c694b84602922bedcb964a511fd5cbf9",
+    "ccc520a0566b9f24748f37ed7da021627bfb6dee4fa1ff1c0d84f110c18754c9",
+    "0fd29f6c46c5b9a4e67ee43a4f8feb529c176b9a22377b7c4b89c6a7470c7d28",
+    "2fda6c0019dc616c3009a4c3c4b95749f44c4899d97cfab9afb8a596083166f0",
+    "b1f3979fba143c33f4a68b34e337ec5f5f6fd73960f9e9bd8f5e7082520ff684",
+    "c32d424e7647c4db65d3d4afee9b29ef3f3f59103ac90da9a6fc35e78f529060",
+    "9a886e3e50ebdbcd56db7a771f3400e0a0de195cf7b62ddbf02d16fa2cd66ad9",
+    "39dc2374f9f0bc657dc846452ff30afdf3404a4025e0395c2059313264cb2a30",
+    "8c706345200b0bf22c5d2f7327609fa875f281af61a6be4b9ead0594f7a86bd2",
+    "d493bc05f064060e6ab6e39bc287329ea8990a7c867f6d39956208c0ce155a31",
+    "e4d8aa136c1e633351e3524e4a4cc2026dd277288590435d8f66f0fea091b41b",
+    "84155e3241a1b5206c0b0cab3686741e99f86867422b75a67398871ec3b8f89e",
+    "94847e937c578fc42c26c86843292a6d1ee778d443fb1f06049bc45296249034",
+    "0c08a977122334c52276d4a5db2d968b1ddc6bb516a9101d77512929a3195d3f",
+    "0541073cf75bb4917833ff1896c65abe0bcc2a5bfb905ef066db4353c16658c9",
+    "ed41316824f900259308aeccf79415e408999444dc2214e02832e1c971f857b7",
+    "53fac18e1fd35c7efd71356c3aa9bc39b891b713fe33441e736909df2fd7b94c",
+    "785998aa2b039984455bc06c76ae76d39a32bbeb4738b6990ce0fc541f4aed14",
+    "e73351a42f7b61e938faebbd66f6d417c2ac9d3e631c6363a9f2e5e9347aa814",
+    "611fbaa42c25d2db13cd00d13d3df9c6df6ef4e3b0506d4a0b4231f547132d3e",
+    "0d9f04222bb9eef6788c34449d40a42e083835e8625ac38055474609d4e83c3e",
+    "27efacf5730030a556a81515be687eaf59330ac41b9c81a1f58025629579dd95",
+    "0cb8d9878f716297bc60ea33522a967060ba67ae2da1f7c93e94ec78a22fbf14",
+    "b7fa5ac19b765ac4c12602adc4b35143348d45b897d73b528600c48220ce8139",
+    "e1e6beb04972981e29e80b90b2de18e89b781b526cbc16ef5e5de7ebad44bdc2",
+    "7df02f420e8799f0c0bd854638eff6eb526094d1a5ca646a90bc7cb1edcda4dc",
+    "e6f2bacc44f4b79e2c9bb0f542db3e5cba9dc00c17719530c5f30908b2f571d8",
+    "6e5e67c98ec6fb3d56813d04fdfdc2a978b3babfad95480c23b3eb0409379a02",
+    "1b2eece58d74e23f0f9b4a50eecf1ef0e44326d982fd078d246b85560db49575",
+    "b655c8e9cc7d49f52f824e09fa4e8441b376825068bc5edcc2132d5c05ab10dd",
+    "ab2ac574445c2f2c6daa410e1b38611c1a84afed1b9d00bbe9e389ba6865813f",
+    "c0c0236f1ea0a82cfd215155d134f2dd9cc21da15c4fd25b80b2073bfea2fc79",
+    "5deaf65c3fc4249c40474418cdbbd87cb6d81bf88cb0aec521e29ebd525738e0",
+    "99444175832ff4e17036d43178511673c8e8c5504618ceda6fc2e9faf2f7477e",
+    "e26ade481d5d16d1e071c52dac4a5fad678a2814a53dc71d164bc9e9fa2c7f8f",
+    "7f974c5846a93d870a50ccdd3617e0f2db2e1102348fbfdcecccfd671a4b3666",
+    "429d65247b344ad19f8e5ddad31b4b694d90c501fe68a3a907ee7b4ff235fa20",
+    "5461defc8f0276afa321862ee07bcb4cf9a692b7e3ddb48c4aed5c2b699554aa",
+    "833fb1d189ddf76c94de262d24ed3bb928c0b46c3dc54e873152ff933b45e2a2",
+    "8ea511f44ea6711da3854738f8f463524aa041d81ec97f6fd5d1cfd28af9b82e",
+    "cb0801a16e0de3da670cc6da7eca787f165a16555d9c529b31baa039b2a8e7e2",
+    "88e37fe3415243f5854b45e267d0fb01782dfbdb649c9d3b41879e8688d7319d",
+    "7cfd30b38c4f48c4cf29d061d9cf42b7b95639fc98daae966de3be8315d402f0",
+    "74ef9caf6fa509512f1f58fe41cb165f787a9c0cdd7d750f63d81ceb4d672799",
+    "6b78032ec407b046050b16290b97bfe83508ef8ceb9efe1fa5d9a6db31f25c58",
+    "40bb7147e172eb29284ba83f2920861a9064e8cb5cbca0b3b76665231fa73506",
+    "c1a51487bb04bb4ad4aaeda4983b8b32f19f8b87fda46b2dd065fcf0020432cc",
+    "500eb971c8c0dbaf8d9fdc1c6999d6d83c62b6547e5b84f1c52b5ec969789820",
+    "9668c67a402d479a535aac153a43a472804ddfc8218dbe90185ac26097d23454",
+    "bb65a87a23ddb40537968cbcc840f24d13812e07ffda1be68d4b1c7e232a6b2b",
+    "8506753e0b85c05dbe4ba1d76f517a531acd309c1284b0d9403f12186b2cca89",
+    "4ad075f2d48adc8bf198e6be01b5e618f66e10c65e3a25e13e11d0d486d41881",
+    "07e537c8e195c09437c97b359bbee251f1b460e3ac363f684b0faba53bddbf6b",
+    "894a1451f5d2eb27c726f4e1f135aca4bf63ea9be7b3ab4a0e10b795f29bb51e",
+    "9f602b07683fb42f057921ad458e4a10de5fbdab223d06964398e62b47215aba",
+    "d83ccf3bb7c8b5d478fcd6f008b178135c96486c6285bbf7d8b4cd1efafc1d02",
+    "fc805c71ddcd9028ca42458604fc82bcc96fb2d0cbec8bbe5012535fc6d94947",
+    "bd5e4ed84f4c7043104f18f73aa59d213dccd9ae155b9e98421518122bbe5b82",
+    "0f1d81dd4295d47e1a1a1970e9691bde069d96fef2aad85f2dab6ed3cff09e0a",
+    "fcd071e0302b8a75400af1e177a3f4f25266ede43a96e88ea47026ae967f4217",
+    "f2541ad9c0f1acf5cfafa0dff68d7c9c7a4ddb34456c20edf4ea3253bc724fa2",
+    "1d9dfcc6bbff7d6d689ca079943027930d9ed71811348ae4c6d0e33a6d2c21e2",
+    "94f189335f21228f0986a762cfef778397b22c95a89b741d7c9cdd77ef990ab9",
+    "8ae3f34d2ae296020e4de48e2319f3b5076137e920f3911b7ee30686c608402f",
+    "bde40e9a845241fbf96123890d550e041b55bf8ed353bf2761061f5847e73792",
+    "fc32854eb950ad956eff6d7ca7635a0e817b0be11b1e11e54d3ece6e80779ccb",
+    "fac18f311d58f4f58e494287442ff53307abb5bf9763ad4b1086557317d39b5b",
+    "ba96b8128b2dcaf6dc8b6f079226d4d571800c89b3c73d4df4265d9e1d1f5aac",
+    "fa1bc4c74b8b8f6bc8253769fed5418146b688f5baba4c3296b4e099d2db41d1",
+    "9b95f95897787cadfa39ae0f8a709d66dd753201844f7cda297be23b5b5dff7d",
+    "117bad7885a38176745f0c017ebb158c9a850bb206dd23e5e036b8f789d6ec5d",
+    "8adeaed887768bd17f697daddcb704437344dcd8b1fc8955b9a06bda83019570",
+    "71139d3146a657d7c75e46289d4e84b2e64ffa78375c3dd3b44ebaad28b90be1",
+    "631a6e96a3e220a3ac59559a290a005ecb40d2b1bb34d674d24d7dfd1444f60a",
+    "c0e32e1e13dcb8fe3faf448b655b89c7a35e5139e35db23b4d14751b3aa75232",
+    "782ad71f1e63c35277d877fd036f2bacfd73ce60137a5a9fd621cd08ed8c34e3",
+    "84487562e7d737c95132e3ddc2f614e43c32cba88343b7e2a96b1213fa043a1d",
+    "a22326f90d13f8ed96d6b678eca44188e61e53ba4f1e87b0199f4355f26196cf",
+    "83b00774debf94567a632864aa2d9e1efde9b9941878b35064578344afe757be",
+    "094e66f66fbf98971d47cebdc9d9dd62d707e4ca54107e360f8cc74bc5698b5a",
+    "1fc6df3aaad2725c14b6c01f959d8a0273886ad0bb3e947c3e1f54b39c19d017",
+    "ac85388e191c11b999414e8202103c5c035779ae27dcf6905ad53b2df9cb03a6",
+    "7d7ddfa82fd3cb74eb399a16b3792a34c3715a8a08a6f63cfd6d93331a990a86",
+    "1e1988175d54e863c305a50ceee915b2b39bdd366a531df4d33cd522781e8f58",
+    "a44cab5ed04e0d1b33ef16ea8456e9a9d6f8b9aa3f67c93e893e2c84ac5a7472",
+    "2d6dbdf4aae1117adbd79cd1fc73b80c5393a2340546e9fef039c3b7e23a0c41",
+    "9e35d4cdf682027941de684d333c4dbc95a4343452557f7bb056eb9c051c8f80",
+    "d0a1834eb6acfb710e7180b2bf7b3bcfb9d1554ff39242c72b8f35f8b7930974",
+    "22343ef707463a857cbc159c3b57be62818ddc162a4c855693fb335abd45b0db",
+    "1eefb3a2cd0dc2aff12dd1998c91dff7b26ecea5db3d9ca5ccffda77a0e8af1f",
+    "8ceb88d1e893df280ce744a6d77308fb5050952bd05a2d7b56884697a584abec",
+    "bd67bf33b747870f88b252bbc836c1c2b9812702d4df2c2f6f619cd30ce5b93d",
+    "619d39aee25b8b398f0b9c733be2d58d027982e8444dd8f2ccf462fbb7649a51",
+    "26fed0d4a6a23f89d181d7558426d6debf6743dd91c796e4def7f378f5eab993"
+  ],
+  "forgotten_ids": [
+    "362f70f1de9ac80288b555377509424689ef84c552d01df6c73971213c251e6e",
+    "9f5bcc970edeeb60d8d6609aedb3f62dd442d9bfbcd4c80a5d874635795addde"
+  ],
+  "format": 4,
+  "head_event_hex_sample": "b1f3979fba143c33f4a68b34e337ec5f5f6fd73960f9e9bd8f5e7082520ff684",
+  "latest": 12,
+  "owner": "fixture",
+  "sql_kind_counts": [
+    [
+      "action",
+      "20"
+    ],
+    [
+      "decision",
+      "19"
+    ],
+    [
+      "note",
+      "20"
+    ],
+    [
+      "outcome",
+      "20"
+    ],
+    [
+      "statement",
+      "20"
+    ]
+  ],
+  "versions": [
+    {
+      "content_hash": "5d53a0d46db1350f7d32c9749089567bc9e8ad31b4f0d2732d6194e730bf7060",
+      "manifest_hash": "8f3ed9989037ec7c6a05595cecaf8453c64999e03dd3f9f0842832e10a9c7671",
+      "recorded_at": "2026-03-01T00:01:00Z",
+      "rows": {
+        "events": 0,
+        "outcomes": 0,
+        "predictions": 0,
+        "revision_causes": 0,
+        "revisions": 0,
+        "schema_meta": 1
+      },
+      "v": 0
+    },
+    {
+      "content_hash": "f14921ab49146e178aa86e9e3eb5f37a6af80941587c59e87df71190fdf18e88",
+      "manifest_hash": "c1d57cdc169f6bd9653d29a34987eebe37ea1fe626dd47f796a55ee4a037c3b8",
+      "recorded_at": "2026-03-01T00:02:00Z",
+      "rows": {
+        "events": 19,
+        "outcomes": 0,
+        "predictions": 0,
+        "revision_causes": 0,
+        "revisions": 0,
+        "schema_meta": 1
+      },
+      "v": 1
+    },
+    {
+      "content_hash": "f264334b8078aaf88242e0fcb7c71b332fb691d58358284b3d8e26c180d825e2",
+      "manifest_hash": "c40799b562adf7189a7b267fc35e220c1ccf5412d8be31eaa543c4492f30d767",
+      "recorded_at": "2026-03-01T00:03:00Z",
+      "rows": {
+        "events": 39,
+        "outcomes": 0,
+        "predictions": 0,
+        "revision_causes": 0,
+        "revisions": 0,
+        "schema_meta": 1
+      },
+      "v": 2
+    },
+    {
+      "content_hash": "6675c4528c9be934c761711b1be047008ee141bc7451a7cee442116b26203278",
+      "manifest_hash": "fc1de00304b02fa72417b42c6dc39f4f0ad54dde24acebd040a369e05bdaa80f",
+      "recorded_at": "2026-03-01T00:04:00Z",
+      "rows": {
+        "events": 39,
+        "outcomes": 0,
+        "predictions": 0,
+        "revision_causes": 2,
+        "revisions": 1,
+        "schema_meta": 1
+      },
+      "v": 3
+    },
+    {
+      "content_hash": "5bda34ace2b875d6e86a318c887ce8dd2f70aca9fabcd29b58b314d91d25383f",
+      "manifest_hash": "bc92acb4398adbeaee564ff9eb2852c179c24393f136db42d141c3b6b0b7f315",
+      "recorded_at": "2026-03-01T00:05:00Z",
+      "rows": {
+        "events": 58,
+        "outcomes": 0,
+        "predictions": 0,
+        "revision_causes": 2,
+        "revisions": 1,
+        "schema_meta": 1
+      },
+      "v": 4
+    },
+    {
+      "content_hash": "0cf2a86355e8aa8f9e2908bbd0226ca800bdda43dc4b057c3c9a4a9c24f96773",
+      "manifest_hash": "b3f79d8a5a6a55a346211597c2f3c3bfcc38f47add41673628b3798cb676caec",
+      "recorded_at": "2026-03-01T00:06:00Z",
+      "rows": {
+        "events": 78,
+        "outcomes": 0,
+        "predictions": 0,
+        "revision_causes": 2,
+        "revisions": 1,
+        "schema_meta": 1
+      },
+      "v": 5
+    },
+    {
+      "content_hash": "18b814ab5574146d62562dda7c4d09220f79c0843f91580c5ebfa698363521cc",
+      "manifest_hash": "9f0a52334cb72fc023b77c8e12bb7287171d5f0c97f083b0639e10a85e7d5f6b",
+      "recorded_at": "2026-03-01T00:07:00Z",
+      "rows": {
+        "events": 78,
+        "outcomes": 0,
+        "predictions": 0,
+        "revision_causes": 4,
+        "revisions": 2,
+        "schema_meta": 1
+      },
+      "v": 6
+    },
+    {
+      "content_hash": "1c019c59de35338a36d71dac875cc7d8c2d74424d3b52417a48d2d3ab44cf4e6",
+      "manifest_hash": "7a5eca16de726dbe21dfbe50d6b0337b8b19c787126f46ef04d3443c3acc2a37",
+      "recorded_at": "2026-03-01T00:08:00Z",
+      "rows": {
+        "events": 98,
+        "outcomes": 0,
+        "predictions": 0,
+        "revision_causes": 4,
+        "revisions": 2,
+        "schema_meta": 1
+      },
+      "v": 7
+    },
+    {
+      "content_hash": "54449165f16c85c1eaeca9ff00bdb414b18c72abbf038967dc930d904ea71e30",
+      "manifest_hash": "190cb88ba975d2fec0ec216393a309e387de06f2546ee4ed7dfacb42a94d28c4",
+      "recorded_at": "2026-03-01T00:10:00Z",
+      "rows": {
+        "events": 98,
+        "outcomes": 0,
+        "predictions": 0,
+        "revision_causes": 4,
+        "revisions": 3,
+        "schema_meta": 1
+      },
+      "v": 8
+    },
+    {
+      "content_hash": "43c4b381ec5b66bb35096368077ab222fe361bbb52464bafa1c86de0e542ff13",
+      "manifest_hash": "b79b5adf887e0c91371b22a417368831f4d71903fe50b51e121a5ca1ebdfac14",
+      "recorded_at": "2026-03-01T00:11:00Z",
+      "rows": {
+        "events": 98,
+        "outcomes": 0,
+        "predictions": 1,
+        "revision_causes": 4,
+        "revisions": 3,
+        "schema_meta": 1
+      },
+      "v": 9
+    },
+    {
+      "content_hash": "8644dea809d7735f92ccf551fef64483d48727a4ec5f454352578ccf788a0c7f",
+      "manifest_hash": "50c0ba2fdf6df606f0a1c8126c3c6db624601b089bfbc635083103575f52c63b",
+      "recorded_at": "2026-03-01T00:12:00Z",
+      "rows": {
+        "events": 98,
+        "outcomes": 1,
+        "predictions": 1,
+        "revision_causes": 4,
+        "revisions": 3,
+        "schema_meta": 1
+      },
+      "v": 10
+    },
+    {
+      "content_hash": "8644dea809d7735f92ccf551fef64483d48727a4ec5f454352578ccf788a0c7f",
+      "manifest_hash": "0a604f02c6f333ac8f2f041db86eaf2c3a85cb53b26ea40f8eb62d307e68ce27",
+      "recorded_at": "2026-03-01T00:13:00Z",
+      "rows": {
+        "events": 98,
+        "outcomes": 1,
+        "predictions": 1,
+        "revision_causes": 4,
+        "revisions": 3,
+        "schema_meta": 1
+      },
+      "v": 11
+    },
+    {
+      "content_hash": "7169ba1f3166588694fe1232b6b60fff6280ddf14fbaea7231d1cc2344fe4c5c",
+      "manifest_hash": "24d097ca9ce35aad2ff9c426c1d42cf85267df66c21c14e6077fb3743743e81c",
+      "recorded_at": "2026-03-01T00:14:00Z",
+      "rows": {
+        "events": 99,
+        "outcomes": 1,
+        "predictions": 1,
+        "revision_causes": 4,
+        "revisions": 3,
+        "schema_meta": 1
+      },
+      "v": 12
+    }
+  ]
+}
