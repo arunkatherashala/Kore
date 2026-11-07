@@ -60,6 +60,8 @@ pub trait Chooser2 {
     fn name(&self) -> String;
     /// `offers` is never empty; None when nothing can be paid.
     fn choose(&mut self, st: &State2, offers: &[Offer2]) -> Option<Choice2>;
+    /// World O only (Track B12): called with the World O state before `choose`; a no-op for every other chooser.
+    fn prepare_o(&mut self, _st: &crate::being::world_o::engine::StateO) {}
 }
 
 pub fn r3(x: f64) -> f64 {

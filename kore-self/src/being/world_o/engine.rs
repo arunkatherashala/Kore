@@ -16,6 +16,7 @@
 //! Caps (`Limits`), refusals, the kill switch and the energy cap (`Policy::gate_cost`) work as in
 //! World v2. The checker's true verdict is kept for the measurement only (`TrueO`), never logged.
 
+use super::b12::{self, B12State, B12View, L2LCfg};
 use super::world::{FeedbackO, Open, TaskO, WOCfg, WorldO, ARCHIVE, SKIP_COST, SOURCE_O};
 use crate::being::controller::{Limits, Refusal};
 use crate::being::discover::{self, rule_from_event, Example, Found, Rule};
@@ -45,21 +46,23 @@ pub struct LearnerOCfg {
     pub skip_rule: SkipRule,
     /// Track B7 switches A and A2 (rule-record estimate, `discovered` only where a rule covers the offer).
     pub use_: UseCfg,
+    /// Track B12 switches (learning to learn; all off by default, see `b12.rs`).
+    pub l2l: L2LCfg,
 }
 
 impl Default for LearnerOCfg {
     fn default() -> Self {
         let l = LearnerCfg::default();
-        LearnerOCfg { beta_milli: l.beta_milli, skip_milli: l.skip_milli, skip_rule: SkipRule::Rate, use_: UseCfg::default() }
+        LearnerOCfg { beta_milli: l.beta_milli, skip_milli: l.skip_milli, skip_rule: SkipRule::Rate, use_: UseCfg::default(), l2l: L2LCfg::default() }
     }
 }
 
 impl LearnerOCfg {
     pub fn learner(&self) -> LearnerO {
-        LearnerO { inner: Learner2 { beta: self.beta_milli as f64 / 1000.0, skip_frac: self.skip_milli as f64 / 1000.0, use_: self.use_ }, skip_rule: self.skip_rule }
+        LearnerO { inner: Learner2 { beta: self.beta_milli as f64 / 1000.0, skip_frac: self.skip_milli as f64 / 1000.0, use_: self.use_ }, skip_rule: self.skip_rule, l2l: self.l2l, view: None }
     }
     fn w2(&self) -> LearnerCfg {
-        LearnerCfg { beta_milli: self.beta_milli, skip_milli: self.skip_milli, use_: self.use_ }
+        LearnerCfg { beta_milli: self.beta_milli, skip_milli: self.skip_milli, use_: self.use_, skills: Default::default() }
     }
 }
 
@@ -69,13 +72,25 @@ impl LearnerOCfg {
 pub struct LearnerO {
     pub inner: Learner2,
     pub skip_rule: SkipRule,
+    /// Track B12 switches; with all off `choose` is exactly the B11 learner.
+    pub l2l: L2LCfg,
+    /// Track B12: what the learner reads of the World O state (set by `prepare_o` before each choice).
+    pub view: Option<B12View>,
 }
 
 impl Chooser2 for LearnerO {
     fn name(&self) -> String {
         LEARNER_O.into()
     }
+    fn prepare_o(&mut self, st: &StateO) {
+        if self.l2l.chooser_on() {
+            b12::prepare(self, st);
+        }
+    }
     fn choose(&mut self, st: &State2, offers: &[Offer2]) -> Option<Choice2> {
+        if self.l2l.chooser_on() {
+            return b12::choose(self, st, offers);
+        }
         let ch = self.inner.choose(st, offers)?;
         if self.skip_rule == SkipRule::Rate {
             return Some(ch);
@@ -133,6 +148,8 @@ pub struct StateO {
     pub bases: BTreeMap<usize, usize>,
     pub opened: u64,
     pub closed: u64,
+    /// Track B12 state (empty with the switches off).
+    pub b12: B12State,
 }
 
 impl StateO {
@@ -142,6 +159,7 @@ impl StateO {
         self.s2.start(w2, learner.w2(), event);
         self.cfg = Some(cfg);
         self.learner = learner;
+        self.b12.cfg = learner.l2l;
     }
 
     pub fn open_family(&mut self, o: &Open) {
@@ -150,10 +168,16 @@ impl StateO {
             self.bases.insert(o.slot, b);
         }
         self.opened += 1;
+        if self.b12.cfg.prior_k > 0 {
+            b12::on_open(self, o);
+        }
     }
 
     /// A family closed: archive its slot's evidence, drop its working examples and rules.
     pub fn close_slot(&mut self, slot: usize) {
+        if self.b12.cfg.prior_k > 0 {
+            b12::on_close(self, slot);
+        }
         for d in 1..=5u8 {
             for s in STRATEGIES_EXT {
                 let c = self.s2.model.cell(slot, d, s);
@@ -187,14 +211,23 @@ impl StateO {
     /// of the open `compose` families that reuse that slot's rules.
     pub fn apply_rule(&mut self, r: Rule) -> bool {
         let (fam, d) = sig2_split(r.sig);
+        let rid = r.clone();
         if !self.s2.apply_rule(r) {
             return false;
+        }
+        if self.b12.cfg.form_prior > 0 {
+            b12::on_rule(self, &rid);
         }
         let kids: Vec<usize> = self.bases.iter().filter(|(_, b)| **b == fam).map(|(k, _)| *k).collect();
         for k in kids {
             self.s2.model.reset_cell(k, d, Strategy::Discovered);
         }
         true
+    }
+
+    /// Track B12 counters (exploration energy, exploration attempts, rules accepted with reduced support).
+    pub fn b12_counters(&self) -> (i64, u64, u64) {
+        (self.b12.explore_energy, self.b12.explore_steps, self.b12.reduced_rules)
     }
 
     pub fn from_events(rows: &[EventRow]) -> StateO {
@@ -229,11 +262,18 @@ impl StateO {
         } else if e.kind == "outcome" {
             if let Some(o) = outcome_from_event(e) {
                 self.s2.apply(&o);
+                if has("b12_explore") {
+                    self.b12.note_explore(o.cost);
+                }
             }
         } else if e.kind == "note" && has("rule") && has("worldo") {
             if let Some(r) = rule_from_event(e) {
-                self.apply_rule(r);
+                if self.apply_rule(r) && has("b12_reduced") {
+                    self.b12.reduced_rules += 1;
+                }
             }
+        } else if e.kind == "note" && has("controller_refusal") && tag(&e.tags, "cap") == Some(b12::CAP_EXPLORE) {
+            self.b12.explore_cap_pm = tag(&e.tags, "limit").and_then(|x| x.parse().ok());
         }
     }
 }
@@ -246,7 +286,11 @@ fn learner_from_tags(tags: &str) -> Option<LearnerOCfg> {
         None => SkipRule::Rate,
     };
     let use_ = tag(tags, "w2_use").and_then(UseCfg::parse).unwrap_or_default();
-    Some(LearnerOCfg { beta_milli, skip_milli, skip_rule, use_ })
+    let l2l = match tag(tags, "wo_l2l") {
+        Some(x) => L2LCfg::parse(x)?,
+        None => L2LCfg::default(),
+    };
+    Some(LearnerOCfg { beta_milli, skip_milli, skip_rule, use_, l2l })
 }
 
 pub fn genesis_event_o(cfg: &WOCfg, l: &LearnerOCfg) -> (NewEvent, String) {
@@ -260,9 +304,13 @@ pub fn genesis_event_o(cfg: &WOCfg, l: &LearnerOCfg) -> (NewEvent, String) {
     if l.use_.any() {
         tags.push(l.use_.tag());
     }
+    if l.l2l.any() {
+        tags.push(l.l2l.tag());
+    }
     let text = format!(
-        "world O being created: seed {}, budget {} energy units, menu of {}, {} families open at the start, a new family every {} energy units, each living {} x that, {} families per tier, {} per mille of families change their hidden rule once, feedback noise {} per mille; learner beta {:.3}, skip fraction {:.3}, skip test {}. Simulated open-ended world with author-defined families and rewards",
-        cfg.seed, cfg.budget, cfg.menu, cfg.start, cfg.intro_every, cfg.life_intros, cfg.tier_every, cfg.drift_pm, cfg.noise_pm, l.beta_milli as f64 / 1000.0, l.skip_milli as f64 / 1000.0, l.skip_rule.code()
+        "world O being created: seed {}, budget {} energy units, menu of {}, {} families open at the start, a new family every {} energy units, each living {} x that, {} families per tier, {} per mille of families change their hidden rule once, feedback noise {} per mille; learner beta {:.3}, skip fraction {:.3}, skip test {}{}. Simulated open-ended world with author-defined families and rewards",
+        cfg.seed, cfg.budget, cfg.menu, cfg.start, cfg.intro_every, cfg.life_intros, cfg.tier_every, cfg.drift_pm, cfg.noise_pm, l.beta_milli as f64 / 1000.0, l.skip_milli as f64 / 1000.0, l.skip_rule.code(),
+        if l.l2l.any() { l.l2l.words() } else { String::new() }
     );
     let ev = NewEvent { source: SOURCE_O.into(), occurred_at: iso_at(0), kind: "note".into(), text, tags, redacted: false };
     let id = event_id(&ev.source, &ev.occurred_at, &ev.text);
@@ -352,12 +400,14 @@ pub struct EngineO {
     pub scan: crate::being::discover_scan::ScanCache,
     /// Family notes of the next step not yet handed out (when the step then found nothing to do).
     carry: Vec<NewEvent>,
+    /// Track B12 M4: per slot, the (examples, live rules, form-prior version) of its last family pass (no work twice).
+    pub fam_scan: BTreeMap<usize, (usize, usize, u64)>,
 }
 
 impl EngineO {
     pub fn new(state: StateO, limits: Option<Limits>) -> EngineO {
         let world = WorldO::new(state.cfg.clone().expect("a started state"));
-        EngineO { world, state, limits, refusals: vec![], refusals_total: vec![], refused: HashSet::new(), last_blocks: 0, max_candidates_seen: 0, scan: Default::default(), carry: vec![] }
+        EngineO { world, state, limits, refusals: vec![], refusals_total: vec![], refused: HashSet::new(), last_blocks: 0, max_candidates_seen: 0, scan: Default::default(), carry: vec![], fam_scan: BTreeMap::new() }
     }
 
     pub fn refuse(&mut self, r: Refusal) {
@@ -365,6 +415,21 @@ impl EngineO {
             self.refusals_total.push(r.clone());
             self.refusals.push(r);
         }
+    }
+
+    /// Track B12: the controller's cap on the exploration budget (per mille of the energy). A learner asking for
+    /// more gets the cap, and the refusal (returned, to be logged before the first step) records it.
+    pub fn cap_explore(&mut self, cap_pm: Option<u32>) -> Option<Refusal> {
+        let cap = cap_pm?;
+        let want = self.state.b12.cfg.explore_pm;
+        if self.state.b12.cfg.explore_n == 0 || want <= cap || self.state.b12.explore_cap_pm == Some(cap) {
+            return None;
+        }
+        self.state.b12.explore_cap_pm = Some(cap);
+        let r = Refusal::new(b12::CAP_EXPLORE, cap as u64, want as u64, format!("the learner asks for an exploration budget of {want} per mille of its energy; the controller allows {cap}"));
+        self.refused.insert(format!("{}|{}", r.cap, r.what));
+        self.refusals_total.push(r.clone());
+        Some(r)
     }
 
     pub fn take_refusals(&mut self) -> Vec<Refusal> {
@@ -382,6 +447,7 @@ impl EngineO {
             evs.push(family_event(&a, false, step, clock, &self.world.fams[j as usize].name()));
             self.state.close_slot(slot);
             self.scan = Default::default();
+            self.fam_scan.clear();
         }
         for j in open {
             if self.state.known.get(&self.world.fams[j as usize].slot) != Some(&j) {
@@ -400,6 +466,9 @@ impl EngineO {
         let t0 = self.state.s2.clock;
         let tasks = self.world.offers(step, t0);
         let offers = offers_of_o(&tasks);
+        if !offers.is_empty() {
+            chooser.prepare_o(&self.state);
+        }
         let Some(ch) = (if offers.is_empty() { None } else { chooser.choose(&self.state.s2, &offers) }) else {
             self.carry = fam_events;
             return Err(StopReason::BudgetExhausted);
@@ -500,6 +569,10 @@ impl EngineO {
         let listed = slot.map_or(cost, |m| tasks[m].view.cost);
         let mut tags = vec![format!("step:{step}")];
         tags.append(&mut otags);
+        let explore = ch.policy == b12::POLICY_EXPLORE;
+        if explore {
+            tags.push("b12_explore".into());
+        }
         tags.extend([format!("result:{result}"), format!("reward:{reported_reward}"), format!("cost:{cost}"), format!("listed:{listed}"), format!("budget_left:{budget_left}"), format!("clock:{t1}")]);
         let what = slot.map_or("menu".to_string(), |m| format!("task {}", tasks[m].view.id));
         let oev = NewEvent { source: SOURCE_O.into(), occurred_at: iso_at(t1), kind: "outcome".into(), text: format!("step {step}: {what} is reported {result}; reward {reported_reward} cost {cost} budget left {budget_left}"), tags, redacted: false };
@@ -555,6 +628,9 @@ impl EngineO {
             cex: None,
         };
         self.state.s2.apply(&outcome);
+        if explore {
+            self.state.b12.note_explore(outcome.cost);
+        }
         let mut events = fam_events;
         events.extend([dev, aev, oev]);
         Ok(StepO { outcome, truth, label, task: attempted_task, events, revision, prediction, resolved })
@@ -581,14 +657,22 @@ impl EngineO {
         };
         let mut out = vec![];
         for f in found {
-            if let Some(nr) = self.accept_found(&f) {
+            if let Some(nr) = self.accept_found(&f, None) {
                 out.push(nr);
+            }
+        }
+        if self.state.b12.cfg.form_prior > 0 {
+            for (f, how) in b12::family_pass(self) {
+                if let Some(nr) = self.accept_found(&f, Some(how)) {
+                    out.push(nr);
+                }
             }
         }
         out
     }
 
-    fn accept_found(&mut self, f: &Found) -> Option<NewRuleO> {
+    /// `b12`: a family-wide rule of Track B12 M4 (with how it was accepted).
+    fn accept_found(&mut self, f: &Found, b12: Option<b12::FamilyHow>) -> Option<NewRuleO> {
         let nblocks = if f.xf.is_id() { 0 } else { self.last_blocks as u32 };
         let mut rule = Rule::new_x(f.sig, f.xf, f.form, f.train_ok, f.val_ok, self.state.s2.step, nblocks);
         if self.state.s2.rules.iter().any(|r| r.id == rule.id) {
@@ -618,6 +702,14 @@ impl EngineO {
             tags.push(format!("xf:{}", f.xf.code()));
             tags.push(format!("blocks:{nblocks}"));
         }
+        let mut text = text;
+        if let Some(h) = &b12 {
+            tags.push("b12_family".into());
+            if h.reduced {
+                tags.push("b12_reduced".into());
+            }
+            text = h.text(&text);
+        }
         let event = NewEvent { source: SOURCE_O.into(), occurred_at: at.clone(), kind: "note".into(), text, tags, redacted: false };
         let ev_id = event_id(&event.source, &event.occurred_at, &event.text);
         rule.event_id = ev_id.clone();
@@ -627,6 +719,10 @@ impl EngineO {
             "rule_id": rule.id, "slot": slot, "family_id": fid, "difficulty": d, "form": rule.form.code(), "dsl": rule.form.dsl(), "transform": f.xf.code(),
             "training_examples_reproduced": f.train_ok, "held_out_examples_reproduced": f.val_ok, "cited_examples": f.cite.len(), "accepted_at_step": self.state.s2.step,
         });
+        let mut rationale = rationale;
+        if let Some(h) = &b12 {
+            rationale["b12_family_rule"] = h.json();
+        }
         let revision = NewRevision {
             entity_type: "rule".into(),
             key: format!("being/worldo/rule/{}", rule.id),
@@ -638,7 +734,9 @@ impl EngineO {
             author: "rule:being-discover".into(),
             caused_by,
         };
-        self.state.apply_rule(rule.clone());
+        if self.state.apply_rule(rule.clone()) && b12.as_ref().map_or(false, |h| h.reduced) {
+            self.state.b12.reduced_rules += 1;
+        }
         Some(NewRuleO { rule, event, revision })
     }
 }
@@ -680,6 +778,8 @@ pub struct RunOCfg {
     /// Discovery pass after every N-th step (0: never).
     pub discover_every: u64,
     pub ctl: Option<Limits>,
+    /// Track B12: the controller's cap on the exploration budget, per mille of the energy (None: no cap).
+    pub max_explore_pm: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -733,6 +833,10 @@ pub fn run_o(log: &mut VersionedLog, cfg: &RunOCfg, policy: &Policy, chooser: Op
     let mut engine = EngineO::new(state, cfg.ctl.clone());
     let (mut new_rules, mut truths) = (vec![], vec![]);
     let mut pending = Batch::default();
+    if let Some(r) = engine.cap_explore(cfg.max_explore_pm) {
+        // logged before any step, so the fold (and the replay) apply the cap from the first decision on
+        log.commit_batch(Batch { events: vec![refusal_event_o(&r, engine.state.s2.step, engine.state.s2.clock)], ..Default::default() })?;
+    }
     let mut pending_steps = 0usize;
     let (mut done, mut rep, mut tru, mut cost) = (0u64, 0i64, 0i64, 0i64);
     let stopped;
@@ -797,13 +901,17 @@ pub fn replay_o(rows: &[EventRow]) -> (u64, u64) {
     let mut world: Option<WorldO> = None;
     let (mut n, mut bad) = (0u64, 0u64);
     for e in rows.iter().filter(|e| e.source == SOURCE_O) {
-        if e.kind == "decision" && tag(&e.tags, "policy") == Some(crate::being::world2::learner::LEARNER_NAME) {
+        let pol = tag(&e.tags, "policy");
+        if e.kind == "decision" && (pol == Some(crate::being::world2::learner::LEARNER_NAME) || pol == Some(b12::POLICY_EXPLORE)) {
             if world.is_none() {
                 world = st.cfg.clone().map(WorldO::new);
             }
             if let Some(w) = &world {
                 let offers = offers_of_o(&w.offers(st.s2.step, st.s2.clock));
                 let mut l = st.learner.learner();
+                if !offers.is_empty() {
+                    l.prepare_o(&st);
+                }
                 let got = l.choose(&st.s2, &offers).map(|c| c.act.label());
                 n += 1;
                 if got.as_deref() != tag(&e.tags, "action") {

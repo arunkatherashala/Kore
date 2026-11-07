@@ -8,8 +8,12 @@
 //! planner keyed by family slot, the B2/B5 rule search), with the Track B11 skip test as a switch.
 //! Author-defined simulation; the only claims are the measured numbers in docs/measured.md.
 
+pub mod b12;
 pub mod engine;
 pub mod measure;
+pub mod measure_b12;
 pub mod world;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_b12;

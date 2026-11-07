@@ -2174,6 +2174,233 @@ the references are deterministic and oracle-knows-rules beats oracle-planner and
 Anything outside these author-defined worlds; the skip fix through the real binary; World O through the real binary
 (there is no MCP tool for it); World O with feedback noise; a learner that keeps up in World O.
 
+## Track B12: learning to learn (synthetic world, author-defined families)
+
+Everything here is the World O simulation (`docs/open_world.md`: author-defined families, grammar, schedule, drift
+and rewards) and the being's own learner. Question: in World O new task families keep appearing, and Track B11
+found that the being does not get faster at learning later families (top-tier Spearman of family order vs
+attempts to competence +0.025 [-0.060, +0.110]), its competent share falls from 84% to 47-49% on the last top-tier
+families and its regret against `oracle-knows-rules` rises from 0.13 to 0.84 per window. Can it reuse experience
+across families so that later families are learned faster? Code: `kore-self/src/being/world_o/b12.rs` (new), hooks in
+`world_o/engine.rs` (switch-guarded), one default no-op trait method in `world2/learner.rs` (`Chooser2::prepare_o`),
+measurement `world_o/measure_b12.rs` and `examples/measure_b12.rs` (modes `diag`, `report`, `seqdebug`), observer
+`being_observe --source being:worldo` / `--demo-o`. Branch `learn-to-learn` (from a4ca4231), 2026-11-07, Windows, 8
+CPUs shared with other work. Tuning seeds 101..120 (diagnosis on all 20, tuning on 101..110 at a 600,000-energy
+life), report seeds 1..20 at the B11 life of 1,200,000 energy units, windows of 100,000, 95% t-intervals of the mean,
+paired differences on identical worlds. Score: TRUE reward per energy (the checker's verdict). Controller of every run:
+live-rule cap 200, candidate cap 100,000, no composition (as B11).
+
+A fix needed first: the merge of B10 and B11 into brain-v5 did not compile (`LearnerOCfg::w2()` lacked the B10
+`skills` field); the one-line fix (`skills: Default::default()`) is part of this branch.
+
+### Step 1: diagnosis (cause confirmed, but not the candidate one)
+
+`measure_b12 diag` (seeds 101..120, `current` learner) records, for every family, the first 100 menus on which it
+appears: how often the being attempts it, skips the menu, the examples it gives, the being's starting estimate of the
+truly best strategy against that strategy's true success rate, and whether the starting score is below the skip bar.
+`seqdebug` lists, for the open sequence families at a few points of one life, the examples per (family, difficulty)
+and which grammar form explains them.
+
+| families (seeds 101..120, pooled) | n | attempts on it per menu | menus skipped per menu | start estimate p | true p | start score below the skip bar | sequence families never given a rule |
+|---|---|---|---|---|---|---|---|
+| tiers 0-1 | 320 | 0.260 | 0.265 | 0.703 | 0.778 | 39% | 68% |
+| tiers 2-3 | 320 | 0.282 | 0.276 | 0.707 | 0.532 | 6% | 71% |
+| tier 4, index 32-95 | 1280 | 0.230 | 0.343 | 0.712 | 0.510 | 6% | 71% |
+| tier 4, index 96-159 | 1280 | 0.186 | 0.491 | 0.710 | 0.522 | 9% | 84% |
+| tier 4, index 160+ | 860 | 0.179 | 0.502 | 0.698 | 0.528 | 8% | 84% |
+
+Per type at the top tier the pooled starting estimate is too optimistic for sequence (+0.21 to +0.26), compose
+(+0.18 to +0.23) and formula families (+0.60 to +0.64), too pessimistic for grids (-0.25 to -0.34), about right for
+knapsacks.
+
+* The candidate cause of B11 ("new families start from a pooled prior and are skipped") is **not** what happens:
+  the starting estimate is too *optimistic* for the families that need rules (only 5-9% of top-tier families start
+  below the skip bar), and a new top-tier sequence family is attempted on 11 to 14 of its first 100 menus
+  (10.9 to 14.4 examples). What falls over the life is the attempt share once those first tries fail (0.230 ->
+  0.179 per menu; menus skipped 0.34 -> 0.50).
+* The cause of the missing rules: the B2 search keys a rule by (family, difficulty) and needs 3 training + 1
+  held-out examples **in one such signature**; a family's examples spread over five difficulties. `seqdebug`
+  (seed 101) shows it directly: e.g. at 300,000 energy a tribonacci family has 2, 2, 2, 2, 2 examples at
+  difficulties 1-5 and a cubic one 2, 2, 3, 3, 4; in every such case the right form explains every example at every
+  difficulty, but no signature reaches 3 + 1 (at a window end 1.4 to 7.0, after 400,000 energy units 1.4 to 2.4, of the 15 to 21 signatures with examples
+  hold at least 4 examples). 77% of all sequence families never get a rule (84% after family 96),
+  and a `compose` family (reusing a base family's rule at the same difficulty) can only use the rule where the base
+  has one at that difficulty.
+* Rule-search inputs fall with the attempt share: examples held at window ends 741-1,319 in the first 400,000 energy,
+  226-1,339 later; rules accepted per window 7.3, 14.4, 17.1, 9.2, then 2.9 to 6.2.
+
+So the being does not reuse what one difficulty of a family teaches about the others, nor what earlier families
+teach about new ones: its knowledge of rules restarts per (family, difficulty), its estimates restart per family
+from a prior pooled over every family ever seen.
+
+### What was built (each a switch, off by default, `docs/open_world.md`)
+
+| part | switch (genesis tag `wo_l2l:k/n/w/pm/f`) | what it does |
+|---|---|---|
+| M2 hierarchical prior | `prior_k` (8) | at a family's announcement, an empirical-Bayes Beta prior per (strategy, difficulty) from the latest 8 families of the same announced type (closed or open, >= 5 attempts with the strategy, >= 3 families; weight from their spread, 2..30), in place of the prior pooled over every family |
+| M3 new-family exploration | `explore_n` (10), weight 0.5, budget 50 per mille | an information bonus `0.5 x rate x (1 - n/10)` on the options of a family with fewer than 10 attempts, while the energy of the steps the bonus changed (policy `wo-explore`) stays under 5% of the energy spent; the controller can lower the budget (`max_explore_pm`, refusal logged before the first step) |
+| M4 level 1, family-wide rules | `form` = 1 (`fam`) | after the B2 pass, one form sought over all examples of a family (every difficulty) under the B2 guard (never applicable-and-wrong, 3 training + 1 held-out, the 3 spare equations), accepted for every difficulty of the family without a rule |
+| M4 level 2, rule-form prior | `form` = 2 (`form`) | as level 1, and the forms accepted in >= 2 earlier families (and the family's own forms) are tried first and need 2 + 1 instead of 3 + 1 |
+
+The constants were set before the report and checked on tuning seeds 101..110 (life 600,000), differences to the
+current learner: with the defaults `prior` -0.068, `explore` +0.080, `fam` +0.371, `form` +0.385, `all` +0.372;
+cohort 4 / 16 gave `prior+form` +0.203 / +0.137; a weaker exploration (weight 0.25, 6 tries) gave `all` +0.085. The
+defaults were kept. Nothing was tuned on the report seeds.
+
+### Report seeds 1..20 (life 1,200,000 energy units, windows of 100,000; n = 20 worlds)
+
+The `current` column reproduces Track B11 exactly (2.653 ... 4.163 per window, Spearman +0.025, regret 0.131 ->
+0.836). `fix+b7` is the current learner with the B11 skip fix and the B7 switches A and A2.
+
+Whole life after the first window, paired differences in true reward per energy (better in):
+
+| condition | minus current | minus fix+b7 |
+|---|---|---|
+| prior (M2) | -0.316 [-0.435, -0.197] (1 of 20) | -0.071 [-0.186, +0.043] |
+| explore (M3) | -0.021 [-0.151, +0.109] (13 of 20) | +0.223 [+0.115, +0.332] |
+| fam (M4 level 1) | **+0.361 [+0.269, +0.453] (20 of 20)** | +0.606 [+0.501, +0.711] |
+| form (M4 level 2) | **+0.366 [+0.275, +0.456] (20 of 20)** | +0.610 [+0.505, +0.716] |
+| prior+form | +0.189 [+0.044, +0.333] (17 of 20) | +0.433 [+0.292, +0.575] |
+| explore+form | **+0.372 [+0.271, +0.472] (20 of 20)** | +0.617 [+0.502, +0.731] |
+| prior+explore | -0.395 [-0.560, -0.231] (2 of 20) | -0.151 [-0.268, -0.034] |
+| all (prior+explore+form) | **+0.357 [+0.257, +0.458] (20 of 20)** | +0.602 [+0.489, +0.714] |
+| all+fix+b7 | +0.085 [-0.028, +0.199] (11 of 20) | +0.330 [+0.227, +0.433] |
+| fix+b7 | -0.245 [-0.342, -0.148] (2 of 20) | - |
+
+Ablation from `all`: without M2 (`explore+form`) +0.015 against `all`; without M3 (`prior+form`) -0.168; without M4
+(`prior+explore`) -0.752. M4 carries the whole gain; level 2 adds +0.005 to level 1 (no interval computed for that
+pair, the per-window curves of `fam` and `form` differ by at most 0.05).
+
+Does it get faster at learning later families? Top tier, Spearman per world of family index vs attempts to
+competence (not reached = slowest; negative = faster later):
+
+| condition | Spearman | minus current, paired |
+|---|---|---|
+| current | +0.025 [-0.060, +0.110] | - |
+| fix+b7 | -0.034 [-0.119, +0.050] | -0.059 [-0.117, -0.001] |
+| prior | -0.078 [-0.172, +0.015] | -0.103 [-0.164, -0.043] |
+| explore | +0.052 [-0.012, +0.116] | +0.027 [-0.030, +0.084] |
+| fam | -0.084 [-0.156, -0.012] | -0.109 [-0.157, -0.061] |
+| form | **-0.098 [-0.171, -0.026]** | -0.123 [-0.176, -0.070] |
+| explore+form | -0.062 [-0.124, +0.000] | -0.087 [-0.159, -0.016] |
+| all | -0.011 [-0.060, +0.037] | -0.037 [-0.109, +0.036] |
+| all+fix+b7 | -0.062 [-0.133, +0.010] | -0.087 [-0.149, -0.024] |
+
+Regret against `oracle-knows-rules` per window (selected; all 12 windows and conditions are printed by the mode):
+
+| energy | current | fix+b7 | prior | explore | form | explore+form | all |
+|---|---|---|---|---|---|---|---|
+| 0-100k | 0.131 [0.044, 0.218] | 0.115 | 0.130 | 0.141 | 0.131 | 0.140 | 0.125 [0.038, 0.212] |
+| 200-300k | 0.537 [0.114, 0.961] | 0.506 | 0.742 | 0.398 | 0.169 [0.019, 0.318] | 0.172 | 0.231 [0.035, 0.427] |
+| 400-500k | 0.460 [0.241, 0.678] | 0.889 | 1.016 | 0.619 | 0.194 [0.058, 0.330] | 0.176 | 0.196 [0.064, 0.327] |
+| 600-700k | 0.713 [0.306, 1.119] | 1.031 | 1.161 | 0.866 | 0.178 [0.011, 0.345] | 0.224 | 0.229 [0.039, 0.420] |
+| 800-900k | 0.546 [0.166, 0.925] | 0.858 | 0.974 | 0.586 | 0.274 [0.062, 0.487] | 0.264 | 0.247 [0.051, 0.443] |
+| 1.0M-1.1M | 0.752 [0.388, 1.117] | 0.967 | 0.923 | 0.668 | 0.384 [0.078, 0.691] | 0.350 | 0.451 [0.147, 0.756] |
+| 1.1M-1.2M | 0.836 [0.359, 1.313] | 0.976 | 0.880 | 0.732 | 0.373 [-0.008, 0.754] | 0.302 [0.057, 0.546] | 0.268 [0.078, 0.457] |
+| first third -> last third (windows 2-4 vs 9-12) | 0.442 -> 0.751, change +0.309 [-0.041, +0.659] | 0.586 -> 0.949 | 0.789 -> 0.906 | 0.457 -> 0.689 | 0.195 -> 0.349, +0.155 [-0.094, +0.403] | 0.199 -> 0.307, +0.108 [-0.110, +0.326] | 0.228 -> 0.324, +0.096 [-0.147, +0.339] |
+
+Competence per block of families (order of appearance, learnable families, pooled over worlds; median attempts to
+competence in brackets):
+
+| families | tiers | current | fix+b7 | prior | form | all |
+|---|---|---|---|---|---|---|
+| 0-31 | 0-3 | 84% (10) | 82% (10) | 84% (10) | 93% (10) | 88% (10) |
+| 32-63 | 4 | 63% (17) | 52% (10) | 58% (10) | 90% (17) | 88% (12) |
+| 64-95 | 4 | 67% (17) | 51% (10) | 54% (10) | 93% (16) | 84% (11) |
+| 96-127 | 4 | 65% (10) | 57% (10) | 66% (10) | 93% (16) | 83% (10) |
+| 128-159 | 4 | 61% (10) | 51% (10) | 66% (10) | 90% (16) | 78% (10) |
+| 160-191 | 4 | 47% (10) | 51% (10) | 66% (10) | 92% (16) | 78% (10) |
+| 192-223 | 4 | 49% (10) | 44% (10) | 53% (10) | 89% (16) | 82% (10) |
+| mean ratio to the best the means allow, first 10 attempts (top tier) | | 0.32-0.42 | 0.36-0.48 | 0.51-0.61 | 0.44-0.55 | 0.66-0.72 |
+
+Rules (per world, mean) and wrong rules (every accepted rule of a sequence family judged on 60 sampled tasks of its
+family and difficulty at acceptance; wrong = applies and is wrong on more than 5% of them):
+
+| condition | rules accepted | judged | wrong | with reduced support (wrong) | rule answers (right share) | attempt share | exploration energy share |
+|---|---|---|---|---|---|---|---|
+| current | 126.4 | 2,438 | 0 | - | 46,528 (0.936) | 0.487 | - |
+| fix+b7 | 45.0 | 866 | 1 | - | 20,911 (0.936) | 0.423 | - |
+| prior | 47.0 | 916 | 0 | - | 15,762 (0.933) | 0.404 | - |
+| explore | 129.4 | 2,497 | 0 | - | 43,858 (0.937) | 0.487 | 0.26% |
+| fam | 356.7 | 7,010 | 0 | - | 77,830 (0.936) | 0.623 | - |
+| form | 381.4 | 7,471 | 0 | 2,836 (0) | 78,560 (0.936) | 0.626 | - |
+| all | 387.1 | 7,586 | 0 | 2,708 (0) | 78,823 (0.935) | 0.631 | 0.57% |
+| all+fix+b7 | 273.8 | 5,318 | 1 | 1,539 (0) | 58,451 (0.935) | 0.549 | 0.26% |
+
+Rules accepted per window, `current` -> `form`: 7.8 -> 29.6, 14.8 -> 38.6, 20.0 -> 35.5 (300-400k), 11.6 -> 30.7
+(500-600k), 4.3 -> 24.4 (800-900k), 8.6 -> 26.6 (last). Top-tier families in their first 100 menus (`current` ->
+`form`): attempts per menu 0.218 -> 0.251, menus skipped per menu 0.373 -> 0.267, sequence families that ever get a
+rule 30% -> 84%, median attempts before the first rule 10 -> 3.
+
+### One sample life before and after (observer)
+
+`being_observe --demo-o <dir> --seed 1 --steps 30000 --l2l off|on` (World O seed 1, 30,000 steps, log only; the
+report is the World v2 report read on the World O rows, so it is titled "World v2 being" and names families by slot,
+`f03` = slot 3):
+
+| | B12 off | B12 on (all) |
+|---|---|---|
+| reported reward per energy, steps 0-10k / 10-20k / 20-30k | 2.360 / 2.040 / 2.317 | 2.378 / 2.090 / 2.380 |
+| rules accepted per window | 3 / 1 / 9 | 11 / 5 / 17 |
+| rule answers (reported right), steps 20-30k | 477 (445) | 663 (625) |
+| decisions by policy | w2-model-ucb 30,000 | w2-model-ucb 29,903, wo-explore 97 |
+| slot 14 (a quadratic family): its rules | d1, d3, d4, d5, d2 accepted at steps 28,220 to 28,310, one by one | all five difficulties at step 23,010 (one family-wide form, 4 + 1 examples) |
+| slot 16 (an interleaved-steps family) | d4, d5, d2, d3 at steps 28,120 to 28,610 | all five difficulties at step 26,500 |
+
+Both are short and from one world; they show the mechanism (one form for the whole family, accepted earlier), not
+an effect size.
+
+### Verdict
+
+Cause confirmed, and it is not the B11 candidate: new top-tier families are not skipped from the start (their
+pooled starting estimate is too optimistic, not too pessimistic); the being's rules restart per (family,
+difficulty), so a family's examples, spread over five difficulties, rarely reach the B2 support in any one of them
+(77% of sequence families never got a rule). **Family-wide rules (M4) fix most of it**: +0.36 to +0.37 reward per
+energy over the whole life (20 of 20 worlds), regret in the last window 0.836 -> 0.373 (0.268 with all switches),
+competent share on the last top-tier families 47-49% -> 89-92%, 0 wrong rules among 7,471 judged (2,836 accepted
+with the reduced support of the rule-form prior, 0 wrong). **Faster later?** The order-vs-competence correlation
+turns negative (form -0.098 [-0.171, -0.026], paired -0.123 [-0.176, -0.070] against current), but it is small:
+the gain is mostly immediate (each family's own difficulties share a form) and only a little of it grows with
+experience of earlier families (level 2 over level 1: +0.005 reward, -0.014 Spearman). Regret still rises over the
+life (form 0.195 -> 0.349, interval of the change contains 0). The hierarchical prior (M2) makes the first attempts
+at a family much better (first-10 ratio 0.32-0.42 -> 0.51-0.61) but costs reward (-0.316 alone, and it halves the
+gain of M4 in `prior+form`): an accurate, confident prior for families that start out hard removes the optimism
+that made the being try them, so they give fewer examples (2.2 against 5.3 in their first 100 menus) and fewer
+rules. Exploration (M3) changes little (-0.021 alone; +0.006 on top of M4). With the B11 skip fix and B7 on, all
+B12 switches together gain only +0.085 [-0.028, +0.199] over current (+0.330 over fix+b7 itself), so the B7
+switches still hurt in World O. Recommended combination from these numbers: `form` or `explore+form`, not M2.
+
+### Other worlds
+
+The B12 code is used only by World O (B12 is not wired into World v2 or the first world). With the switches off the
+outputs of `measure_b11 worldo --seeds 1..3 --budget 60000 --window 20000` and `measure_b11 b1 --seeds 1..5` from the
+binary built before B12 and the one built after are byte-identical (md5 5c7753f2... and ae3bb95d...), and the World
+v2 tests (golden digests of Track B7) pass unchanged; the only edit outside World O is a default no-op trait method.
+So World v2 and the B1 worlds are exactly as before; whether family-wide rules would help in World v2 was not
+measured.
+
+### Caveats
+
+Author-defined world and grammar; M4 works because in World O the hidden class of a family is the same at every
+difficulty (a world where it changes with the difficulty would see such forms rejected by the never-wrong guard,
+and gain nothing); the wrong-rule judge samples 60 tasks at acceptance and does not follow a rule through its
+family's drift; tiers are not observable, so M2 uses "the latest families of a type"; the constants were chosen on
+10 tuning seeds at half the life; no long run (> 1.2M energy) and no logged run at full length with B12 on.
+
+### What is tested (not measured)
+
+`being/world_o/tests_b12.rs`: off by default and then the B11 being (the B12 measurement run equals `run_wo` window
+for window; no B12 tag in a default log; empty B12 state; a pinned digest of a default run); the `wo_l2l` tag round
+trip and refusal of bad tags; the empirical-Bayes prior (too few families: none; consistent families give a
+stronger weight; only earlier families of the same type count; an empty cell's estimate is the prior's); family-wide
+rules (four examples at four difficulties: B2 accepts nothing, level 1 accepts the form for all five difficulties,
+a second pass adds nothing, an example the form gets wrong blocks it); the rule-form prior (three examples: nothing
+without a prior, five reduced-support rules with the form seen in two earlier families, level 1 ignores the prior);
+exploration (attempts happen, the energy stays within the budget, the controller cap is logged before the first
+decision and holds, fold and replay with `wo-explore` decisions); with all switches on: fold of the log equals the
+live state (priors formed, families closed), all 2,500 decisions re-derived from the log, 1,200 + 1,300 steps with a
+cold restart equal 2,500, the live-rule cap holds, KILL before the first step and after 12 steps (stop logged).
+
 ## Not measured
 
 Real-life data of any kind (the free-text section above is also synthetic); the probabilities of the live ledger (`predict_make`/`predict_score` have not been run on real data; the S4 numbers above are synthetic sequences only; the older `self_ledger_snapshot` rows are not scored by any measurement); behaviour with

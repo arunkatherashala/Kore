@@ -70,6 +70,30 @@ rule, a retirement time or a drift.
   are available (logged as `w2_use`); B7 B and C (robust acceptance, fitted constants) and the B3b adaptation switches
   (which live in the first world's model, not in the family-keyed model) are not wired into World O.
 
+## Learning to learn (Track B12, opt-in)
+
+Measured (Track B12): the family-wide rules carry the gain (+0.37 reward per energy over the life, 0 wrong rules),
+the hierarchical prior costs reward, the exploration bonus changes little. Code: `kore-self/src/being/world_o/b12.rs` (mechanisms), `world_o/measure_b12.rs` (measurement records),
+`examples/measure_b12.rs` (modes `diag`, `report`); results in `docs/measured.md`, section "Track B12". Three
+switches, each off by default and logged in the genesis event (`wo_l2l:<prior_k>/<explore_n>/<explore_w>/<explore_pm>/<form>`;
+absent = all off, and then the being, its log and its measurements are those of Track B11):
+
+* M2, hierarchical prior: when a family is announced, its cells start from an empirical-Bayes Beta prior formed from
+  the latest families of the same announced type (closed or still open), per strategy and difficulty, instead of the
+  strategy-wide estimate pooled over every family. Tiers are not announced; the latest families of a type stand in.
+* M3, new-family exploration: an information bonus on the options of a family with fewer than `explore_n`
+  attempts, within an energy budget (per mille of the energy spent) that the controller can lower
+  (`RunOCfg::max_explore_pm`, refusal logged before the first step). Decisions changed by the bonus have policy
+  `wo-explore`; their outcomes carry the tag `b12_explore`.
+* M4, family-wide rules (level 1) and the rule-form prior (level 2): one form sought over all the examples of a
+  family (every difficulty) under the B2 guard and accepted for each difficulty of that family without a rule (tag
+  `b12_family`); at level 2 the forms of rules accepted in earlier families are tried first and need 2 + 1 instead
+  of 3 + 1 support (tag `b12_reduced`).
+
+The prior is formed at the announcement (a pure function of the folded state), so `StateO::from_events` and
+`replay_o` re-derive it; the replay also checks the `wo-explore` decisions. The observer reads a World O log with
+`being_observe --root <dir> --owner <owner> --source being:worldo` (or `--demo-o <dir> --l2l on|off`).
+
 ## Log, controller, kill switch
 
 Per step: the family notes, a decision event (with every alternative in its revision's rationale), an action event,
@@ -101,7 +125,8 @@ average at least 0.9. Attempts and energy are counted from the family's opening.
 
 ## Known limits of the design
 
-Author-defined families, grammar and schedule; the types are World v2's; rewards rise with the tier by construction
+Author-defined families, grammar and schedule; the types are World v2's; within a family the hidden class is the
+same at every difficulty (which is what M4 exploits; a world where it is not would not reward it); rewards rise with the tier by construction
 (so reward per energy rising over time is not by itself learning; the regret against the reference is the measure);
 a family's drift is a single re-draw; the slot is observable (the being knows when a family is new); no real data,
 no language model.

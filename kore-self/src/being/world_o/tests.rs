@@ -138,7 +138,7 @@ fn learner_o_with_the_default_skip_test_is_the_world_v2_learner() {
 
 fn run_logged(root: &std::path::Path, c: WOCfg, l: LearnerOCfg, steps: u64, limits: Option<Limits>) -> (VersionedLog, RunOSummary) {
     let mut log = open_log(root);
-    let s = run_o(&mut log, &RunOCfg { world: Some(c), learner: Some(l), discover_every: 10, ctl: limits }, &Policy::new(steps), None).unwrap();
+    let s = run_o(&mut log, &RunOCfg { world: Some(c), learner: Some(l), discover_every: 10, ctl: limits, max_explore_pm: None }, &Policy::new(steps), None).unwrap();
     (log, s)
 }
 

@@ -51,7 +51,7 @@ pub fn cmd_worldo_log(args: &[String]) {
         if !killed_once && done + chunk > kill_at {
             std::fs::write(&kill, "stop").unwrap();
         }
-        let s = run_o(&mut log, &RunOCfg { world: Some(wcfg.clone()), learner: Some(lcfg), discover_every: 10, ctl: Some(limits.clone()) }, &pol, None).unwrap();
+        let s = run_o(&mut log, &RunOCfg { world: Some(wcfg.clone()), learner: Some(lcfg), discover_every: 10, ctl: Some(limits.clone()), max_explore_pm: None }, &pol, None).unwrap();
         if kill.exists() {
             assert_eq!((s.steps_run, s.stopped), (0, StopReason::Killed), "no step after KILL");
             println!("| {} | {:.1} | KILL file present: stopped, {} steps, stop logged | | | | |", s.state.s2.step, t.elapsed().as_secs_f64(), s.steps_run);
