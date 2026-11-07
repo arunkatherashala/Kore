@@ -167,6 +167,71 @@ pub struct ModelChooser {
     pub novelty: f64,
     /// How advice found in the log is used (default: ignored).
     pub advice: AdviceCfg,
+    /// Track B11: which skip test is used (default: the B1 test, bit for bit).
+    pub skip_rule: SkipRule,
+}
+
+/// Track B11: the skip test of the planner.
+///
+/// * `Rate` (B1, default): skip when the best optimistic score is below `skip_frac x rate`.
+/// * `Calibrated`: skip when the best optimistic score is below `skip_frac x rate x (1 - SKIP_COST / e)`,
+///   with `e` the estimated energy of that best option. This is the renewal-reward comparison of
+///   "attempt now" (expected reward minus `rate x e`) with "skip" (minus `rate x SKIP_COST`): both lead
+///   to a fresh menu, so the attempt is worth it when `reward x p > rate x (e - SKIP_COST)`. Under
+///   `Rate` the bar stays at the full rate, so once the optimism `beta x sd` has shrunk the planner
+///   skips offers that pay more than the energy a skip would save (docs/measured.md, Track B11).
+/// * `Settled(k)`: the calibrated bar once the best option's own cell is well known, the B1 bar while
+///   it is not: `skip_frac x rate x (1 - w x SKIP_COST / e)` with `w = n / (n + k)` and `n` the attempts
+///   in that cell (the same evidence that shrinks its optimism bonus). Early in a life the realized rate
+///   is a low estimate of what the being will earn, and the stricter B1 bar makes up for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SkipRule {
+    #[default]
+    Rate,
+    Calibrated,
+    Settled(u32),
+}
+
+/// `k` of `SkipRule::Settled`, chosen on tuning seeds 101..120 only (docs/measured.md, Track B11).
+pub const DEFAULT_SETTLE_K: u32 = 100;
+
+impl SkipRule {
+    pub fn name(self) -> &'static str {
+        match self {
+            SkipRule::Rate => "rate",
+            SkipRule::Calibrated => "calibrated",
+            SkipRule::Settled(_) => "settled",
+        }
+    }
+    /// `rate`, `calibrated`, `settled` (default k) or `settled:<k>`.
+    pub fn parse(s: &str) -> Option<SkipRule> {
+        match s {
+            "rate" => Some(SkipRule::Rate),
+            "calibrated" => Some(SkipRule::Calibrated),
+            "settled" => Some(SkipRule::Settled(DEFAULT_SETTLE_K)),
+            _ => s.strip_prefix("settled:").and_then(|k| k.parse().ok()).map(SkipRule::Settled),
+        }
+    }
+    /// Text form that `parse` reads back.
+    pub fn code(self) -> String {
+        match self {
+            SkipRule::Settled(k) => format!("settled:{k}"),
+            r => r.name().to_string(),
+        }
+    }
+    /// The bar the best optimistic score is compared with (`cost_est` = estimated energy of that
+    /// option, `n` = attempts in its cell).
+    pub fn bar(self, skip_frac: f64, rate: f64, cost_est: f64, skip_cost: i64, n: u64) -> f64 {
+        let save = (skip_cost as f64 / cost_est.max(1.0)).min(1.0);
+        match self {
+            SkipRule::Rate => skip_frac * rate,
+            SkipRule::Calibrated => skip_frac * rate * (1.0 - save),
+            SkipRule::Settled(k) => {
+                let w = n as f64 / (n as f64 + k as f64);
+                skip_frac * rate * (1.0 - w * save)
+            }
+        }
+    }
 }
 
 /// Revealed examples per signature after which the curiosity bonus is gone.
@@ -182,7 +247,7 @@ pub const DEFAULT_NOVELTY: f64 = 0.25;
 
 impl ModelChooser {
     pub fn new(beta: f64) -> ModelChooser {
-        ModelChooser { beta, skip_frac: DEFAULT_SKIP_FRAC, no_discovered: false, curiosity: DEFAULT_CURIOSITY, novelty: DEFAULT_NOVELTY, advice: AdviceCfg::default() }
+        ModelChooser { beta, skip_frac: DEFAULT_SKIP_FRAC, no_discovered: false, curiosity: DEFAULT_CURIOSITY, novelty: DEFAULT_NOVELTY, advice: AdviceCfg::default(), skip_rule: SkipRule::Rate }
     }
 
     /// The planner of a logged being: its optimism from the genesis event and its advice mode.
@@ -258,9 +323,13 @@ impl MenuChooser for ModelChooser {
             Some(r) => r,
             None => if st.total_cost > 0 { st.total_reward as f64 / st.total_cost as f64 } else { 0.0 },
         };
-        let skip_ok = |score: f64| self.skip_frac > 0.0 && st.total_cost >= SKIP_MIN_COST && score < self.skip_frac * rate && st.budget_left >= super::world::SKIP_COST;
+        let skip_rule = self.skip_rule;
+        let skip_ok = |score: f64, cost_est: f64, n: u64| {
+            let bar = if skip_rule == SkipRule::Rate { self.skip_frac * rate } else { skip_rule.bar(self.skip_frac, rate, cost_est, super::world::SKIP_COST, n) };
+            self.skip_frac > 0.0 && st.total_cost >= SKIP_MIN_COST && score < bar && st.budget_left >= super::world::SKIP_COST
+        };
         let label = |c: &Cand| format!("{}:{}", c.slot, c.strategy.name());
-        let alone_skip = skip_ok(best.score);
+        let alone_skip = skip_ok(best.score, best.cost_est, best.n);
         let (mut chosen, mut skip, mut shown_score) = (best_i, alone_skip, best.score);
         let mut trace: Option<AdviceTrace> = None;
         if self.advice.mode != AdviceMode::Off {
@@ -306,7 +375,7 @@ impl MenuChooser for ModelChooser {
                                 }
                                 chosen = bi;
                                 shown_score = bs;
-                                skip = skip_ok(bs);
+                                skip = skip_ok(bs, cands[bi].cost_est, cands[bi].n);
                             }
                         }
                     }
@@ -334,6 +403,10 @@ impl MenuChooser for ModelChooser {
             "policy": self.name(), "beta": self.beta, "skip_frac": self.skip_frac, "curiosity": self.curiosity, "realized_reward_per_energy": round3(rate),
             "attempts_in_model": st.model.attempts(), "alternatives": alts,
         });
+        if self.skip_rule != SkipRule::Rate {
+            rationale["skip_rule"] = json!(self.skip_rule.code());
+            rationale["skip_bar"] = json!(round3(self.skip_rule.bar(self.skip_frac, rate, best.cost_est, super::world::SKIP_COST, best.n)));
+        }
         if st.model.adaptive() {
             rationale["adapt"] = json!(st.model.mode().name());
             rationale["novelty_bonus"] = json!(if st.model.mode() == AdaptMode::Full { self.novelty } else { 0.0 });
@@ -352,7 +425,11 @@ impl MenuChooser for ModelChooser {
             return Some(Choice {
                 action: Action::Skip,
                 policy: self.name(),
-                why: format!("best optimistic score {:.3} is below {} x realized rate {:.3}: skip the menu", shown_score, self.skip_frac, rate),
+                why: if self.skip_rule == SkipRule::Rate {
+                    format!("best optimistic score {:.3} is below {} x realized rate {:.3}: skip the menu", shown_score, self.skip_frac, rate)
+                } else {
+                    format!("best optimistic score {:.3} is below the {} skip bar {:.3} (realized rate {:.3}, its energy {:.3}, {} attempts in its cell): skip the menu", shown_score, self.skip_rule.code(), self.skip_rule.bar(self.skip_frac, rate, best.cost_est, super::world::SKIP_COST, best.n), rate, best.cost_est, best.n)
+                },
                 p: 0.0,
                 sd: 0.0,
                 cost_est: super::world::SKIP_COST as f64,
