@@ -40,10 +40,11 @@ All tables are typed `.kore` files (KORE columnar format).
 
 ```
 <root>/<owner>/log/
-  MANIFEST                      one JSON line per commit, hash-chained (header 1, or 2 = journal, format 3)
+  MANIFEST                      one JSON line per commit, hash-chained (header 1, 2 = journal (format 3), 3 = format 4)
   events/0000000003.kore        only the rows added by commit 3
   revisions/0000000003.kore
   revision_causes/...  predictions/...  outcomes/...  schema_meta/0000000000.kore
+  dicts/<sha256>.kdic           format 4 only: shared dictionary objects listed in the MANIFEST
 ```
 
 `owner` is restricted to `[A-Za-z0-9_-]{1,64}`. Version 0 is the genesis commit
@@ -148,6 +149,75 @@ format 2 one (`"enc":2`), the entry lines and the hash chain are unchanged.
   switches the header; all earlier lines are kept byte for byte. `open_or_create*` never does
   it; `LogFormat::V3` applies only when a log is created. There is no downgrade.
 * `forget` rewrites the MANIFEST (the chain is re-sealed) with the log's own header.
+
+## Log format 4 (opt-in): KORE v4 compact segments and shared dictionaries
+
+Format 4 stores every segment as a kore-store version-4 ("compact") file and codes the
+`events.text` column with a **shared dictionary**: a separate, immutable, content-addressed
+object that many segments reference by id instead of each segment carrying its own vocabulary.
+Measurements: `docs/log_format4.md`.
+
+* **Shape.** MANIFEST header `KORE-VLOG-MANIFEST 3` (journal discipline, as format 3: a commit
+  appends one line and fsyncs). Segment references carry `"enc":4`; the files are kore-store
+  version-4 files (`KORE`, version 4: header, dictionary ids and column directory under one CRC,
+  every payload under its CRC). Dictionary objects live in `dicts/<sha256>.kdic` (kore-store
+  `KDIC`: magic, version, kind, length, content, sha256 of everything before it = the id).
+* **Listing.** The commit that first uses a dictionary lists it in its entry:
+  `"dicts":[{"id":<sha256 hex>,"file":"dicts/<id>.kdic","bytes":<object length>}]`. The listing
+  is part of the hashed entry text (`dict\t<id>\t<file>\t<bytes>` lines after the segment lines;
+  entries without `dicts` hash exactly as before), so it cannot be changed or dropped without
+  breaking the chain. A segment names its dictionary by id in its checksummed header, and the
+  segment's sha256 is in the MANIFEST, so a segment can only be decoded with exactly the object
+  it was written with. Rules checked by `verify()` (and the listing rules also by `open`): the
+  file name is `dicts/<id>.kdic`, an id is listed once, every listed object exists, has the listed
+  length and sha256 = id, every id a segment references is listed at or before that segment's
+  version, and `dicts/` holds no unlisted file. A dictionary listing under an older header is
+  refused by the parser.
+* **Which dictionary.** `DictPolicy` (per handle, not stored; it only affects future writes):
+  the first dictionary is built by the first commit after which the log holds at least
+  `train_events` events (default 1000), from the newest whole event texts that fit into
+  `max_bytes` (default 128 KiB): that commit's own texts first, then earlier stored ones. The
+  content is those texts in log order separated by the byte 0xFF (never part of UTF-8), stored
+  as a raw-content zstd dictionary. That commit's events segment already uses it. Drift: once
+  `check_events` events (default 100,000) have been stored since the current dictionary was
+  listed, the next commit with at least `check_min_text` bytes of event text (default 16 KiB)
+  is also coded with a candidate built from the texts stored before it; if the candidate makes
+  that commit's events segment at least `min_gain_pct` (5 %) smaller it becomes a new object
+  (new id) listed by that commit, otherwise the check is postponed by another `check_events`.
+  A dictionary is never modified; older segments keep the object they reference, so every
+  version stays readable (time travel needs the dictionaries of the versions read, and they
+  are all kept). Only `events.text` uses a dictionary; every other column and table is plain
+  v4 compact (raw 32-byte ids, delta timestamps, token/dictionary transforms, zstd level 19 for
+  payloads below 256 KiB).
+* **Reads.** `open` reads and verifies every listed dictionary object, then streams the log as
+  for format 2/3 (ids only from events segments; v4 projection of `event_id`, which needs no
+  dictionary). `get_event` decodes the one segment that holds the row (whole segment: the v4
+  reader has no row-level access). `open_at`, `diff`, `for_each_event` and `peek_events` read
+  segments with the listed dictionaries. Query results are identical to formats 1 and 3 for the
+  same operations (tests compare the rows of every table at every version and three SQL results).
+* **Upgrade is explicit.** `VersionedLog::upgrade_to_v4()` (from format 1, 2 or 3) appends one
+  commit with `schema_meta.format_version = 4` and, in the same atomic file replacement, switches
+  the header to `... 3`; all earlier entry lines are kept byte for byte, so every old version
+  hash is unchanged and the old segments are not rewritten (a mixed log). `LogFormat::V4`
+  applies only when a log is created. There is no downgrade: `upgrade_to_v2`/`upgrade_to_v3`
+  on a format-4 log return false and write nothing.
+* **Older binaries** refuse the log at the header (`MANIFEST is corrupt: manifest header missing
+  or wrong`; checked with a binary built before format 4, `docs/log_format4.md`). Their segment
+  readers would also refuse a v4 segment (`unsupported version 4`, or "needs shared dictionary").
+* **Crash.** The dictionary object is written (temp file, fsync, rename) before the segments
+  and the MANIFEST line; a crash before the line leaves an unlisted object, which `open`
+  ignores, `verify()` reports as an extra file, and the next format-4 commit or `recover()`
+  deletes.
+* **forget and dictionaries.** Because a dictionary is made of whole event texts, the texts it
+  holds are known exactly. `forget_events` replaces every listed dictionary that holds the text
+  of a forgotten event by a new object built from its remaining texts (or drops it if none
+  remain), re-encodes every segment that used it, lists the replacement in the entry that listed
+  the old one, re-seals the chain from the earliest affected entry, and deletes the old object
+  file (all inside the same staged, crash-safe forget). The report counts
+  `dictionaries_rebuilt` / `dictionaries_removed`. Afterwards no file of the log contains the
+  forgotten text (tested by scanning every file). Not covered: a forgotten text that also occurs
+  inside the text of another, still stored event stays there as part of that event, and copies
+  outside the log are not touched (as for every format).
 
 ## Round 2 changes that do not alter the on-disk shape
 

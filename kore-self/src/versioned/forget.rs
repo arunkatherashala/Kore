@@ -23,6 +23,14 @@
 //! next open, a log with a marker is rolled forward; a staging directory without
 //! a marker is discarded, leaving the log exactly as it was.
 //!
+//! Format 4 (shared dictionaries): a dictionary's content is a list of whole event texts (see
+//! `v4log`). Every listed dictionary that holds the text of a forgotten event is replaced by a new
+//! object built from its remaining texts (or dropped if none remain); every segment that used it is
+//! re-encoded with the replacement, the listing entry names the replacement, the chain is re-sealed
+//! from the earliest such entry, and the old object file is deleted. So the forgotten text survives
+//! neither in a segment nor in a dictionary. A text that also occurs inside another, still stored
+//! event's text stays there, as part of that event.
+//!
 //! Limits: copies of the text outside this log (backups, filesystem snapshots,
 //! earlier exports, disk blocks not overwritten) are not touched.
 
@@ -57,6 +65,11 @@ pub struct ForgetReport {
     pub segments_removed: usize,
     pub predictions_edited: usize,
     pub outcomes_edited: usize,
+    /// Format 4: dictionaries that held a forgotten text and were replaced by a rebuilt object.
+    pub dictionaries_rebuilt: usize,
+    /// Format 4: dictionaries that held only forgotten texts and were dropped (their segments are
+    /// re-encoded without a dictionary).
+    pub dictionaries_removed: usize,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -184,10 +197,19 @@ impl VersionedLog {
         let mut cause_total: HashMap<String, usize> = HashMap::new();
         let mut cause_dropped: HashMap<String, usize> = HashMap::new();
         let mut events_removed = 0usize;
+        // format 4: dictionary used by each segment, and the texts of the removed events
+        let mut seg_dict: HashMap<(usize, usize), String> = HashMap::new();
+        let mut gone_texts: Vec<String> = Vec::new();
         for (ei, e) in self.entries.iter().enumerate() {
             for (si, g) in e.segments.iter().enumerate() {
-                let rows = load_segment(&self.dir, g)?;
-                let table = Table::from_name(&g.table).expect("checked by load_segment");
+                let bytes = read_verified(&self.dir, g)?;
+                let table = seg_table(g)?;
+                if g.enc == Some(v4log::ENC_V4) {
+                    if let Some(id) = v4log::seg_dict_ids(&bytes).map_err(|d| unreadable(g, d))?.into_iter().next() {
+                        seg_dict.insert((ei, si), id);
+                    }
+                }
+                let rows = decode_seg_bytes(g, table, &bytes, &self.dicts)?;
                 let mut touched = false;
                 let mut out: Vec<Vec<Cell>> = Vec::with_capacity(rows.len());
                 for mut r in rows {
@@ -195,6 +217,7 @@ impl VersionedLog {
                         Table::Events => {
                             if set.contains(&r[0].s()) {
                                 events_removed += 1;
+                                gone_texts.push(r[5].s());
                                 touched = true;
                                 continue;
                             }
@@ -242,26 +265,75 @@ impl VersionedLog {
         report.forgotten = set.len();
         report.created = true;
 
-        // Pass 2: new segment bytes, re-sealed entries, forget entry.
+        // Pass 1b (format 4): dictionaries that hold a forgotten text are rebuilt without it; every
+        // segment that used one is re-encoded with the replacement.
         let mut entries = self.entries.clone();
-        let first = changed.iter().map(|c| c.0).min().expect("events were found in some segment");
+        let mut first = changed.iter().map(|c| c.0).min().expect("events were found in some segment");
         let mut staged: Vec<(String, Vec<u8>)> = Vec::new();
         let mut deletes: Vec<String> = Vec::new();
+        let gone: HashSet<&[u8]> = gone_texts.iter().map(|t| t.as_bytes()).collect();
+        let mut replaced: HashMap<String, Option<SharedDict>> = HashMap::new();
+        for (ei, e) in self.entries.iter().enumerate() {
+            for (k, d) in e.dicts.iter().enumerate() {
+                let sd = match codec::hex64_to_bytes(&d.id).and_then(|b| self.dicts.get(&b)) {
+                    Some(sd) => sd.clone(),
+                    None => return Err(VerifyError::MissingSegment { file: d.file.clone() }.into()),
+                };
+                if !v4log::members(&sd).iter().any(|m| gone.contains(m)) {
+                    continue;
+                }
+                let new = v4log::without_texts(&sd, &gone);
+                first = first.min(ei);
+                deletes.push(d.file.clone());
+                match &new {
+                    Some(nd) => {
+                        let r = v4log::dict_ref(nd);
+                        staged.push((r.file.clone(), nd.to_bytes().to_vec()));
+                        entries[ei].dicts[k] = r;
+                        report.dictionaries_rebuilt += 1;
+                    }
+                    None => report.dictionaries_removed += 1,
+                }
+                replaced.insert(d.id.clone(), new);
+            }
+        }
+        for e in entries.iter_mut() {
+            e.dicts.retain(|d| !replaced.get(&d.id).map_or(false, |n| n.is_none()));
+        }
+        if !replaced.is_empty() {
+            let mut extra = Vec::new();
+            for (&(ei, si), id) in &seg_dict {
+                if replaced.contains_key(id) && !changed.iter().any(|c| c.0 == ei && c.1 == si) {
+                    extra.push((ei, si, load_seg(&self.dir, &self.entries[ei].segments[si], &self.dicts)?));
+                }
+            }
+            changed.extend(extra);
+            changed.sort_by_key(|c| (c.0, c.1));
+        }
+        // Pass 2: new segment bytes, re-sealed entries, forget entry.
         for (ei, si, rows) in &changed {
             let g: SegRef = entries[*ei].segments[*si].clone();
             let table = Table::from_name(&g.table).expect("known");
             if rows.is_empty() {
                 deletes.push(g.file.clone());
             } else {
-                let bytes = encode_seg(g.enc, table, rows);
+                let dict: Option<SharedDict> = match seg_dict.get(&(*ei, *si)) {
+                    None => None,
+                    Some(id) => match replaced.get(id) {
+                        Some(n) => n.clone(),
+                        None => codec::hex64_to_bytes(id).and_then(|b| self.dicts.get(&b)).cloned(),
+                    },
+                };
+                let bytes = encode_seg(g.enc, table, rows, dict.as_ref());
                 let seg = &mut entries[*ei].segments[*si];
                 seg.sha256 = sha256_hex(&[&bytes]);
                 seg.rows = rows.len() as u64;
                 staged.push((g.file.clone(), bytes));
             }
         }
-        report.segments_removed = deletes.len();
-        report.segments_rewritten = staged.len();
+        let is_dict = |f: &String| f.starts_with(v4log::DICT_DIR);
+        report.segments_removed = deletes.iter().filter(|f| !is_dict(f)).count();
+        report.segments_rewritten = staged.iter().filter(|f| !is_dict(&f.0)).count();
         for e in entries.iter_mut() {
             e.segments.retain(|g| !deletes.contains(&g.file));
         }
@@ -293,7 +365,7 @@ impl VersionedLog {
             write_synced(&p, bytes)?;
         }
         fs::create_dir_all(&staging)?;
-        write_synced(&staging.join("MANIFEST"), manifest::render(&entries, self.journal).as_bytes())?;
+        write_synced(&staging.join("MANIFEST"), manifest::render(&entries, self.level).as_bytes())?;
         if matches!(crash, Some(Crash::BeforeMarker)) {
             return Err(crash_err());
         }

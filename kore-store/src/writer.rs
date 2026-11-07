@@ -209,6 +209,13 @@ impl KoreWriter {
         crate::v3::write(block, opts)
     }
 
+    /// Serialize as a version-4 ("compact") file: per-column codecs including timestamp and token
+    /// transforms, and optional shared dictionaries (referenced by id, stored separately; see `dict`).
+    /// Opt-in; readers older than version 4 reject the file. Output is a pure function of the inputs.
+    pub fn to_bytes_compact(block: &DataBlock, opts: &crate::CompactOptions) -> Result<Vec<u8>, kore_core::KoreError> {
+        crate::v4::write(block, opts)
+    }
+
     /// Write a version-3 file to `path`.
     pub fn write_file_with(path: &std::path::Path, block: &DataBlock, opts: &crate::WriteOptions) -> Result<(), kore_core::KoreError> {
         let bytes = Self::to_bytes_with(block, opts)?;

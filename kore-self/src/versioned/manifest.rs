@@ -12,6 +12,9 @@ pub const HEADER: &str = "KORE-VLOG-MANIFEST 1";
 /// line (then fsyncs) instead of rewriting the file; an unterminated last line is an uncommitted
 /// tail (a crash during the append) and is ignored by `open`, reported by `verify`.
 pub const HEADER_J: &str = "KORE-VLOG-MANIFEST 2";
+/// Log format 4 MANIFEST: the journal discipline of header 2, plus entries may list shared
+/// dictionary objects (`dicts`). Older binaries refuse the header, so they never misread a format-4 log.
+pub const HEADER_V4: &str = "KORE-VLOG-MANIFEST 3";
 pub const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -26,6 +29,15 @@ pub struct SegRef {
     /// hashed entry text, so it cannot be changed without breaking the chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enc: Option<u8>,
+}
+
+/// A shared dictionary object (kore-store `KDIC`, content-addressed) listed by the commit that first
+/// uses it. `id` = sha256 of the object (hex), `file` = `dicts/<id>.kdic`, `bytes` = object length.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DictRef {
+    pub id: String,
+    pub file: String,
+    pub bytes: u64,
 }
 
 /// Written by `forget`: what was removed, by event-id hash only (never content).
@@ -46,6 +58,10 @@ pub struct Entry {
     pub segments: Vec<SegRef>,
     pub prev: String,
     pub hash: String,
+    /// Log format 4: dictionary objects first used by this commit. Absent on every other entry, so
+    /// the hashed text of older entries is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dicts: Vec<DictRef>,
     /// Present only on the commit created by `forget`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forget: Option<ForgetRecord>,
@@ -65,6 +81,10 @@ impl Entry {
     }
     pub fn compute_hash(&self) -> String {
         let mut c = Self::canonical(self.v, &self.recorded_at, &self.segments);
+        for d in &self.dicts {
+            c.push_str(&format!("dict	{}	{}	{}
+", d.id, d.file, d.bytes));
+        }
         if let Some(f) = &self.forget {
             c.push_str(&format!("forget	{}	{}	{}
 ", f.removed.join(","), f.prior_head, f.resealed_from));
@@ -72,7 +92,7 @@ impl Entry {
         sha256_hex(&[self.prev.as_bytes(), c.as_bytes()])
     }
     pub fn new(v: u64, recorded_at: String, segments: Vec<SegRef>, prev: &str) -> Entry {
-        let mut e = Entry { v, recorded_at, segments, prev: prev.to_string(), hash: String::new(), forget: None };
+        let mut e = Entry { v, recorded_at, segments, prev: prev.to_string(), hash: String::new(), dicts: vec![], forget: None };
         e.hash = e.compute_hash();
         e
     }
@@ -83,9 +103,18 @@ impl Entry {
     }
 }
 
-pub fn render(entries: &[Entry], journal: bool) -> String {
+/// Header line for a manifest level (1 = rewrite, 2 = journal, 3 = journal + dictionaries).
+pub fn header_for(level: u8) -> &'static str {
+    match level {
+        3 => HEADER_V4,
+        2 => HEADER_J,
+        _ => HEADER,
+    }
+}
+
+pub fn render(entries: &[Entry], level: u8) -> String {
     let mut s = String::new();
-    s.push_str(if journal { HEADER_J } else { HEADER });
+    s.push_str(header_for(level));
     s.push('\n');
     for e in entries {
         s.push_str(&serde_json::to_string(e).expect("entry serialises"));
@@ -97,8 +126,10 @@ pub fn render(entries: &[Entry], journal: bool) -> String {
 /// Result of `parse_ex`.
 pub struct Parsed {
     pub entries: Vec<Entry>,
-    /// Header was the journal header (`HEADER_J`).
+    /// Header was a journal header (`HEADER_J` or `HEADER_V4`).
     pub journal: bool,
+    /// 1 = `HEADER`, 2 = `HEADER_J`, 3 = `HEADER_V4`.
+    pub level: u8,
     /// Length of the committed prefix; bytes after it are an uncommitted partial tail (journal only).
     pub valid_len: usize,
 }
@@ -111,13 +142,16 @@ pub fn parse_ex(raw: &[u8]) -> Result<Parsed, String> {
     }
     let nl = raw.iter().position(|&b| b == b'\n').ok_or_else(|| "manifest is truncated (no trailing newline)".to_string())?;
     let header = &raw[..nl];
-    let journal = if header == HEADER.as_bytes() {
-        false
+    let level: u8 = if header == HEADER.as_bytes() {
+        1
     } else if header == HEADER_J.as_bytes() {
-        true
+        2
+    } else if header == HEADER_V4.as_bytes() {
+        3
     } else {
         return Err("manifest header missing or wrong".into());
     };
+    let journal = level >= 2;
     let last_nl = raw.iter().rposition(|&b| b == b'\n').expect("has a newline");
     let valid_len = last_nl + 1;
     if !journal && valid_len != raw.len() {
@@ -127,9 +161,12 @@ pub fn parse_ex(raw: &[u8]) -> Result<Parsed, String> {
     let mut out = Vec::new();
     for (i, l) in text.lines().skip(1).enumerate() {
         let e: Entry = serde_json::from_str(l).map_err(|e| format!("manifest line {}: {e}", i + 2))?;
+        if level < 3 && !e.dicts.is_empty() {
+            return Err(format!("manifest line {}: dictionary listing needs the format-4 header", i + 2));
+        }
         out.push(e);
     }
-    Ok(Parsed { entries: out, journal, valid_len })
+    Ok(Parsed { entries: out, journal, level, valid_len })
 }
 
 /// Strict parse (no uncommitted tail allowed), used by `verify`.
