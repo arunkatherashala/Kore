@@ -49,7 +49,7 @@ use std::collections::BTreeMap;
 /// Likelihood factor of one example on which a hypothesis was not applicable.
 pub const NA_LIKELIHOOD: f64 = 0.5;
 /// Reward units per bit of value, as a multiple of the offer's listed reward. Chosen on tuning seeds 101..120 only (docs/measured.md, Track B9).
-pub const DEFAULT_KAPPA: f64 = 0.5;
+pub const DEFAULT_KAPPA: f64 = 0.25;
 /// Hypotheses shown in a decision record (the heaviest first); the counts always cover all of them.
 pub const SHOW_HYPS: usize = 8;
 

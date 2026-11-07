@@ -23,7 +23,7 @@ use super::world2::world::{FType, W2Cfg, World2};
 
 pub const EVERY: u64 = 10;
 /// Experiment budget (per mille of the life budget) used in the report. Chosen on tuning seeds 101..120 only.
-pub const DEFAULT_CAP_PM: u32 = 100;
+pub const DEFAULT_CAP_PM: u32 = 50;
 const FRESH_OFFSET: u64 = 30_000_000;
 
 /// How fast and how well rules were learned in one life (scored against hidden truth).
