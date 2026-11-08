@@ -71,7 +71,7 @@ pub fn apply_window(
     // 2. Parallel: each partition computes independently.
     //    Use COMPACT partition-sized Vec (not n-sized scratch) — eliminates
     //    48MB zero-init + random-write per partition.
-    let partial: Vec<Result<(Vec<usize>, Vec<f64>), KoreError>> = partitions
+    let partial: Vec<Result<(Vec<usize>, Vec<Option<f64>>), KoreError>> = partitions
         .par_iter()
         .map(|(_key, sorted_indices)| {
             // Compact: only m values, sequential writes, cache-friendly
@@ -81,7 +81,7 @@ pub fn apply_window(
         .collect();
 
     // 3. Merge: write each partition's values back to the correct positions
-    let mut result: Vec<f64> = vec![0.0; n];
+    let mut result: Vec<Option<f64>> = vec![None; n];
     for p in partial {
         let (indices, vals) = p?;
         for (&idx, &val) in indices.iter().zip(vals.iter()) {
@@ -91,7 +91,7 @@ pub fn apply_window(
 
     let new_col = Column {
         name: output_col.to_string(),
-        data: ColumnData::Float64(result.into_iter().map(Some).collect()),
+        data: ColumnData::Float64(result),
     };
     let mut cols = block.columns.clone();
     cols.push(new_col);
@@ -286,206 +286,120 @@ fn sort_indices(block: &DataBlock, indices: &mut Vec<usize>, order_by: &[WinOrde
 
 // ── Function evaluation ───────────────────────────────────────────────────────
 
-/// Compute window function values into a COMPACT Vec<f64> of length m.
+/// Compute window function values into a COMPACT Vec of length m.
 /// No n-sized scratch buffer — sequential writes, cache-friendly.
+///
+/// A missing value is `None` (SQL NULL): a NULL of the data, LAG / LEAD past the edge of the partition, and an
+/// aggregate with no non-NULL value (COUNT is 0 then). Before, missing values were NaN and integer NULLs read as
+/// 0. A NaN that is a value of the data stays a value (`Some(NaN)`).
 fn compute_fn_values(
     block:  &DataBlock,
     sorted: &[usize],
     func:   &WindowFn,
-) -> Result<Vec<f64>, KoreError> {
+) -> Result<Vec<Option<f64>>, KoreError> {
     let m = sorted.len();
-    let mut values = vec![0.0f64; m];
+    let mut values: Vec<Option<f64>> = vec![None; m];
 
     match func {
         WindowFn::RowNumber | WindowFn::Rank | WindowFn::DenseRank
         | WindowFn::PercentRank | WindowFn::CumeDist => {
-            for i in 0..m { values[i] = (i + 1) as f64; }
+            for i in 0..m { values[i] = Some((i + 1) as f64); }
         }
         WindowFn::Ntile(buckets) => {
             let n = m as f64;
             for i in 0..m {
-                values[i] = ((i as f64 / n) * (*buckets as f64)).floor() + 1.0;
+                values[i] = Some(((i as f64 / n) * (*buckets as f64)).floor() + 1.0);
             }
         }
         WindowFn::Lag { col, offset } => {
             let vals = extract_f64(block, col, sorted);
             for i in 0..m {
-                values[i] = if i >= *offset { vals[i - offset] } else { f64::NAN };
+                values[i] = if i >= *offset { vals[i - offset] } else { None };
             }
         }
         WindowFn::Lead { col, offset } => {
             let vals = extract_f64(block, col, sorted);
             for i in 0..m {
-                values[i] = if i + offset < m { vals[i + offset] } else { f64::NAN };
+                values[i] = if i + offset < m { vals[i + offset] } else { None };
             }
         }
         WindowFn::Sum(col) => {
             let vals = extract_f64(block, col, sorted);
-            let total: f64 = vals.iter().filter(|v| !v.is_nan()).sum();
+            let total = vals.iter().flatten().copied().reduce(|a, b| a + b);
             for i in 0..m { values[i] = total; }
         }
         WindowFn::Avg(col) => {
             let vals = extract_f64(block, col, sorted);
-            let good: Vec<f64> = vals.iter().copied().filter(|v| !v.is_nan()).collect();
-            let avg = if good.is_empty() { f64::NAN }
-                      else { good.iter().sum::<f64>() / good.len() as f64 };
+            let good: Vec<f64> = vals.iter().flatten().copied().collect();
+            let avg = if good.is_empty() { None }
+                      else { Some(good.iter().sum::<f64>() / good.len() as f64) };
             for i in 0..m { values[i] = avg; }
         }
         WindowFn::Count(col) => {
-            let vals = extract_f64(block, col, sorted);
-            let cnt = vals.iter().filter(|v| !v.is_nan()).count() as f64;
-            for i in 0..m { values[i] = cnt; }
+            let cnt = count_present(block, col, sorted) as f64;
+            for i in 0..m { values[i] = Some(cnt); }
         }
         WindowFn::Min(col) => {
             let vals = extract_f64(block, col, sorted);
-            let min = vals.iter().copied().filter(|v| !v.is_nan()).fold(f64::INFINITY, f64::min);
+            let min = vals.iter().flatten().copied().reduce(f64::min);
             for i in 0..m { values[i] = min; }
         }
         WindowFn::Max(col) => {
             let vals = extract_f64(block, col, sorted);
-            let max = vals.iter().copied().filter(|v| !v.is_nan()).fold(f64::NEG_INFINITY, f64::max);
+            let max = vals.iter().flatten().copied().reduce(f64::max);
             for i in 0..m { values[i] = max; }
         }
         WindowFn::CumSum(col) => {
             let vals = extract_f64(block, col, sorted);
-            let mut running = 0.0f64;
+            let mut running: Option<f64> = None;
             for (i, v) in vals.iter().enumerate() {
-                if !v.is_nan() { running += v; }
+                if let Some(v) = v { running = Some(running.unwrap_or(0.0) + v); }
                 values[i] = running;
-            }
-        }
-        _ => {
-            // Fallback: use old compute_fn_for_partition
-            let n_total = block.num_rows;
-            let mut scratch = vec![0.0f64; n_total];
-            compute_fn_for_partition(block, sorted, func, &mut scratch)?;
-            for (i, &orig_i) in sorted.iter().enumerate() { values[i] = scratch[orig_i]; }
-        }
-    }
-    Ok(values)
-}
-
-fn compute_fn_for_partition(
-    block:   &DataBlock,
-    sorted:  &[usize],
-    func:    &WindowFn,
-    result:  &mut Vec<f64>,
-) -> Result<(), KoreError> {
-    let m = sorted.len();
-
-    match func {
-        WindowFn::RowNumber => {
-            for (rank, &orig_i) in sorted.iter().enumerate() {
-                result[orig_i] = (rank + 1) as f64;
-            }
-        }
-        WindowFn::Rank => {
-            // rows with equal order keys get the same rank; next rank skips
-            // (needs order-by values to detect ties — simplified: each row distinct)
-            for (rank, &orig_i) in sorted.iter().enumerate() {
-                result[orig_i] = (rank + 1) as f64;
-            }
-        }
-        WindowFn::DenseRank => {
-            for (rank, &orig_i) in sorted.iter().enumerate() {
-                result[orig_i] = (rank + 1) as f64;
-            }
-        }
-        WindowFn::PercentRank => {
-            let n = m as f64;
-            for (rank, &orig_i) in sorted.iter().enumerate() {
-                result[orig_i] = if n <= 1.0 { 0.0 } else { rank as f64 / (n - 1.0) };
-            }
-        }
-        WindowFn::CumeDist => {
-            let n = m as f64;
-            for (rank, &orig_i) in sorted.iter().enumerate() {
-                result[orig_i] = (rank + 1) as f64 / n;
-            }
-        }
-        WindowFn::Ntile(buckets) => {
-            let n = m as f64;
-            for (i, &orig_i) in sorted.iter().enumerate() {
-                result[orig_i] = ((i as f64 / n) * (*buckets as f64)).floor() + 1.0;
-            }
-        }
-        WindowFn::Lag { col, offset } => {
-            let vals = extract_f64(block, col, sorted);
-            for (i, &orig_i) in sorted.iter().enumerate() {
-                result[orig_i] = if i >= *offset { vals[i - offset] } else { f64::NAN };
-            }
-        }
-        WindowFn::Lead { col, offset } => {
-            let vals = extract_f64(block, col, sorted);
-            for (i, &orig_i) in sorted.iter().enumerate() {
-                result[orig_i] = if i + offset < m { vals[i + offset] } else { f64::NAN };
-            }
-        }
-        WindowFn::Sum(col) => {
-            let vals = extract_f64(block, col, sorted);
-            let total: f64 = vals.iter().filter(|v| !v.is_nan()).sum();
-            for &orig_i in sorted { result[orig_i] = total; }
-        }
-        WindowFn::Avg(col) => {
-            let vals = extract_f64(block, col, sorted);
-            let good: Vec<f64> = vals.iter().copied().filter(|v| !v.is_nan()).collect();
-            let avg = if good.is_empty() { f64::NAN } else { good.iter().sum::<f64>() / good.len() as f64 };
-            for &orig_i in sorted { result[orig_i] = avg; }
-        }
-        WindowFn::Count(col) => {
-            let vals = extract_f64(block, col, sorted);
-            let cnt = vals.iter().filter(|v| !v.is_nan()).count() as f64;
-            for &orig_i in sorted { result[orig_i] = cnt; }
-        }
-        WindowFn::Min(col) => {
-            let vals = extract_f64(block, col, sorted);
-            let min = vals.iter().copied().filter(|v| !v.is_nan())
-                .fold(f64::INFINITY, f64::min);
-            for &orig_i in sorted { result[orig_i] = min; }
-        }
-        WindowFn::Max(col) => {
-            let vals = extract_f64(block, col, sorted);
-            let max = vals.iter().copied().filter(|v| !v.is_nan())
-                .fold(f64::NEG_INFINITY, f64::max);
-            for &orig_i in sorted { result[orig_i] = max; }
-        }
-        WindowFn::CumSum(col) => {
-            let vals = extract_f64(block, col, sorted);
-            let mut running = 0.0f64;
-            for (i, &orig_i) in sorted.iter().enumerate() {
-                if !vals[i].is_nan() { running += vals[i]; }
-                result[orig_i] = running;
             }
         }
         WindowFn::CumAvg(col) => {
             let vals = extract_f64(block, col, sorted);
             let mut running = 0.0f64; let mut cnt = 0usize;
-            for (i, &orig_i) in sorted.iter().enumerate() {
-                if !vals[i].is_nan() { running += vals[i]; cnt += 1; }
-                result[orig_i] = if cnt > 0 { running / cnt as f64 } else { f64::NAN };
+            for (i, v) in vals.iter().enumerate() {
+                if let Some(v) = v { running += v; cnt += 1; }
+                values[i] = if cnt > 0 { Some(running / cnt as f64) } else { None };
             }
         }
         WindowFn::FirstValue(col) => {
             let vals = extract_f64(block, col, sorted);
-            let first = vals.first().copied().unwrap_or(f64::NAN);
-            for &orig_i in sorted { result[orig_i] = first; }
+            let first = vals.first().copied().flatten();
+            for i in 0..m { values[i] = first; }
         }
         WindowFn::LastValue(col) => {
             let vals = extract_f64(block, col, sorted);
-            let last = vals.last().copied().unwrap_or(f64::NAN);
-            for &orig_i in sorted { result[orig_i] = last; }
+            let last = vals.last().copied().flatten();
+            for i in 0..m { values[i] = last; }
         }
     }
-    Ok(())
+    Ok(values)
 }
 
-fn extract_f64(block: &DataBlock, col: &str, sorted_indices: &[usize]) -> Vec<f64> {
+/// The non-NULL count of `col` over the rows (any column type); `*` counts the rows.
+fn count_present(block: &DataBlock, col: &str, sorted_indices: &[usize]) -> usize {
+    if col == "*" { return sorted_indices.len(); }
+    match col_lookup(block, col).map(|c| &c.data) {
+        Some(ColumnData::Float64(v)) => sorted_indices.iter().filter(|&&i| v.get(i).map_or(false, |x| x.is_some())).count(),
+        Some(ColumnData::Int64(v))   => sorted_indices.iter().filter(|&&i| v.get(i).map_or(false, |x| x.is_some())).count(),
+        Some(ColumnData::Bool(v))    => sorted_indices.iter().filter(|&&i| v.get(i).map_or(false, |x| x.is_some())).count(),
+        Some(ColumnData::Str(v))     => sorted_indices.iter().filter(|&&i| v.get(i).map_or(false, |x| x.is_some())).count(),
+        Some(ColumnData::StrDict { codes, .. }) => sorted_indices.iter().filter(|&&i| codes.get(i).map_or(false, |&c| c != u8::MAX)).count(),
+        None => 0,
+    }
+}
+
+/// The numeric values of `col` in partition order; NULL (and a column that is not numeric or not found) is None.
+fn extract_f64(block: &DataBlock, col: &str, sorted_indices: &[usize]) -> Vec<Option<f64>> {
     match col_lookup(block, col).map(|c| &c.data) {
         Some(ColumnData::Float64(v)) =>
-            sorted_indices.iter().map(|&i| v.get(i).and_then(|x| *x).unwrap_or(f64::NAN)).collect(),
+            sorted_indices.iter().map(|&i| v.get(i).and_then(|x| *x)).collect(),
         Some(ColumnData::Int64(v)) =>
-            sorted_indices.iter().map(|&i| v.get(i).and_then(|x| *x).unwrap_or(0) as f64).collect(),
-        _ => vec![f64::NAN; sorted_indices.len()],
+            sorted_indices.iter().map(|&i| v.get(i).and_then(|x| *x).map(|x| x as f64)).collect(),
+        _ => vec![None; sorted_indices.len()],
     }
 }
 

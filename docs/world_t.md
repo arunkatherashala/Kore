@@ -215,21 +215,29 @@ in the default world) or weekly; derived columns use fees and rates the default 
 ## Engine needs
 
 What the KORE SQL engine (`kore-sql`, `KqlContext`) lacks or does differently from standard SQL, found while
-building the tasks. The engine crates were not changed; each item is pinned by `world_t/tests_engine.rs`.
+building the tasks. World T did not change the engine crates. Items 1, 2 and 5 were later fixed in this copy of the
+engine (branch `dl-sql-fix`, a targeted fix that gives these three cases the NULL semantics of `master-kore-engine`;
+tests in `kore-sql/tests/null_semantics.rs`). Each item, fixed or not, is pinned by `world_t/tests_engine.rs`.
 
-1. `COUNT(column)` counts NULLs (`COUNT(x)` over 1, NULL, 3, 4 gives 4; standard SQL gives 3). `AVG` ignores
-   NULLs. The mean task needed the non-null count; the tool works around it with `COUNT(*) ... WHERE x IS NOT
-   NULL`. Without the workaround the SQL mean was wrong on 26 of 41 probe tasks with nulls.
-2. An unknown function is not an error: it returns NULL for every row (`NO_SUCH_FN(x)`, `REGEXP_LIKE(g, 'a')`).
-   A typo in a generated query is then a silent wrong answer, not a visible failure. Needed: an error. No regular
-   expression function, so log parsing is done before SQL.
+1. Fixed. `COUNT(column)` counted NULLs (`COUNT(x)` over 1, NULL, 3, 4 gave 4; standard SQL gives 3); it now gives
+   3, and `COUNT(*)` still counts rows. `AVG` ignores NULLs. The mean task needs the non-null count; the tool used
+   to work around the bug with `COUNT(*) ... WHERE x IS NOT NULL` (without the workaround the SQL mean was wrong on
+   26 of 41 probe tasks with nulls) and now uses plain `SUM(x), COUNT(x)`. The report on seeds 1..20 at the default
+   reward design (`report --beta 2 --ucb-c 0.003 --lin-alpha 1`) is identical before and after the fix and the
+   plan change, for every policy: the two queries return the same sum and count on every table.
+2. Fixed. An unknown function was not an error: it returned NULL for every row (`NO_SUCH_FN(x)`,
+   `REGEXP_LIKE(g, 'a')`), so a typo in a generated query was a silent wrong answer. It is now an error when the
+   query is parsed, `unknown function: <name as written>`. There is still no regular expression function
+   (`REGEXP_LIKE` is one of the unknown functions), so log parsing is done before SQL.
 3. No quoted identifiers (`"date"` is a lexer error). A header with a space, a byte-order mark or a reserved word
    cannot be named in a query; the tools rely on the sniffing loader to clean headers (with the naive loader and
    a byte-order mark, SQL cannot address the first column).
 4. `PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY x)` does not parse (`MEDIAN` works). No percentile task kind was
    added for that reason.
-5. Window functions return NaN instead of NULL for missing values (`LAG` on the first row). The series tasks do
-   not use SQL windows (the native series tools are used), so a SQL series plan was not added.
+5. Fixed. Window functions returned NaN instead of NULL for missing values (`LAG` on the first row); they now return
+   NULL (`LAG` / `LEAD` past the edge, an aggregate with no non-NULL value; `COUNT` is then 0). This copy still
+   ignores window frames (`ROWS` / `RANGE`): a window aggregate covers its whole partition. The series tasks do not
+   use SQL windows (the native series tools are used), so a SQL series plan was not added.
 6. `ORDER BY ... DESC` puts NULL groups first (as PostgreSQL); `NULLS LAST` works. The top-group query filters
    NULLs (`WHERE x IS NOT NULL`); not a defect, noted because it changed an answer during development.
 7. No CSV reader is used from the engine side: tables reach the engine only as `DataBlock`s built by the being's

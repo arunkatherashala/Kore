@@ -294,6 +294,16 @@ Query notes for the older KORE SQL engine: single-table SELECTs name their colum
 `<table>.<col>`, joins keep alias prefixes (`r.key`), `count(*)` is named `Count(*)`,
 joins are equi-joins.
 
+NULL semantics: this copy of the engine now matches `master-kore-engine` in three cases
+(targeted fix on branch `dl-sql-fix`, tests in `kore-sql/tests/null_semantics.rs`):
+`COUNT(col)` counts only non-NULL values (`COUNT(*)` and `COUNT(1)` still count rows),
+an unknown function is an error naming the function as written (it was NULL on every
+row), and a window function with no value returns NULL, not NaN. The rest of this copy
+is unchanged and older than master (for example, window frames are ignored).
+
+Long term (future work, not done): Digital Life should depend on the master engine
+instead of keeping its own copy of `kore-sql`, so that fixes made there reach it.
+
 ## Ingestion, redaction and forget (M2a)
 
 Tools `self_ingest_folder`, `self_ingest_csv`, `self_ingest_kore`, `self_export`

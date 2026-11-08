@@ -1072,7 +1072,11 @@ fn decorrelate_expr(
                                 let key_cols: Vec<String> = corr.iter().map(|(ic, _)| {
                                     find_col_in_block(ic, &filtered).unwrap_or_else(|| ic.clone())
                                 }).collect();
-                                let mut groups: std::collections::HashMap<String, Vec<f64>> =
+                                // COUNT(*) has no source column: it counts the inner rows of the key
+                                let count_star = matches!(proj_expr, Expr::Agg { func: AggFunc::Count, expr: ie }
+                                    if matches!(ie.as_ref(), Expr::Star) || matches!(ie.as_ref(), Expr::Col(c) if c == "*"));
+                                // one entry per inner row; a NULL of the aggregated column stays None (it is not 0)
+                                let mut groups: std::collections::HashMap<String, Vec<Option<f64>>> =
                                     std::collections::HashMap::new();
                                 for row in 0..filtered.num_rows {
                                     let key: String = key_cols.iter().map(|kc| {
@@ -1085,11 +1089,16 @@ fn decorrelate_expr(
                                     }).collect::<Vec<_>>().join(",");
                                     if let Some(col) = agg_col {
                                         let v = match &col.data {
-                                            ColumnData::Float64(vs) => vs.get(row).and_then(|x| *x).unwrap_or(0.0),
-                                            ColumnData::Int64(vs)   => vs.get(row).and_then(|x| *x).unwrap_or(0) as f64,
-                                            _ => 0.0,
+                                            ColumnData::Float64(vs) => vs.get(row).and_then(|x| *x),
+                                            ColumnData::Int64(vs)   => vs.get(row).and_then(|x| *x).map(|i| i as f64),
+                                            // not numeric: only whether it is NULL matters (for COUNT); a value reads as 0 as before
+                                            ColumnData::Bool(vs)    => vs.get(row).and_then(|x| *x).map(|_| 0.0),
+                                            ColumnData::Str(vs)     => vs.get(row).and_then(|x| x.as_ref()).map(|_| 0.0),
+                                            ColumnData::StrDict { codes, .. } => codes.get(row).filter(|&&c| c != u8::MAX).map(|_| 0.0),
                                         };
                                         groups.entry(key).or_default().push(v);
+                                    } else if count_star {
+                                        groups.entry(key).or_default().push(Some(1.0));
                                     }
                                 }
 
@@ -1107,19 +1116,23 @@ fn decorrelate_expr(
                                     }
                                     _ => AggFunc::Sum,
                                 };
-                                let mut lookup: std::collections::HashMap<String, f64> =
+                                let mut lookup: std::collections::HashMap<String, Option<f64>> =
                                     std::collections::HashMap::new();
                                 for (k, vs) in &groups {
+                                    // the non-NULL values: SUM / AVG / MIN / MAX of none is NULL, COUNT of none is 0
+                                    let vals: Vec<f64> = vs.iter().flatten().copied().collect();
                                     let agg = match agg_fn {
-                                        AggFunc::Sum   => vs.iter().sum(),
-                                        AggFunc::Avg   => if vs.is_empty() { 0.0 } else { vs.iter().sum::<f64>() / vs.len() as f64 },
-                                        AggFunc::Count => vs.len() as f64,
-                                        AggFunc::Min   => vs.iter().cloned().fold(f64::MAX, f64::min),
-                                        AggFunc::Max   => vs.iter().cloned().fold(f64::MIN, f64::max),
-                                        _ => 0.0,
+                                        AggFunc::Sum   => if vals.is_empty() { None } else { Some(vals.iter().sum()) },
+                                        AggFunc::Avg   => if vals.is_empty() { None } else { Some(vals.iter().sum::<f64>() / vals.len() as f64) },
+                                        AggFunc::Count => Some(if count_star { vs.len() } else { vals.len() } as f64),
+                                        AggFunc::Min   => vals.iter().copied().reduce(f64::min),
+                                        AggFunc::Max   => vals.iter().copied().reduce(f64::max),
+                                        _ => Some(0.0),
                                     };
-                                    lookup.insert(k.clone(), agg * factor);
+                                    lookup.insert(k.clone(), agg.map(|a| a * factor));
                                 }
+                                // a key with no inner rows: COUNT is 0, the other aggregates are NULL
+                                let missing = if matches!(agg_fn, AggFunc::Count) && (agg_col.is_some() || count_star) { Some(0.0) } else { None };
 
                                 // Inject threshold column
                                 let col_name = format!("__decorr_{}__", counter);
@@ -1134,7 +1147,7 @@ fn decorrelate_expr(
                                             _ => String::new(),
                                         }
                                     }).collect::<Vec<_>>().join(",");
-                                    lookup.get(&k).copied()
+                                    lookup.get(&k).copied().unwrap_or(missing)
                                 }).collect();
                                 outer_block.columns.push(kore_core::Column {
                                     name: col_name.clone(),
@@ -1733,6 +1746,25 @@ fn eval_expr(expr: &Expr, block: &DataBlock, row: usize) -> ExprVal {
 }
 
 // ─── Scalar function evaluation ───────────────────────────────────────────────
+
+/// Every scalar function `eval_func` implements (upper case, as the parser stores the name). The parser rejects
+/// any other name with `unknown function: <name as written>`; before, such a call returned NULL on every row.
+/// `tests::known_functions_match_eval_func` keeps this list and the match arms of `eval_func` the same.
+pub(crate) const KNOWN_FUNCTIONS: &[&str] = &[
+    "ABS", "ASCII", "CAST", "CBRT", "CEIL", "CEILING", "CHAR", "CHARINDEX", "CHAR_LENGTH", "CHR", "COALESCE",
+    "CONCAT", "COS", "CURRENT_DATE", "CURRENT_TIMESTAMP", "DATE", "DATEADD", "DATEDIFF", "DATE_ADD", "DATE_DIFF",
+    "DATE_TRUNC", "DAY", "DEGREES", "EXP", "EXTRACT", "EXTRACT_DAY", "EXTRACT_MONTH", "EXTRACT_YEAR", "FLOOR",
+    "FORMAT_DATE", "GREATEST", "IF", "IFNULL", "IIF", "INITCAP", "INSTR", "ISNULL", "ISNUMERIC", "LEAST", "LEFT",
+    "LEN", "LENGTH", "LN", "LOCATE", "LOG", "LOG10", "LOG2", "LOWER", "LPAD", "LTRIM", "MOD", "MONTH", "NOW",
+    "NULLIF", "NVL", "ORD", "PI", "POSITION_OF", "POW", "POWER", "PROPERCASE", "QUARTER", "RADIANS", "RAND",
+    "RANDOM", "REPEAT", "REPLACE", "REVERSE", "RIGHT", "ROUND", "RPAD", "RTRIM", "SIGN", "SIN", "SPACE",
+    "SPLIT_PART", "SQRT", "STRFTIME", "SUBSTR", "SUBSTRING", "TAN", "TODAY", "TO_DATE", "TRANSLATE", "TRIM",
+    "TRUNC", "TRUNCATE", "UPPER", "YEAR"
+];
+
+pub(crate) fn is_known_function(upper: &str) -> bool {
+    KNOWN_FUNCTIONS.contains(&upper)
+}
 
 fn eval_func(name: &str, args: &[Expr], block: &DataBlock, row: usize) -> ExprVal {
     // Helper macro: unwrap Option or return Null
@@ -2678,6 +2710,25 @@ fn extract_f64_all(col: &Column) -> Vec<f64> {
     }
 }
 
+/// `COUNT(expr)` over `rows`: `COUNT(*)` counts rows; `COUNT(col)` / `COUNT(expr)` counts the rows where the
+/// value is not NULL (a literal such as `COUNT(1)` is never NULL, so it counts rows). `agg_col` is the column of a
+/// direct column reference, if found.
+fn count_non_null(inner: &Expr, agg_col: Option<&Column>, block: &DataBlock, rows: &[usize]) -> usize {
+    if matches!(inner, Expr::Star) || matches!(inner, Expr::Col(c) if c == "*") {
+        return rows.len();
+    }
+    match agg_col {
+        Some(col) => rows.iter().filter(|&&r| match &col.data {
+            ColumnData::Float64(v) => v.get(r).map_or(false, |x| x.is_some()),
+            ColumnData::Int64(v)   => v.get(r).map_or(false, |x| x.is_some()),
+            ColumnData::Bool(v)    => v.get(r).map_or(false, |x| x.is_some()),
+            ColumnData::Str(v)     => v.get(r).map_or(false, |x| x.is_some()),
+            ColumnData::StrDict { codes, .. } => codes.get(r).map_or(false, |&c| c != u8::MAX),
+        }).count(),
+        None => rows.iter().filter(|&&r| !matches!(eval_expr(inner, block, r), ExprVal::Null)).count(),
+    }
+}
+
 // ─── Global aggregation (no GROUP BY) ────────────────────────────────────────
 
 /// Aggregate the entire block into a single row.
@@ -2705,7 +2756,7 @@ fn global_agg(block: DataBlock, projections: &[Projection]) -> Result<DataBlock,
                 }).collect()
             };
             let v: Option<f64> = match func {
-                AggFunc::Count => Some(block.num_rows as f64),
+                AggFunc::Count => Some(count_non_null(inner, agg_col, &block, &all_rows) as f64),
                 AggFunc::CountDistinct => {
                     use std::collections::HashSet;
                     let seen: HashSet<u64> = agg_col.map(|col| match &col.data {
@@ -2937,7 +2988,7 @@ fn group_by_agg(
                                 }).collect()
                             };
                             let v = match func {
-                                AggFunc::Count => Some(idxs.len() as f64),
+                                AggFunc::Count => Some(count_non_null(inner, agg_col, &block, idxs) as f64),
                                 AggFunc::CountDistinct => {
                                     use std::collections::HashSet;
                                     let seen: HashSet<u64> = if is_direct {
@@ -3136,6 +3187,9 @@ fn ast_to_win_fn(ast: &WindowFn) -> WinFn {
         WindowFn::Agg { func, expr } => match func {
             AggFunc::Sum   => WinFn::Sum  (col_name_from_expr(expr)),
             AggFunc::Avg   => WinFn::Avg  (col_name_from_expr(expr)),
+            // COUNT(*) (parsed as the column "*") and COUNT(<literal>) count rows: kore-window counts "*" so
+            AggFunc::Count if matches!(expr.as_ref(), Expr::Star | Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_))
+                           => WinFn::Count("*".into()),
             AggFunc::Count | AggFunc::CountDistinct => WinFn::Count(col_name_from_expr(expr)),
             AggFunc::Min   => WinFn::Min  (col_name_from_expr(expr)),
             AggFunc::Max   => WinFn::Max  (col_name_from_expr(expr)),
@@ -3378,5 +3432,36 @@ mod like_match_tests {
         assert!(!like_match("ab", "abc") && like_match("ab", "ab%%") && !like_match("", "_"));
         let long = "a".repeat(2_000_000);
         assert!(like_match(&long, "%a") && !like_match(&long, "%b%") && like_match(&format!("{long}needle{long}"), "%needle%"));
+    }
+}
+
+#[cfg(test)]
+mod known_functions_tests {
+    use super::{is_known_function, KNOWN_FUNCTIONS};
+
+    /// KNOWN_FUNCTIONS (what the parser accepts) is exactly the set of names `eval_func` has a match arm for.
+    #[test]
+    fn known_functions_match_eval_func() {
+        let src = include_str!("executor.rs");
+        // the body of eval_func: from its signature to the first line that is a lone closing brace
+        let body = src.lines().skip_while(|l| !l.starts_with("fn eval_func(")).take_while(|l| l.trim_end() != "}");
+        let mut arms: Vec<&str> = Vec::new();
+        for line in body {
+            let t = line.trim_start();
+            // a match arm of the top-level `match name`: 8 spaces, then "NAME" [| "NAME"]* =>
+            if line.len() - t.len() != 8 || !t.starts_with('"') { continue; }
+            let Some(head) = t.split("=>").next() else { continue };
+            for part in head.split('|') {
+                let n = part.trim().trim_matches('"');
+                if !n.is_empty() { arms.push(n); }
+            }
+        }
+        arms.sort();
+        arms.dedup();
+        let mut known: Vec<&str> = KNOWN_FUNCTIONS.to_vec();
+        known.sort();
+        assert_eq!(arms, known);
+        for f in KNOWN_FUNCTIONS { assert!(is_known_function(f)); }
+        assert!(!is_known_function("NO_SUCH_FN") && !is_known_function("upper"));
     }
 }

@@ -261,8 +261,8 @@ pub fn sql_text(t: Tmpl, v: &ViewT) -> Result<String, String> {
     Ok(match t {
         Tmpl::ColSum => format!("SELECT SUM({}) AS v FROM t", c[0]),
         Tmpl::ColMax => format!("SELECT MAX({}) AS v FROM t", c[0]),
-        // COUNT(col) of the engine counts NULLs (docs/world_t.md, "Engine needs"): count the non-null rows instead
-        Tmpl::ColMean => format!("SELECT SUM({0}) AS s, COUNT(*) AS n FROM t WHERE {0} IS NOT NULL", c[0]),
+        // COUNT(col) counts the non-NULL values (the engine counted NULLs until dl-sql-fix; docs/world_t.md "Engine needs")
+        Tmpl::ColMean => format!("SELECT SUM({0}) AS s, COUNT({0}) AS n FROM t", c[0]),
         Tmpl::ColCount => "SELECT COUNT(*) AS v FROM t".into(),
         Tmpl::ColDistinct => format!("SELECT COUNT(DISTINCT {}) AS v FROM t", c[1]),
         Tmpl::GrpSumWhere => format!("SELECT SUM({}) AS v FROM t WHERE {} = {}", c[0], c[1], sql_lit(&v.param)?),

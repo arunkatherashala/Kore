@@ -41,10 +41,12 @@ pub fn parse_query(sql: &str) -> Result<Query, KoreError> {
 struct Parser {
     tokens: Vec<Token>,
     pos:    usize,
+    /// parsing the type after `CAST(expr AS`: a `DECIMAL(10, 2)` there is not a function call
+    in_cast_type: bool,
 }
 
 impl Parser {
-    fn new(tokens: Vec<Token>) -> Self { Self { tokens, pos: 0 } }
+    fn new(tokens: Vec<Token>) -> Self { Self { tokens, pos: 0, in_cast_type: false } }
 
     fn peek(&self) -> &Token {
         self.tokens.get(self.pos).unwrap_or(&Token::Eof)
@@ -743,17 +745,31 @@ impl Parser {
                         if self.peek() == &Token::LParen {
                             // Scalar function call: UPPER(x), ROUND(x,2), etc.
                             self.pos += 1;
+                            let upper = name.to_ascii_uppercase();
+                            // an unknown function is an error when the query is planned (it returned NULL on
+                            // every row before); the message names it as written. The type of a CAST, such as
+                            // DECIMAL(10, 2), parses like a call and is not a function.
+                            if !self.in_cast_type && !crate::executor::is_known_function(&upper) {
+                                return Err(KoreError::InvalidArgument(format!("unknown function: {name}")));
+                            }
                             let args = if self.peek() != &Token::RParen {
                                 // CAST(expr AS type) — treat AS as arg separator
                                 let first = self.parse_expr(0)?;
                                 let mut a = vec![first];
-                                while self.consume_if(&Token::Comma) || self.consume_if(&Token::As) {
-                                    a.push(self.parse_expr(0)?);
+                                loop {
+                                    let after_as = if self.consume_if(&Token::Comma) { false }
+                                                   else if self.consume_if(&Token::As) { true }
+                                                   else { break };
+                                    let saved = self.in_cast_type;
+                                    self.in_cast_type = after_as && upper == "CAST";
+                                    let e = self.parse_expr(0);
+                                    self.in_cast_type = saved;
+                                    a.push(e?);
                                 }
                                 a
                             } else { vec![] };
                             self.expect(&Token::RParen)?;
-                            Ok(Expr::FuncCall { name: name.to_ascii_uppercase(), args })
+                            Ok(Expr::FuncCall { name: upper, args })
                         } else if self.peek() == &Token::Dot {
                             self.pos += 1;
                             let col = self.expect_ident()?;
