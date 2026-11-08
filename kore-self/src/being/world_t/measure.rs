@@ -34,7 +34,10 @@ pub enum Pol {
     AlwaysSql,
     Ucb(UcbCfg),
     Lin(LinCfg),
-    Oracle,
+    /// The answer-everything oracle (sees hidden).
+    AnswerAll,
+    /// The reward-best oracle (sees hidden).
+    RewardBest,
 }
 
 impl Pol {
@@ -45,7 +48,8 @@ impl Pol {
             Pol::AlwaysSql => "always SQL".into(),
             Pol::Ucb(c) => UcbT::new(*c).name(),
             Pol::Lin(c) => LinUcbT::new(*c).name(),
-            Pol::Oracle => "oracle (sees hidden)".into(),
+            Pol::AnswerAll => "answer-everything oracle (sees hidden)".into(),
+            Pol::RewardBest => "reward-best oracle (sees hidden)".into(),
         }
     }
 }
@@ -73,7 +77,8 @@ pub fn run_life_cached(cfg: &WTCfg, pol: Pol, sb: Option<&dyn Sandbox>, cache: &
         Pol::AlwaysSql => Box::new(AlwaysSqlT),
         Pol::Ucb(c) => Box::new(UcbT::new(c)),
         Pol::Lin(c) => Box::new(LinUcbT::new(c)),
-        Pol::Oracle => Box::new(OracleT::new()),
+        Pol::AnswerAll => Box::new(OracleT::new()),
+        Pol::RewardBest => Box::new(RewardBestT::new()),
     };
     let discover = matches!(pol, Pol::Being(_));
     let mut truths = vec![];

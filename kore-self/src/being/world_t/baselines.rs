@@ -16,6 +16,23 @@ fn fixed(t: Tmpl) -> Vec<Plan> {
     plans_for(t).iter().copied().filter(|p| *p != Plan::TsRule).collect()
 }
 
+/// Reward per energy into [0, 1] for UCB1 (with a penalty, negative values are shifted in).
+fn scale01(rpe: f64, penalty_pm: u32) -> f64 {
+    if penalty_pm == 0 {
+        return (rpe / RPE_SCALE).min(1.0);
+    }
+    let lo = penalty_pm as f64 / 1000.0 * RPE_SCALE;
+    ((rpe + lo) / (RPE_SCALE + lo)).clamp(0.0, 1.0)
+}
+
+fn unscale(x: f64, penalty_pm: u32) -> f64 {
+    if penalty_pm == 0 {
+        return x * RPE_SCALE;
+    }
+    let lo = penalty_pm as f64 / 1000.0 * RPE_SCALE;
+    x * (RPE_SCALE + lo) - lo
+}
+
 /// The renewal skip used by the being, available to the references as a tuned option.
 fn skip_bar(rate: f64, energy: f64) -> f64 {
     rate * (energy - SKIP_COST as f64).max(0.0) / energy.max(1.0)
@@ -32,7 +49,7 @@ impl ChooserT for RandomT {
     fn choose(&mut self, _st: &StateT, v: &ViewT) -> ChoiceT {
         let ps = fixed(v.tmpl);
         let p = ps[self.rng.below(ps.len() as u64) as usize];
-        ChoiceT::plain("ref-random", p, p.energy(v.rows) as f64, "uniform over the template's plans")
+        ChoiceT::plain("ref-random", p, p.listed(v) as f64, "uniform over the template's plans")
     }
 }
 
@@ -46,7 +63,7 @@ impl ChooserT for AlwaysSqlT {
         let ps = fixed(v.tmpl);
         let p = if ps.contains(&Plan::SniffSql) { Some(Plan::SniffSql) } else if ps.contains(&Plan::LogSql) { Some(Plan::LogSql) } else { None };
         match p {
-            Some(p) => ChoiceT::plain("ref-sql", p, p.energy(v.rows) as f64, "the SQL plan with the sniffing loader"),
+            Some(p) => ChoiceT::plain("ref-sql", p, p.listed(v) as f64, "the SQL plan with the sniffing loader"),
             None => ChoiceT::skip("ref-sql", "no SQL plan for this template: skip"),
         }
     }
@@ -97,9 +114,9 @@ impl ChooserT for UcbT {
             }
         }
         let (idx, p) = best.unwrap();
-        let e = p.energy(v.rows) as f64;
+        let e = p.listed(v) as f64;
         let rate = if self.cost > 0.0 { self.rew / self.cost } else { 0.0 };
-        if self.cfg.skip && self.cost >= 40.0 && idx.is_finite() && idx * RPE_SCALE < skip_bar(rate, e) {
+        if self.cfg.skip && self.cost >= 40.0 && idx.is_finite() && unscale(idx, v.penalty_pm) < skip_bar(rate, e) {
             return ChoiceT::skip("ref-ucb", "best index below the skip bar");
         }
         ChoiceT::plain("ref-ucb", p, e, "highest UCB1 index")
@@ -112,7 +129,7 @@ impl ChooserT for UcbT {
             let k = self.key(v, p);
             let a = self.arms.entry(k).or_default();
             a.n += 1.0;
-            a.sum += (reward as f64 / cost.max(1) as f64 / RPE_SCALE).min(1.0);
+            a.sum += scale01(reward as f64 / cost.max(1) as f64, v.penalty_pm);
         }
     }
 }
@@ -134,6 +151,8 @@ pub struct LinCfg {
 struct LinArm {
     ainv: Vec<f64>,
     b: Vec<f64>,
+    /// Target "the answer was wrong" (same features, same design matrix).
+    bw: Vec<f64>,
 }
 
 impl LinArm {
@@ -142,7 +161,7 @@ impl LinArm {
         for i in 0..LIN_D {
             ainv[i * LIN_D + i] = 1.0;
         }
-        LinArm { ainv, b: vec![0.0; LIN_D] }
+        LinArm { ainv, b: vec![0.0; LIN_D], bw: vec![0.0; LIN_D] }
     }
     /// (theta . x, x' A^-1 x) for a sparse one-hot x.
     fn eval(&self, x: &[usize]) -> (f64, f64) {
@@ -158,7 +177,13 @@ impl LinArm {
         }
         (mean, var.max(0.0))
     }
-    fn update(&mut self, x: &[usize], y: f64) {
+    fn mean_wrong(&self, x: &[usize]) -> f64 {
+        x.iter().map(|&i| self.ainv[i * LIN_D..(i + 1) * LIN_D].iter().zip(&self.bw).map(|(a, b)| a * b).sum::<f64>()).sum()
+    }
+    fn update(&mut self, x: &[usize], y: f64, yw: f64) {
+        for &j in x {
+            self.bw[j] += yw;
+        }
         // Sherman-Morrison: ainv -= (ainv x)(x' ainv) / (1 + x' ainv x)
         let mut u = vec![0.0; LIN_D];
         for &j in x {
@@ -204,10 +229,11 @@ impl ChooserT for LinUcbT {
         let x = feats(v);
         let mut best: Option<(f64, Plan, f64)> = None;
         for p in fixed(v.tmpl) {
-            let e = p.energy(v.rows) as f64;
+            let e = p.listed(v) as f64;
             let (m, var) = self.arms.get(&(p.idx() as u8)).map_or((0.0, 5.0), |a| a.eval(&x));
             let ucb = (m + self.cfg.alpha * var.sqrt()).clamp(0.0, 1.0);
-            let s = ucb * v.reward as f64 / e;
+            let mw = if v.penalty_pm == 0 { 0.0 } else { self.arms.get(&(p.idx() as u8)).map_or(0.0, |a| a.mean_wrong(&x)).clamp(0.0, 1.0) };
+            let s = (ucb * v.reward as f64 - mw * v.penalty()) / e;
             if best.map_or(true, |b| s > b.0) {
                 best = Some((s, p, e));
             }
@@ -224,13 +250,15 @@ impl ChooserT for LinUcbT {
         self.cost += cost as f64;
         if let Some(p) = plan {
             let x = feats(v);
-            self.arms.entry(p.idx() as u8).or_insert_with(LinArm::new).update(&x, if reward > 0 { 1.0 } else { 0.0 });
+            self.arms.entry(p.idx() as u8).or_insert_with(LinArm::new).update(&x, if reward > 0 { 1.0 } else { 0.0 }, if reward < 0 { 1.0 } else { 0.0 });
         }
     }
 }
 
-/// SEES HIDDEN information: the true result of every plan on the task (and whether a perfect series rule
-/// would answer it); takes the right answer of highest reward per energy, or skips when none is right.
+/// The ANSWER-EVERYTHING oracle. SEES HIDDEN information: the true result of every plan on the task (and
+/// whether a perfect series rule would answer it); answers every task that some plan answers right, with
+/// the right plan of highest reward per energy, and skips only when no plan is right. It never skips a task
+/// it can answer, however expensive, so it is a per-task reference, not the best policy.
 pub struct OracleT {
     pick: Option<(Plan, String, i64)>,
 }
@@ -241,9 +269,59 @@ impl OracleT {
     }
 }
 
+/// The REWARD-BEST oracle. SEES HIDDEN information like the answer-everything oracle; on every task it takes
+/// the option, skip included, of highest `reward - rho x energy`, where the reward is the true one (the
+/// penalty for a wrong answer included), a skip is worth `-rho` (its energy 1), and rho is its own realized
+/// reward per energy so far (the renewal comparison of the World O oracle-planner). A strong reference, not a
+/// proven optimum.
+pub struct RewardBestT {
+    pick: Option<(Plan, Option<String>, i64)>,
+    rew: f64,
+    cost: f64,
+}
+
+impl RewardBestT {
+    pub fn new() -> RewardBestT {
+        RewardBestT { pick: None, rew: 0.0, cost: 0.0 }
+    }
+}
+
+impl ChooserT for RewardBestT {
+    fn name(&self) -> String {
+        "reward-best oracle (sees the true result of every plan)".into()
+    }
+    fn peek(&mut self, task: &TaskT, results: &[PlanResult]) {
+        let rho = if self.cost > 0.0 { self.rew / self.cost } else { 0.0 };
+        let v = &task.view;
+        let mut best: (f64, Option<(Plan, Option<String>, i64)>) = (-rho * SKIP_COST as f64, None);
+        for r in results {
+            let reward = if r.correct { v.reward as f64 } else if r.answer.is_some() { -((v.reward * v.penalty_pm as i64 + 500) / 1000) as f64 } else { 0.0 };
+            let val = reward - rho * r.energy as f64;
+            if val > best.0 {
+                best = (val, Some((r.plan, r.answer.clone(), r.energy)));
+            }
+        }
+        self.pick = best.1;
+    }
+    fn choose(&mut self, _st: &StateT, _v: &ViewT) -> ChoiceT {
+        match self.pick.take() {
+            Some((p, a, e)) => {
+                let mut c = ChoiceT::plain("ref-reward-best", p, e as f64, "the option of highest true reward minus rho x energy");
+                c.oracle_answer = Some(a.unwrap_or_default());
+                c
+            }
+            None => ChoiceT::skip("ref-reward-best", "skipping is worth more than any plan on this task"),
+        }
+    }
+    fn observe(&mut self, _v: &ViewT, _plan: Option<Plan>, reward: i64, cost: i64) {
+        self.rew += reward as f64;
+        self.cost += cost as f64;
+    }
+}
+
 impl ChooserT for OracleT {
     fn name(&self) -> String {
-        "oracle (sees the true result of every plan)".into()
+        "answer-everything oracle (sees the true result of every plan)".into()
     }
     fn peek(&mut self, task: &TaskT, results: &[PlanResult]) {
         let mut best: Option<(f64, Plan, String, i64)> = None;
@@ -258,11 +336,11 @@ impl ChooserT for OracleT {
     fn choose(&mut self, _st: &StateT, _v: &ViewT) -> ChoiceT {
         match self.pick.take() {
             Some((p, a, e)) => {
-                let mut c = ChoiceT::plain("ref-oracle", p, e as f64, "the plan whose true answer is right at the lowest energy");
+                let mut c = ChoiceT::plain("ref-answer-all", p, e as f64, "the plan whose true answer is right at the highest reward per energy");
                 c.oracle_answer = Some(a);
                 c
             }
-            None => ChoiceT::skip("ref-oracle", "no plan answers this task right"),
+            None => ChoiceT::skip("ref-answer-all", "no plan answers this task right"),
         }
     }
 }

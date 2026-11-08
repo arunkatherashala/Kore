@@ -149,7 +149,7 @@ fn column_rule_search_is_never_wrong_and_learns_its_order() {
                 let Logical::Derived(dv, blanks) = &f.logical else { continue };
                 for b in blanks {
                     let key = &dv.rows[*b].0;
-                    let v = ViewT { step: 0, id: String::new(), tmpl: Tmpl::DerivedVal, ctx: f.ctx, file: f.name.clone(), rows: dv.rows.len(), size: 0, reward: 1, param: key.clone(), cols: Default::default(), prefix: 0, tol: 0, prompt: String::new() };
+                    let v = ViewT { step: 0, id: String::new(), tmpl: Tmpl::DerivedVal, ctx: f.ctx, file: f.name.clone(), rows: dv.rows.len(), size: 0, reward: 1, param: key.clone(), cols: Default::default(), prefix: 0, tol: 0, prompt: String::new(), penalty_pm: 0, cost_pm: 1000 };
                     let o = run_plan(Plan::ColSearch, &v, &f.bytes, &ToolCtx { rules: &[], order: (0..6).collect(), sql: SqlLimits::default() });
                     assert!(o.tried >= 1);
                     if let Some(a) = &o.answer {
@@ -480,9 +480,9 @@ fn a_world_t_being_and_a_world_o_being_share_a_log_without_touching_each_other()
 // ---- references, out of distribution ----
 
 #[test]
-fn references_run_and_the_oracle_is_an_upper_reference() {
+fn references_run_and_the_answer_everything_oracle_is_an_upper_reference() {
     let c = WTCfg::new(21, 1200);
-    let o = run_life(&c, Pol::Oracle, None);
+    let o = run_life(&c, Pol::AnswerAll, None);
     for p in [Pol::Random, Pol::AlwaysSql, Pol::Ucb(UcbCfg { c: 0.3, per_ctx: true, skip: true }), Pol::Lin(LinCfg { alpha: 0.5, skip: true }), Pol::Being(LearnerTCfg::default())] {
         let l = run_life(&c, p, None);
         assert!(l.cost >= 1190, "{}", p.label());
@@ -490,6 +490,39 @@ fn references_run_and_the_oracle_is_an_upper_reference() {
         assert!(l.truths.iter().all(|t| !t.wrong_accepted));
     }
     assert!(o.truths.iter().all(|t| !t.answered || t.correct), "the oracle never answers wrong");
+    // the reward-best oracle never answers wrong either, skips more, and earns at least as much per energy
+    let r = run_life(&c, Pol::RewardBest, None);
+    assert!(r.truths.iter().all(|t| !t.answered || t.correct));
+    assert!(r.rpe() >= o.rpe() - 1e-9, "{} < {}", r.rpe(), o.rpe());
+    assert!(r.truths.iter().filter(|t| t.plan.is_none()).count() >= o.truths.iter().filter(|t| t.plan.is_none()).count());
+}
+
+#[test]
+fn the_reward_design_is_off_by_default_and_changes_rewards_and_prices_when_on() {
+    // default: no tag, so every earlier World T log keeps its meaning
+    assert!(!cfg(1).tags().iter().any(|t| t.starts_with("wt_penalty") || t.starts_with("wt_cost")));
+    let c = WTCfg { penalty_pm: 2000, cost_pm: 2000, ..cfg(1) };
+    assert_eq!(WTCfg::from_tags(&c.tags().join(",")), Some(c.clone()));
+    assert_eq!((scale_energy(1, 2000), scale_energy(3, 2000), scale_energy(3, 500), scale_energy(4, 1000)), (1, 5, 2, 4));
+    // a wrong answer costs twice the listed reward; the being learns to avoid the cheap wrong plans
+    let l = run_life(&c, Pol::Random, None);
+    let wrong: Vec<&TrueT> = l.truths.iter().filter(|t| t.wrong).collect();
+    assert!(!wrong.is_empty() && wrong.iter().all(|t| t.reward < 0));
+    assert!(l.truths.iter().all(|t| !t.wrong_accepted));
+    let b0 = run_life(&WTCfg { penalty_pm: 0, ..c.clone() }, Pol::Being(LearnerTCfg::default()), None);
+    let b2 = run_life(&c, Pol::Being(LearnerTCfg::default()), None);
+    let share = |l: &LifeT| l.truths.iter().filter(|t| t.wrong).count() as f64 / l.truths.len() as f64;
+    assert!(share(&b2) < share(&b0), "{} {}", share(&b2), share(&b0));
+    // the logged run with a penalty folds and replays
+    let d = tempfile::tempdir().unwrap();
+    let mut log = open_log(d.path());
+    let w = WorldT::new(c.clone());
+    let s = run_t(&mut log, &run_cfg(c), &Policy::new(300), None, &MemSandbox(&w)).unwrap();
+    let rs = rows(&log);
+    let mut folded = StateT::from_events(&rs);
+    folded.kinds_open = s.state.kinds_open.clone();
+    assert_eq!(folded, s.state);
+    assert_eq!(replay_t(&rs), (s.steps_run, 0));
 }
 
 #[test]
