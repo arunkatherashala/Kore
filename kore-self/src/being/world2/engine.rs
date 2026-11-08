@@ -49,18 +49,20 @@ pub struct LearnerCfg {
     pub use_: UseCfg,
     /// Track B10 switches (adaptation, rule retirement; all off by default; see `skills.rs`).
     pub skills: SkillsCfg,
+    /// Track B13 switch (the chooser's linear success estimate, `linval.rs`; off by default).
+    pub lin: Option<crate::being::linval::LinCfg>,
 }
 
 impl Default for LearnerCfg {
     fn default() -> Self {
         let l = Learner2::default();
-        LearnerCfg { beta_milli: (l.beta * 1000.0).round() as u32, skip_milli: (l.skip_frac * 1000.0).round() as u32, use_: UseCfg::default(), skills: SkillsCfg::default() }
+        LearnerCfg { beta_milli: (l.beta * 1000.0).round() as u32, skip_milli: (l.skip_frac * 1000.0).round() as u32, use_: UseCfg::default(), skills: SkillsCfg::default(), lin: None }
     }
 }
 
 impl LearnerCfg {
     pub fn learner(&self) -> Learner2 {
-        Learner2 { beta: self.beta_milli as f64 / 1000.0, skip_frac: self.skip_milli as f64 / 1000.0, use_: self.use_ }
+        Learner2 { beta: self.beta_milli as f64 / 1000.0, skip_frac: self.skip_milli as f64 / 1000.0, use_: self.use_, lin: self.lin }
     }
 }
 
@@ -333,7 +335,8 @@ impl State2 {
             if let (Some(c), Some(b), Some(s)) = (W2Cfg::from_tags(&e.tags), tag(&e.tags, "w2_beta_milli").and_then(|x| x.parse().ok()), tag(&e.tags, "w2_skip_milli").and_then(|x| x.parse().ok())) {
                 let use_ = tag(&e.tags, "w2_use").and_then(UseCfg::parse).unwrap_or_default();
                 let skills = tag(&e.tags, "w2_skills").and_then(SkillsCfg::parse).unwrap_or_default();
-                self.start(c, LearnerCfg { beta_milli: b, skip_milli: s, use_, skills }, e.event_id.clone());
+                let lin = tag(&e.tags, LIN_TAG).and_then(crate::being::linval::LinCfg::parse);
+                self.start(c, LearnerCfg { beta_milli: b, skip_milli: s, use_, skills, lin }, e.event_id.clone());
             }
         } else if e.kind == "outcome" {
             if let Some(o) = outcome_from_event(e) {
@@ -405,6 +408,9 @@ pub fn const_from_event(e: &EventRow) -> Option<ConstRule> {
     Some(ConstRule { id, fam, g, train_ok: t("train")?.parse().ok()?, val_ok: t("val")?.parse().ok()?, wrong: t("missed")?.parse().ok()?, step: t("at_step")?.parse().ok()?, event_id: e.event_id.clone() })
 }
 
+/// Genesis tag of the Track B13 switch (World v2 and World O).
+pub const LIN_TAG: &str = "w2_lin";
+
 pub fn genesis_event2(cfg: &W2Cfg, l: &LearnerCfg) -> (NewEvent, String) {
     let mut tags = vec!["w2_genesis".to_string()];
     tags.extend(cfg.tags());
@@ -416,6 +422,9 @@ pub fn genesis_event2(cfg: &W2Cfg, l: &LearnerCfg) -> (NewEvent, String) {
     if l.skills.any() {
         tags.push(l.skills.tag());
     }
+    if let Some(lc) = &l.lin {
+        tags.push(format!("{LIN_TAG}:{}", lc.code()));
+    }
     let mut text = format!(
         "world v2 being created: seed {}, {} task families, budget {} energy units, feedback noise {} per mille, drift {} changes per 10000 energy, difficulty curve {}%, menu of {}; learner beta {:.3}, skip fraction {:.3}. Simulated world with author-defined families and rewards",
         cfg.seed, cfg.families, cfg.budget, cfg.noise_pm, cfg.drift_per_10k, cfg.curve_pct, cfg.menu, l.beta_milli as f64 / 1000.0, l.skip_milli as f64 / 1000.0
@@ -425,6 +434,9 @@ pub fn genesis_event2(cfg: &W2Cfg, l: &LearnerCfg) -> (NewEvent, String) {
     }
     if l.skills.any() {
         text.push_str(&l.skills.words());
+    }
+    if let Some(lc) = &l.lin {
+        text.push_str(&lc.words());
     }
     let ev = NewEvent { source: SOURCE2.into(), occurred_at: iso_at(0), kind: "note".into(), text, tags, redacted: false };
     let id = event_id(&ev.source, &ev.occurred_at, &ev.text);

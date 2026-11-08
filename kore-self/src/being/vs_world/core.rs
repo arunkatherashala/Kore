@@ -653,6 +653,13 @@ impl LinUcb {
     pub fn new(alpha: f64, skip_frac: f64) -> LinUcb {
         LinUcb { alpha, skip_frac, models: vec![Ridge::new(LIN_D); 3] }
     }
+    /// The score `choose` maximises for one (non-skip) option, with its mean and width (Track B13's fallback reads it).
+    pub fn score(&self, cx: &Ctx, o: &Opt) -> (f64, f64, f64) {
+        let x = lin_features(o, cx);
+        let m = &self.models[o.s()];
+        let (mean, w) = (m.mean(&x), m.quad(&x).sqrt());
+        (o.listed_reward * (mean + self.alpha * w).clamp(0.0, 1.0) / o.energy, mean, w)
+    }
 }
 
 impl Agent for LinUcb {

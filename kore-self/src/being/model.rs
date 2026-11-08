@@ -514,6 +514,12 @@ impl Model {
         t
     }
 
+    /// Track B13: (attempts, successes) of one cell as the estimate reads them (discounted or switched in the adaptive modes).
+    pub fn cell_counts(&self, d: Domain, difficulty: u8, s: Strategy) -> (f64, f64) {
+        let c = self.cell_tot(d.idx(), (difficulty.clamp(1, 5) - 1) as usize, s.idx());
+        (c.n, c.succ)
+    }
+
     pub fn estimate(&self, d: Domain, difficulty: u8, s: Strategy) -> Estimate {
         self.est(d, difficulty, s, true)
     }

@@ -22,6 +22,8 @@ pub mod measure_b9;
 pub mod measure_b11;
 /// Track B8: planning ahead (opt-in; see lookahead/mod.rs).
 pub mod lookahead;
+/// Track B13: a context-aware success estimate for the chooser (opt-in; see linval.rs).
+pub mod linval;
 pub mod measure;
 pub mod measure_b5;
 pub mod measure_b6;
@@ -59,6 +61,8 @@ mod tests_scan;
 mod tests_b9;
 #[cfg(test)]
 mod tests_b11;
+#[cfg(test)]
+mod tests_b13;
 
 pub use chooser::{DomainPicker, Ucb1};
 pub use policy::{Policy, StopReason};

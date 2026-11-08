@@ -48,21 +48,24 @@ pub struct LearnerOCfg {
     pub use_: UseCfg,
     /// Track B12 switches (learning to learn; all off by default, see `b12.rs`).
     pub l2l: L2LCfg,
+    /// Track B13 switch (the chooser's linear success estimate; off by default). Not combined with the B12
+    /// chooser: with B12's chooser switches on, B12 decides.
+    pub lin: Option<crate::being::linval::LinCfg>,
 }
 
 impl Default for LearnerOCfg {
     fn default() -> Self {
         let l = LearnerCfg::default();
-        LearnerOCfg { beta_milli: l.beta_milli, skip_milli: l.skip_milli, skip_rule: SkipRule::Rate, use_: UseCfg::default(), l2l: L2LCfg::default() }
+        LearnerOCfg { beta_milli: l.beta_milli, skip_milli: l.skip_milli, skip_rule: SkipRule::Rate, use_: UseCfg::default(), l2l: L2LCfg::default(), lin: None }
     }
 }
 
 impl LearnerOCfg {
     pub fn learner(&self) -> LearnerO {
-        LearnerO { inner: Learner2 { beta: self.beta_milli as f64 / 1000.0, skip_frac: self.skip_milli as f64 / 1000.0, use_: self.use_ }, skip_rule: self.skip_rule, l2l: self.l2l, view: None }
+        LearnerO { inner: Learner2 { beta: self.beta_milli as f64 / 1000.0, skip_frac: self.skip_milli as f64 / 1000.0, use_: self.use_, lin: self.lin }, skip_rule: self.skip_rule, l2l: self.l2l, view: None }
     }
     fn w2(&self) -> LearnerCfg {
-        LearnerCfg { beta_milli: self.beta_milli, skip_milli: self.skip_milli, use_: self.use_, skills: Default::default() }
+        LearnerCfg { beta_milli: self.beta_milli, skip_milli: self.skip_milli, use_: self.use_, skills: Default::default(), lin: self.lin }
     }
 }
 
@@ -290,7 +293,11 @@ fn learner_from_tags(tags: &str) -> Option<LearnerOCfg> {
         Some(x) => L2LCfg::parse(x)?,
         None => L2LCfg::default(),
     };
-    Some(LearnerOCfg { beta_milli, skip_milli, skip_rule, use_, l2l })
+    let lin = match tag(tags, crate::being::world2::engine::LIN_TAG) {
+        Some(x) => Some(crate::being::linval::LinCfg::parse(x)?),
+        None => None,
+    };
+    Some(LearnerOCfg { beta_milli, skip_milli, skip_rule, use_, l2l, lin })
 }
 
 pub fn genesis_event_o(cfg: &WOCfg, l: &LearnerOCfg) -> (NewEvent, String) {
@@ -307,11 +314,18 @@ pub fn genesis_event_o(cfg: &WOCfg, l: &LearnerOCfg) -> (NewEvent, String) {
     if l.l2l.any() {
         tags.push(l.l2l.tag());
     }
+    if let Some(lc) = &l.lin {
+        tags.push(format!("{}:{}", crate::being::world2::engine::LIN_TAG, lc.code()));
+    }
     let text = format!(
         "world O being created: seed {}, budget {} energy units, menu of {}, {} families open at the start, a new family every {} energy units, each living {} x that, {} families per tier, {} per mille of families change their hidden rule once, feedback noise {} per mille; learner beta {:.3}, skip fraction {:.3}, skip test {}{}. Simulated open-ended world with author-defined families and rewards",
         cfg.seed, cfg.budget, cfg.menu, cfg.start, cfg.intro_every, cfg.life_intros, cfg.tier_every, cfg.drift_pm, cfg.noise_pm, l.beta_milli as f64 / 1000.0, l.skip_milli as f64 / 1000.0, l.skip_rule.code(),
         if l.l2l.any() { l.l2l.words() } else { String::new() }
     );
+    let text = match &l.lin {
+        Some(lc) => format!("{text}{}", lc.words()),
+        None => text,
+    };
     let ev = NewEvent { source: SOURCE_O.into(), occurred_at: iso_at(0), kind: "note".into(), text, tags, redacted: false };
     let id = event_id(&ev.source, &ev.occurred_at, &ev.text);
     (ev, id)
