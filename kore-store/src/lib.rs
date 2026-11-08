@@ -29,7 +29,7 @@ pub mod keyindex;
 pub use reader::KoreReader;
 pub use writer::KoreWriter;
 pub use codec::{ColumnCodec, Stage, Transform, WriteOptions};
-pub use v4::CompactOptions;
+pub use v4::{CompactOptions, SearchMode};
 pub use dict::{DictSet, SharedDict};
 pub use keyindex::{KeyIndex, KeyIndexBuilder, Verify};
 
@@ -45,6 +45,10 @@ pub const VERSION_V3: u16    = 3;
 /// Opt-in compact container (see `v4`): version 3 plus timestamp/token transforms and shared
 /// dictionaries. Readers that predate it reject the file at the version field.
 pub const VERSION_V4: u16    = 4;
+
+/// Opt-in container (see `v4`, "container version 5"): version 4 with a varint header and directory.
+/// Readers that predate it reject the file at the version field ("unsupported version 5").
+pub const VERSION_V5: u16    = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

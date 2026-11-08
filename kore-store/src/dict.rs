@@ -156,6 +156,13 @@ impl DictSet {
     pub fn get(&self, id: &[u8; 32]) -> Option<&SharedDict> { self.dicts.iter().find(|d| &d.id() == id) }
     pub fn len(&self) -> usize { self.dicts.len() }
     pub fn is_empty(&self) -> bool { self.dicts.is_empty() }
+    /// The dictionaries in the order they were added.
+    pub fn iter(&self) -> std::slice::Iter<'_, SharedDict> { self.dicts.iter() }
+    /// Their ids, in the order they were added.
+    pub fn ids(&self) -> Vec<[u8; 32]> { self.dicts.iter().map(|d| d.id()).collect() }
+    /// Their ids as lowercase hex (`.kdic` file stems), in the order they were added.
+    pub fn ids_hex(&self) -> Vec<String> { self.dicts.iter().map(|d| d.id_hex()).collect() }
+    pub fn contains(&self, id: &[u8; 32]) -> bool { self.get(id).is_some() }
     /// Load every `*.kdic` object in `dir` (each one verified).
     pub fn load_dir(dir: &std::path::Path) -> Result<DictSet, KoreError> {
         let mut s = DictSet::new();
@@ -171,4 +178,22 @@ impl DictSet {
         }
         Ok(s)
     }
+}
+
+impl<'a> IntoIterator for &'a DictSet {
+    type Item = &'a SharedDict;
+    type IntoIter = std::slice::Iter<'a, SharedDict>;
+    fn into_iter(self) -> Self::IntoIter { self.dicts.iter() }
+}
+
+impl FromIterator<SharedDict> for DictSet {
+    fn from_iter<I: IntoIterator<Item = SharedDict>>(it: I) -> Self {
+        let mut s = DictSet::new();
+        for d in it { s.add(d); }
+        s
+    }
+}
+
+impl Extend<SharedDict> for DictSet {
+    fn extend<I: IntoIterator<Item = SharedDict>>(&mut self, it: I) { for d in it { self.add(d); } }
 }
