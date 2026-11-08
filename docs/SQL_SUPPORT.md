@@ -108,6 +108,24 @@ catalog or tables). `query` also answers `SHOW TABLES`, `DESCRIBE t` and `EXPLAI
 * `EXPLAIN` / `DESCRIBE` / `SHOW` output formats differ from Spark's.
 * `INSERT` is stricter than Spark's non-ANSI mode: it will not narrow DOUBLE to BIGINT or parse text into numbers.
 
+## Changes for users of older engine copies (NULL semantics)
+
+Older copies of `kore-sql`, such as the one on `main-Digital-Life-AI`, differ from this engine in three ways. These are
+bug fixes, and query results change when you move to this engine:
+
+* **`COUNT(col)` output changes for columns that contain NULLs.** It counts only the non-NULL values of `col`. The
+  older copy counted every row. `COUNT(*)` and `COUNT(1)` still count rows, including rows whose columns are all
+  NULL. The same rule holds for `COUNT(DISTINCT col)` (NULL is not a value), for `COUNT` in `GROUP BY` and `HAVING`,
+  and for `COUNT(col) OVER (...)`.
+* An unknown function name is an error (`unknown function: <name>`) when the query is planned. It is no longer NULL on
+  every row.
+* A window function with no value returns NULL, never NaN. This covers `LAG` and `LEAD` past the edge of the partition
+  without a default, and `SUM`, `AVG`, `MIN`, `MAX` or `FIRST_VALUE` over an empty frame. `COUNT` over an empty frame
+  is 0.
+
+On this branch these rules are pinned on every execution path and checked against SQLite by
+`kore-sql/tests/null_semantics.rs` (`oracle_dump`, run by `tests/oracle/run_gate.sh`).
+
 ## How to extend the matrix
 
 Add a case to `kore-sql/tests/sql_coverage2.rs` (`(sql, expected)` pairs, `ERR` for must-be-rejected) with an expected

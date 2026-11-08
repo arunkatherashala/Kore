@@ -47,6 +47,17 @@ if [ "${GATE_THRESH:-1}" = 1 ]; then
     run "thr_$a" FUZZ_SCALE=mid FUZZ_A="$a" FUZZ_SEEDS=1 FUZZ_PER=60 FUZZ_FIRST="$FIRST"
   done
 fi
+# NULL semantics (COUNT(col) vs COUNT(*), LAG/LEAD edges, empty window frames) on every execution path, replayed in SQLite
+mkdir -p "$OUT/nullsem"
+if NULLSEM_DIR="$OUT/nullsem/data" cargo test --release -p kore-sql --offline -j "$JOBS" --test null_semantics -- --ignored oracle_dump > "$OUT/nullsem/kore.log" 2>&1; then
+  "$PY" "$ROOT/kore-sql/tests/oracle/compare.py" "$OUT/nullsem/data" > "$OUT/nullsem/oracle.log" 2>&1
+  m=$(grep -c '^MISMATCH' "$OUT/nullsem/oracle.log"); e=$(grep -c '^KORE-ERR' "$OUT/nullsem/oracle.log")
+else
+  m=1; e=0; echo "[gate] nullsem: oracle_dump failed, see $OUT/nullsem/kore.log"
+fi
+mism=$((mism + m)); kerr=$((kerr + e))
+echo "[gate] nullsem: oracle_mismatch=$m oracle_kore_err=$e :: $(tail -1 "$OUT/nullsem/oracle.log" 2>/dev/null)"
+rm -rf "$OUT/nullsem/data"
 MIN=$(( ($(date +%s) - T0) / 60 ))
 v=PASS; [ "$tests" = FAIL ] && v=FAIL; [ "$diff" != 0 ] && v=FAIL; [ "$mism" != 0 ] && v=FAIL; [ "$kerr" != 0 ] && v=FAIL
 echo "GATE $v tests=$tests diff=$diff oracle_mismatch=$mism oracle_kore_err=$kerr (${MIN} min, logs in $OUT)"
