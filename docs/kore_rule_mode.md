@@ -849,7 +849,7 @@ tables. It can be larger than rule mode at the default level, as version 4 can.
 ## 6. Tests
 
 Totals: `cargo test -p kore-store --offline --no-fail-fast` has 15 test targets, **105 passed, 0 failed**. The
-same 105 also pass on a clean `git archive` export of commit 7d5bdb45 built in its own target directory.
+same 105 also pass on a clean `git archive` export of commit 426a2ac3 (the code and docs of this branch) built in its own target directory.
 
 `kore-store/tests/rules.rs` has 16 tests:
 
