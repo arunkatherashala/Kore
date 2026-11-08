@@ -169,6 +169,58 @@ fn stage_bytes(raw: &[u8], stage: u8, level: i32, small: i32, dict: Option<&Shar
     out
 }
 
+// ── i64 transform selection: a second finalist (docs/kore_v4_int_select.md) ────
+//
+// The transform pre-score (zstd level 1 on the whole column) ranks integer layouts differently from the
+// zstd level that is actually written (9 or 19 for large payloads). On real timestamps (NYC taxi, int64
+// microseconds) zstd-1 prefers `Varint` (10.1 MB against 12.2 MB for `Delta`), while at level 19 `Delta`
+// is 6.2 MB and `Varint` 10.5 MB. So for large i64 columns every transform is also scored on a row sample
+// (`SAMPLE_WINDOWS` windows of `SAMPLE_ROWS` rows, spread over the column) with the zstd level its full
+// payload would get. If that ranking has another winner, both go through the full stage search and the
+// sampled one is kept only if it is strictly smaller. Hence:
+// * no column is ever larger than with the zstd-1 choice alone, and when the zstd-1 choice is at least as
+//   small the bytes are exactly those of the earlier writer;
+// * small columns (every candidate below `INT_SAMPLE_MIN` raw bytes) are untouched;
+// * no format change: the written transform ids (Plain, Delta, Varint) are the existing ones.
+
+/// The sampled check runs when some candidate of an i64 column has at least this many raw bytes.
+const INT_SAMPLE_MIN: usize = SMALL;
+const SAMPLE_WINDOWS: usize = 4;
+const SAMPLE_ROWS: usize = 16 << 10;
+
+/// Up to `SAMPLE_WINDOWS` windows of `SAMPLE_ROWS` consecutive rows, evenly spread, first and last
+/// included (the whole column if it is not longer).
+fn int_sample(v: &[Option<i64>]) -> Vec<Option<i64>> {
+    let n = v.len();
+    if n <= SAMPLE_WINDOWS * SAMPLE_ROWS { return v.to_vec(); }
+    let mut out = Vec::with_capacity(SAMPLE_WINDOWS * SAMPLE_ROWS);
+    for k in 0..SAMPLE_WINDOWS {
+        let start = k * (n - SAMPLE_ROWS) / (SAMPLE_WINDOWS - 1);
+        out.extend_from_slice(&v[start..start + SAMPLE_ROWS]);
+    }
+    out
+}
+
+/// The index of the second finalist of an i64 column under `Transform::Auto`, or None (other types,
+/// small columns, an explicit stage other than zstd, or the sample agrees with the zstd-1 winner `win`).
+/// `scored` = (transform, full raw bytes, zstd-1 score) per candidate.
+fn int_finalist(data: &ColumnData, codec: ColumnCodec, scored: &[(Transform, Vec<u8>, usize)], win: usize, level: i32, small: i32, par: bool) -> Result<Option<usize>, KoreError> {
+    use rayon::prelude::*;
+    let ColumnData::Int64(v) = data else { return Ok(None) };
+    if codec.transform != Transform::Auto || !matches!(codec.stage, Stage::Auto | Stage::Zstd) { return Ok(None); }
+    if scored.len() < 2 || scored.iter().all(|c| c.1.len() < INT_SAMPLE_MIN) { return Ok(None); }
+    let sample = ColumnData::Int64(int_sample(v));
+    let score = |c: &(Transform, Vec<u8>, usize)| -> Result<usize, KoreError> {
+        let raw = codec::encode_transform(&sample, c.0)?;
+        let lvl = if c.1.len() < SMALL { small } else { level };
+        Ok(raw.len().min(zstd::bulk::compress(&raw, lvl).expect("zstd").len()))
+    };
+    let s: Vec<usize> = if par { scored.par_iter().map(score).collect::<Result<_, _>>()? } else { scored.iter().map(score).collect::<Result<_, _>>()? };
+    let mut best = 0;
+    for i in 1..s.len() { if s[i] < s[best] { best = i; } }
+    Ok(if best != win && s[best] < s[win] { Some(best) } else { None })
+}
+
 /// Encode one column: `(transform id, stage id, uses_dict, payload)`.
 pub(crate) fn encode_column(data: &ColumnData, codec: ColumnCodec, dict: Option<&SharedDict>, level: i32, small: i32) -> Result<(u8, u8, bool, Vec<u8>), KoreError> {
     use rayon::prelude::*;
@@ -184,8 +236,14 @@ pub(crate) fn encode_column(data: &ColumnData, codec: ColumnCodec, dict: Option<
         let scored = scored?;
         let mut win = 0;
         for i in 1..scored.len() { if scored[i].2 < scored[win].2 { win = i; } }
-        let (t, raw, _) = scored.into_iter().nth(win).unwrap();
-        vec![(t, raw)]
+        // second finalist (i64 only, see `int_finalist`): it goes through the stage search after the
+        // zstd-1 winner and is kept only if strictly smaller
+        let alt = int_finalist(data, codec, &scored, win, level, small, true)?;
+        let mut scored: Vec<Option<(Transform, Vec<u8>, usize)>> = scored.into_iter().map(Some).collect();
+        let (t, raw, _) = scored[win].take().unwrap();
+        let mut v = vec![(t, raw)];
+        if let Some(j) = alt { let (t, raw, _) = scored[j].take().unwrap(); v.push((t, raw)); }
+        v
     } else {
         let t = transforms[0];
         vec![(t, codec::encode_transform(data, t)?)]
@@ -306,7 +364,7 @@ fn encode_column_pruned(data: &ColumnData, codec: ColumnCodec, dict: Option<&Sha
         let score = if raw.len() < 64 { raw.len() } else { raw.len().min(zstd::bulk::compress(&raw, 1).expect("zstd").len() + 4) };
         Ok((t, raw, score))
     };
-    let (t, raw) = if transforms.len() > 1 {
+    let (t, raw, alt) = if transforms.len() > 1 {
         let scored: Vec<(Transform, Vec<u8>, usize)> = if par {
             transforms.into_par_iter().map(score).collect::<Result<_, _>>()?
         } else {
@@ -314,12 +372,30 @@ fn encode_column_pruned(data: &ColumnData, codec: ColumnCodec, dict: Option<&Sha
         };
         let mut win = 0;
         for i in 1..scored.len() { if scored[i].2 < scored[win].2 { win = i; } }
-        let (t, raw, _) = scored.into_iter().nth(win).unwrap();
-        (t, raw)
+        let alt = int_finalist(data, codec, &scored, win, level, small, par)?;
+        let mut scored: Vec<Option<(Transform, Vec<u8>, usize)>> = scored.into_iter().map(Some).collect();
+        let (t, raw, _) = scored[win].take().unwrap();
+        let alt = alt.map(|j| { let (t, raw, _) = scored[j].take().unwrap(); (t, raw) });
+        (t, raw, alt)
     } else {
         let t = transforms[0];
-        (t, codec::encode_transform(data, t)?)
+        (t, codec::encode_transform(data, t)?, None)
     };
+    let Some((t2, raw2)) = alt else { return stage_search_pruned(t, raw, codec, dict, level, small, par) };
+    // two finalists: the zstd-1 winner, then the sampled one; the second is kept only if strictly smaller
+    // (the order and the comparison of `encode_column`)
+    let (a, b) = if par {
+        rayon::join(|| stage_search_pruned(t, raw, codec, dict, level, small, par), || stage_search_pruned(t2, raw2, codec, dict, level, small, par))
+    } else {
+        (stage_search_pruned(t, raw, codec, dict, level, small, par), stage_search_pruned(t2, raw2, codec, dict, level, small, par))
+    };
+    let (a, b) = (a?, b?);
+    Ok(if b.3.len() < a.3.len() { b } else { a })
+}
+
+/// The stage search of `encode_column_pruned` for one transform (same choice as `encode_column`).
+fn stage_search_pruned(t: Transform, raw: Vec<u8>, codec: ColumnCodec, dict: Option<&SharedDict>, level: i32, small: i32, par: bool) -> Result<(u8, u8, bool, Vec<u8>), KoreError> {
+    use rayon::prelude::*;
     let stages: Vec<u8> = match codec.stage {
         Stage::Auto => {
             let mut s = vec![0u8, 1];
