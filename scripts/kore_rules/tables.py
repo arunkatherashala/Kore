@@ -7,9 +7,9 @@ import json
 import os
 import sys
 
-ORDER = ["orders", "logs", "sensors", "dump_tpcds_store_sales", "dump_tpcds_web_sales", "dump_tpcds_customer",
+ORDER = ["dump_nyc_taxi_2024_01", "orders", "logs", "sensors", "dump_tpcds_store_sales", "dump_tpcds_web_sales", "dump_tpcds_customer",
          "dump_tpcds_customer_address", "dump_tpcds_item", "events", "sequences", "random", "random_norule"]
-LABEL = {"orders": "orders (generated)", "logs": "logs (generated)", "sensors": "sensors (generated)",
+LABEL = {"dump_nyc_taxi_2024_01": "NYC TLC Yellow Taxi trip records, Jan 2024, SHA-256 c4d59da7... (real data)", "orders": "orders (generated)", "logs": "logs (generated)", "sensors": "sensors (generated)",
          "dump_tpcds_store_sales": "TPC-DS store_sales (benchmark, generated)", "dump_tpcds_web_sales": "TPC-DS web_sales (benchmark, generated)",
          "dump_tpcds_customer": "TPC-DS customer (benchmark, generated)", "dump_tpcds_customer_address": "TPC-DS customer_address (benchmark, generated)",
          "dump_tpcds_item": "TPC-DS item (benchmark, generated)", "events": "events (realistic generator, kore_size.md)",
