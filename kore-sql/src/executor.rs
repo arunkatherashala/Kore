@@ -9614,3 +9614,180 @@ fn to_hash_val(e: Option<&Expr>, v: &ExprVal) -> crate::hashes::HashVal {
         }
     }
 }
+
+#[cfg(test)]
+mod like_robust_tests {
+    use super::like_match;
+
+    /// The original (pre-fix) matcher, verbatim: recursive, byte-based, no escapes.
+    fn old_recursive(s: &[u8], p: &[u8]) -> bool {
+        match (s, p) {
+            (_, []) => s.is_empty(),
+            (_, [b'%', rest @ ..]) => {
+                if old_recursive(s, rest) { return true; }
+                if let [_, tail @ ..] = s { return old_recursive(tail, p); }
+                false
+            }
+            ([], _) => false,
+            ([_, st @ ..], [b'_', pt @ ..]) => old_recursive(st, pt),
+            ([sc, st @ ..], [pc, pt @ ..]) if sc == pc => old_recursive(st, pt),
+            _ => false,
+        }
+    }
+
+    /// Reference with the current documented semantics: recursive over chars, `_` = one char,
+    /// `\x` = literal x, a trailing lone `\` = literal backslash.
+    const BS: char = '\u{5c}';
+    fn reference(s: &[char], p: &[char]) -> bool {
+        match p {
+            [] => s.is_empty(),
+            ['%', rest @ ..] => (0..=s.len()).any(|k| reference(&s[k..], rest)),
+            ['_', rest @ ..] => !s.is_empty() && reference(&s[1..], rest),
+            [BS, c, rest @ ..] => !s.is_empty() && s[0] == *c && reference(&s[1..], rest),
+            [c, rest @ ..] => !s.is_empty() && s[0] == *c && reference(&s[1..], rest),
+        }
+    }
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 { self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); self.0 >> 33 }
+        fn below(&mut self, n: usize) -> usize { (self.next() % n as u64) as usize }
+        fn string(&mut self, alpha: &[&str], max: usize) -> String {
+            let n = self.below(max + 1);
+            (0..n).map(|_| alpha[self.below(alpha.len())]).collect()
+        }
+    }
+
+    fn check(v: &str, p: &str) {
+        let vc: Vec<char> = v.chars().collect();
+        let pc: Vec<char> = p.chars().collect();
+        assert_eq!(like_match(v, p), reference(&vc, &pc), "value {v:?} pattern {p:?}");
+    }
+
+    #[test]
+    fn differential_vs_recursive_reference() {
+        let mut r = Rng(0x5eed);
+        // multi-byte chars of 2, 3 and 4 UTF-8 bytes, wildcards, escape
+        let val_alpha = ["a", "b", "é", "日", "😀", "%", "_", "\\"];
+        let pat_alpha = ["a", "b", "é", "日", "😀", "%", "%", "_", "_", "\\"];
+        for _ in 0..300_000 {
+            let v = r.string(&val_alpha, 7);
+            let p = r.string(&pat_alpha, 7);
+            check(&v, &p);
+        }
+        // exhaustive: every pattern over {a,%,_} up to length 5 against every value over {a,b} up to length 5
+        fn all(alpha: &[&str], max: usize) -> Vec<String> {
+            let mut out = vec![String::new()];
+            let mut cur = vec![String::new()];
+            for _ in 0..max {
+                cur = cur.iter().flat_map(|s| alpha.iter().map(move |c| format!("{s}{c}"))).collect();
+                out.extend(cur.iter().cloned());
+            }
+            out
+        }
+        let vals = all(&["a", "b", "é"], 5);
+        for p in all(&["a", "é", "%", "_", "\\"], 5) { for v in &vals { check(v, &p); } }
+        // edge cases named explicitly
+        for (v, p) in [("", ""), ("", "%"), ("", "%%"), ("", "_"), ("a", ""), ("é", "_"), ("é", "__"), ("日本", "_%"), ("😀", "_"),
+                       ("a%b", r"a\%b"), ("axb", r"a\%b"), ("a", "a\\"), ("a\\", "a\\"), ("abc", "%%%c"), ("abc", "a%%%"), ("abc", "%%b%%")] {
+            check(v, p);
+        }
+    }
+
+    #[test]
+    fn differential_vs_original_on_ascii() {
+        // old semantics == new semantics for ASCII text and patterns without backslash
+        let mut r = Rng(42);
+        let a = ["a", "b", "c", "%", "_"];
+        for _ in 0..200_000 {
+            let v: String = r.string(&["a", "b", "c", "%", "_"], 8);
+            let p = r.string(&a, 8);
+            assert_eq!(like_match(&v, &p), old_recursive(v.as_bytes(), p.as_bytes()), "value {v:?} pattern {p:?}");
+        }
+    }
+
+    #[test]
+    fn two_mb_text_and_adversarial_patterns() {
+        let long = "a".repeat(2_000_000);
+        assert!(like_match(&long, "%a") && like_match(&long, "a%") && like_match(&long, "%a%a%a%") && like_match(&long, "_%_"));
+        assert!(!like_match(&long, "%b%") && !like_match(&long, "%a%b") && !like_match(&long, "a_b%"));
+        assert!(like_match(&format!("{long}needle{long}"), "%needle%"));
+        let uni = "é日😀".repeat(300_000);
+        assert!(like_match(&uni, "%😀") && like_match(&uni, "é_😀%") && !like_match(&uni, "%é日é%"));
+        // worst case O(n*m): 8 stars on 100k chars, then a final mismatch
+        let text = "a".repeat(100_000);
+        let pat = format!("{}b", "%a".repeat(8));
+        let t = std::time::Instant::now();
+        assert!(!like_match(&text, &pat));
+        assert!(t.elapsed().as_secs() < 20, "took {:?}", t.elapsed());
+    }
+}
+
+#[cfg(test)]
+mod like_bench {
+    use super::like_match;
+    fn old_recursive(s: &[u8], p: &[u8]) -> bool {
+        match (s, p) {
+            (_, []) => s.is_empty(),
+            (_, [b'%', rest @ ..]) => {
+                if old_recursive(s, rest) { return true; }
+                if let [_, tail @ ..] = s { return old_recursive(tail, p); }
+                false
+            }
+            ([], _) => false,
+            ([_, st @ ..], [b'_', pt @ ..]) => old_recursive(st, pt),
+            ([sc, st @ ..], [pc, pt @ ..]) if sc == pc => old_recursive(st, pt),
+            _ => false,
+        }
+    }
+    /// `cargo test -p kore-sql --release --lib like_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_like_short_strings() {
+        let vals = ["Alice Johnson", "BOB", "special requests pending", "customer#000012345", "PROMO BURNISHED COPPER", "x", "", "forest green metallic"];
+        let pats = ["%son", "A%", "%special%requests%", "customer#_____%", "PROMO%COPPER", "%e%e%e%", "x", "%"];
+        let iters = 200_000usize;
+        let run = |f: &dyn Fn(&str, &str) -> bool| -> f64 {
+            let mut hits = 0usize;
+            let t = std::time::Instant::now();
+            for _ in 0..iters { for v in &vals { for p in &pats { if f(std::hint::black_box(v), std::hint::black_box(p)) { hits += 1; } } } }
+            std::hint::black_box(hits);
+            t.elapsed().as_nanos() as f64 / (iters * vals.len() * pats.len()) as f64
+        };
+        for (name, f) in [("old recursive", &(|v: &str, p: &str| old_recursive(v.as_bytes(), p.as_bytes())) as &dyn Fn(&str, &str) -> bool),
+                          ("iterative  ", &(|v: &str, p: &str| like_match(v, p)) as &dyn Fn(&str, &str) -> bool)] {
+            run(f);
+            let mut xs: Vec<f64> = (0..11).map(|_| run(f)).collect();
+            xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            println!("BENCH {name}: median {:.1} ns/match  min {:.1}  max {:.1}", xs[5], xs[0], xs[10]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod like_repro {
+    /// Documents the original bug: the pre-fix recursive matcher aborts the process (stack overflow) on long text.
+    /// Ignored because it kills the test binary by design. Run: KORE_OLD_LIKE_LEN=10000 cargo test ... like_repro -- --ignored
+    #[test]
+    #[ignore]
+    fn old_recursive_matcher_overflows() {
+        fn old_recursive(s: &[u8], p: &[u8]) -> bool {
+            match (s, p) {
+                (_, []) => s.is_empty(),
+                (_, [b'%', rest @ ..]) => {
+                    if old_recursive(s, rest) { return true; }
+                    if let [_, tail @ ..] = s { return old_recursive(tail, p); }
+                    false
+                }
+                ([], _) => false,
+                ([_, st @ ..], [b'_', pt @ ..]) => old_recursive(st, pt),
+                ([sc, st @ ..], [pc, pt @ ..]) if sc == pc => old_recursive(st, pt),
+                _ => false,
+            }
+        }
+        let n: usize = std::env::var("KORE_OLD_LIKE_LEN").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000);
+        let s = "a".repeat(n);
+        println!("old matcher on {n} bytes: {}", old_recursive(s.as_bytes(), b"%b"));
+        println!("new matcher on {n} bytes: {}", super::like_match(&s, "%b"));
+    }
+}
