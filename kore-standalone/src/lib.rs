@@ -9,10 +9,13 @@
 //! let mut block = DataBlock::new();
 //! block.add_column("price", DataType::F64, vec![10.5f64.to_bits(), 20.0f64.to_bits(), 30.75f64.to_bits()]);
 //! block.add_column("qty",   DataType::I64, vec![100, 200, 300]);
-//! write_file("data.kore", &block).unwrap();
+//! # let tmp = std::env::temp_dir().join(format!("kore_doc_quickstart_{}.kore", std::process::id()));
+//! # let path = tmp.to_str().unwrap();
+//! write_file(path, &block).unwrap();   // e.g. "data.kore"
 //!
-//! let result = read_file("data.kore").unwrap();
+//! let result = read_file(path).unwrap();
 //! assert_eq!(result.num_rows(), 3);
+//! # std::fs::remove_file(path).ok();
 //! ```
 
 use std::io;
@@ -178,7 +181,15 @@ pub fn crc32(data: &[u8]) -> u32 {
 /// New column is filled with `default_val` for existing rows.
 ///
 /// ```
-/// kore_fileformat::add_column("data.kore", "region", kore_fileformat::DataType::I64, 0);
+/// # use kore_fileformat::{DataBlock, DataType, write_file, read_file};
+/// # let tmp = std::env::temp_dir().join(format!("kore_doc_add_column_{}.kore", std::process::id()));
+/// # let path = tmp.to_str().unwrap();
+/// # let mut block = DataBlock::new();
+/// # block.add_column("price", DataType::F64, vec![10.5f64.to_bits(), 20.0f64.to_bits()]);
+/// # write_file(path, &block).unwrap();
+/// kore_fileformat::add_column(path, "region", kore_fileformat::DataType::I64, 0).unwrap();
+/// # assert_eq!(read_file(path).unwrap().num_columns(), 2);
+/// # std::fs::remove_file(path).ok();
 /// ```
 pub fn add_column(path: &str, name: &str, dtype: DataType, default_val: u64) -> io::Result<()> {
     let mut block = read_file(path)?;
@@ -209,9 +220,17 @@ pub fn rename_column(path: &str, old_name: &str, new_name: &str) -> io::Result<(
 /// Both blocks must have the same column names and types.
 ///
 /// ```
+/// # use kore_fileformat::{DataBlock, DataType, write_file, read_file};
+/// # let tmp = std::env::temp_dir().join(format!("kore_doc_append_file_{}.kore", std::process::id()));
+/// # let path = tmp.to_str().unwrap();
+/// # let mut block = DataBlock::new();
+/// # block.add_column("price", DataType::F64, vec![10.5f64.to_bits(), 20.0f64.to_bits()]);
+/// # write_file(path, &block).unwrap();
 /// let mut extra = kore_fileformat::DataBlock::new();
 /// extra.add_column("price", kore_fileformat::DataType::F64, vec![50.0f64.to_bits()]);
-/// kore_fileformat::append_file("data.kore", &extra).unwrap();
+/// kore_fileformat::append_file(path, &extra).unwrap();
+/// # assert_eq!(read_file(path).unwrap().num_rows(), 3);
+/// # std::fs::remove_file(path).ok();
 /// ```
 pub fn append_file(path: &str, new_block: &DataBlock) -> io::Result<()> {
     let mut base = read_file(path)?;

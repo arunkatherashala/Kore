@@ -131,7 +131,8 @@ jobs:
   python-matrix:
     name: "🐍 Python ${{ matrix.python-version }}"
     needs: format-validate
-    runs-on: ubuntu-latest
+    # Python 3.9 has no build for ubuntu-latest (26.04); pyproject still says >=3.9, so 3.9 runs on 22.04.
+    runs-on: ${{ matrix.python-version == '3.9' && 'ubuntu-22.04' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
