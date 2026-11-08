@@ -540,3 +540,27 @@ fn no_banned_words_in_world_t_sources_logs_or_docs() {
     }
 }
 
+
+/// Merge check (brain-v9: B13 + Track W1): the B13 key and the World T keys live side by side in one
+/// controller file, each is read by its own reader, and neither overwrites the other; a repeated key
+/// is still refused.
+#[test]
+fn merged_controller_keys_b13_and_world_t_coexist() {
+    use crate::being::controller::Controller;
+    use crate::being::linval::LinCtl;
+    let both = "context_chooser = on\nworld_t_run = on\nworld_t_sql_timeout_ms = 2000\nworld_t_sql_max_rows = 1000\n";
+    assert!(Controller::parse(both).is_ok(), "both key sets must parse together");
+    assert!(LinCtl::from_text(Some(both)).allowed, "B13 key read as on");
+    assert!(super::ctl::allowed(Some(both)).is_ok(), "World T key read as on");
+    let b13_only = "context_chooser = on\nworld_t_run = off\n";
+    assert!(LinCtl::from_text(Some(b13_only)).allowed);
+    assert!(super::ctl::allowed(Some(b13_only)).is_err());
+    let wt_only = "context_chooser = off\nworld_t_run = on\n";
+    assert!(!LinCtl::from_text(Some(wt_only)).allowed);
+    assert!(super::ctl::allowed(Some(wt_only)).is_ok());
+    for dup in ["context_chooser = on\ncontext_chooser = off\n", "world_t_run = on\nworld_t_run = on\n"] {
+        assert!(Controller::parse(dup).is_err(), "a repeated key must be refused: {dup:?}");
+        assert!(!LinCtl::from_text(Some(dup)).allowed);
+        assert!(super::ctl::allowed(Some(dup)).is_err());
+    }
+}
