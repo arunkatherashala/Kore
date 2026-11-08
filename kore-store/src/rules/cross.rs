@@ -271,7 +271,7 @@ pub fn describe(family: u8, rd: &mut Rd, n: usize, names: &[&str]) -> String {
             match rd.u8() {
                 Ok(0) => format!("= {} + {}", nm(0), nm(1)), Ok(1) => format!("= {} - {}", nm(0), nm(1)),
                 Ok(2) => format!("= {} * {}", nm(0), nm(1)),
-                Ok(3) => { let a = rd.zz().unwrap_or(0); let b = rd.zz().unwrap_or(0); format!("= {a}*{} {b:+}", nm(0)) }
+                Ok(3) => { let a = rd.zz().unwrap_or(0); let b = rd.zz().unwrap_or(0); if a == 1 && b == 0 { format!("= {} + offset residual", nm(0)) } else { format!("= {a}*{} {b:+}", nm(0)) } }
                 _ => "?".into(),
             }
         }
@@ -293,6 +293,20 @@ pub fn describe(family: u8, rd: &mut Rd, n: usize, names: &[&str]) -> String {
 }
 
 // ── search ───────────────────────────────────────────────────────────────────
+
+/// Relation candidates encoded in full per target and family group: the best by sample hit rate.
+const TOP_RELATIONS: usize = 8;
+
+/// The `TOP_RELATIONS` candidates with the highest sample hit rate (ties: search order), encoded.
+fn top<'a>(mut lazy: Vec<(f64, Box<dyn FnOnce() -> Cand + 'a>)>) -> Vec<Cand> {
+    let mut idx: Vec<usize> = (0..lazy.len()).collect();
+    idx.sort_by(|&x, &y| lazy[y].0.partial_cmp(&lazy[x].0).unwrap().then(x.cmp(&y)));
+    idx.truncate(TOP_RELATIONS);
+    idx.sort_unstable();
+    let mut out = vec![];
+    for (k, (_, f)) in lazy.drain(..).enumerate() { if idx.contains(&k) { out.push(f()); } }
+    out
+}
 
 fn hit_rate(rows: &[usize], t: impl Fn(usize) -> Option<bool>) -> f64 {
     let (mut h, mut k) = (0usize, 0usize);
@@ -326,8 +340,25 @@ pub fn search(cols: &[&ColumnData], lv: Levels) -> Vec<Cand> {
         if let ColumnData::Int64(tv) = tc {
             let ints: Vec<usize> = (0..k).filter(|&j| j != t && matches!(cols[j], ColumnData::Int64(_))).collect();
             let iv = |j: usize| match cols[j] { ColumnData::Int64(v) => v, _ => unreachable!() };
+            // the target's own delta stream on the sample: the bar an offset relation must clear
+            let own: usize = {
+                let mut prev = 0i64;
+                let mut r = vec![];
+                for &i in &rows { if let Some(y) = tv[i] { stream::put_zz(&mut r, y.wrapping_sub(prev)); prev = y; } }
+                stream::score(&r)
+            };
+            let mut lazy: Vec<(f64, Box<dyn FnOnce() -> Cand + '_>)> = vec![];
             for (x, &a) in ints.iter().enumerate() {
                 let av = iv(a);
+                // offset relation t = a + r (an order rule such as ship_date = sold_date + lag): kept as a
+                // candidate when the residuals t - a on the sample code to under 80 % of the target's deltas
+                {
+                    let mut r = vec![];
+                    for &i in &rows { if let Some(y) = tv[i] { stream::put_zz(&mut r, y.wrapping_sub(av[i].unwrap_or(0))); } }
+                    if stream::score(&r) * 10 < own * 8 {
+                        lazy.push((0.25, Box::new(move || Cand { target: t, family: INT_REL, deps: vec![a], body: int_body(tv, av, None, IOp::Affine(1, 0), lv) })));
+                    }
+                }
                 // affine of one column, fitted on two sample rows with different source values
                 let pts: Vec<(i64, i64)> = rows.iter().filter_map(|&i| match (av[i], tv[i]) { (Some(p), Some(q)) => Some((p, q)), _ => None }).take(64).collect();
                 if let Some(&(x0, y0)) = pts.first() {
@@ -338,8 +369,9 @@ pub fn search(cols: &[&ColumnData], lv: Levels) -> Vec<Cand> {
                             let be = y0 as i128 - al * x0 as i128;
                             if let (Ok(al), Ok(be)) = (i64::try_from(al), i64::try_from(be)) {
                                 let op = IOp::Affine(al, be);
-                                if !(al == 1 && be == 0) && hit_rate(&rows, |i| tv[i].map(|y| y == ipred(op, av[i], None))) >= 0.5 {
-                                    out.push(Cand { target: t, family: INT_REL, deps: vec![a], body: int_body(tv, av, None, op, lv) });
+                                let h = hit_rate(&rows, |i| tv[i].map(|y| y == ipred(op, av[i], None)));
+                                if !(al == 1 && be == 0) && h >= 0.5 {
+                                    lazy.push((h, Box::new(move || Cand { target: t, family: INT_REL, deps: vec![a], body: int_body(tv, av, None, op, lv) })));
                                 }
                             }
                         }
@@ -353,12 +385,14 @@ pub fn search(cols: &[&ColumnData], lv: Levels) -> Vec<Cand> {
                     for (op, p, q) in ops {
                         if p == q && matches!(op, IOp::Diff) { continue; }
                         let (pv, qv) = (iv(p), iv(q));
-                        if hit_rate(&rows, |i| tv[i].map(|y| y == ipred(op, pv[i], qv[i]))) >= 0.5 {
-                            out.push(Cand { target: t, family: INT_REL, deps: vec![p, q], body: int_body(tv, pv, Some(qv), op, lv) });
+                        let h = hit_rate(&rows, |i| tv[i].map(|y| y == ipred(op, pv[i], qv[i])));
+                        if h >= 0.5 {
+                            lazy.push((h, Box::new(move || Cand { target: t, family: INT_REL, deps: vec![p, q], body: int_body(tv, pv, Some(qv), op, lv) })));
                         }
                     }
                 }
             }
+            out.extend(top(lazy));
         }
         // float relations
         if let ColumnData::Float64(tv) = tc {
@@ -366,6 +400,7 @@ pub fn search(cols: &[&ColumnData], lv: Levels) -> Vec<Cand> {
             let fv: Vec<Vec<Option<f64>>> = nums.iter().map(|&j| as_f64(cols[j]).unwrap()).collect();
             let mut rounds = vec![0xFFu8];
             if let Some(s) = find_scale(tv, &rows) { rounds.push(s); }
+            let mut lazy: Vec<(f64, Box<dyn FnOnce() -> Cand + '_>)> = vec![];
             for x in 0..nums.len() {
                 for y in 0..nums.len() {
                     for op in 0u8..4 {
@@ -379,12 +414,14 @@ pub fn search(cols: &[&ColumnData], lv: Levels) -> Vec<Cand> {
                             let h = hit_rate(&rows, |i| tv[i].map(|z| z.to_bits() == fpred(op, rd, a[i], b[i])));
                             if h >= 0.5 && best.map_or(true, |(bh, _)| h > bh) { best = Some((h, rd)); }
                         }
-                        if let Some((_, rd)) = best {
-                            out.push(Cand { target: t, family: FLOAT_REL, deps: vec![nums[x], nums[y]], body: float_body(tv, a, b, op, rd, lv) });
+                        if let Some((h, rd)) = best {
+                            let deps = vec![nums[x], nums[y]];
+                            lazy.push((h, Box::new(move || Cand { target: t, family: FLOAT_REL, deps, body: float_body(tv, a, b, op, rd, lv) })));
                         }
                     }
                 }
             }
+            out.extend(top(lazy));
         }
         // lookups
         if let Some(tcell) = &cell[t] {

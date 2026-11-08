@@ -1,19 +1,25 @@
-//! KORE rule mode (opt-in): lossless compression by discovered rules. Container version 5.
+
+
+//! KORE rule mode (opt-in): lossless compression by discovered rules. Container version 6.
 //!
 //! When a column, or a relation between columns, follows a rule, the file stores the rule plus its
 //! exceptions/residuals instead of the values; the reader regenerates the exact values and checks them
 //! against a digest of the original column (a mismatch is an error, never silent). See
 //! docs/kore_rule_mode.md for the DSL, the measurements and the limits.
 //!
+//! Version 6 = the container-version-5 layout (version 4 with a varint header and directory, `v4.rs`)
+//! with the version field 6 and one more meaning of the codec byte:
 //! ```text
-//! "KORE" | version:u16 = 5 | num_cols:u32 | num_rows:u64
-//! num_dicts:u16, per dictionary: dict_id:[32] | content_len:u32                       (as version 4)
-//! per column: name_len:u16 | name | dtype:u8 | transform:u8 | stage:u8 | dict:u8 | payload_len:u64 | payload_crc32:u32
+//! "KORE" | version:u16 = 6 | varint(num_cols) | varint(num_rows) | varint(num_dicts)
+//! per dictionary: dict_id:[32] | varint(content_len)
+//! per column: varint(name_len) | name | dtype:u8 | codec:u8 | [dict:u8 if stage == 4] | varint(payload_len) | payload_crc32:u32
+//!   codec = transform id (bits 0-3) | stage id << 4 (bits 4-6), bit 7 = 0: a version-4 payload (as in version 5)
+//!   codec = 0x80 exactly: a rule payload (no dict byte); any other value with bit 7 set is refused
 //! dir_crc32:u32
 //! payloads
 //! ```
-//! Exactly the version-4 layout; in addition `transform` may be `0x10` (rule), then `stage` = 0 and
-//! `dict` = 0xFF and the payload is
+//! Bit 7 is reserved (must be 0) in version 5, so the rule marker cannot collide with any transform or
+//! stage id of versions 4 and 5. A rule payload is
 //! ```text
 //! family:u8 | digest:u64 (CRC-64/XZ of the decoded column, `stream::digest`) | n_deps:u8 | deps: varint column
 //! indices | body (see `within` for families 1-6, `cross` for 7-9)
@@ -22,9 +28,11 @@
 //! derived; the reader decodes in dependency order and refuses cycles. Every other column payload is a
 //! version-4 payload, decoded by the version-4 code.
 //!
-//! Writer rule: every column is encoded by the version-4 writer and by every applicable rule; the smaller
-//! payload is kept (ties keep version 4). If no column uses a rule, the output is the version-4 file,
-//! byte for byte. Readers that predate version 5 stop at the version field ("unsupported version 5").
+//! Writer rule: every column is encoded exactly as `v4::write` encodes it with the same options, and by
+//! every applicable rule; the smaller payload is kept (ties keep the version-4 payload). If no column uses
+//! a rule, the output is byte for byte what `v4::write` produces with the same `CompactOptions` (version 4,
+//! or version 5 with `with_compact_directory(true)`). As soon as one rule is used the file is version 6.
+//! Readers that predate version 6 stop at the version field ("unsupported version 6").
 
 pub mod stream;
 pub mod intseq;
@@ -40,11 +48,12 @@ use crate::v4::{NO_DICT, STAGE_ZSTD_DICT};
 use crate::{compress, CompactOptions, DType, MAGIC};
 use stream::{bad, put_varint, Levels, Rd};
 
-pub const VERSION_V5: u16 = 5;
-/// Directory transform id of a rule payload (version 5 only).
-pub const TRANSFORM_RULE: u8 = 0x10;
+pub const VERSION_V6: u16 = 6;
+/// Codec byte of a rule column in the version-6 directory.
+pub const CODEC_RULE: u8 = 0x80;
+/// In-memory transform id of a rule column (never written: on disk the codec byte is `CODEC_RULE`).
+const TRANSFORM_RULE: u8 = 0x10;
 const MAX_ROWS: usize = 1 << 28;
-const MIN_ENTRY: usize = 2 + 1 + 1 + 1 + 1 + 8 + 4;
 const PAR_MIN_BYTES: usize = 64 * 1024;
 
 /// Options of the rule-mode writer: the version-4 options (levels, codecs, shared dictionaries) plus
@@ -63,7 +72,7 @@ impl Default for RuleOptions {
 }
 
 impl CompactOptions {
-    /// Opt into rule mode (version-5 files when a rule wins; see `rules`).
+    /// Opt into rule mode (version-6 files when a rule wins; see `rules`).
     pub fn with_rules(self) -> RuleOptions { RuleOptions { compact: self, within: true, cross: true } }
 }
 
@@ -73,9 +82,9 @@ impl RuleOptions {
     pub fn cross_only(mut self) -> Self { self.within = false; self }
 }
 
-/// True if `data` starts with the KORE magic and format version 5.
-pub fn is_v5(data: &[u8]) -> bool {
-    data.len() >= 6 && &data[..4] == MAGIC && u16::from_le_bytes([data[4], data[5]]) == VERSION_V5
+/// True if `data` starts with the KORE magic and format version 6 (rule mode).
+pub fn is_v6(data: &[u8]) -> bool {
+    data.len() >= 6 && &data[..4] == MAGIC && u16::from_le_bytes([data[4], data[5]]) == VERSION_V6
 }
 
 fn dict_for<'a>(o: &'a CompactOptions, name: &str) -> Option<&'a SharedDict> { o.dicts.iter().find(|(n, _)| n == name).map(|(_, d)| d) }
@@ -131,13 +140,27 @@ fn same(a: &ColumnData, b: &ColumnData) -> bool {
     }
 }
 
-enum Choice { V4, Rule { payload: Vec<u8>, deps: Vec<usize> } }
+enum Choice { V4, Rule { payload: Vec<u8> } }
 
 /// What the writer chose per column (for reports and tests).
 #[derive(Debug, Clone)]
 pub struct ColumnChoice { pub name: String, pub v4_bytes: usize, pub rule: Option<(String, usize)> }
 
 pub fn write(block: &DataBlock, opts: &RuleOptions) -> Result<Vec<u8>, KoreError> { write_explained(block, opts).map(|x| x.0) }
+
+/// Every cross-column candidate the search encodes in full, whether it wins or not: `(target column,
+/// description, rule payload bytes)`. For measurements (the exception-rate sweep); not used by `write`.
+#[doc(hidden)]
+pub fn cross_candidates(block: &DataBlock, opts: &RuleOptions) -> Vec<(String, String, usize)> {
+    let o = &opts.compact;
+    let lv = Levels { large: o.zstd_level, small: o.small_zstd_level };
+    let cols: Vec<&ColumnData> = block.columns.iter().map(|c| &c.data).collect();
+    cross::search(&cols, lv).into_iter().map(|c| {
+        let p = rule_payload(c.family, 0, &c.deps, &c.body);
+        let names: Vec<&str> = c.deps.iter().map(|&d| block.columns[d].name.as_str()).collect();
+        (block.columns[c.target].name.clone(), describe_payload(&p, block.num_rows, &names), p.len())
+    }).collect()
+}
 
 /// `write` plus, per column, the version-4 size and the rule that won (description, payload bytes).
 pub fn write_explained(block: &DataBlock, opts: &RuleOptions) -> Result<(Vec<u8>, Vec<ColumnChoice>), KoreError> {
@@ -155,8 +178,9 @@ pub fn write_explained(block: &DataBlock, opts: &RuleOptions) -> Result<(Vec<u8>
     let lv = Levels { large: o.zstd_level, small: o.small_zstd_level };
     let n = block.num_rows;
     let ncols = block.columns.len();
+    // exactly the payloads `v4::write` produces with these options
     let base: Vec<(u8, u8, bool, Vec<u8>)> = block.columns.par_iter()
-        .map(|c| crate::v4::encode_column(&c.data, o.codecs.codec_for(&c.name), dict_for(o, &c.name), o.zstd_level, o.small_zstd_level))
+        .map(|c| crate::v4::encode_for_write(c, o))
         .collect::<Result<_, _>>()?;
     // a column with an explicit codec keeps it; columns of a block with too many rows are not searched
     let eligible: Vec<bool> = block.columns.iter().map(|c| o.codecs.codec_for(&c.name) == ColumnCodec::AUTO && n <= MAX_ROWS && !matches!(c.data, ColumnData::StrDict { .. } | ColumnData::Bool(_))).collect();
@@ -183,7 +207,7 @@ pub fn write_explained(block: &DataBlock, opts: &RuleOptions) -> Result<(Vec<u8>
             best
         }).collect();
         for (i, f) in found.into_iter().enumerate() {
-            if let Some(p) = f { size[i] = p.len(); desc[i] = Some(describe_payload(&p, n, &[])); choice[i] = Choice::Rule { payload: p, deps: vec![] }; }
+            if let Some(p) = f { size[i] = p.len(); desc[i] = Some(describe_payload(&p, n, &[])); choice[i] = Choice::Rule { payload: p }; }
         }
     }
 
@@ -222,7 +246,7 @@ pub fn write_explained(block: &DataBlock, opts: &RuleOptions) -> Result<(Vec<u8>
             size[c.target] = len;
             let names: Vec<&str> = c.deps.iter().map(|&d| block.columns[d].name.as_str()).collect();
             desc[c.target] = Some(describe_payload(&p, n, &names));
-            choice[c.target] = Choice::Rule { payload: p, deps: c.deps.clone() };
+            choice[c.target] = Choice::Rule { payload: p };
         }
     }
 
@@ -231,16 +255,24 @@ pub fn write_explained(block: &DataBlock, opts: &RuleOptions) -> Result<(Vec<u8>
         rule: match &choice[i] { Choice::V4 => None, Choice::Rule { payload, .. } => Some((desc[i].clone().unwrap_or_default(), payload.len())) },
     }).collect();
     let any_rule = choice.iter().any(|c| matches!(c, Choice::Rule { .. }));
-    let _ = choice.iter().map(|c| if let Choice::Rule { deps, .. } = c { deps.len() } else { 0 }).sum::<usize>();
     let entries: Vec<(u8, u8, bool, &[u8])> = (0..ncols).map(|i| match &choice[i] {
         Choice::V4 => (base[i].0, base[i].1, base[i].2, base[i].3.as_slice()),
         Choice::Rule { payload, .. } => (TRANSFORM_RULE, 0u8, false, payload.as_slice()),
     }).collect();
-    Ok((assemble(if any_rule { VERSION_V5 } else { crate::v4::VERSION_V4 }, block, o, &entries)?, report))
+    let (used, dict_idx) = dicts_used(block, o, &entries)?;
+    let bytes = if any_rule {
+        serialize_v6(block, &entries, &used, &dict_idx)
+    } else if o.compact_directory {
+        // no rule won: exactly the bytes of `v4::write` with these options (container version 5)
+        crate::v4::serialize_v5(block, &base, &used, &dict_idx)
+    } else {
+        serialize_v4(block, &entries, &used, &dict_idx)
+    };
+    Ok((bytes, report))
 }
 
-/// The version-4 file layout (with `version` 4 this is exactly what `v4::write` produces).
-fn assemble(version: u16, block: &DataBlock, o: &CompactOptions, enc: &[(u8, u8, bool, &[u8])]) -> Result<Vec<u8>, KoreError> {
+/// Dictionaries actually used, in column order, and the dictionary index per column (as `v4::write`).
+fn dicts_used(block: &DataBlock, o: &CompactOptions, enc: &[(u8, u8, bool, &[u8])]) -> Result<(Vec<SharedDict>, Vec<u8>), KoreError> {
     let mut used: Vec<SharedDict> = vec![];
     let mut dict_idx = vec![NO_DICT; block.columns.len()];
     for (i, (col, e)) in block.columns.iter().zip(enc).enumerate() {
@@ -250,13 +282,18 @@ fn assemble(version: u16, block: &DataBlock, o: &CompactOptions, enc: &[(u8, u8,
         if k >= NO_DICT as usize { return Err(bad("too many dictionaries in one file")); }
         dict_idx[i] = k as u8;
     }
+    Ok((used, dict_idx))
+}
+
+/// The version-4 file layout: exactly what `v4::write` produces (no rule column may be present).
+fn serialize_v4(block: &DataBlock, enc: &[(u8, u8, bool, &[u8])], used: &[SharedDict], dict_idx: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&version.to_le_bytes());
+    out.extend_from_slice(&crate::v4::VERSION_V4.to_le_bytes());
     out.extend_from_slice(&(block.columns.len() as u32).to_le_bytes());
     out.extend_from_slice(&(block.num_rows as u64).to_le_bytes());
     out.extend_from_slice(&(used.len() as u16).to_le_bytes());
-    for d in &used {
+    for d in used {
         out.extend_from_slice(&d.id());
         out.extend_from_slice(&(d.content().len() as u32).to_le_bytes());
     }
@@ -273,7 +310,38 @@ fn assemble(version: u16, block: &DataBlock, o: &CompactOptions, enc: &[(u8, u8,
     let dir_crc = compress::crc32(&out);
     out.extend_from_slice(&dir_crc.to_le_bytes());
     for (_, _, _, payload) in enc { out.extend_from_slice(payload); }
-    Ok(out)
+    out
+}
+
+/// Version 6: the version-5 layout; a rule column has the codec byte `CODEC_RULE` and no dict byte.
+fn serialize_v6(block: &DataBlock, enc: &[(u8, u8, bool, &[u8])], used: &[SharedDict], dict_idx: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(&VERSION_V6.to_le_bytes());
+    put_varint(&mut out, block.columns.len() as u64);
+    put_varint(&mut out, block.num_rows as u64);
+    put_varint(&mut out, used.len() as u64);
+    for d in used {
+        out.extend_from_slice(&d.id());
+        put_varint(&mut out, d.content().len() as u64);
+    }
+    for (i, (col, (t, s, _, payload))) in block.columns.iter().zip(enc).enumerate() {
+        put_varint(&mut out, col.name.len() as u64);
+        out.extend_from_slice(col.name.as_bytes());
+        out.push(codec::dtype_of(&col.data) as u8);
+        if *t == TRANSFORM_RULE {
+            out.push(CODEC_RULE);
+        } else {
+            out.push(*t | (*s << 4));
+            if *s == STAGE_ZSTD_DICT { out.push(dict_idx[i]); }
+        }
+        put_varint(&mut out, payload.len() as u64);
+        out.extend_from_slice(&compress::crc32(payload).to_le_bytes());
+    }
+    let dir_crc = compress::crc32(&out);
+    out.extend_from_slice(&dir_crc.to_le_bytes());
+    for (_, _, _, payload) in enc { out.extend_from_slice(payload); }
+    out
 }
 
 fn describe_payload(p: &[u8], n: usize, names: &[&str]) -> String {
@@ -293,31 +361,51 @@ fn take<'a>(d: &'a [u8], pos: &mut usize, n: usize) -> Result<&'a [u8], KoreErro
     Ok(s)
 }
 
+/// A minimal LEB128 varint of the header/directory (as version 5).
+fn take_varint(d: &[u8], pos: &mut usize) -> Result<u64, KoreError> {
+    let start = *pos;
+    let v = codec::get_varint(d, pos).map_err(|_| bad("truncated .kore data"))?;
+    if stream::varint_len(v) != *pos - start { return Err(bad("non-minimal varint in file header/directory")); }
+    Ok(v)
+}
+
 fn parse_header(data: &[u8]) -> Result<(usize, Vec<([u8; 32], u32)>, Vec<Raw>, usize), KoreError> {
     let mut pos = 0usize;
     if take(data, &mut pos, 4)? != MAGIC { return Err(bad("invalid KORE magic bytes")); }
     let version = u16::from_le_bytes(take(data, &mut pos, 2)?.try_into().unwrap());
-    if version != VERSION_V5 { return Err(bad(format!("unsupported version {version}"))); }
-    let num_cols = u32::from_le_bytes(take(data, &mut pos, 4)?.try_into().unwrap()) as usize;
-    let num_rows = u64::from_le_bytes(take(data, &mut pos, 8)?.try_into().unwrap());
-    let nd = u16::from_le_bytes(take(data, &mut pos, 2)?.try_into().unwrap()) as usize;
-    if nd > (data.len() - pos) / 36 { return Err(bad("implausible dictionary count")); }
+    if version != VERSION_V6 { return Err(bad(format!("unsupported version {version}"))); }
+    let num_cols = take_varint(data, &mut pos)?;
+    let num_rows = take_varint(data, &mut pos)?;
+    let nd = take_varint(data, &mut pos)?;
+    if nd > ((data.len() - pos) / 33) as u64 || nd > u16::MAX as u64 { return Err(bad("implausible dictionary count")); }
+    let nd = nd as usize;
     let mut dicts = Vec::with_capacity(nd);
     for _ in 0..nd {
         let id: [u8; 32] = take(data, &mut pos, 32)?.try_into().unwrap();
-        let len = u32::from_le_bytes(take(data, &mut pos, 4)?.try_into().unwrap());
+        let len = u32::try_from(take_varint(data, &mut pos)?).map_err(|_| bad("implausible dictionary length"))?;
         dicts.push((id, len));
     }
-    if num_cols > (data.len() - pos) / MIN_ENTRY { return Err(bad("implausible column count")); }
-    let mut dir = Vec::with_capacity(num_cols);
+    // name_len + dtype + codec + payload_len + crc, with an empty name
+    if num_cols > ((data.len() - pos) / 8) as u64 { return Err(bad("implausible column count")); }
+    let mut dir = Vec::with_capacity(num_cols as usize);
     for _ in 0..num_cols {
-        let name_len = u16::from_le_bytes(take(data, &mut pos, 2)?.try_into().unwrap()) as usize;
+        let name_len = usize::try_from(take_varint(data, &mut pos)?).map_err(|_| bad("implausible name length"))?;
         let name = String::from_utf8(take(data, &mut pos, name_len)?.to_vec()).map_err(|_| bad("invalid UTF-8 column name"))?;
-        let hdr = take(data, &mut pos, 4)?;
+        let hdr = take(data, &mut pos, 2)?;
         let dtype = DType::try_from(hdr[0])?;
-        let len = u64::from_le_bytes(take(data, &mut pos, 8)?.try_into().unwrap());
+        let (transform, stage, dict) = if hdr[1] == CODEC_RULE {
+            (TRANSFORM_RULE, 0u8, NO_DICT)
+        } else if hdr[1] & 0x80 != 0 {
+            return Err(bad("reserved codec bit set"));
+        } else {
+            let (t, s) = (hdr[1] & 0x0F, hdr[1] >> 4);
+            let dict = if s == STAGE_ZSTD_DICT { take(data, &mut pos, 1)?[0] } else { NO_DICT };
+            if s == STAGE_ZSTD_DICT && dict == NO_DICT { return Err(bad("dictionary index out of range")); }
+            (t, s, dict)
+        };
+        let len = take_varint(data, &mut pos)?;
         let crc = u32::from_le_bytes(take(data, &mut pos, 4)?.try_into().unwrap());
-        dir.push(Raw { name, dtype, transform: hdr[1], stage: hdr[2], dict: hdr[3], len, crc });
+        dir.push(Raw { name, dtype, transform, stage, dict, len, crc });
     }
     let covered = pos;
     let dir_crc = u32::from_le_bytes(take(data, &mut pos, 4)?.try_into().unwrap());
@@ -342,7 +430,7 @@ fn parse_header(data: &[u8]) -> Result<(usize, Vec<([u8; 32], u32)>, Vec<Raw>, u
     Ok((num_rows, dicts, dir, pos))
 }
 
-/// Per column of a version-5 file: name, dtype, payload bytes and the rule (None = version-4 payload).
+/// Per column of a version-6 file: name, dtype, payload bytes and the rule (None = version-4 payload).
 /// Checks the header and payload checksums, decodes nothing.
 pub fn describe(data: &[u8]) -> Result<Vec<(String, DType, usize, Option<String>)>, KoreError> {
     let (n, _, dir, mut pos) = parse_header(data)?;
@@ -366,6 +454,18 @@ pub fn read(data: &[u8], wanted: Option<&[&str]>, dicts: &DictSet) -> Result<Dat
         Ok(r) => r,
         Err(_) => Err(bad("corrupt .kore data")),
     }
+}
+
+/// Rows `rows` of `wanted` (all columns if None). A rule column is regenerated from its whole sequence
+/// (predictors, lags and derived columns need the earlier rows), so the requested columns and their
+/// sources are decoded and verified in full and then cut to `rows`: same values and errors as `read`
+/// followed by a cut, not faster than `read`.
+pub fn read_rows(data: &[u8], wanted: Option<&[&str]>, rows: std::ops::Range<usize>, dicts: &DictSet) -> Result<DataBlock, KoreError> {
+    let b = read(data, wanted, dicts)?;
+    if rows.start > rows.end || rows.end > b.num_rows {
+        return Err(bad(format!("rows {}..{} out of range: the file has {} rows", rows.start, rows.end, b.num_rows)));
+    }
+    Ok(crate::reader::slice_rows(b, rows))
 }
 
 fn read_inner(data: &[u8], wanted: Option<&[&str]>, dicts: &DictSet) -> Result<DataBlock, KoreError> {

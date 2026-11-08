@@ -227,7 +227,7 @@ fn rules_with_shared_dictionary_and_projection() {
     let d = kore_store::SharedDict::from_content(&b"free text note number about the order ".repeat(40)).unwrap();
     let o = CompactOptions::default().with_dict("note", d.clone()).with_rules();
     let bytes = KoreWriter::to_bytes_rules(&b, &o).unwrap();
-    assert!(rules::is_v5(&bytes));
+    assert!(rules::is_v6(&bytes));
     let mut ds = DictSet::new();
     ds.add(d);
     same(&b, &KoreReader::from_bytes_with_dicts(&bytes, &ds).unwrap());
@@ -244,21 +244,21 @@ fn rules_with_shared_dictionary_and_projection() {
 fn old_readers_refuse_rule_mode_files() {
     let b = gen::orders(2000, 11);
     let bytes = KoreWriter::to_bytes_rules(&b, &RuleOptions::default()).unwrap();
-    assert!(rules::is_v5(&bytes));
+    assert!(rules::is_v6(&bytes));
     let e = v4::read(&bytes, None, &DictSet::new()).unwrap_err().to_string();
-    assert!(e.contains("unsupported version 5"), "{e}");
+    assert!(e.contains("unsupported version 6"), "{e}");
     let e = kore_store::v3::read(&bytes, None).unwrap_err().to_string();
     assert!(!e.is_empty());
     assert!(v4::info(&bytes).is_err());
     // the committed fixture (written by this code) still reads, and old readers refuse it too
-    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rules_v5.kore");
+    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rules_v6.kore");
     let fx = std::fs::read(p).unwrap();
-    assert!(rules::is_v5(&fx));
+    assert!(rules::is_v6(&fx));
     same(&rules_fixture_block(), &KoreReader::from_bytes(&fx).unwrap());
-    assert!(v4::read(&fx, None, &DictSet::new()).unwrap_err().to_string().contains("unsupported version 5"));
+    assert!(v4::read(&fx, None, &DictSet::new()).unwrap_err().to_string().contains("unsupported version 6"));
 }
 
-/// The block of tests/fixtures/rules_v5.kore.
+/// The block of tests/fixtures/rules_v6.kore.
 fn rules_fixture_block() -> DataBlock {
     let n = 300;
     block(vec![
@@ -272,7 +272,7 @@ fn rules_fixture_block() -> DataBlock {
 #[test]
 fn fixture_bytes_are_stable() {
     let bytes = KoreWriter::to_bytes_rules(&rules_fixture_block(), &RuleOptions::default()).unwrap();
-    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rules_v5.kore");
+    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rules_v6.kore");
     if std::env::var("KORE_WRITE_RULES_FIXTURE").is_ok() { std::fs::write(&p, &bytes).unwrap(); }
     assert_eq!(std::fs::read(p).unwrap(), bytes, "rule-mode writer output changed");
 }
@@ -289,7 +289,7 @@ fn small_rule_file() -> (DataBlock, Vec<u8>) {
         Column::str_col("msg", (0..n).map(|i| Some(format!("job {} took {}s", 500 + i, r.below(9)))).collect()),
     ]);
     let bytes = KoreWriter::to_bytes_rules(&b, &RuleOptions::default()).unwrap();
-    assert!(rules::is_v5(&bytes));
+    assert!(rules::is_v6(&bytes));
     (b, bytes)
 }
 
@@ -316,21 +316,36 @@ fn corruption_and_truncation_never_panic_or_return_wrong_data() {
     check(&bytes);
 }
 
+fn varint(d: &[u8], pos: &mut usize) -> u64 {
+    let (mut v, mut sh) = (0u64, 0);
+    loop { let b = d[*pos]; *pos += 1; v |= ((b & 0x7f) as u64) << sh; if b & 0x80 == 0 { return v; } sh += 7; }
+}
+
+/// Version-6 directory: per column (offset of its payload CRC, payload length), the end of the directory.
+fn v6_dir(d: &[u8]) -> (Vec<(usize, usize)>, usize) {
+    let mut pos = 6;
+    let ncols = varint(d, &mut pos) as usize;
+    let _rows = varint(d, &mut pos);
+    let nd = varint(d, &mut pos) as usize;
+    for _ in 0..nd { pos += 32; varint(d, &mut pos); }
+    let mut ents = vec![];
+    for _ in 0..ncols {
+        let nl = varint(d, &mut pos) as usize;
+        pos += nl + 1;
+        let codec = d[pos];
+        pos += 1;
+        if codec != 0x80 && codec >> 4 == 4 { pos += 1; }
+        let len = varint(d, &mut pos) as usize;
+        ents.push((pos, len));
+        pos += 4;
+    }
+    (ents, pos)
+}
+
 /// Rewrite the payload CRCs and the directory CRC so that a payload change reaches the rule decoder.
 fn recrc(d: &mut Vec<u8>) {
     let crc32 = kore_store::compress::crc32;
-    let ncols = u32::from_le_bytes(d[6..10].try_into().unwrap()) as usize;
-    let nd = u16::from_le_bytes(d[18..20].try_into().unwrap()) as usize;
-    let mut pos = 20 + 36 * nd;
-    let mut ents = vec![];
-    for _ in 0..ncols {
-        let nl = u16::from_le_bytes(d[pos..pos + 2].try_into().unwrap()) as usize;
-        pos += 2 + nl + 4;
-        let len = u64::from_le_bytes(d[pos..pos + 8].try_into().unwrap()) as usize;
-        ents.push((pos + 8, len));
-        pos += 12;
-    }
-    let dir_end = pos;
+    let (ents, dir_end) = v6_dir(d);
     let mut p = dir_end + 4;
     for (crc_at, len) in ents {
         let c = crc32(&d[p..p + len]);
@@ -344,11 +359,7 @@ fn recrc(d: &mut Vec<u8>) {
 #[test]
 fn payload_garbage_with_valid_crcs_is_refused_or_exact() {
     let (b, bytes) = small_rule_file();
-    let ncols = b.columns.len();
-    let nd = u16::from_le_bytes(bytes[18..20].try_into().unwrap()) as usize;
-    let mut pos = 20 + 36 * nd;
-    for _ in 0..ncols { let nl = u16::from_le_bytes(bytes[pos..pos + 2].try_into().unwrap()) as usize; pos += 2 + nl + 16; }
-    let payload_start = pos + 4;
+    let payload_start = v6_dir(&bytes).1 + 4;
     let (mut ok_exact, mut refused) = (0, 0);
     for i in payload_start..bytes.len() {
         for mask in [0x01u8, 0x10, 0xff] {
@@ -394,4 +405,48 @@ fn explicit_codecs_are_respected_and_options_checked() {
     let (x, r2) = rules::write_explained(&o2, &RuleOptions::default().cross_only()).unwrap();
     assert!(rule_of(&r2, "ordered_at").is_none());
     same(&o2, &KoreReader::from_bytes(&x).unwrap());
+}
+
+#[test]
+fn no_rule_output_equals_every_v4_option_set() {
+    // when no rule wins, the bytes are those of `to_bytes_compact` with the same options: v4, the
+    // version-5 compact directory, quick(), fast() and level 19
+    let mut b = gen::random(3000, 21);
+    b.columns.retain(|c| c.name != "f64_unit");
+    for o in [CompactOptions::default(), CompactOptions::default().with_compact_directory(true), CompactOptions::quick(),
+              CompactOptions::fast(), CompactOptions::default().with_zstd_level(19), CompactOptions::quick().with_compact_directory(true)] {
+        let want = KoreWriter::to_bytes_compact(&b, &o).unwrap();
+        let got = KoreWriter::to_bytes_rules(&b, &o.clone().with_rules()).unwrap();
+        assert_eq!(got, want, "{o:?}");
+    }
+    // with rules winning, other option sets still produce version 6 files that read back exactly
+    let s = gen::sensors(3000, 22);
+    for o in [CompactOptions::default().with_compact_directory(true), CompactOptions::quick(), CompactOptions::default().with_zstd_level(19)] {
+        let bytes = KoreWriter::to_bytes_rules(&s, &o.with_rules()).unwrap();
+        assert!(rules::is_v6(&bytes));
+        same(&s, &KoreReader::from_bytes(&bytes).unwrap());
+    }
+}
+
+#[test]
+fn partial_row_reads_equal_the_full_read() {
+    let b = gen::orders(3000, 31);
+    let bytes = KoreWriter::to_bytes_rules(&b, &RuleOptions::default()).unwrap();
+    assert!(rules::is_v6(&bytes));
+    let full = KoreReader::from_bytes(&bytes).unwrap();
+    for (lo, hi) in [(0usize, 0usize), (0, 1), (17, 18), (100, 2500), (2999, 3000), (0, 3000)] {
+        for cols in [None, Some(&["total_cents", "country"][..]), Some(&["line_total"][..])] {
+            let got = KoreReader::from_bytes_rows_with_dicts(&bytes, cols, lo..hi, &DictSet::new()).unwrap();
+            assert_eq!(got.num_rows, hi - lo);
+            let names: Vec<&str> = cols.map(|c| c.to_vec()).unwrap_or_else(|| full.columns.iter().map(|c| c.name.as_str()).collect());
+            assert_eq!(got.columns.len(), names.len());
+            for (c, name) in got.columns.iter().zip(&names) {
+                assert_eq!(&c.name, name);
+                let f = &full.column(name).unwrap().data;
+                for r in lo..hi { assert_eq!(c.data.get_value(r - lo), f.get_value(r), "{name} row {r}"); }
+            }
+        }
+    }
+    assert!(KoreReader::from_bytes_rows_with_dicts(&bytes, None, 10..3001, &DictSet::new()).is_err());
+    assert!(KoreReader::from_bytes_rows_with_dicts(&bytes, None, 5..4, &DictSet::new()).is_err());
 }

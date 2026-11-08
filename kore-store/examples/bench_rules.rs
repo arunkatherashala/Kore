@@ -45,6 +45,34 @@ fn events(path: &Path, n: usize) -> DataBlock {
     DataBlock::new(cols).unwrap()
 }
 
+/// Inverse of `dump`: a block from Arrow buffers (first `n` rows; `n` = 0 means all).
+fn load_dump(dir: &Path, n: usize) -> DataBlock {
+    let meta: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("meta.json")).unwrap()).unwrap();
+    let rows = meta["rows"].as_u64().unwrap() as usize;
+    let take = if n == 0 { rows } else { n.min(rows) };
+    let mut cols = vec![];
+    for (k, c) in meta["columns"].as_array().unwrap().iter().enumerate() {
+        let valid = std::fs::read(dir.join(format!("{k}.valid"))).unwrap();
+        let values = std::fs::read(dir.join(format!("{k}.values"))).unwrap();
+        let ok = |i: usize| valid[i / 8] >> (i % 8) & 1 == 1;
+        let name = c["name"].as_str().unwrap();
+        let w = |i: usize| u64::from_le_bytes(values[i * 8..i * 8 + 8].try_into().unwrap());
+        let data = match c["type"].as_str().unwrap() {
+            "int64" => ColumnData::Int64((0..take).map(|i| if ok(i) { Some(w(i) as i64) } else { None }).collect()),
+            "float64" => ColumnData::Float64((0..take).map(|i| if ok(i) { Some(f64::from_bits(w(i))) } else { None }).collect()),
+            "bool" => ColumnData::Bool((0..take).map(|i| if ok(i) { Some(values[i / 8] >> (i % 8) & 1 == 1) } else { None }).collect()),
+            "large_string" => {
+                let off = std::fs::read(dir.join(format!("{k}.offsets"))).unwrap();
+                let o = |i: usize| i64::from_le_bytes(off[i * 8..i * 8 + 8].try_into().unwrap()) as usize;
+                ColumnData::Str((0..take).map(|i| if ok(i) { Some(String::from_utf8(values[o(i)..o(i + 1)].to_vec()).unwrap()) } else { None }).collect())
+            }
+            t => panic!("type {t}"),
+        };
+        cols.push(Column { name: name.to_string(), data });
+    }
+    DataBlock::new(cols).unwrap()
+}
+
 fn median(mut v: Vec<f64>) -> f64 { v.sort_by(|a, b| a.partial_cmp(b).unwrap()); if v.is_empty() { f64::NAN } else { v[v.len() / 2] } }
 
 /// Arrow buffers per column: validity bitmap (1 = valid), values (i64/f64 LE, bool bits) or int64 offsets
@@ -79,6 +107,10 @@ fn dump(b: &DataBlock, dir: &Path) -> Value {
     m
 }
 
+fn set_name(set: &str) -> String {
+    match set.strip_prefix("dump:") { Some(d) => Path::new(d).file_name().unwrap().to_string_lossy().to_string(), None => set.to_string() }
+}
+
 fn same(a: &DataBlock, b: &DataBlock) -> bool {
     a.num_rows == b.num_rows && a.columns.len() == b.columns.len()
         && a.columns.iter().zip(&b.columns).all(|(x, y)| x.name == y.name && rules::digest(&x.data) == rules::digest(&y.data))
@@ -104,6 +136,7 @@ fn main() {
                 "random" => gen::random(n, 20261107),
                 // the control without the uniform-[0,1) doubles: no column has a rule (worst case of rule mode)
                 "random_norule" => { let mut b = gen::random(n, 20261107); b.columns.retain(|c| c.name != "f64_unit"); b }
+                d if d.starts_with("dump:") => load_dump(Path::new(&d[5..]), n),
                 "events" => events(Path::new(&get("--events").expect("--events JSONL")), n),
                 s => panic!("unknown set {s}"),
             };
@@ -130,16 +163,32 @@ fn main() {
             let (rb19, _) = rules::write_explained(&b, &r_19).unwrap();
             let e_r_19 = t19.elapsed().as_secs_f64();
             let (_, report) = rules::write_explained(&b, &r_def).unwrap();
-            // paired decode
-            let (mut d_v4, mut d_r, mut d_ratio) = (vec![], vec![], vec![]);
+            // paired decode: full read and one derived column, of the v4 default, v4 level 19 and rule-mode
+            // (default and level 19) files, in rotating order per repetition
+            let (_, report19) = rules::write_explained(&b, &r_19).unwrap();
+            let derived = report19.iter().find(|c| c.rule.as_ref().map_or(false, |r| r.0.starts_with('=')))
+                .or_else(|| report19.iter().find(|c| c.rule.is_some())).map(|c| c.name.clone());
+            let files: [&Vec<u8>; 4] = [&v4b, &v4b19, &rb, &rb19];
+            let mut full: Vec<Vec<f64>> = vec![vec![]; 4];
+            let mut proj: Vec<Vec<f64>> = vec![vec![]; 4];
             for rep in 0..reps {
-                let mut dv = || { let t = Instant::now(); let x = KoreReader::from_bytes(&v4b).unwrap(); (t.elapsed().as_secs_f64(), x) };
-                let mut dr = || { let t = Instant::now(); let x = KoreReader::from_bytes(&rb).unwrap(); (t.elapsed().as_secs_f64(), x) };
-                let ((a, x), (c, y)) = if rep % 2 == 0 { let p = dv(); (p, dr()) } else { let q = dr(); (dv(), q) };
-                assert!(same(&b, &x) && same(&b, &y), "round trip failed");
-                d_v4.push(a); d_r.push(c); d_ratio.push(c / a);
+                for k in 0..4 {
+                    let f = (k + rep) % 4;
+                    let t = Instant::now();
+                    let x = KoreReader::from_bytes(files[f]).unwrap();
+                    full[f].push(t.elapsed().as_secs_f64());
+                    assert!(same(&b, &x), "round trip failed");
+                    if let Some(name) = &derived {
+                        let t = Instant::now();
+                        let y = KoreReader::from_bytes_columns(files[f], &[name.as_str()]).unwrap();
+                        proj[f].push(t.elapsed().as_secs_f64());
+                        assert_eq!(rules::digest(&y.columns[0].data), rules::digest(&b.column(name).unwrap().data));
+                    }
+                }
             }
-            assert!(same(&b, &KoreReader::from_bytes(&rb19).unwrap()));
+            let ratio = |a: &Vec<f64>, c: &Vec<f64>| -> Vec<f64> { a.iter().zip(c).map(|(x, y)| x / y).collect() };
+            let (d_v4, d_r) = (full[0].clone(), full[2].clone());
+            let d_ratio = ratio(&full[2], &full[0]);
             assert!(rb.len() <= v4b.len() && rb19.len() <= v4b19.len());
             let raw_bytes: usize = b.columns.iter().map(|c| match &c.data {
                 ColumnData::Int64(v) => v.len() * 8, ColumnData::Float64(v) => v.len() * 8, ColumnData::Bool(v) => v.len().div_ceil(8),
@@ -149,17 +198,25 @@ fn main() {
             let mut res = json!({
                 "set": set, "rows": b.num_rows, "cols": b.columns.len(), "values": values, "raw_bytes": raw_bytes,
                 "v4_default": v4b.len(), "v4_19": v4b19.len(), "rules_default": rb.len(), "rules_19": rb19.len(),
-                "rules_is_v5": rules::is_v5(&rb),
+                "rules_is_v6": rules::is_v6(&rb), "rules_19_is_v6": rules::is_v6(&rb19),
                 "encode_v4_s": e_v4, "encode_rules_s": e_r, "encode_ratio_median": median(e_ratio.clone()), "encode_ratio": e_ratio,
                 "encode_v4_19_s": e_v4_19, "encode_rules_19_s": e_r_19,
                 "decode_v4_s": d_v4, "decode_rules_s": d_r, "decode_ratio_median": median(d_ratio.clone()), "decode_ratio": d_ratio,
                 "columns": cols,
+                "columns_19": report19.iter().map(|c| json!({"name": c.name, "v4_bytes": c.v4_bytes,
+                    "rule": c.rule.as_ref().map(|r| r.0.clone()), "rule_bytes": c.rule.as_ref().map(|r| r.1)})).collect::<Vec<Value>>(),
+                "read_full_s": {"v4_default": full[0], "v4_19": full[1], "rules_default": full[2], "rules_19": full[3]},
+                "read_col": derived, "read_col_s": {"v4_default": proj[0], "v4_19": proj[1], "rules_default": proj[2], "rules_19": proj[3]},
+                "read_full_ratio_rules19_v4_19": ratio(&full[3], &full[1]), "read_full_ratio_rules19_v4_default": ratio(&full[3], &full[0]),
+                "read_col_ratio_rules19_v4_19": ratio(&proj[3], &proj[1]), "read_col_ratio_rules19_v4_default": ratio(&proj[3], &proj[0]),
+                "read_full_ratio_v4_19_v4_default": ratio(&full[1], &full[0]),
             });
             eprintln!("[{set} {n}] v4 {} B ({:.3} B/value), v4-19 {} B, rules {} B ({:.3} B/value), rules-19 {} B; encode x{:.2}, decode x{:.2}",
                 v4b.len(), v4b.len() as f64 / values, v4b19.len(), rb.len(), rb.len() as f64 / values, rb19.len(), median(e_ratio), median(d_ratio));
             for c in &report { eprintln!("    {:<28} v4 {:>10}  {}", c.name, c.v4_bytes, c.rule.as_ref().map_or("-".to_string(), |r| format!("{} B  {}", r.1, r.0))); }
-            if !no_dump { res["dump"] = dump(&b, &out.join(format!("dump_{set}_{n}"))); }
-            std::fs::write(out.join(format!("store_{set}_{n}.json")), serde_json::to_string_pretty(&res).unwrap()).unwrap();
+            res["set"] = json!(set_name(set));
+            if !no_dump && !set.starts_with("dump:") { res["dump"] = dump(&b, &out.join(format!("dump_{set}_{n}"))); }
+            std::fs::write(out.join(format!("store_{}_{n}.json", set_name(set))), serde_json::to_string_pretty(&res).unwrap()).unwrap();
         }
     }
 }
