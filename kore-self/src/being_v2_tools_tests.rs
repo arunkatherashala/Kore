@@ -119,3 +119,57 @@ fn energy_cap_of_the_controller_stops_a_world_v2_run() {
     assert!((80..110).contains(&spent), "{spent}");
     assert!(audit_tools(o).contains(&"controller_max_energy_per_run".to_string()));
 }
+
+#[test]
+fn the_b13_chooser_needs_its_controller_key_and_is_fixed_at_creation() {
+    // not allowed (key missing): the run happens with the B1 estimate, the request is refused and audited
+    let o = "w2-b13-off";
+    let dir = setup(o);
+    allow(&dir);
+    std::fs::write(dir.join("controller.txt"), "max_steps_per_run = 60\n").unwrap();
+    let (e, t) = call(o, "being_run_v2", json!({"steps": 30, "world_seed": 2, "families": 6, "budget": 1500, "chooser": "context"}));
+    assert!(!e, "{t}");
+    assert!(audit_tools(o).contains(&"controller_context_chooser".to_string()), "{:?}", audit_tools(o));
+    let rows: Vec<EventRow> = log_tools::open(o).unwrap().open_latest().rows();
+    assert!(rows.iter().any(|e| e.tags.contains("w2_genesis") && !e.tags.contains("w2_lin")));
+    // a bad value makes controller.txt invalid: fail closed, the run is refused
+    let o = "w2-b13-bad";
+    let dir = setup(o);
+    allow(&dir);
+    std::fs::write(dir.join("controller.txt"), "context_chooser = maybe\n").unwrap();
+    let (e, t) = call(o, "being_run_v2", json!({"steps": 5, "chooser": "context"}));
+    assert!(e && t.contains("fail closed"), "{t}");
+    // allowed: the being is created with the switch, every decision replays from the log
+    let o = "w2-b13-on";
+    let dir = setup(o);
+    allow(&dir);
+    std::fs::write(dir.join("controller.txt"), "max_steps_per_run = 60\ncontext_chooser = on\n").unwrap();
+    let (e, t) = call(o, "being_run_v2", json!({"steps": 40, "world_seed": 2, "families": 6, "budget": 1500, "chooser": "context"}));
+    assert!(!e, "{t}");
+    assert!(!audit_tools(o).contains(&"controller_context_chooser".to_string()));
+    let rows: Vec<EventRow> = log_tools::open(o).unwrap().open_latest().rows();
+    assert!(rows.iter().any(|e| e.tags.contains("w2_genesis") && e.tags.contains("w2_lin:")));
+    let (e, st) = call(o, "being_status_v2", json!({}));
+    assert!(!e, "{st}");
+    let s: Value = serde_json::from_str(&st).unwrap();
+    assert_eq!(s["replay"]["decisions"], 40);
+    assert_eq!(s["replay"]["decisions"], s["replay"]["rederived_identically"]);
+    // a later plain run keeps the switch the being was created with
+    let (e, t) = call(o, "being_run_v2", json!({"steps": 10, "world_seed": 2, "families": 6, "budget": 1500}));
+    assert!(!e, "{t}");
+    let (_, st) = call(o, "being_status_v2", json!({}));
+    let s: Value = serde_json::from_str(&st).unwrap();
+    assert_eq!(s["replay"]["decisions"], 50);
+    assert_eq!(s["replay"]["decisions"], s["replay"]["rederived_identically"]);
+    // a being created without it cannot get it later
+    let o2 = "w2-b13-late";
+    let dir = setup(o2);
+    allow(&dir);
+    std::fs::write(dir.join("controller.txt"), "max_steps_per_run = 60\ncontext_chooser = on\n").unwrap();
+    let (e, _) = call(o2, "being_run_v2", json!({"steps": 5, "world_seed": 2, "families": 6, "budget": 1500}));
+    assert!(!e);
+    let (e, t) = call(o2, "being_run_v2", json!({"steps": 5, "world_seed": 2, "families": 6, "budget": 1500, "chooser": "context"}));
+    assert!(!e, "{t}");
+    assert!(audit_tools(o2).contains(&"controller_fixed_at_creation".to_string()), "{:?}", audit_tools(o2));
+    let _ = dir;
+}

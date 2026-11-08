@@ -169,6 +169,10 @@ pub struct ModelChooser {
     pub advice: AdviceCfg,
     /// Track B11: which skip test is used (default: the B1 test, bit for bit).
     pub skip_rule: SkipRule,
+    /// Track B13 (default off): the success estimate of every option is its (domain, difficulty, strategy)
+    /// cell shrunk toward a shared linear estimate over domain and difficulty, with LinUCB's optimism
+    /// (`linval.rs`). Ignored while advice is in use or the model adapts (those keep the B1 estimate).
+    pub lin: Option<super::linval::LinCfg>,
 }
 
 /// Track B11: the skip test of the planner.
@@ -247,7 +251,7 @@ pub const DEFAULT_NOVELTY: f64 = 0.25;
 
 impl ModelChooser {
     pub fn new(beta: f64) -> ModelChooser {
-        ModelChooser { beta, skip_frac: DEFAULT_SKIP_FRAC, no_discovered: false, curiosity: DEFAULT_CURIOSITY, novelty: DEFAULT_NOVELTY, advice: AdviceCfg::default(), skip_rule: SkipRule::Rate }
+        ModelChooser { beta, skip_frac: DEFAULT_SKIP_FRAC, no_discovered: false, curiosity: DEFAULT_CURIOSITY, novelty: DEFAULT_NOVELTY, advice: AdviceCfg::default(), skip_rule: SkipRule::Rate, lin: None }
     }
 
     /// The planner of a logged being: its optimism from the genesis event and its advice mode.
@@ -264,7 +268,30 @@ impl ModelChooser {
         }
     }
 
+    /// Track B13: the linear fit of the being's own evidence in the first world.
+    pub fn lin_fit(&self, st: &BeingState) -> Option<super::linval::LinFit> {
+        use super::linval::{CellObs, Dims, LinFit};
+        let lc = self.lin.filter(|_| self.advice.mode == AdviceMode::Off && !st.model.adaptive())?;
+        let mut cells = vec![];
+        for d in super::world::ALL_DOMAINS_X {
+            for k in 1..=5u8 {
+                for &s in self.strategies(st) {
+                    let (n, succ) = st.model.cell_counts(d, k, s);
+                    if n > 0.0 {
+                        cells.push(CellObs { strat: s.idx(), fam: d.idx(), diff: k, ftype: None, ctx: 0, n, succ });
+                    }
+                }
+            }
+        }
+        Some(LinFit::fit(lc, Dims { fams: super::world::ALL_DOMAINS_X.len(), diffs: true, types: 0 }, STRATEGIES_EXT.len(), &cells))
+    }
+
     pub fn candidates(&self, st: &BeingState, offers: &[Offer]) -> Vec<Cand> {
+        self.candidates_lin(st, offers, self.lin_fit(st).as_ref()).into_iter().map(|(c, _)| c).collect()
+    }
+
+    /// The candidates with the B13 estimate each rests on (None: the B1 estimate).
+    pub fn candidates_lin(&self, st: &BeingState, offers: &[Offer], fit: Option<&super::linval::LinFit>) -> Vec<(Cand, Option<super::linval::LinEst>)> {
         let mut v = vec![];
         let full = st.model.mode() == AdaptMode::Full;
         let discovering = !self.no_discovered && st.genesis.as_ref().map_or(false, |g| g.extended);
@@ -285,18 +312,27 @@ impl ModelChooser {
                 let e = st.model.estimate(o.domain, o.difficulty, s);
                 let cost_est = (o.listed_cost as f64 * e.cost_ratio).max(1.0);
                 let novel = if full && e.group_n < NOVEL_BELOW { self.novelty } else { 0.0 };
-                let pu = (e.p + self.beta * e.sd).min(1.0) + cur + novel;
-                v.push(Cand {
-                    slot: o.slot,
-                    strategy: s,
-                    n: e.n,
-                    p: e.p,
-                    sd: e.sd,
-                    cost_est,
-                    score: o.listed_reward as f64 * pu / cost_est,
-                    mean_score: o.listed_reward as f64 * e.p / cost_est,
-                    affordable: cost_est.round() as i64 <= st.budget_left,
-                });
+                let mut pu = (e.p + self.beta * e.sd).min(1.0) + cur + novel;
+                let (mut p, mut sd) = (e.p, e.sd);
+                let le = fit.map(|f| f.estimate(s.idx(), o.domain.idx(), o.difficulty, None, 0));
+                if let Some(l) = &le {
+                    (p, sd) = (l.p, l.width);
+                    pu = l.p_up + cur + novel;
+                }
+                v.push((
+                    Cand {
+                        slot: o.slot,
+                        strategy: s,
+                        n: e.n,
+                        p,
+                        sd,
+                        cost_est,
+                        score: o.listed_reward as f64 * pu / cost_est,
+                        mean_score: o.listed_reward as f64 * p / cost_est,
+                        affordable: cost_est.round() as i64 <= st.budget_left,
+                    },
+                    le,
+                ));
             }
         }
         v
@@ -309,7 +345,10 @@ impl MenuChooser for ModelChooser {
     }
 
     fn choose(&mut self, st: &BeingState, offers: &[Offer]) -> Option<Choice> {
-        let cands = self.candidates(st, offers);
+        let fit = self.lin_fit(st);
+        let with_lin = self.candidates_lin(st, offers, fit.as_ref());
+        let lins: Vec<Option<super::linval::LinEst>> = with_lin.iter().map(|x| x.1.clone()).collect();
+        let cands: Vec<Cand> = with_lin.into_iter().map(|x| x.0).collect();
         // first best in (slot, strategy) order wins ties
         let mut best_i: Option<usize> = None;
         for (i, c) in cands.iter().enumerate() {
@@ -389,20 +428,29 @@ impl MenuChooser for ModelChooser {
         let best = &cands[chosen];
         let alts: Vec<Value> = cands
             .iter()
-            .map(|c| {
+            .enumerate()
+            .map(|(i, c)| {
                 let o = &offers[c.slot];
-                json!({
+                let mut a = json!({
                     "slot": c.slot, "domain": o.domain.name(), "difficulty": o.difficulty, "strategy": c.strategy.name(),
                     "listed_cost": o.listed_cost, "listed_reward": o.listed_reward,
                     "n_cell": c.n, "p_success": round3(c.p), "uncertainty_sd": round3(c.sd), "est_energy": round3(c.cost_est),
                     "mean_reward_per_energy": round3(c.mean_score), "score": round3(c.score), "affordable": c.affordable,
-                })
+                });
+                if let (Some(le), Some(f)) = (&lins[i], &fit) {
+                    let names = |d: usize| super::world::ALL_DOMAINS_X.get(d).map_or("?", |x| x.name()).to_string();
+                    a["estimate_from_linear"] = le.to_json(&f.cfg, &f.dims, &names);
+                }
+                a
             })
             .collect();
         let mut rationale = json!({
             "policy": self.name(), "beta": self.beta, "skip_frac": self.skip_frac, "curiosity": self.curiosity, "realized_reward_per_energy": round3(rate),
             "attempts_in_model": st.model.attempts(), "alternatives": alts,
         });
+        if let Some(f) = &fit {
+            rationale["chooser_estimate"] = json!({ "track": "B13", "what": "cell shrunk toward a shared linear estimate (per strategy ridge regression on bias, domain, difficulty of the being's outcomes); optimism alpha x width", "cell_k": f.cfg.cell_k(), "alpha": f.cfg.alpha() });
+        }
         if self.skip_rule != SkipRule::Rate {
             rationale["skip_rule"] = json!(self.skip_rule.code());
             rationale["skip_bar"] = json!(round3(self.skip_rule.bar(self.skip_frac, rate, best.cost_est, super::world::SKIP_COST, best.n)));

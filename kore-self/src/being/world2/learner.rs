@@ -10,7 +10,8 @@
 
 use super::engine::State2;
 use super::rules_use::{covered, rule_estimate, RuleEst, UseCfg};
-use super::world::FType;
+use super::world::{FType, FTYPES, TYPE_CYCLE};
+use crate::being::linval::{CellObs, Dims, LinCfg, LinEst, LinFit};
 use crate::being::planner::{DEFAULT_BETA, DEFAULT_SKIP_FRAC, SKIP_MIN_COST};
 use crate::being::solver::{Strategy, STRATEGIES_EXT};
 use serde_json::{json, Value};
@@ -80,11 +81,14 @@ pub struct Learner2 {
     pub skip_frac: f64,
     /// Track B7 switches (`rules_use.rs`); off by default. Only `rule_est` changes what the planner computes.
     pub use_: UseCfg,
+    /// Track B13 switch (`linval.rs`); off by default. On: the success estimate of every option without a
+    /// rule estimate is the cell shrunk toward a shared linear estimate, with LinUCB's optimism.
+    pub lin: Option<LinCfg>,
 }
 
 impl Default for Learner2 {
     fn default() -> Self {
-        Learner2 { beta: DEFAULT_BETA, skip_frac: DEFAULT_SKIP_FRAC, use_: UseCfg::default() }
+        Learner2 { beta: DEFAULT_BETA, skip_frac: DEFAULT_SKIP_FRAC, use_: UseCfg::default(), lin: None }
     }
 }
 
@@ -103,11 +107,45 @@ pub struct Cand2 {
     pub affordable: bool,
     /// B7 A: the rule record the estimate of `discovered` came from.
     pub rule: Option<RuleEst>,
+    /// B13: what the linear estimate of this option rests on.
+    pub lin: Option<LinEst>,
+}
+
+/// Track B13: does the world show the type of every family (World v2: the public type cycle)? World O
+/// re-uses slots for families of any type (its World v2 config has no families), so there it does not.
+pub fn types_visible(st: &State2) -> bool {
+    st.cfg.as_ref().map_or(false, |c| c.families > 0)
+}
+
+/// Track B13: the linear fit of the being's own evidence (every (family, difficulty, strategy) cell it has
+/// attempted, as reported), with type features when `cfg.types` and the world shows the types.
+pub fn lin_fit2(st: &State2, offers: &[Offer2], cfg: LinCfg) -> LinFit {
+    let typed = cfg.types && types_visible(st);
+    let fams = st.model.families().max(offers.iter().map(|o| o.fam + 1).max().unwrap_or(0));
+    let dims = Dims { fams, diffs: true, types: if typed { FTYPES.len() } else { 0 } };
+    let mut cells = vec![];
+    for fam in 0..st.model.families() {
+        for d in 1..=5u8 {
+            for s in STRATEGIES_EXT {
+                let c = st.model.evidence(fam, d, s);
+                if c.n > 0 {
+                    let ftype = if typed { Some(TYPE_CYCLE[fam % TYPE_CYCLE.len()] as u8) } else { None };
+                    cells.push(CellObs { strat: s.idx(), fam, diff: d, ftype, ctx: 0, n: c.n as f64, succ: c.succ as f64 });
+                }
+            }
+        }
+    }
+    LinFit::fit(cfg, dims, STRATEGIES_EXT.len(), &cells)
+}
+
+pub fn type_word(i: usize) -> String {
+    FTYPES.get(i).map_or("?", |t| t.name()).to_string()
 }
 
 impl Learner2 {
     pub fn candidates(&self, st: &State2, offers: &[Offer2]) -> Vec<Cand2> {
         let mut v = vec![];
+        let fit = self.lin.map(|c| lin_fit2(st, offers, c));
         for o in offers {
             for &s in STRATEGIES_EXT.iter() {
                 if self.use_.rule_only && s == Strategy::Discovered && !covered(st, o) {
@@ -122,7 +160,15 @@ impl Learner2 {
                     }
                 }
                 let cost_est = (o.listed_cost as f64 * e.cost_ratio).max(1.0);
-                let pu = (e.p + self.beta * e.sd).min(1.0);
+                let mut pu = (e.p + self.beta * e.sd).min(1.0);
+                let mut lin = None;
+                if let (Some(f), None) = (&fit, &rule) {
+                    let le = f.estimate(s.idx(), o.fam, o.difficulty, if f.dims.types > 0 { Some(o.ftype as u8) } else { None }, 0);
+                    e.p = le.p;
+                    e.sd = le.width;
+                    pu = le.p_up;
+                    lin = Some(le);
+                }
                 v.push(Cand2 {
                     slot: o.slot,
                     strategy: s,
@@ -134,6 +180,7 @@ impl Learner2 {
                     mean_score: o.listed_reward as f64 * e.p / cost_est,
                     affordable: cost_est.round() as i64 <= st.budget_left,
                     rule,
+                    lin,
                 });
             }
         }
@@ -165,6 +212,10 @@ impl Chooser2 for Learner2 {
                     "listed_cost": o.listed_cost, "listed_reward": o.listed_reward, "n_cell": c.n, "p_success": r3(c.p), "uncertainty_sd": r3(c.sd),
                     "est_energy": r3(c.cost_est), "mean_reward_per_energy": r3(c.mean_score), "score": r3(c.score), "affordable": c.affordable,
                 });
+                if let (Some(le), Some(lc)) = (&c.lin, &self.lin) {
+                    let dims = Dims { fams: st.model.families().max(o.fam + 1), diffs: true, types: if lc.types && types_visible(st) { FTYPES.len() } else { 0 } };
+                    a["estimate_from_linear"] = le.to_json(lc, &dims, &type_word);
+                }
                 if let Some(r) = &c.rule {
                     a["estimate_from_rule"] = json!({
                         "rule_id": r.rule_id, "rule_event": r.event_id, "support": r.support, "missed": r.missed, "answered_since": r.post_n, "reported_right_since": r.post_succ,
@@ -179,6 +230,9 @@ impl Chooser2 for Learner2 {
             "reported_reward_per_energy": r3(rate), "attempts_in_model": st.model.attempts(), "alternatives": alts,
         });
         let mut rationale = rationale;
+        if let Some(lc) = &self.lin {
+            rationale["chooser_estimate"] = json!({ "track": "B13", "what": "cell shrunk toward a shared linear estimate (per strategy ridge regression on bias, family, difficulty, type, type x difficulty of the being's reported outcomes); optimism alpha x width", "cell_k": lc.cell_k(), "alpha": lc.alpha(), "type_features": lc.types && types_visible(st) });
+        }
         if self.use_.any() {
             rationale["rules_in_use"] = json!({ "rule_estimate": self.use_.rule_est, "robust_milli": self.use_.robust_milli, "fitted_constants": self.use_.fit_const, "rule_prior_weight_cap": self.use_.rule_k });
         }
@@ -197,7 +251,7 @@ impl Chooser2 for Learner2 {
         Some(Choice2 {
             act: Act2::Attempt { slot: best.slot, strategy: best.strategy },
             policy: LEARNER_NAME.into(),
-            why: "highest optimistic reward per estimated energy (p + beta*sd) among affordable options".into(),
+            why: if self.lin.is_some() { "highest optimistic reward per estimated energy among affordable options (B13: p + alpha*width of the cell shrunk toward the shared linear estimate; rule estimates where a rule covers the offer)".into() } else { "highest optimistic reward per estimated energy (p + beta*sd) among affordable options".into() },
             p: best.p,
             sd: best.sd,
             cost_est: best.cost_est,

@@ -13,6 +13,8 @@
 //! Author-defined simulation; the only claims are the measured numbers in docs/measured.md.
 
 pub mod adapt;
+/// Track B13 baseline: rules where a rule covers the offer, tuned LinUCB elsewhere.
+pub mod fallback;
 pub mod core;
 pub mod llm;
 pub mod mcts;

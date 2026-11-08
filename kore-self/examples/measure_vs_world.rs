@@ -24,6 +24,7 @@ mod being;
 mod llm_run;
 
 use being::experiment::ExpCfg;
+use being::linval::{LIN_L, LIN_MENU, LIN_V2};
 use being::lookahead::beingl::{run_wl, GreedyL, LookL, OracleL, OracleMyopicL};
 use being::lookahead::plan::{LookCfg, Mode};
 use being::lookahead::worldl::{Setting, WLCfg, WorldL, SETTINGS};
@@ -170,6 +171,10 @@ pub enum Ours2 {
     Mcts,
     OraclePlanner,
     OracleRules,
+    /// Track B13: the current learner with the context-aware chooser estimate.
+    B13Current,
+    /// Track B13: the recommended profile (B7 + settled skip) with the context-aware chooser estimate.
+    B13Recommended,
 }
 
 impl Ours2 {
@@ -181,11 +186,16 @@ impl Ours2 {
             Ours2::Mcts => "MCTS on the TRUE simulator (sees hidden)",
             Ours2::OraclePlanner => "oracle-planner (sees hidden)",
             Ours2::OracleRules => "oracle-knows-rules (sees hidden)",
+            Ours2::B13Current => "ours: current + B13 chooser",
+            Ours2::B13Recommended => "ours: B13 profile (B7 + skip fix + B13 chooser)",
         }
     }
 }
 
-pub const OURS2: [Ours2; 6] = [Ours2::Current, Ours2::Recommended, Ours2::AllSkills, Ours2::Mcts, Ours2::OraclePlanner, Ours2::OracleRules];
+pub const OURS2: [Ours2; 8] = [Ours2::Current, Ours2::Recommended, Ours2::AllSkills, Ours2::Mcts, Ours2::OraclePlanner, Ours2::OracleRules, Ours2::B13Current, Ours2::B13Recommended];
+/// Columns of the B13 rows in `OURS2`.
+pub const B13C: usize = 6;
+pub const B13R: usize = 7;
 
 pub fn run_ours2(p: Ours2, cfg: &W2Cfg) -> f64 {
     match p {
@@ -203,6 +213,15 @@ pub fn run_ours2(p: Ours2, cfg: &W2Cfg) -> f64 {
         Ours2::Mcts => run_w2(cfg, &mut Mcts2::new(World2::new(cfg.clone()), cfg.seed), 0, None).per_energy(),
         Ours2::OraclePlanner => run_w2(cfg, &mut Oracle2::new(World2::new(cfg.clone()), false), 0, None).per_energy(),
         Ours2::OracleRules => run_w2(cfg, &mut Oracle2::new(World2::new(cfg.clone()), true), 0, None).per_energy(),
+        Ours2::B13Current => {
+            let lc = LearnerCfg { lin: Some(LIN_V2), ..LearnerCfg::default() };
+            run_w2_with(cfg, &mut lc.learner(), EVERY, None, lc).per_energy()
+        }
+        Ours2::B13Recommended => {
+            let lc = LearnerCfg { use_: profile_use(), lin: Some(LIN_V2), ..LearnerCfg::default() };
+            let mut l = LearnerO { inner: lc.learner(), skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), l2l: being::world_o::b12::L2LCfg::default(), view: None };
+            run_w2_with(cfg, &mut l, EVERY, None, lc).per_energy()
+        }
     }
 }
 
@@ -272,17 +291,19 @@ fn report_v2(seeds: Vec<u64>, only: Option<&str>) {
         let rs = rows2(&c, &seeds, &OURS2, &ms);
         eprintln!("World v2 {}: {:.0} s", c.name, t0.elapsed().as_secs_f64());
         println!("\n### {} (families {}, budget {}, noise {} per mille, drift {} per 10k, curve {})\n", c.name, c.families, c.budget, c.noise_pm, c.drift, c.curve);
-        println!("| policy | true reward per energy, mean [95% interval] | current minus policy (better/worse/tie) | recommended minus policy |");
-        println!("|---|---|---|---|");
+        println!("| policy | true reward per energy, mean [95% interval] | current minus policy (better/worse/tie) | recommended minus policy | B13 profile minus policy | current + B13 minus policy |");
+        println!("|---|---|---|---|---|---|");
         let cur = col(&rs, 0);
         let rec = col(&rs, 1);
+        let b13r = col(&rs, B13R);
+        let b13c = col(&rs, B13C);
         for (j, o) in OURS2.iter().enumerate() {
-            println!("| {} | {} | {} | {} |", o.name(), fci(&col(&rs, j)), fdiff(&cur, &col(&rs, j)), fdiff(&rec, &col(&rs, j)));
+            println!("| {} | {} | {} | {} | {} | {} |", o.name(), fci(&col(&rs, j)), fdiff(&cur, &col(&rs, j)), fdiff(&rec, &col(&rs, j)), fdiff(&b13r, &col(&rs, j)), fdiff(&b13c, &col(&rs, j)));
         }
         let mut best = (0usize, f64::MIN);
         for (k, m) in ms.iter().enumerate() {
             let x = col(&rs, OURS2.len() + k);
-            println!("| {} | {} | {} | {} |", m.label(), fci(&x), fdiff(&cur, &x), fdiff(&rec, &x));
+            println!("| {} | {} | {} | {} | {} | {} |", m.label(), fci(&x), fdiff(&cur, &x), fdiff(&rec, &x), fdiff(&b13r, &x), fdiff(&b13c, &x));
             if mean(&x) > best.1 {
                 best = (k, mean(&x));
             }
@@ -307,6 +328,47 @@ fn report_v2(seeds: Vec<u64>, only: Option<&str>) {
             fci(&col(rs, 4)),
             fci(&col(rs, 5))
         );
+    }
+    println!("\n### World v2, Track B13 summary (best method = highest mean on these report seeds, chosen after the fact)\n");
+    println!("| condition | ours current | current + B13 | ours recommended | B13 profile | LinUCB | best standard method | its value | B13 profile minus LinUCB | B13 profile minus best method | current + B13 minus LinUCB | B13 profile minus recommended | current + B13 minus current |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    let lin_k = ms.iter().position(|m| m.family() == "LinUCB").unwrap();
+    for (name, rs, b) in &summary {
+        let bm = col(rs, OURS2.len() + b);
+        let lu = col(rs, OURS2.len() + lin_k);
+        println!(
+            "| {name} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            fci(&col(rs, 0)),
+            fci(&col(rs, B13C)),
+            fci(&col(rs, 1)),
+            fci(&col(rs, B13R)),
+            fci(&lu),
+            ms[*b].family(),
+            fci(&bm),
+            fdiff(&col(rs, B13R), &lu),
+            fdiff(&col(rs, B13R), &bm),
+            fdiff(&col(rs, B13C), &lu),
+            fdiff(&col(rs, B13R), &col(rs, 1)),
+            fdiff(&col(rs, B13C), &col(rs, 0))
+        );
+    }
+    println!("\n### World v2: every method against the B13 profile, paired, per condition\n");
+    print!("| method |");
+    for (name, _, _) in &summary {
+        print!(" {name} |");
+    }
+    println!();
+    print!("|---|");
+    for _ in &summary {
+        print!("---|");
+    }
+    println!();
+    for (k, m) in ms.iter().enumerate() {
+        print!("| {} |", m.family());
+        for (_, rs, _) in &summary {
+            print!(" {} |", fdiff(&col(rs, B13R), &col(rs, OURS2.len() + k)));
+        }
+        println!();
     }
     println!("\n### World v2: every method against ours (recommended), paired, per condition: mean difference and wins/losses/ties\n");
     print!("| method |");
@@ -334,7 +396,8 @@ fn report_o(seeds: Vec<u64>, budget: i64, window: i64) {
     use being::world_o::measure::{run_wo, OracleO, RunWO, TruthO};
     use being::world_o::world::{WOCfg, WorldO, MAX_TIER};
     let ms = chosen_v2();
-    let names: Vec<String> = ["ours: current", "ours: fix+b7 (recommended)", "oracle-planner (sees hidden)", "oracle-knows-rules (sees hidden)"].iter().map(|s| s.to_string()).chain(ms.iter().map(|m| m.family().to_string())).collect();
+    const NO: usize = 6;
+    let names: Vec<String> = ["ours: current", "ours: fix+b7 (recommended)", "oracle-planner (sees hidden)", "oracle-knows-rules (sees hidden)", "ours: current + B13 chooser", "ours: fix+b7 + B13 chooser"].iter().map(|s| s.to_string()).chain(ms.iter().map(|m| m.family().to_string())).collect();
     let jobs: Vec<(usize, u64)> = (0..names.len()).flat_map(|j| seeds.iter().map(move |s| (j, *s))).collect();
     let t0 = Instant::now();
     let limits = || being::controller::Limits { max_live_rules: 200, max_candidates: 100_000, compose: false, max_blocks: 8, ..being::controller::Limits::default() };
@@ -353,8 +416,14 @@ fn report_o(seeds: Vec<u64>, budget: i64, window: i64) {
                     let mut o = OracleO { world: WorldO::new(c.clone()), truth: TruthO::default(), knows_rules: *j == 3 };
                     run_wo(&c, Default::default(), Some(&mut o), 0, None, u64::MAX, window, false)
                 }
+                4 => run_wo(&c, being::world_o::engine::LearnerOCfg { lin: Some(LIN_V2), ..Default::default() }, None, EVERY, Some(limits()), u64::MAX, window, true),
+                5 => {
+                    let b7 = being::world2::rules_use::UseCfg { rule_est: true, rule_only: true, ..Default::default() };
+                    let lc = being::world_o::engine::LearnerOCfg { skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), use_: b7, lin: Some(LIN_V2), ..Default::default() };
+                    run_wo(&c, lc, None, EVERY, Some(limits()), u64::MAX, window, true)
+                }
                 _ => {
-                    let mut p = Player2::new(ms[*j - 4].agent(*s));
+                    let mut p = Player2::new(ms[*j - NO].agent(*s));
                     run_wo(&c, Default::default(), Some(&mut p), 0, Some(limits()), u64::MAX, window, true)
                 }
             }
@@ -389,11 +458,11 @@ fn report_o(seeds: Vec<u64>, budget: i64, window: i64) {
         }
         println!();
     }
-    println!("\n| policy minus ours (recommended), whole run after window 1 | difference (better/worse/tie) | minus ours (current) |");
-    println!("|---|---|---|");
+    println!("\n| policy minus ours (recommended), whole run after window 1 | difference (better/worse/tie) | minus ours (current) | minus ours (current + B13) | minus ours (fix+b7 + B13) |");
+    println!("|---|---|---|---|---|");
     let tot = |j: usize| -> Vec<f64> { seeds.iter().map(|s| span(get(j, *s), 1, nwin)).collect() };
     for (j, n) in names.iter().enumerate().skip(2) {
-        println!("| {n} | {} | {} |", fdiff(&tot(j), &tot(1)), fdiff(&tot(j), &tot(0)));
+        println!("| {n} | {} | {} | {} | {} |", fdiff(&tot(j), &tot(1)), fdiff(&tot(j), &tot(0)), fdiff(&tot(j), &tot(4)), fdiff(&tot(j), &tot(5)));
     }
     println!("\n#### Order versus competence (top tier, Spearman of family index with attempts to competence, per world; negative = faster later) and share of learnable families reached\n");
     println!("| policy | worlds | Spearman mean [95% interval] | learnable families reached competence |");
@@ -453,7 +522,7 @@ pub fn spearman(x: &[f64], y: &[f64]) -> f64 {
 
 // ---- World L ----
 
-const OURS_L: [&str; 6] = ["ours: B1 planner (current)", "ours: lookahead pure d3", "ours: lookahead hybrid d2 (all-skills setting)", "MCTS on the TRUE simulator (sees hidden, incl. phase)", "oracle one-step (sees hidden)", "oracle DP (sees hidden)"];
+const OURS_L: [&str; 8] = ["ours: B1 planner (current)", "ours: lookahead pure d3", "ours: lookahead hybrid d2 (all-skills setting)", "MCTS on the TRUE simulator (sees hidden, incl. phase)", "oracle one-step (sees hidden)", "oracle DP (sees hidden)", "ours: B1 + B13 chooser (B1 skip)", "ours: B1 + B13 chooser, no skip (B13 profile)"];
 
 fn run_ours_l(j: usize, cfg: &WLCfg) -> f64 {
     let look = |d: u32, mode: Mode| {
@@ -467,7 +536,9 @@ fn run_ours_l(j: usize, cfg: &WLCfg) -> f64 {
         2 => run_wl(cfg, &mut LookL::new(Some(look(2, Mode::Hybrid)))),
         3 => run_wl(cfg, &mut MctsL::new(WorldL::new(cfg.clone()), cfg.seed)),
         4 => run_wl(cfg, &mut OracleMyopicL::new(WorldL::new(cfg.clone()))),
-        _ => run_wl(cfg, &mut OracleL::new(WorldL::new(cfg.clone()))),
+        5 => run_wl(cfg, &mut OracleL::new(WorldL::new(cfg.clone()))),
+        6 => run_wl(cfg, &mut GreedyL { lin: Some(LIN_L), ..GreedyL::default() }),
+        _ => run_wl(cfg, &mut GreedyL { lin: Some(LIN_L), skip_frac: 0.0, ..GreedyL::default() }),
     };
     r.per_energy()
 }
@@ -502,24 +573,34 @@ fn report_l(seeds: Vec<u64>) {
                 .collect();
             let rs: Vec<Vec<f64>> = (0..seeds.len()).map(|i| vals[i * w..(i + 1) * w].to_vec()).collect();
             println!("\n### World L {} budget {budget}\n", st.name());
-            println!("| policy | reward per energy | B1 (current) minus policy | best of ours minus policy |");
-            println!("|---|---|---|---|");
+            println!("| policy | reward per energy | B1 (current) minus policy | best of ours minus policy | B13 profile minus policy |");
+            println!("|---|---|---|---|---|");
             let b1 = col(&rs, 0);
             let our_best = (0..3).max_by(|a, b| mean(&col(&rs, *a)).partial_cmp(&mean(&col(&rs, *b))).unwrap()).unwrap();
             let ob = col(&rs, our_best);
+            let b13 = col(&rs, 7);
             for (j, n) in OURS_L.iter().enumerate() {
-                println!("| {n} | {} | {} | {} |", fci(&col(&rs, j)), fdiff(&b1, &col(&rs, j)), fdiff(&ob, &col(&rs, j)));
+                println!("| {n} | {} | {} | {} | {} |", fci(&col(&rs, j)), fdiff(&b1, &col(&rs, j)), fdiff(&ob, &col(&rs, j)), fdiff(&b13, &col(&rs, j)));
             }
             let mut best = (0usize, f64::MIN);
             for (k, m) in ms.iter().enumerate() {
                 let x = col(&rs, OURS_L.len() + k);
-                println!("| {} | {} | {} | {} |", m.label(), fci(&x), fdiff(&b1, &x), fdiff(&ob, &x));
+                println!("| {} | {} | {} | {} | {} |", m.label(), fci(&x), fdiff(&b1, &x), fdiff(&ob, &x), fdiff(&b13, &x));
                 if mean(&x) > best.1 {
                     best = (k, mean(&x));
                 }
             }
             summary.push((format!("{} {budget}", st.name()), rs, best.0, our_best));
         }
+    }
+    println!("\n### World L, Track B13 summary (best method chosen after the fact on these seeds)\n");
+    println!("| setting, budget | ours B1 (current) | B1 + B13 (B1 skip) | B13 profile (no skip) | LinUCB | best standard method | its value | B13 profile minus LinUCB | B13 profile minus best method | B1 + B13 (B1 skip) minus best method | B13 profile minus B1 | B13 profile minus lookahead pure d3 |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|");
+    let lin_k = ms.iter().position(|m| m.family() == "LinUCB").unwrap();
+    for (name, rs, b, _) in &summary {
+        let bm = col(rs, OURS_L.len() + b);
+        let lu = col(rs, OURS_L.len() + lin_k);
+        println!("| {name} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |", fci(&col(rs, 0)), fci(&col(rs, 6)), fci(&col(rs, 7)), fci(&lu), ms[*b].family(), fci(&bm), fdiff(&col(rs, 7), &lu), fdiff(&col(rs, 7), &bm), fdiff(&col(rs, 6), &bm), fdiff(&col(rs, 7), &col(rs, 0)), fdiff(&col(rs, 7), &col(rs, 1)));
     }
     println!("\n### World L summary (best method chosen after the fact on these seeds)\n");
     println!("| setting, budget | ours B1 (current) | best of ours (which) | best standard method | its value | B1 minus best method | best of ours minus best method | MCTS true simulator | oracle DP |");
@@ -532,7 +613,7 @@ fn report_l(seeds: Vec<u64>) {
 
 // ---- the first world with the B2 pattern families ----
 
-const OURS_B2: [&str; 5] = ["ours: learner + discovery (current, B2)", "ours: learner, no discovery", "ours: learner + discovery + skip fix", "oracle, fixed solvers (sees hidden)", "oracle with perfect rules (sees hidden)"];
+const OURS_B2: [&str; 7] = ["ours: learner + discovery (current, B2)", "ours: learner, no discovery", "ours: learner + discovery + skip fix", "oracle, fixed solvers (sees hidden)", "oracle with perfect rules (sees hidden)", "ours: learner + discovery + B13 chooser", "ours: learner + discovery + skip fix + B13 chooser (B13 profile)"];
 
 fn run_ours_b2(j: usize, seed: u64, budget: i64) -> f64 {
     let w = || World::with_extended(seed, true);
@@ -542,7 +623,9 @@ fn run_ours_b2(j: usize, seed: u64, budget: i64) -> f64 {
         1 => run_menu_ext(w(), budget, &mut ModelChooser { no_discovered: true, ..ModelChooser::new(DEFAULT_BETA) }, 0, &[]).run.per_budget(),
         2 => run_menu_ext(w(), budget, &mut ModelChooser { skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), ..ModelChooser::new(DEFAULT_BETA) }, DISCOVER_EVERY, &[]).run.per_budget(),
         3 => run_menu_ext(w(), budget, &mut OracleMenu { truth: truth_in(&w(), &[]), strategies: STRATEGIES.to_vec() }, 0, &[]).run.per_budget(),
-        _ => run_menu_ext(w(), budget, &mut OracleMenu { truth: truth_in(&w(), &perfect), strategies: STRATEGIES_EXT.to_vec() }, 0, &perfect).run.per_budget(),
+        4 => run_menu_ext(w(), budget, &mut OracleMenu { truth: truth_in(&w(), &perfect), strategies: STRATEGIES_EXT.to_vec() }, 0, &perfect).run.per_budget(),
+        5 => run_menu_ext(w(), budget, &mut ModelChooser { lin: Some(LIN_MENU), ..ModelChooser::new(DEFAULT_BETA) }, DISCOVER_EVERY, &[]).run.per_budget(),
+        _ => run_menu_ext(w(), budget, &mut ModelChooser { skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), lin: Some(LIN_MENU), ..ModelChooser::new(DEFAULT_BETA) }, DISCOVER_EVERY, &[]).run.per_budget(),
     }
 }
 
@@ -569,21 +652,24 @@ fn report_b2(seeds: Vec<u64>) {
         let vals: Vec<f64> = jobs.par_iter().map(|(i, j)| if *j < OURS_B2.len() { run_ours_b2(*j, seeds[*i], budget) } else { run_m_b2(&ms[*j - OURS_B2.len()], seeds[*i], budget) }).collect();
         let rs: Vec<Vec<f64>> = (0..seeds.len()).map(|i| vals[i * w..(i + 1) * w].to_vec()).collect();
         println!("\n### budget {budget}\n");
-        println!("| policy | reward per energy | current minus policy | skip fix minus policy |");
-        println!("|---|---|---|---|");
+        println!("| policy | reward per energy | current minus policy | skip fix minus policy | B13 profile minus policy | current + B13 minus policy |");
+        println!("|---|---|---|---|---|---|");
         for (j, n) in OURS_B2.iter().enumerate() {
-            println!("| {n} | {} | {} | {} |", fci(&col(&rs, j)), fdiff(&col(&rs, 0), &col(&rs, j)), fdiff(&col(&rs, 2), &col(&rs, j)));
+            println!("| {n} | {} | {} | {} | {} | {} |", fci(&col(&rs, j)), fdiff(&col(&rs, 0), &col(&rs, j)), fdiff(&col(&rs, 2), &col(&rs, j)), fdiff(&col(&rs, 6), &col(&rs, j)), fdiff(&col(&rs, 5), &col(&rs, j)));
         }
         let mut best = (0usize, f64::MIN);
         for (k, m) in ms.iter().enumerate() {
             let x = col(&rs, OURS_B2.len() + k);
-            println!("| {} | {} | {} | {} |", m.label(), fci(&x), fdiff(&col(&rs, 0), &x), fdiff(&col(&rs, 2), &x));
+            println!("| {} | {} | {} | {} | {} | {} |", m.label(), fci(&x), fdiff(&col(&rs, 0), &x), fdiff(&col(&rs, 2), &x), fdiff(&col(&rs, 6), &x), fdiff(&col(&rs, 5), &x));
             if mean(&x) > best.1 {
                 best = (k, mean(&x));
             }
         }
         let bm = col(&rs, OURS_B2.len() + best.0);
         println!("\nsummary budget {budget}: current {} | skip fix {} | best method {} {} | current minus best {} | oracle with rules {}", fci(&col(&rs, 0)), fci(&col(&rs, 2)), ms[best.0].family(), fci(&bm), fdiff(&col(&rs, 0), &bm), fci(&col(&rs, 4)));
+        let lin_k = ms.iter().position(|m| m.family() == "LinUCB").unwrap();
+        let lu = col(&rs, OURS_B2.len() + lin_k);
+        println!("B13 summary budget {budget}: current + B13 {} | B13 profile {} | LinUCB {} | B13 profile minus LinUCB {} | B13 profile minus best method ({}) {} | current + B13 minus LinUCB {} | B13 profile minus current {} | B13 profile minus skip fix {}", fci(&col(&rs, 5)), fci(&col(&rs, 6)), fci(&lu), fdiff(&col(&rs, 6), &lu), ms[best.0].family(), fdiff(&col(&rs, 6), &bm), fdiff(&col(&rs, 5), &lu), fdiff(&col(&rs, 6), &col(&rs, 0)), fdiff(&col(&rs, 6), &col(&rs, 2)));
     }
 }
 
@@ -734,6 +820,245 @@ fn report_rules(seeds: Vec<u64>) {
     }
 }
 
+// ---- Track B13 review additions: the rules-or-LinUCB fallback and regret curves ----
+
+/// Policies of the B13 extra report in World v2 (column order).
+const X2: [&str; 6] = ["oracle-knows-rules (sees hidden)", "ours: B13 profile (B7 + skip fix + B13 chooser)", "ours: current + B13 chooser", "ours: recommended (B7 + skip fix)", "LinUCB (V1 tuning)", "rules-or-LinUCB fallback (B7 rule estimate where a rule covers, LinUCB elsewhere)"];
+
+fn run_x2(j: usize, cfg: &W2Cfg) -> being::world2::measure::W2Run {
+    match j {
+        0 => run_w2(cfg, &mut Oracle2::new(World2::new(cfg.clone()), true), 0, None),
+        1 => {
+            let lc = LearnerCfg { use_: profile_use(), lin: Some(LIN_V2), ..LearnerCfg::default() };
+            let mut l = LearnerO { inner: lc.learner(), skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), l2l: being::world_o::b12::L2LCfg::default(), view: None };
+            run_w2_with(cfg, &mut l, EVERY, None, lc)
+        }
+        2 => {
+            let lc = LearnerCfg { lin: Some(LIN_V2), ..LearnerCfg::default() };
+            run_w2_with(cfg, &mut lc.learner(), EVERY, None, lc)
+        }
+        3 => {
+            let lc = LearnerCfg { use_: profile_use(), ..LearnerCfg::default() };
+            let mut l = LearnerO { inner: lc.learner(), skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), l2l: being::world_o::b12::L2LCfg::default(), view: None };
+            run_w2_with(cfg, &mut l, EVERY, None, lc)
+        }
+        4 => run_w2(cfg, &mut Player2::new(Method::LinUcb { alpha: 0.5, skip: 1.0 }.agent(cfg.seed)), 0, None),
+        _ => {
+            // the same rule machinery as the B13 profile (B7 B, C, G: robust acceptance, fitted constants), discovery every 10 steps
+            let lc = LearnerCfg { use_: profile_use(), ..LearnerCfg::default() };
+            run_w2_with(cfg, &mut being::vs_world::fallback::RulesOrLin::new(0.5, 1.0), EVERY, None, lc)
+        }
+    }
+}
+
+/// Window sizes of the regret curves: the life's energy in 10, 5 and 2 windows.
+const NWINS: [i64; 3] = [10, 5, 2];
+
+/// Ordering of regret means of (B13 profile, LinUCB, fallback) in one window, and the paired B13-minus-other tests.
+fn order_line(reg: &[Vec<f64>; 3]) -> (bool, i32, i32) {
+    let m: Vec<f64> = reg.iter().map(|r| mean(r)).collect();
+    let lowest = m[0] <= m[1] && m[0] <= m[2];
+    // B13 regret minus the other's: below 0 = B13 better; sign of the interval
+    let sig = |o: usize| -> i32 {
+        let d: Vec<f64> = reg[0].iter().zip(&reg[o]).map(|(x, y)| x - y).collect();
+        let (_, lo, hi) = mci(&d);
+        if hi < 0.0 { 1 } else if lo > 0.0 { -1 } else { 0 }
+    };
+    (lowest, sig(1), sig(2))
+}
+
+fn report_b13_v2(seeds: Vec<u64>) {
+    println!("\n## Track B13 review additions, World v2, report seeds {}..{} (n = {})\n", seeds[0], seeds[seeds.len() - 1], seeds.len());
+    println!("Policies: {}\n", X2.join("; "));
+    println!("Regret = oracle-knows-rules minus the policy, true reward per energy within each window of the life's energy, paired by world, mean [95% interval]. Window sizes: a tenth, a fifth and a half of the life's energy budget.\n");
+    let mut rows_sum = vec![];
+    let mut order_sum: Vec<(String, i64, usize, usize, usize, usize, usize, usize)> = vec![];
+    for c in conds() {
+        let t0 = Instant::now();
+        let jobs: Vec<(usize, usize)> = (0..seeds.len()).flat_map(|i| (0..X2.len()).map(move |j| (i, j))).collect();
+        let runs: Vec<(f64, Vec<Vec<f64>>, u64)> = jobs
+            .par_iter()
+            .map(|(i, j)| {
+                let cfg = c.cfg(seeds[*i]);
+                let r = run_x2(*j, &cfg);
+                let wins: Vec<Vec<f64>> = NWINS.iter().map(|n| { let w = cfg.budget / n; (0..*n).map(|k| r.window_e(k * w, (k + 1) * w)).collect() }).collect();
+                let rule_answers = r.recs.iter().filter(|x| x.rule_used).count() as u64;
+                (r.per_energy(), wins, rule_answers)
+            })
+            .collect();
+        eprintln!("B13 extra, World v2 {}: {:.0} s", c.name, t0.elapsed().as_secs_f64());
+        let get = |j: usize| -> Vec<&(f64, Vec<Vec<f64>>, u64)> { (0..seeds.len()).map(|i| &runs[i * X2.len() + j]).collect() };
+        let rpe = |j: usize| -> Vec<f64> { get(j).iter().map(|r| r.0).collect() };
+        let regret = |j: usize, z: usize, k: usize| -> Vec<f64> { (0..seeds.len()).map(|i| get(0)[i].1[z][k] - get(j)[i].1[z][k]).collect() };
+        println!("\n### {}\n", c.name);
+        println!("| policy | true reward per energy | rule answers per life |\n|---|---|---|");
+        for j in 0..X2.len() {
+            let ra: Vec<f64> = get(j).iter().map(|r| r.2 as f64).collect();
+            println!("| {} | {} | {:.0} |", X2[j], fci(&rpe(j)), mean(&ra));
+        }
+        println!("\n| paired | difference |\n|---|---|");
+        println!("| B13 profile minus fallback | {} |", fdiff(&rpe(1), &rpe(5)));
+        println!("| current + B13 minus fallback | {} |", fdiff(&rpe(2), &rpe(5)));
+        println!("| fallback minus LinUCB | {} |", fdiff(&rpe(5), &rpe(4)));
+        println!("| fallback minus recommended | {} |", fdiff(&rpe(5), &rpe(3)));
+        for (z, n) in NWINS.iter().enumerate() {
+            println!("\nRegret per window, {n} windows of {} energy:\n", c.budget / n);
+            print!("| policy |");
+            for k in 0..*n {
+                print!(" w{} |", k + 1);
+            }
+            println!();
+            print!("|---|");
+            for _ in 0..*n {
+                print!("---|");
+            }
+            println!();
+            for j in 1..X2.len() {
+                print!("| {} |", X2[j]);
+                for k in 0..*n as usize {
+                    print!(" {} |", fci(&regret(j, z, k)));
+                }
+                println!();
+            }
+            print!("| B13 profile regret minus fallback regret |");
+            for k in 0..*n as usize {
+                print!(" {} |", fdiff(&regret(1, z, k), &regret(5, z, k)));
+            }
+            println!();
+            let (mut low, mut bl, mut wl, mut bf, mut wf) = (0, 0, 0, 0, 0);
+            for k in 0..*n as usize {
+                let (lowest, sl, sf) = order_line(&[regret(1, z, k), regret(4, z, k), regret(5, z, k)]);
+                low += lowest as usize;
+                bl += (sl > 0) as usize;
+                wl += (sl < 0) as usize;
+                bf += (sf > 0) as usize;
+                wf += (sf < 0) as usize;
+            }
+            order_sum.push((c.name.to_string(), *n, *n as usize, low, bl, wl, bf, wf));
+        }
+        rows_sum.push((c.name, (0..X2.len()).map(rpe).collect::<Vec<_>>()));
+    }
+    println!("\n### Summary: rules-or-LinUCB fallback against the B13 chooser (World v2)\n");
+    println!("| condition | fallback | B13 profile | current + B13 | LinUCB | B13 profile minus fallback | current + B13 minus fallback | fallback minus LinUCB | fallback minus recommended |");
+    println!("|---|---|---|---|---|---|---|---|---|");
+    for (n, r) in &rows_sum {
+        println!("| {n} | {} | {} | {} | {} | {} | {} | {} | {} |", fci(&r[5]), fci(&r[1]), fci(&r[2]), fci(&r[4]), fdiff(&r[1], &r[5]), fdiff(&r[2], &r[5]), fdiff(&r[5], &r[4]), fdiff(&r[5], &r[3]));
+    }
+    println!("\n### Window-size sensitivity: does the ordering B13 profile < fallback, LinUCB (regret) hold in every window?\n");
+    println!("| condition | windows | B13 profile has the lowest mean regret of the three | B13 below LinUCB, interval excludes 0 | B13 above LinUCB, interval excludes 0 | B13 below fallback, interval excludes 0 | B13 above fallback, interval excludes 0 |");
+    println!("|---|---|---|---|---|---|---|");
+    let mut tot = [0usize; 6];
+    for (name, n, w, low, bl, wl, bf, wf) in &order_sum {
+        println!("| {name} | {n} | {low} of {w} | {bl} | {wl} | {bf} | {wf} |");
+        for (t, x) in tot.iter_mut().zip([*w, *low, *bl, *wl, *bf, *wf]) {
+            *t += x;
+        }
+    }
+    println!("| all | - | {} of {} | {} | {} | {} | {} |", tot[1], tot[0], tot[2], tot[3], tot[4], tot[5]);
+    for n in NWINS {
+        let sel: Vec<_> = order_sum.iter().filter(|x| x.1 == n).collect();
+        let f = |g: fn(&&(String, i64, usize, usize, usize, usize, usize, usize)) -> usize| sel.iter().map(g).sum::<usize>();
+        println!("| all, {n} windows | {n} | {} of {} | {} | {} | {} | {} |", f(|x| x.3), f(|x| x.2), f(|x| x.4), f(|x| x.5), f(|x| x.6), f(|x| x.7));
+    }
+}
+
+fn report_b13_o(seeds: Vec<u64>, budget: i64, window: i64) {
+    use being::world_o::measure::{run_wo, OracleO, RunWO, TruthO};
+    use being::world_o::world::{WOCfg, WorldO};
+    let names = ["oracle-knows-rules (sees hidden)", "ours: current + B13 chooser", "ours: current", "LinUCB (V1 World v2 tuning)", "rules-or-LinUCB fallback"];
+    let limits = || being::controller::Limits { max_live_rules: 200, max_candidates: 100_000, compose: false, max_blocks: 8, ..being::controller::Limits::default() };
+    let jobs: Vec<(usize, u64)> = (0..names.len()).flat_map(|j| seeds.iter().map(move |s| (j, *s))).collect();
+    let t0 = Instant::now();
+    let res: Vec<RunWO> = jobs
+        .par_iter()
+        .map(|(j, s)| {
+            let c = WOCfg::new(*s, budget);
+            match j {
+                0 => {
+                    let mut o = OracleO { world: WorldO::new(c.clone()), truth: TruthO::default(), knows_rules: true };
+                    run_wo(&c, Default::default(), Some(&mut o), 0, None, u64::MAX, window, false)
+                }
+                1 => run_wo(&c, being::world_o::engine::LearnerOCfg { lin: Some(LIN_V2), ..Default::default() }, None, EVERY, Some(limits()), u64::MAX, window, true),
+                2 => run_wo(&c, being::world_o::engine::LearnerOCfg::default(), None, EVERY, Some(limits()), u64::MAX, window, true),
+                3 => {
+                    let mut p = Player2::new(Method::LinUcb { alpha: 0.5, skip: 1.0 }.agent(*s));
+                    run_wo(&c, Default::default(), Some(&mut p), 0, Some(limits()), u64::MAX, window, true)
+                }
+                _ => {
+                    // the being's rule search runs (every 10 steps) and its rules answer through `discovered`
+                    let mut f = being::vs_world::fallback::RulesOrLin::new(0.5, 1.0);
+                    run_wo(&c, Default::default(), Some(&mut f), EVERY, Some(limits()), u64::MAX, window, true)
+                }
+            }
+        })
+        .collect();
+    eprintln!("B13 extra, World O: {:.0} s", t0.elapsed().as_secs_f64());
+    let get = |j: usize, s: u64| &res[jobs.iter().position(|x| *x == (j, s)).unwrap()];
+    let nwin = res.iter().map(|r| r.wins.len()).min().unwrap_or(0);
+    let span = |r: &RunWO, a: usize, b: usize| {
+        let (x, y) = r.wins[a..b].iter().fold((0i64, 0i64), |acc, w| (acc.0 + w.true_reward, acc.1 + w.cost));
+        x as f64 / y.max(1) as f64
+    };
+    // whole run after the first 100k energy (the V1 measure), from the 50k base windows
+    let skip0 = (100_000 / window) as usize;
+    let tot = |j: usize| -> Vec<f64> { seeds.iter().map(|s| span(get(j, *s), skip0, nwin)).collect() };
+    println!("\n## Track B13 review additions, World O, budget {budget}, seeds {}..{} (n = {})\n", seeds[0], seeds[seeds.len() - 1], seeds.len());
+    println!("| policy | whole run (after the first 100k energy) |\n|---|---|");
+    for (j, n) in names.iter().enumerate() {
+        println!("| {n} | {} |", fci(&tot(j)));
+    }
+    println!("\n| paired, whole run after the first 100k | difference |\n|---|---|");
+    println!("| current + B13 minus fallback | {} |", fdiff(&tot(1), &tot(4)));
+    println!("| current minus fallback | {} |", fdiff(&tot(2), &tot(4)));
+    println!("| fallback minus LinUCB | {} |", fdiff(&tot(4), &tot(3)));
+    println!("| current + B13 minus current | {} |", fdiff(&tot(1), &tot(2)));
+    println!("| current + B13 minus LinUCB | {} |", fdiff(&tot(1), &tot(3)));
+    let mut sum = vec![];
+    for agg in [1usize, 2, 4] {
+        let size = window * agg as i64;
+        let nw = nwin / agg;
+        println!("\nRegret per window (oracle-knows-rules minus the policy), windows of {size} energy:\n");
+        print!("| policy |");
+        for i in 0..nw {
+            print!(" {}k-{}k |", i as i64 * size / 1000, (i as i64 + 1) * size / 1000);
+        }
+        println!();
+        print!("|---|");
+        for _ in 0..nw {
+            print!("---|");
+        }
+        println!();
+        let reg = |j: usize, i: usize| -> Vec<f64> { seeds.iter().map(|s| span(get(0, *s), i * agg, (i + 1) * agg) - span(get(j, *s), i * agg, (i + 1) * agg)).collect() };
+        for (j, n) in names.iter().enumerate().skip(1) {
+            print!("| {n} |");
+            for i in 0..nw {
+                print!(" {} |", fci(&reg(j, i)));
+            }
+            println!();
+        }
+        print!("| current + B13 regret minus fallback regret |");
+        for i in 0..nw {
+            print!(" {} |", fdiff(&reg(1, i), &reg(4, i)));
+        }
+        println!();
+        let (mut low, mut bl, mut wl, mut bf, mut wf) = (0, 0, 0, 0, 0);
+        for i in 0..nw {
+            let (lowest, sl, sf) = order_line(&[reg(1, i), reg(3, i), reg(4, i)]);
+            low += lowest as usize;
+            bl += (sl > 0) as usize;
+            wl += (sl < 0) as usize;
+            bf += (sf > 0) as usize;
+            wf += (sf < 0) as usize;
+        }
+        sum.push((size, nw, low, bl, wl, bf, wf));
+    }
+    println!("\n### Window-size sensitivity (World O): does current + B13 have lower regret than LinUCB and the fallback in every window?\n");
+    println!("| window size | windows | current + B13 lowest mean regret of the three | below LinUCB, interval excludes 0 | above LinUCB, interval excludes 0 | below fallback, interval excludes 0 | above fallback, interval excludes 0 |\n|---|---|---|---|---|---|---|");
+    for (size, nw, low, bl, wl, bf, wf) in sum {
+        println!("| {size} | {nw} | {low} of {nw} | {bl} | {wl} | {bf} | {wf} |");
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).map(|s| s.as_str()).unwrap_or("quick");
@@ -754,6 +1079,11 @@ fn main() {
         "l" => report_l(report),
         "b2" => report_b2(report),
         "rules" => report_rules(report),
+        "b13-v2" => report_b13_v2(report),
+        "b13-o" => {
+            let budget = args.get(2).and_then(|x| x.parse().ok()).unwrap_or(600_000);
+            report_b13_o(report, budget, 50_000)
+        }
         "llm" => llm_run::main_llm(&args),
         "llm-report" => llm_run::report(&args),
         "quick" => {

@@ -25,6 +25,7 @@
 //! rules_use             = on      # World v2: may the learner use its rules (B7 switches; B10, default off)
 //! adaptation            = on      # World v2: may the model adapt to changes (B3b; B10, default off)
 //! rule_retirement       = on      # World v2: may the being retire rules its later answers contradict (B10, default off)
+//! context_chooser       = on      # World v2: may a new being use the context-aware chooser estimate (B13, default off)
 //! ```
 //!
 //! The B9 keys fail closed on their own: without `experiments = on` AND a non-zero energy share AND a
@@ -179,6 +180,8 @@ impl Controller {
                 "max_experiments_per_run" => c.max_experiments_per_run = num(HARD_EXP_N)?,
                 // B8 keys (planning ahead) are read by `lookahead::ctl`; here they are only validated
                 _ if super::lookahead::ctl::is_key(k) => super::lookahead::ctl::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
+                // B13 key (the chooser's context-aware estimate) is read by `linval::LinCtl`; here it is only validated
+                _ if super::linval::is_key(k) => super::linval::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 // B10 keys (World v2 rules use, adaptation, rule retirement) are read by `world2::skills`; here they are only validated
                 _ if super::world2::skills::is_key(k) => super::world2::skills::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 _ => return Err(format!("line {n}: unknown key '{k}'")),

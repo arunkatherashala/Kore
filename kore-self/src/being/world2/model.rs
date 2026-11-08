@@ -151,6 +151,12 @@ impl FamModel {
         self.cells.get(fam).map(|x| x[(difficulty.clamp(1, 5) - 1) as usize][s.idx()]).unwrap_or_default()
     }
 
+    /// The evidence the estimate reads for one cell (the raw counts, or under B3b the counts after M1 switches).
+    pub fn evidence(&self, fam: usize, difficulty: u8, s: Strategy) -> Cell {
+        let cells = if self.sw_cfg.is_some() { &self.ev } else { &self.cells };
+        cells.get(fam).map(|x| x[(difficulty.clamp(1, 5) - 1) as usize][s.idx()]).unwrap_or_default()
+    }
+
     /// The B1 estimate (`Model::estimate` in mode `Off`, without transfer links).
     pub fn estimate(&self, fam: usize, difficulty: u8, s: Strategy) -> Estimate {
         let k = (difficulty.clamp(1, 5) - 1) as usize;

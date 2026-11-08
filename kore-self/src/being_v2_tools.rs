@@ -66,6 +66,13 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         Some(Value::String(s)) if s == "default" => false,
         Some(_) => return Err(err("'profile' must be \"default\" or \"all_skills\"")),
     };
+    // B13: the context-aware chooser estimate (needs context_chooser = on in controller.txt; fixed when the being is created)
+    let want_ctx = match args.get("chooser") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(s)) if s == "context" => true,
+        Some(Value::String(s)) if s == "default" => false,
+        Some(_) => return Err(err("'chooser' must be \"default\" or \"context\"")),
+    };
     if profile && want_exp {
         return Err(err("'experiments' is part of the all_skills profile; do not pass both"));
     }
@@ -111,13 +118,31 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
     let owner_k = owner.to_string();
     policy.kill = Some(KillCheck(std::sync::Arc::new(move || authorize::kill_active(&owner_k))));
     let mut cfg = Run2Cfg { world: Some(world), learner: Some(LearnerCfg::default()), discover_every: if discover { DEFAULT_DISCOVER_EVERY } else { 0 }, ctl: Some(limits) };
+    let mut ctx_lin: Option<crate::being::linval::LinCfg> = None;
+    if want_ctx {
+        let rows: Vec<EventRow> = log.open_latest().rows();
+        let st0 = State2::from_events(&rows);
+        match crate::being::linval::LinCtl::from_text(load_controller_text(owner).as_deref()).grant(true) {
+            Ok(_) if st0.cfg.is_none() => ctx_lin = Some(crate::being::linval::LIN_V2),
+            Ok(_) if st0.learner.lin.is_some() => {}
+            Ok(_) => refused.push(("fixed_at_creation".into(), 0, 1, "the chooser estimate is fixed when a World v2 being is created; this being keeps the B1 estimate".into())),
+            Err(r) => refused.push((r.cap.clone(), r.limit, r.requested, r.what.clone())),
+        }
+        if let (Some(l), Some(lc)) = (cfg.learner.as_mut(), ctx_lin) {
+            l.lin = Some(lc);
+        }
+    }
     if profile {
         let rows: Vec<EventRow> = log.open_latest().rows();
         let st0 = State2::from_events(&rows);
         let existing = st0.cfg.as_ref().map(|_| st0.learner);
         let ctl_text = load_controller_text(owner);
         let g = crate::being::world2::all_skills::grant(ctl_text.as_deref(), crate::being::world2::all_skills::Want::all(), existing);
-        cfg.learner = Some(g.learner);
+        let mut learner = g.learner;
+        if ctx_lin.is_some() && existing.is_none() {
+            learner.lin = ctx_lin;
+        }
+        cfg.learner = Some(learner);
         let o = crate::being::world2::all_skills::run_v2_all(&mut log, &cfg, &policy, &g.all).map_err(log_err)?;
         drop(log);
         let s = o.summary;
@@ -240,6 +265,7 @@ pub fn tool_defs() -> Vec<Value> {
             "drift_per_10k": { "type": "integer", "minimum": 0, "maximum": 200 }, "curve_pct": { "type": "integer", "minimum": 0, "maximum": 100 },
             "menu": { "type": "integer", "minimum": 2, "maximum": 8 }, "discover": { "type": "boolean" },
             "experiments": { "type": "boolean", "description": "B9 (opt-in): choose some tasks on purpose to test the being's own rule hypotheses; needs experiments = on and a budget in controller.txt, otherwise refused and audited" },
+            "chooser": { "type": "string", "enum": ["default", "context"], "description": "B13 (opt-in, fixed when the being is created): context uses the context-aware success estimate (each cell shrunk toward a shared linear estimate over family and difficulty, LinUCB-style optimism); needs context_chooser = on in controller.txt, otherwise refused and audited" },
             "profile": { "type": "string", "enum": ["default", "all_skills"], "description": "B10 (opt-in): all_skills asks for every skill (rules use, adaptation, rule retirement, experiments, lookahead); each part runs only if its own controller.txt key allows it (rules_use, adaptation, rule_retirement, experiments with a budget, lookahead), otherwise it stays off and the refusal is logged and audited. Rules use, adaptation and retirement are fixed when the being is created" }
           }, "required": ["steps"] } }),
         json!({ "name": "being_observe",

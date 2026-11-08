@@ -197,6 +197,15 @@ impl StateL {
         self.last_at[fam] = Some(o.step);
     }
 
+    /// Track B13: (attempts, successes) of one (family, strategy, context) cell.
+    pub fn cell_counts(&self, fam: usize, s: Strategy, ctx: u16) -> (u64, u64) {
+        if fam >= self.families {
+            return (0, 0);
+        }
+        let c = &self.cells[self.ci(fam, s.idx().min(2), ctx)];
+        (c.n, c.succ)
+    }
+
     /// The learned estimate of a cell: (p, sd, energy ratio, own attempts).
     pub fn estimate(&self, fam: usize, s: Strategy, ctx: u16) -> (f64, f64, f64, u64) {
         let si = s.idx().min(2);
@@ -356,12 +365,34 @@ fn r3(x: f64) -> f64 {
 pub struct GreedyL {
     pub beta: f64,
     pub skip_frac: f64,
+    /// Track B13 (default off): each (family, strategy, context) cell shrunk toward a shared linear
+    /// estimate over family per strategy, with LinUCB's optimism (`linval.rs`).
+    pub lin: Option<crate::being::linval::LinCfg>,
+    /// Track B13: the skip test (default: the B1 test, bit for bit).
+    pub skip_rule: crate::being::planner::SkipRule,
 }
 
 impl Default for GreedyL {
     fn default() -> Self {
-        GreedyL { beta: DEFAULT_BETA, skip_frac: DEFAULT_SKIP_FRAC }
+        GreedyL { beta: DEFAULT_BETA, skip_frac: DEFAULT_SKIP_FRAC, lin: None, skip_rule: crate::being::planner::SkipRule::Rate }
     }
+}
+
+/// Track B13: the linear fit of the World L being's own evidence (cells keyed by family, strategy and context).
+pub fn lin_fit_l(st: &StateL, cfg: crate::being::linval::LinCfg) -> crate::being::linval::LinFit {
+    use crate::being::linval::{CellObs, Dims, LinFit};
+    let mut cells = vec![];
+    for fam in 0..st.families {
+        for s in STRATEGIES {
+            for ctx in 0..nctx(st.families) as u16 {
+                let (n, succ) = st.cell_counts(fam, s, ctx);
+                if n > 0 {
+                    cells.push(CellObs { strat: s.idx().min(2), fam, diff: 1, ftype: None, ctx: ctx as u32, n: n as f64, succ: succ as f64 });
+                }
+            }
+        }
+    }
+    LinFit::fit(cfg, Dims { fams: st.families, diffs: false, types: 0 }, 3, &cells)
 }
 
 impl GreedyL {
@@ -387,29 +418,50 @@ impl ChooserL for GreedyL {
         "wl-model-ucb".into()
     }
     fn choose(&mut self, st: &StateL, offers: &[OfferL]) -> Option<ChoiceL> {
-        let mut best: Option<(f64, usize, Strategy, f64)> = None;
+        use crate::being::planner::SkipRule;
+        let fit = self.lin.map(|c| lin_fit_l(st, c));
+        let mut best: Option<(f64, usize, Strategy, f64, f64, u64)> = None;
         let mut alts = vec![];
         for o in offers {
             if o.needs_token && st.token == 0 {
                 continue;
             }
             for s in STRATEGIES {
-                let (p, sd, ratio, n) = st.estimate(o.fam, s, st.ctx);
+                let (mut p, mut sd, ratio, n) = st.estimate(o.fam, s, st.ctx);
                 let e = (o.cost as f64 * ratio).max(1.0);
-                let score = o.reward as f64 * (p + self.beta * sd).min(1.0) / e;
+                let mut pu = (p + self.beta * sd).min(1.0);
+                let le = fit.as_ref().map(|f| f.estimate(s.idx().min(2), o.fam, 1, None, st.ctx as u32));
+                if let Some(l) = &le {
+                    (p, sd, pu) = (l.p, l.width, l.p_up);
+                }
+                let score = o.reward as f64 * pu / e;
                 let ok = e.round() as i64 <= st.budget_left;
-                alts.push(json!({ "action": format!("{}:{}", o.slot, s.name()), "family": o.fam, "context": ctx_name(st.ctx), "n_cell": n, "p_success": r3(p), "uncertainty_sd": r3(sd), "est_energy": r3(e), "score": r3(score), "affordable": ok }));
+                let mut a = json!({ "action": format!("{}:{}", o.slot, s.name()), "family": o.fam, "context": ctx_name(st.ctx), "n_cell": n, "p_success": r3(p), "uncertainty_sd": r3(sd), "est_energy": r3(e), "score": r3(score), "affordable": ok });
+                if let (Some(l), Some(f)) = (&le, &fit) {
+                    a["estimate_from_linear"] = l.to_json(&f.cfg, &f.dims, &|_| String::new());
+                }
+                alts.push(a);
                 if ok && best.map_or(true, |b| score > b.0) {
-                    best = Some((score, o.slot, s, p));
+                    best = Some((score, o.slot, s, p, e, n));
                 }
             }
         }
-        let (score, slot, s, p) = best?;
+        let (score, slot, s, p, e_best, n_best) = best?;
         let rate = st.rate();
-        let skip = self.skip_frac > 0.0 && st.total_cost >= SKIP_MIN_COST && score < self.skip_frac * rate && st.budget_left >= SKIP_COST;
-        let rationale = json!({ "policy": self.name(), "planner": "B1 one-step: listed_reward * min(1, p + beta*sd) / estimated energy", "beta": self.beta, "skip_frac": self.skip_frac, "realized_reward_per_energy": r3(rate), "alternatives": alts });
+        let bar = if self.skip_rule == SkipRule::Rate { self.skip_frac * rate } else { self.skip_rule.bar(self.skip_frac, rate, e_best, SKIP_COST, n_best) };
+        let skip = self.skip_frac > 0.0 && st.total_cost >= SKIP_MIN_COST && score < bar && st.budget_left >= SKIP_COST;
+        let mut rationale = json!({ "policy": self.name(), "planner": "B1 one-step: listed_reward * min(1, p + beta*sd) / estimated energy", "beta": self.beta, "skip_frac": self.skip_frac, "realized_reward_per_energy": r3(rate), "alternatives": alts });
+        if let Some(f) = &fit {
+            rationale["planner"] = json!("B1 one-step with the B13 estimate: listed_reward * clamp(p + alpha*width, 0, 1) / estimated energy, p = the (family, strategy, context) cell shrunk toward a shared linear estimate over family");
+            rationale["chooser_estimate"] = json!({ "track": "B13", "cell_k": f.cfg.cell_k(), "alpha": f.cfg.alpha() });
+        }
+        if self.skip_rule != SkipRule::Rate {
+            rationale["skip_rule"] = json!(self.skip_rule.code());
+            rationale["skip_bar"] = json!(r3(bar));
+        }
         if skip {
-            return Some(ChoiceL { act: ActL::Skip, policy: self.name(), why: format!("best optimistic score {score:.3} below {} x realized rate {rate:.3}: skip", self.skip_frac), p: 0.0, score: 0.0, rationale, nodes: 0 });
+            let why = if self.skip_rule == SkipRule::Rate { format!("best optimistic score {score:.3} below {} x realized rate {rate:.3}: skip", self.skip_frac) } else { format!("best optimistic score {score:.3} below the {} skip bar {bar:.3} (realized rate {rate:.3}): skip", self.skip_rule.code()) };
+            return Some(ChoiceL { act: ActL::Skip, policy: self.name(), why, p: 0.0, score: 0.0, rationale, nodes: 0 });
         }
         Some(ChoiceL { act: ActL::Attempt { slot, strategy: s }, policy: self.name(), why: "highest optimistic reward per estimated energy".into(), p, score, rationale, nodes: 0 })
     }
