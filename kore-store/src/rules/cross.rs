@@ -379,37 +379,74 @@ pub fn decode(family: u8, rd: &mut Rd, dtype: DType, n: usize, deps: &[&ColumnDa
     }
 }
 
+/// `; exceptions E of M rows, residual/exception bytes B`: rows the rule does not predict exactly and the
+/// bytes of the streams that carry them (for zero-heavy residual streams this includes the zero runs).
+fn exc_note(e: usize, m: usize, bytes: usize) -> String { format!("; exceptions {e} of {m} rows, residual/exception bytes {bytes}") }
+
+/// Count the non-zero values of a residual stream (zigzag varints) and return (count, stream bytes).
+fn count_zz(rd: &mut Rd, m: usize) -> Option<(usize, usize)> {
+    let start = rd.pos;
+    let r = stream::get_zz_stream(rd, m).ok()?;
+    Some((r.iter().filter(|&&x| x != 0).count(), rd.pos - start))
+}
+
+fn count_u64(rd: &mut Rd, m: usize) -> Option<(usize, usize)> {
+    let start = rd.pos;
+    let r = stream::get_u64_stream(rd, m).ok()?;
+    Some((r.iter().filter(|&&x| x != 0).count(), rd.pos - start))
+}
+
 pub fn describe(family: u8, rd: &mut Rd, n: usize, names: &[&str]) -> String {
     let nm = |k: usize| names.get(k).copied().unwrap_or("?").to_string();
+    let nulls_m = |rd: &mut Rd| stream::get_nulls(rd, n).ok().map(|v| v.iter().filter(|&&x| !x).count());
     match family {
         INT_REL => {
-            if stream::get_nulls(rd, n).is_err() { return "?".into(); }
-            match rd.u8() {
+            let Some(m) = nulls_m(rd) else { return "?".into() };
+            let rel = match rd.u8() {
                 Ok(0) => format!("= {} + {}", nm(0), nm(1)), Ok(1) => format!("= {} - {}", nm(0), nm(1)),
                 Ok(2) => format!("= {} * {}", nm(0), nm(1)),
                 Ok(3) => { let a = rd.zz().unwrap_or(0); let b = rd.zz().unwrap_or(0); if a == 1 && b == 0 { format!("= {} + offset residual", nm(0)) } else { format!("= {a}*{} {b:+}", nm(0)) } }
-                _ => "?".into(),
-            }
+                _ => return "?".into(),
+            };
+            match count_zz(rd, m) { Some((e, b)) => rel + &exc_note(e, m, b), None => rel }
         }
         FLOAT_REL => {
-            if stream::get_nulls(rd, n).is_err() { return "?".into(); }
+            let Some(m) = nulls_m(rd) else { return "?".into() };
             let op = rd.u8().unwrap_or(9);
             let round = rd.u8().unwrap_or(0xFF);
             let o = ["*", "+", "-", "/"].get(op as usize).copied().unwrap_or("?");
             let r = if round == 0xFF { String::new() } else { format!(", rounded to {round} decimals") };
-            format!("= {} {o} {} (f64){r}", nm(0), nm(1))
+            let rel = format!("= {} {o} {} (f64){r}", nm(0), nm(1));
+            match count_u64(rd, m) { Some((e, b)) => rel + &exc_note(e, m, b), None => rel }
         }
         FLOAT_SUM => {
-            if stream::get_nulls(rd, n).is_err() { return "?".into(); }
+            let Some(m) = nulls_m(rd) else { return "?".into() };
             let round = rd.u8().unwrap_or(0xFF);
             let r = if round == 0xFF { String::new() } else { format!(", in units of 10^-{round}") };
-            format!("= {} (sum){r}", names.join(" + "))
+            let rel = format!("= {} (sum){r}", names.join(" + "));
+            if round == 0xFF { return match count_u64(rd, m) { Some((e, b)) => rel + &exc_note(e, m, b), None => rel }; }
+            let Some((e, b)) = count_zz(rd, m) else { return rel };
+            let start = rd.pos;
+            let ne = rd.count(m).unwrap_or(0);
+            if ne > 0 { let _ = stream::get_stream(rd, usize::MAX); let _ = stream::get_stream(rd, usize::MAX); }
+            rel + &format!("; rows off by a non-zero number of units {e} of {m}, raw-bit exceptions {ne}, residual/exception bytes {}", b + rd.pos - start)
         }
-        LOOKUP => match rd.u8() {
-            Ok(0) => format!("= {} shifted by {}", nm(0), rd.varint().unwrap_or(0)),
-            Ok(1) => format!("= lookup({}) ({} keys)", nm(0), rd.varint().unwrap_or(0)),
-            _ => "?".into(),
-        },
+        LOOKUP => {
+            let (rel, start) = match rd.u8() {
+                Ok(0) => (format!("= {} shifted by {}", nm(0), rd.varint().unwrap_or(0)), rd.pos),
+                Ok(1) => {
+                    let k = rd.varint().unwrap_or(0);
+                    // skip the map column: transform, stage, varint(len), payload
+                    let _ = rd.u8(); let _ = rd.u8();
+                    let len = rd.varint().unwrap_or(0) as usize;
+                    let _ = rd.bytes(len);
+                    (format!("= lookup({}) ({k} keys, map {len} bytes)", nm(0)), rd.pos)
+                }
+                _ => return "?".into(),
+            };
+            let ne = rd.varint().unwrap_or(0);
+            rel + &format!("; exceptions {ne} of {n} rows, exception bytes {}", rd.d.len() - start)
+        }
         _ => "?".into(),
     }
 }

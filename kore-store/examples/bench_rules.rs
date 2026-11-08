@@ -124,6 +124,8 @@ fn main() {
     let sets: Vec<String> = get("--sets").unwrap_or("sensors,orders,logs,sequences,random".into()).split(',').map(String::from).collect();
     let reps: usize = get("--reps").map(|s| s.parse().unwrap()).unwrap_or(3);
     let no_dump = args.iter().any(|a| a == "--no-dump");
+    // --save: also write the rule-mode level-19 file of every dataset (for rules_describe)
+    let save = args.iter().any(|a| a == "--save");
     std::fs::create_dir_all(&out).unwrap();
     for set in &sets {
         for &n in &sizes {
@@ -141,6 +143,13 @@ fn main() {
                 s => panic!("unknown set {s}"),
             };
             eprintln!("[{set} {n}] generated in {:.1}s", t.elapsed().as_secs_f64());
+            if args.iter().any(|a| a == "--only-save") {
+                // write the rule-mode level-19 file only (input of rules_describe), checked by a full read
+                let f = KoreWriter::to_bytes_rules(&b, &CompactOptions::default().with_zstd_level(19).with_rules()).unwrap();
+                assert!(same(&b, &KoreReader::from_bytes(&f).unwrap()), "round trip failed");
+                std::fs::write(out.join(format!("rules19_{}_{n}.kore", set_name(set))), &f).unwrap();
+                continue;
+            }
             let values = (b.num_rows * b.columns.len()) as f64;
             let o_def = CompactOptions::default();
             let o_19 = CompactOptions::default().with_zstd_level(19);
@@ -214,6 +223,7 @@ fn main() {
             eprintln!("[{set} {n}] v4 {} B ({:.3} B/value), v4-19 {} B, rules {} B ({:.3} B/value), rules-19 {} B; encode x{:.2}, decode x{:.2}",
                 v4b.len(), v4b.len() as f64 / values, v4b19.len(), rb.len(), rb.len() as f64 / values, rb19.len(), median(e_ratio), median(d_ratio));
             for c in &report { eprintln!("    {:<28} v4 {:>10}  {}", c.name, c.v4_bytes, c.rule.as_ref().map_or("-".to_string(), |r| format!("{} B  {}", r.1, r.0))); }
+            if save { std::fs::write(out.join(format!("rules19_{}_{n}.kore", set_name(set))), &rb19).unwrap(); }
             res["set"] = json!(set_name(set));
             if !no_dump && !set.starts_with("dump:") { res["dump"] = dump(&b, &out.join(format!("dump_{set}_{n}"))); }
             std::fs::write(out.join(format!("store_{}_{n}.json", set_name(set))), serde_json::to_string_pretty(&res).unwrap()).unwrap();
