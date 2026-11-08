@@ -5,7 +5,9 @@
 //! answer is right, starting from a prior pooled over what it has seen elsewhere (the same context and
 //! plan in other templates, then the same template and plan in other contexts, then the plan anywhere;
 //! `prior = flat` turns this off); the being's own series rules start from their verification record). It picks the plan with the highest optimistic reward per energy,
-//! `min(1, p + beta * sd) x reward / energy`, the B1 planner's rule, and skips a task when even that
+//! `min(1, p + beta * sd) x reward / energy`, the B1 planner's rule (with a wrong-answer penalty: the
+//! optimistic expected reward of the whole outcome, `min(reward, p x reward - p_wrong x penalty + beta x
+//! sd of that mean) / energy`, `value_ucb`), and skips a task when even that
 //! is below the renewal bar `rate x (E - 1) / E` (the reward per energy it has realized so far, with
 //! the one energy unit a skip costs). Nothing here sees how files are generated: a test scans this file.
 
@@ -28,18 +30,24 @@ pub struct LearnerTCfg {
     /// true: the pooled (hierarchical) prior; false: a flat prior of 0.5.
     pub pooled: bool,
     pub skip: bool,
+    /// true: the optimism bonus is on the expected reward of the whole outcome (right: +reward, wrong:
+    /// -penalty, no answer: 0; Dirichlet posterior over the three, the bonus is beta x its posterior sd),
+    /// so the uncertain wrong-answer chance is explored at the penalty's scale. false (logs written before
+    /// this field, tag `wt_ucb` missing): the bonus is on the right-answer chance only and the penalty
+    /// term is a point estimate. Identical when the penalty is 0.
+    pub value_ucb: bool,
 }
 
 /// Default: the constants chosen on the tuning seeds 101..120 (docs/measured.md, Track W1).
 impl Default for LearnerTCfg {
     fn default() -> Self {
-        LearnerTCfg { beta_milli: 2000, prior_w_milli: 2000, pooled: true, skip: true }
+        LearnerTCfg { beta_milli: 2000, prior_w_milli: 2000, pooled: true, skip: true, value_ucb: true }
     }
 }
 
 impl LearnerTCfg {
     pub fn tags(&self) -> Vec<String> {
-        vec![format!("wt_beta_milli:{}", self.beta_milli), format!("wt_prior_w_milli:{}", self.prior_w_milli), format!("wt_prior:{}", if self.pooled { "pooled" } else { "flat" }), format!("wt_skip:{}", if self.skip { "on" } else { "off" })]
+        vec![format!("wt_beta_milli:{}", self.beta_milli), format!("wt_prior_w_milli:{}", self.prior_w_milli), format!("wt_prior:{}", if self.pooled { "pooled" } else { "flat" }), format!("wt_skip:{}", if self.skip { "on" } else { "off" }), format!("wt_ucb:{}", if self.value_ucb { "value" } else { "p" })]
     }
     pub fn from_tags(tags: &str) -> Option<LearnerTCfg> {
         let t = |k| crate::being::state::tag(tags, k);
@@ -48,6 +56,7 @@ impl LearnerTCfg {
             prior_w_milli: t("wt_prior_w_milli")?.parse().ok()?,
             pooled: match t("wt_prior")? { "pooled" => true, "flat" => false, _ => return None },
             skip: match t("wt_skip")? { "on" => true, "off" => false, _ => return None },
+            value_ucb: match t("wt_ucb") { None | Some("p") => false, Some("value") => true, _ => return None },
         })
     }
 }
@@ -149,9 +158,20 @@ impl LearnerT {
         let sd = (p * (1.0 - p) / (a + b + 1.0)).sqrt();
         // energy: listed, except a search whose cost the being has observed
         let energy = if plan == Plan::ColSearch && c.n > 0 { c.spent as f64 / c.n as f64 } else { plan.listed(v) as f64 };
-        let opt = (p + self.cfg.beta_milli as f64 / 1000.0 * sd).min(1.0);
-        // expected reward: optimistic chance of a right answer x reward, minus the expected penalty of a wrong one
-        Est { plan, n: c.n, succ: c.succ, prior: m, prior_from: from, p_wrong, p, sd, energy, score: (opt * v.reward as f64 - p_wrong * v.penalty()) / energy.max(1.0) }
+        let beta = self.cfg.beta_milli as f64 / 1000.0;
+        let (r, pen) = (v.reward as f64, v.penalty());
+        let value = if self.cfg.value_ucb && pen > 0.0 {
+            // optimistic expected reward of one attempt: the outcome is right (+r), wrong (-pen) or no answer (0)
+            // with Dirichlet posterior means p, p_wrong (prior weight w plus the attempts); the posterior variance
+            // of the mean reward is Var(outcome) / (w + n + 1); capped at r, the best outcome
+            let q = p_wrong.clamp(0.0, 1.0 - p);
+            let var = (p * (1.0 - p) * r * r + q * (1.0 - q) * pen * pen + 2.0 * p * q * r * pen) / (a + b + 1.0);
+            (p * r - q * pen + beta * var.max(0.0).sqrt()).min(r)
+        } else {
+            // optimistic chance of a right answer x reward, minus the expected penalty of a wrong one
+            (p + beta * sd).min(1.0) * r - p_wrong * pen
+        };
+        Est { plan, n: c.n, succ: c.succ, prior: m, prior_from: from, p_wrong, p, sd, energy, score: value / energy.max(1.0) }
     }
 
     pub fn choose(&self, st: &StateT, v: &ViewT) -> ChoiceT {

@@ -152,7 +152,11 @@ const UCB_C: [f64; 6] = [0.001, 0.003, 0.01, 0.03, 0.1, 0.3];
 const LIN_A: [f64; 6] = [0.1, 0.3, 1.0, 3.0, 10.0, 30.0];
 
 fn being_cfg(b: u32) -> LearnerTCfg {
-    LearnerTCfg { beta_milli: b, prior_w_milli: 2000, pooled: true, skip: true }
+    LearnerTCfg { beta_milli: b, prior_w_milli: 2000, pooled: true, skip: true, value_ucb: true }
+}
+/// The being as at abd8de1e (optimism on the right-answer chance only; same at penalty 0).
+fn being_old_cfg(b: u32) -> LearnerTCfg {
+    LearnerTCfg { value_ucb: false, ..being_cfg(b) }
 }
 fn ucb_cfg(c: f64) -> UcbCfg {
     UcbCfg { c, per_ctx: true, skip: true }
@@ -163,6 +167,7 @@ fn lin_cfg(a: f64) -> LinCfg {
 
 fn tune_pols() -> Vec<Pol> {
     let mut v: Vec<Pol> = BETAS.iter().map(|b| Pol::Being(being_cfg(*b))).collect();
+    v.extend(BETAS.iter().map(|b| Pol::Being(being_old_cfg(*b))));
     v.extend(UCB_C.iter().map(|c| Pol::Ucb(ucb_cfg(*c))));
     v.extend(LIN_A.iter().map(|a| Pol::Lin(lin_cfg(*a))));
     v
@@ -171,10 +176,11 @@ fn tune_pols() -> Vec<Pol> {
 #[derive(Clone, Copy, Debug)]
 struct Tuned {
     beta: u32,
+    beta_old: u32,
     ucb_c: f64,
     lin_a: f64,
     /// index of the chosen value in each grid (0 or 5 = edge)
-    idx: [usize; 3],
+    idx: [usize; 4],
 }
 
 fn pick(scores: &[f64]) -> usize {
@@ -188,8 +194,8 @@ fn pick(scores: &[f64]) -> usize {
 }
 
 fn tuned_from(per: &[f64]) -> Tuned {
-    let (b, u, l) = (pick(&per[0..6]), pick(&per[6..12]), pick(&per[12..18]));
-    Tuned { beta: BETAS[b], ucb_c: UCB_C[u], lin_a: LIN_A[l], idx: [b, u, l] }
+    let (b, o, u, l) = (pick(&per[0..6]), pick(&per[6..12]), pick(&per[12..18]), pick(&per[18..24]));
+    Tuned { beta: BETAS[b], beta_old: BETAS[o], ucb_c: UCB_C[u], lin_a: LIN_A[l], idx: [b, u, l, o] }
 }
 
 // ---- metrics ----
@@ -251,23 +257,23 @@ fn sweep(args: &[String]) {
     println!("World T reward-design sweep: tuning seeds {}..{}, report seeds {}..{}, budget {DEFAULT_BUDGET}; tuning wall {:.0} s", tune_seeds[0], tune_seeds[tune_seeds.len() - 1], rep_seeds[0], rep_seeds[rep_seeds.len() - 1], t0.elapsed().as_secs_f64());
     let mut tuned = vec![];
     println!("\nTuning (mean reward per energy on the tuning seeds; chosen value, * = at the edge of its 6-value grid):");
-    println!("| penalty x reward | energy weight | being beta | UCB1 c | LinUCB alpha |");
-    println!("|---|---|---|---|---|");
+    println!("| penalty x reward | energy weight | being beta | UCB1 c | LinUCB alpha | being (abd8de1e) beta |");
+    println!("|---|---|---|---|---|---|");
     for (gi, (p, c)) in g.iter().enumerate() {
         let per: Vec<f64> = (0..pols.len()).map(|k| mean(&tune.iter().map(|s| s[gi][k]).collect::<Vec<_>>())).collect();
         let t = tuned_from(&per);
         let e = |i: usize| if t.idx[i] == 0 || t.idx[i] == 5 { "*" } else { "" };
-        println!("| {:.3} | {:.3} | {}{} ({:.3}) | {}{} ({:.3}) | {}{} ({:.3}) |", *p as f64 / 1000.0, *c as f64 / 1000.0, t.beta as f64 / 1000.0, e(0), per[t.idx[0]], t.ucb_c, e(1), per[6 + t.idx[1]], t.lin_a, e(2), per[12 + t.idx[2]]);
+        println!("| {:.3} | {:.3} | {}{} ({:.3}) | {}{} ({:.3}) | {}{} ({:.3}) | {}{} ({:.3}) |", *p as f64 / 1000.0, *c as f64 / 1000.0, t.beta as f64 / 1000.0, e(0), per[t.idx[0]], t.ucb_c, e(1), per[12 + t.idx[1]], t.lin_a, e(2), per[18 + t.idx[2]], t.beta_old as f64 / 1000.0, e(3), per[6 + t.idx[3]]);
         tuned.push(t);
     }
     // stage 2: report, seeds 1..20, with each grid point's tuned configurations
-    let names = ["being", "LinUCB", "UCB1", "always SQL", "random plan", "reward-best oracle", "answer-everything oracle"];
+    let names = ["being", "LinUCB", "UCB1", "always SQL", "random plan", "reward-best oracle", "answer-everything oracle", "being (abd8de1e)"];
     let t1 = std::time::Instant::now();
     let rep: Vec<Vec<Vec<M>>> = rep_seeds.par_iter().map(|s| {
         with_sandbox(&wcfg(*s, 0, 1000, false), |sb| {
             let mut cache = ToolCache::new();
             g.iter().zip(&tuned).map(|((p, c), t)| {
-                let ps = [Pol::Being(being_cfg(t.beta)), Pol::Lin(lin_cfg(t.lin_a)), Pol::Ucb(ucb_cfg(t.ucb_c)), Pol::AlwaysSql, Pol::Random, Pol::RewardBest, Pol::AnswerAll];
+                let ps = [Pol::Being(being_cfg(t.beta)), Pol::Lin(lin_cfg(t.lin_a)), Pol::Ucb(ucb_cfg(t.ucb_c)), Pol::AlwaysSql, Pol::Random, Pol::RewardBest, Pol::AnswerAll, Pol::Being(being_old_cfg(t.beta_old))];
                 ps.iter().map(|pol| metrics(&run_life_cached(&wcfg(*s, *p, *c, false), *pol, Some(sb), &mut cache))).collect()
             }).collect()
         })
@@ -276,9 +282,11 @@ fn sweep(args: &[String]) {
     println!("\nPer grid point (report seeds; mean over worlds): reward per energy / right share of answers / coverage (answered / tasks) / skip share / wrong answers per 100 tasks");
     println!("| penalty | weight | policy | reward per energy | right of answers | coverage | skip share | wrong per 100 |");
     println!("|---|---|---|---|---|---|---|---|");
-    let mut lead = [0usize; 3];
-    let mut lead_sig = [0usize; 3];
-    let mut behind_sig = [0usize; 3];
+    let mut lead = [0usize; 4];
+    let mut lead_sig = [0usize; 4];
+    let mut behind_sig = [0usize; 4];
+    let mut old_rows = vec![];
+    let mut old_vs_lin = [0usize; 6];
     let mut flips: Vec<String> = vec![];
     let mut summary = vec![];
     for (gi, (p, c)) in g.iter().enumerate() {
@@ -289,7 +297,7 @@ fn sweep(args: &[String]) {
         }
         let b = col(&at(0), |x| x.rpe);
         let mut row = format!("| {:.3} | {:.3} |", *p as f64 / 1000.0, *c as f64 / 1000.0);
-        for (j, k) in [1usize, 2, 3].iter().enumerate() {
+        for (j, k) in [1usize, 2, 3, 7].iter().enumerate() {
             let o = col(&at(*k), |x| x.rpe);
             let v = verdict(&b, &o);
             if mean(&b) > mean(&o) {
@@ -302,7 +310,22 @@ fn sweep(args: &[String]) {
                 behind_sig[j] += 1;
                 flips.push(format!("{} beats the being at penalty {:.3} x reward, energy weight {:.3}: being minus {} {}", names[*k], *p as f64 / 1000.0, *c as f64 / 1000.0, names[*k], paired(&b, &o)));
             }
-            row.push_str(&format!(" {} |", paired(&b, &o)));
+            if *k != 7 {
+                row.push_str(&format!(" {} |", paired(&b, &o)));
+            }
+        }
+        {
+            let o = col(&at(7), |x| x.rpe);
+            let mut r = format!("| {:.3} | {:.3} |", *p as f64 / 1000.0, *c as f64 / 1000.0);
+            for (j, k) in [1usize, 2, 3].iter().enumerate() {
+                let x = col(&at(*k), |m| m.rpe);
+                let v = verdict(&o, &x);
+                if v > 0 { old_vs_lin[2 * j] += 1; }
+                if v < 0 { old_vs_lin[2 * j + 1] += 1; }
+                r.push_str(&format!(" {} |", paired(&o, &x)));
+            }
+            r.push_str(&format!(" {} | {} | {:.2} / {:.2} | {:.1} / {:.1} |", paired(&o, &col(&at(5), |x| x.rpe)), paired(&b, &o), mean(&col(&at(7), |x| x.skip)), mean(&col(&at(0), |x| x.skip)), mean(&col(&at(7), |x| x.wrong100)), mean(&col(&at(0), |x| x.wrong100))));
+            old_rows.push(r);
         }
         let rb = col(&at(5), |x| x.rpe);
         row.push_str(&format!(" {} |", paired(&b, &rb)));
@@ -315,7 +338,17 @@ fn sweep(args: &[String]) {
         println!("{r}");
     }
     let n = g.len();
+    println!("
+Before / after (being (abd8de1e) = optimism on the right-answer chance only; being = value_ucb), paired, better/worse/tie of {}:", rep_seeds.len());
+    println!("| penalty | weight | old minus LinUCB | old minus UCB1 | old minus always SQL | old minus reward-best oracle | being minus being (abd8de1e) | skip share old / now | wrong per 100 old / now |");
+    println!("|---|---|---|---|---|---|---|---|---|");
+    for r in &old_rows {
+        println!("{r}");
+    }
     for (j, nm) in ["LinUCB", "UCB1", "always SQL"].iter().enumerate() {
+        println!("being (abd8de1e) against {nm}: interval above 0 at {}, below 0 at {}", old_vs_lin[2 * j], old_vs_lin[2 * j + 1]);
+    }
+    for (j, nm) in ["LinUCB", "UCB1", "always SQL", "being (abd8de1e)"].iter().enumerate() {
         println!("against {nm}: being ahead on the mean at {} of {n} grid points, interval above 0 at {}, interval below 0 at {}", lead[j], lead_sig[j], behind_sig[j]);
     }
     println!("\nWhere a reference beats the being (interval of the paired difference below 0):");
@@ -331,6 +364,7 @@ fn sweep(args: &[String]) {
 
 fn report(args: &[String], ood: bool) {
     let ss = seeds(args, "--seeds", (1, 20));
+    let pen: u32 = arg(args, "--penalty-pm").map_or(0, |b| b.parse().unwrap());
     let beta: u32 = arg(args, "--beta").map_or(2000, |b| (b.parse::<f64>().unwrap() * 1000.0).round() as u32);
     let uc: f64 = arg(args, "--ucb-c").map_or(0.03, |b| b.parse().unwrap());
     let la: f64 = arg(args, "--lin-alpha").map_or(1.0, |b| b.parse().unwrap());
@@ -347,11 +381,12 @@ fn report(args: &[String], ood: bool) {
         Pol::Lin(LinCfg { skip: false, ..lin_cfg(la) }),
         Pol::RewardBest,
         Pol::AnswerAll,
+        Pol::Being(LearnerTCfg { value_ucb: false, ..lb }),
     ];
-    let names = ["being", "being, skip off", "being, flat prior", "random plan", "always SQL", "UCB1", "UCB1, skip off", "LinUCB", "LinUCB, skip off", "reward-best oracle (SEES HIDDEN)", "answer-everything oracle (SEES HIDDEN)"];
+    let names = ["being", "being, skip off", "being, flat prior", "random plan", "always SQL", "UCB1", "UCB1, skip off", "LinUCB", "LinUCB, skip off", "reward-best oracle (SEES HIDDEN)", "answer-everything oracle (SEES HIDDEN)", "being (abd8de1e)"];
     let t0 = std::time::Instant::now();
     let all: Vec<Vec<LifeT>> = ss.par_iter().map(|s| {
-        let c = wcfg(*s, 0, 1000, ood);
+        let c = wcfg(*s, pen, 1000, ood);
         with_sandbox(&c, |sb| {
             let mut cache = ToolCache::new();
             pols.iter().map(|p| run_life_cached(&c, *p, Some(sb), &mut cache)).collect()

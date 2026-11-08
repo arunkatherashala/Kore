@@ -27,6 +27,7 @@ be burstier, messier and phrased differently.
 | B11 long-run decline and World O (synthetic) | 8 worlds x 1M steps (decline); 20 worlds (World O); 20 worlds (B1 check) | B1 skip test; oracle-knows-rules | settled skip test vs B1 over 1M steps +0.208 [+0.066, +0.350]; world 1 4.164 -> 4.152 (B1 4.096 -> 4.020); B1 budget 600 +0.001 [-0.007, +0.009], 3000 +0.049 [+0.010, +0.087]; World O regret current 0.131 -> 0.836 per 100k-energy window, no faster learning of later families (Spearman +0.025 [-0.060, +0.110]) | 2026-11-07 | open-world |
 | V1 versus standard methods (synthetic): ours minus the best tuned standard method; World v2 12 conditions / first world budget 600 / 3000 / World O | 20 worlds per condition | 10 standard methods (eps-greedy, UCB1-tuned, KL-UCB, Thompson, EXP3, LinUCB, linear Thompson, Q-learning, SARSA, MLP Q), tuned on seeds 101..120; oracles; MCTS on the true simulator | World v2: current -0.18 to -0.38 (11 of 12 below 0), recommended (B7 + skip fix) -0.088 to +0.131 (none significant); first world -0.450 [-0.659, -0.241] / +0.007 [-0.105, +0.119]; World O (600k) current +0.540 [+0.380, +0.701] over the best method; rule learning 0.78-0.81 right, 0 wrong vs brute force 0.59-0.71 and k-NN / trees 0.05-0.55 (Track V1) | 2026-11-07 | vs-world |
 | W1 World T, data work in a sandbox (synthetic): being minus tuned LinUCB / UCB1 / always SQL, reward per energy, default reward design; 6 x 5 reward-design sweep; OOD | 20 worlds per point, budget 6000 | random plan, always SQL, UCB1 and LinUCB, each tuned on seeds 101..120 with 6 configurations per grid point; reward-best oracle (sees every plan's true result) | +0.127 [+0.084, +0.171] / +0.496 [+0.416, +0.575] / +2.259; 0.686 below the reward-best oracle; sweep: being ahead (interval above 0) at 22 / 24 / 25 of 30 points, behind LinUCB and UCB1 from a wrong-answer penalty of 3.16 x reward, behind always SQL at 3 points of penalty 10 x; series rules and column search precision 1.000 before the checker (6,257 and 881 answers); 0 wrong accepted; later kinds not faster (Spearman -0.005 [-0.118, +0.109]); OOD +0.516 over LinUCB, mostly from skipping (Track W1) | 2026-11-08 | world-t |
+| W1b World T over-skipping fix (`value_ucb`, synthetic): being minus tuned LinUCB / UCB1 / always SQL on the 6 x 5 sweep, before (abd8de1e) and after | 20 worlds per point, budget 6000 | same as W1, all re-tuned on seeds 101..120; old being re-tuned separately | penalty 0 unchanged (headline +0.127 [+0.084, +0.171], new minus old +0.000, 0/0/20); points ahead (interval above 0) 22 / 24 / 25 -> 25 / 30 / 29 of 30; still behind LinUCB at penalty 10 x, weights 1 and 3.16 (-0.104, -0.108; before -0.775, -0.488) and always SQL at penalty 10 x, weight 10 (-0.087); pre-registered criterion not met (Track W1b) | 2026-11-08 | wt-overskip |
 
 ## How to reproduce
 
@@ -2845,6 +2846,7 @@ every policy; 0 of 7,478 series-rule and 0 of 2,836 column-search answers reject
   being loses to LinUCB and UCB1, and at 10 x always SQL beats it at three of five weights.** It over-skips: its prior
   for the wrong-answer chance makes untried plans look too risky. The being leads on 22 of 30 grid points against
   LinUCB, 24 against UCB1, 25 against always SQL.
+  (Track W1b: the cause was the optimism bonus on the right-answer chance only; fixed there, 25 / 30 / 29 of 30.)
 * Accuracy is traded for reward unless wrong answers cost something: 11.2 wrong answers per 100 tasks at no penalty,
   0.1 at penalty 10 (where the being is the most accurate policy and earns the least).
 * Later kinds are not learned faster (negative); the pooled prior does not raise reward at the main point (-0.023
@@ -2863,6 +2865,141 @@ several tasks; drift of the quirks over the life; longer lives; the logged run a
 run it for 40 + 10 steps; the measurement runs are in memory with the same steps, a test checks it); a prior for the
 wrong-answer chance tuned to the penalty (the likely fix for the harsh-penalty region); the timeout under real engine
 slowness.
+
+## Track W1b: World T over-skipping at harsh penalties (value-scale optimism)
+
+Pre-registered 2026-11-08, before any run on the report seeds 1..20 with the fix (only tuning seeds 101..120 had been
+run). Success, judged only against this: (1) the being is no longer significantly behind tuned LinUCB or UCB1 at any
+sweep point with penalty >= 3.16 x reward (upper end of the paired 95% interval >= 0); AND (2) the headline (penalty 0,
+energy weight 1; at abd8de1e +0.127 [+0.084, +0.171] over LinUCB) is not significantly worse (paired interval of new
+minus old being includes 0 or is above 0); AND (3) the number of the 30 sweep points where the being is ahead of
+LinUCB (interval above 0) does not drop below 22.
+
+Root cause (`kore-self/src/being/world_t/learner.rs`, `estimate`, at abd8de1e lines 145-147): the score was
+`(min(1, p + beta x sd) x reward - p_wrong x penalty) / energy`. The optimism bonus sat on the right-answer chance
+only, at the reward's scale; the penalty term was a point estimate from a prior of 0.25 (weight 2). With a penalty of
+10 x reward an untried plan scored about `(0.5 + bonus) x R - 2.5 R < 0`, below the skip bar, so the being skipped;
+a skipped task yields no outcome, so the wrong-answer estimate never moved (and series tasks skipped yield no
+examples for the rule search). The bandits put their bonus on the realized reward (UCB1 rescales it by the penalty
+range; LinUCB's wrong-answer mean starts at 0). Fix (`value_ucb`, default on, World T only): the bonus is on the
+expected reward of the whole outcome (right +R, wrong -P, no answer 0; Dirichlet posterior with the same counts and
+prior), `min(R, p R - p_wrong P + beta x sd) / energy` with `sd^2 = (p(1-p) R^2 + q(1-q) P^2 + 2 p q R P) / (w + n + 1)`.
+With no penalty this is exactly the old score (test
+`value_ucb_is_identical_without_a_penalty_explores_the_penalty_term_and_old_logs_keep_their_rule`; sweep: 0/0/20 ties
+at all five penalty-0 points). No controller key: no other world and no live World T run changes (the tool's runs
+have penalty 0); logs without the `wt_ucb` tag replay with the old rule.
+
+Measured 2026-11-08 at commit COMMIT (code; branch `wt-overskip` from abd8de1e), Windows, 6 threads. Same protocol
+as Track W1: every policy re-tuned at every point on seeds 101..120 (6 configurations each; the old being tuned
+separately with its own 6 betas), reported on seeds 1..20, budget 6000, paired 95% t-intervals, (wins/losses/ties of
+20). The old being re-run here reproduces Track W1 exactly (22 / 24 / 25 points ahead of LinUCB / UCB1 / always
+SQL). Before this run on the report seeds, the fix had been run only on tuning seeds 101..120 (penalties 3.16 and 10,
+betas 0.5 to 8). Tuning wall 2629 s, report 766 s.
+
+Headline (penalty 0, weight 1; seeds 1..20, budget 6000): being 3.865 [3.735, 3.995], unchanged: new minus old
++0.000 [+0.000, +0.000] (0/0/20); minus LinUCB +0.127 [+0.084, +0.171] (18/2/0); minus the reward-best oracle (sees
+every plan's true result) -0.686 [-0.742, -0.631] (0/20/0), before and after. OOD (same seeds, main-point constants):
+2.633 [2.468, 2.799] before and after, new minus old +0.000 (0/0/20), minus LinUCB +0.516 [+0.395, +0.637] (20/0/0).
+Rule precision before the checker, before = after at penalty 0: series rules 6,257 answers checked, 0 rejected by the
+checker, precision 1.000; column search 881, 0 rejected, 1.000; 0 wrong accepted (OOD 7,478 and 2,836, 0 rejected).
+At penalty 10, weight 1 (new being, beta 1): series rules 1,188 answers, 0 rejected; column search 5,053, 0 rejected;
+0 wrong accepted.
+
+Sweep, after (being with `value_ucb`), being minus each, reward per energy (wins/losses/ties of 20; **bold** = interval
+below 0):
+
+| penalty | weight | minus LinUCB | minus UCB1 | minus always SQL | minus reward-best oracle | minus being (abd8de1e) | skip share before / after | wrong per 100 before / after |
+|---|---|---|---|---|---|---|---|---|
+| 0 | 0.1 | +0.228 [+0.156, +0.300] 19/1/0 | +0.374 [+0.296, +0.453] 20/0/0 | +4.173 [+3.925, +4.422] 20/0/0 | -0.376 [-0.409, -0.343] 0/20/0 | +0.000 [+0.000, +0.000] 0/0/20 | 0.00 / 0.00 | 3.0 / 3.0 |
+| 0 | 0.316 | +0.141 [+0.087, +0.195] 16/4/0 | +0.384 [+0.331, +0.436] 20/0/0 | +3.188 [+2.996, +3.381] 20/0/0 | -0.634 [-0.686, -0.583] 0/20/0 | +0.000 [+0.000, +0.000] 0/0/20 | 0.00 / 0.00 | 7.3 / 7.3 |
+| 0 | 1 | +0.127 [+0.084, +0.171] 18/2/0 | +0.496 [+0.416, +0.575] 20/0/0 | +2.259 [+2.095, +2.423] 20/0/0 | -0.686 [-0.742, -0.631] 0/20/0 | +0.000 [+0.000, +0.000] 0/0/20 | 0.13 / 0.13 | 11.2 / 11.2 |
+| 0 | 3.162 | +0.206 [+0.103, +0.309] 18/2/0 | +1.309 [+1.182, +1.435] 20/0/0 | +2.579 [+2.354, +2.804] 20/0/0 | -0.394 [-0.456, -0.331] 0/20/0 | +0.000 [+0.000, +0.000] 0/0/20 | 0.31 / 0.31 | 11.6 / 11.6 |
+| 0 | 10 | +0.285 [+0.214, +0.357] 20/0/0 | +2.616 [+2.475, +2.758] 20/0/0 | +3.131 [+2.931, +3.331] 20/0/0 | -0.255 [-0.284, -0.226] 0/20/0 | +0.000 [+0.000, +0.000] 0/0/20 | 0.32 / 0.32 | 13.9 / 13.9 |
+| 0.1 | 0.1 | +0.285 [+0.197, +0.373] 18/2/0 | +0.442 [+0.338, +0.545] 20/0/0 | +4.151 [+3.901, +4.401] 20/0/0 | -0.398 [-0.436, -0.360] 0/20/0 | **-0.039 [-0.069, -0.010] 6/14/0** | 0.00 / 0.00 | 2.6 / 2.7 |
+| 0.1 | 0.316 | +0.173 [+0.110, +0.236] 18/2/0 | +0.390 [+0.326, +0.454] 20/0/0 | +3.122 [+2.924, +3.319] 20/0/0 | -0.701 [-0.756, -0.645] 0/20/0 | -0.024 [-0.069, +0.020] 8/12/0 | 0.00 / 0.00 | 6.4 / 6.1 |
+| 0.1 | 1 | +0.158 [+0.095, +0.221] 17/3/0 | +0.583 [+0.510, +0.655] 20/0/0 | +2.209 [+2.041, +2.377] 20/0/0 | -0.736 [-0.791, -0.682] 0/20/0 | +0.000 [-0.024, +0.024] 8/12/0 | 0.13 / 0.12 | 9.9 / 10.1 |
+| 0.1 | 3.162 | +0.245 [+0.134, +0.355] 16/4/0 | +1.314 [+1.179, +1.448] 20/0/0 | +2.491 [+2.273, +2.710] 20/0/0 | -0.481 [-0.537, -0.425] 0/20/0 | +0.031 [-0.001, +0.064] 14/6/0 | 0.27 / 0.31 | 12.8 / 11.3 |
+| 0.1 | 10 | +0.290 [+0.202, +0.378] 18/2/0 | +2.517 [+2.365, +2.669] 20/0/0 | +2.964 [+2.753, +3.175] 20/0/0 | -0.422 [-0.476, -0.368] 0/20/0 | -0.020 [-0.047, +0.007] 8/12/0 | 0.33 / 0.33 | 12.2 / 12.2 |
+| 0.316 | 0.1 | +0.304 [+0.189, +0.418] 16/4/0 | +0.453 [+0.329, +0.578] 19/1/0 | +4.077 [+3.835, +4.319] 20/0/0 | -0.472 [-0.535, -0.410] 0/20/0 | **-0.044 [-0.084, -0.004] 5/15/0** | 0.00 / 0.00 | 2.3 / 2.4 |
+| 0.316 | 0.316 | +0.268 [+0.188, +0.347] 20/0/0 | +0.449 [+0.369, +0.529] 20/0/0 | +3.031 [+2.837, +3.225] 20/0/0 | -0.791 [-0.845, -0.738] 0/20/0 | -0.012 [-0.047, +0.023] 7/13/0 | 0.00 / 0.00 | 4.8 / 5.7 |
+| 0.316 | 1 | +0.159 [+0.098, +0.220] 16/4/0 | +0.495 [+0.423, +0.567] 20/0/0 | +2.063 [+1.901, +2.224] 20/0/0 | -0.882 [-0.942, -0.822] 0/20/0 | -0.025 [-0.055, +0.005] 8/12/0 | 0.12 / 0.11 | 8.2 / 8.6 |
+| 0.316 | 3.162 | +0.265 [+0.185, +0.345] 18/2/0 | +1.226 [+1.089, +1.363] 20/0/0 | +2.251 [+2.024, +2.478] 20/0/0 | -0.721 [-0.793, -0.650] 0/20/0 | -0.007 [-0.039, +0.025] 12/8/0 | 0.28 / 0.32 | 11.0 / 9.5 |
+| 0.316 | 10 | +0.387 [+0.264, +0.511] 19/1/0 | +2.330 [+2.153, +2.508] 20/0/0 | +2.723 [+2.485, +2.961] 20/0/0 | -0.663 [-0.748, -0.577] 0/20/0 | +0.017 [-0.042, +0.076] 12/8/0 | 0.33 / 0.35 | 10.9 / 10.1 |
+| 1 | 0.1 | +0.448 [+0.309, +0.587] 19/1/0 | +0.562 [+0.402, +0.723] 20/0/0 | +3.882 [+3.640, +4.124] 20/0/0 | -0.668 [-0.744, -0.591] 0/20/0 | -0.029 [-0.073, +0.016] 8/12/0 | 0.01 / 0.01 | 1.7 / 2.4 |
+| 1 | 0.316 | +0.290 [+0.178, +0.403] 18/2/0 | +0.455 [+0.363, +0.547] 20/0/0 | +2.777 [+2.579, +2.975] 20/0/0 | -1.045 [-1.131, -0.959] 0/20/0 | +0.008 [-0.035, +0.051] 10/10/0 | 0.00 / 0.01 | 3.8 / 4.3 |
+| 1 | 1 | +0.292 [+0.222, +0.362] 19/1/0 | +0.478 [+0.382, +0.575] 20/0/0 | +1.812 [+1.643, +1.981] 20/0/0 | -1.133 [-1.218, -1.049] 0/20/0 | +0.037 [+0.009, +0.064] 15/5/0 | 0.11 / 0.10 | 5.7 / 6.0 |
+| 1 | 3.162 | +0.471 [+0.317, +0.625] 18/2/0 | +1.071 [+0.886, +1.255] 20/0/0 | +1.792 [+1.551, +2.033] 20/0/0 | -1.181 [-1.293, -1.069] 0/20/0 | +0.048 [-0.035, +0.131] 10/10/0 | 0.31 / 0.31 | 7.1 / 7.2 |
+| 1 | 10 | +0.433 [+0.240, +0.627] 17/3/0 | +1.752 [+1.463, +2.041] 20/0/0 | +1.965 [+1.653, +2.277] 20/0/0 | -1.421 [-1.618, -1.223] 0/20/0 | -0.017 [-0.172, +0.138] 12/8/0 | 0.37 / 0.45 | 7.0 / 5.4 |
+| 3.162 | 0.1 | +0.467 [+0.308, +0.625] 19/1/0 | +0.538 [+0.390, +0.687] 20/0/0 | +3.326 [+3.076, +3.576] 20/0/0 | -1.224 [-1.360, -1.087] 0/20/0 | +0.298 [+0.196, +0.400] 18/2/0 | 0.11 / 0.08 | 1.0 / 1.3 |
+| 3.162 | 0.316 | +0.251 [+0.131, +0.371] 17/3/0 | +0.398 [+0.264, +0.533] 20/0/0 | +2.229 [+2.036, +2.423] 20/0/0 | -1.593 [-1.669, -1.517] 0/20/0 | +0.745 [+0.568, +0.923] 20/0/0 | 0.25 / 0.03 | 1.4 / 3.1 |
+| 3.162 | 1 | +0.208 [+0.100, +0.316] 17/3/0 | +0.327 [+0.217, +0.437] 20/0/0 | +1.282 [+1.126, +1.438] 20/0/0 | -1.663 [-1.780, -1.546] 0/20/0 | +0.586 [+0.452, +0.720] 20/0/0 | 0.40 / 0.17 | 1.6 / 2.5 |
+| 3.162 | 3.162 | +0.204 [+0.031, +0.377] 13/7/0 | +0.538 [+0.384, +0.692] 20/0/0 | +0.898 [+0.728, +1.069] 20/0/0 | -2.074 [-2.227, -1.921] 0/20/0 | +0.139 [+0.022, +0.256] 13/7/0 | 0.50 / 0.36 | 1.7 / 3.0 |
+| 3.162 | 10 | +0.216 [+0.075, +0.357] 16/4/0 | +0.647 [+0.338, +0.956] 20/0/0 | +0.669 [+0.342, +0.996] 20/0/0 | -2.717 [-2.996, -2.438] 0/20/0 | +0.032 [-0.106, +0.170] 10/10/0 | 0.53 / 0.34 | 2.4 / 4.8 |
+| 10 | 0.1 | +0.032 [-0.082, +0.146] 11/8/1 | +0.470 [+0.367, +0.573] 20/0/0 | +2.478 [+2.205, +2.750] 20/0/0 | -2.072 [-2.283, -1.860] 0/20/0 | +3.789 [+3.233, +4.345] 20/0/0 | 0.59 / 0.14 | 0.2 / 0.8 |
+| 10 | 0.316 | -0.028 [-0.112, +0.055] 10/10/0 | +0.402 [+0.316, +0.488] 20/0/0 | +1.547 [+1.391, +1.703] 20/0/0 | -2.276 [-2.431, -2.120] 0/20/0 | +1.539 [+1.250, +1.828] 20/0/0 | 0.51 / 0.14 | 0.1 / 1.1 |
+| 10 | 1 | **-0.104 [-0.165, -0.043] 4/16/0** | +0.270 [+0.210, +0.330] 20/0/0 | +0.673 [+0.558, +0.788] 20/0/0 | -2.273 [-2.410, -2.136] 0/20/0 | +0.671 [+0.563, +0.780] 20/0/0 | 0.59 / 0.15 | 0.1 / 1.6 |
+| 10 | 3.162 | **-0.108 [-0.189, -0.028] 5/15/0** | +0.306 [+0.214, +0.397] 20/0/0 | +0.190 [+0.071, +0.309] 16/4/0 | -2.783 [-2.951, -2.615] 0/20/0 | +0.380 [+0.172, +0.588] 17/3/0 | 0.81 / 0.18 | 0.1 / 2.6 |
+| 10 | 10 | -0.125 [-0.258, +0.009] 8/12/0 | +0.259 [+0.205, +0.313] 20/0/0 | **-0.087 [-0.146, -0.028] 4/16/0** | -3.473 [-3.660, -3.285] 0/20/0 | +0.092 [+0.038, +0.147] 16/3/1 | 0.92 / 0.88 | 0.1 / 0.2 |
+
+Sweep, before (being at abd8de1e, re-run in the same harness; identical to the Track W1 table), being minus each:
+
+| penalty | weight | minus LinUCB | minus UCB1 | minus always SQL | minus reward-best oracle |
+|---|---|---|---|---|---|
+| 0 | 0.1 | +0.228 [+0.156, +0.300] 19/1/0 | +0.374 [+0.296, +0.453] 20/0/0 | +4.173 [+3.925, +4.422] 20/0/0 | -0.376 [-0.409, -0.343] 0/20/0 |
+| 0 | 0.316 | +0.141 [+0.087, +0.195] 16/4/0 | +0.384 [+0.331, +0.436] 20/0/0 | +3.188 [+2.996, +3.381] 20/0/0 | -0.634 [-0.686, -0.583] 0/20/0 |
+| 0 | 1 | +0.127 [+0.084, +0.171] 18/2/0 | +0.496 [+0.416, +0.575] 20/0/0 | +2.259 [+2.095, +2.423] 20/0/0 | -0.686 [-0.742, -0.631] 0/20/0 |
+| 0 | 3.162 | +0.206 [+0.103, +0.309] 18/2/0 | +1.309 [+1.182, +1.435] 20/0/0 | +2.579 [+2.354, +2.804] 20/0/0 | -0.394 [-0.456, -0.331] 0/20/0 |
+| 0 | 10 | +0.285 [+0.214, +0.357] 20/0/0 | +2.616 [+2.475, +2.758] 20/0/0 | +3.131 [+2.931, +3.331] 20/0/0 | -0.255 [-0.284, -0.226] 0/20/0 |
+| 0.1 | 0.1 | +0.324 [+0.246, +0.402] 20/0/0 | +0.481 [+0.385, +0.577] 20/0/0 | +4.190 [+3.946, +4.435] 20/0/0 | -0.359 [-0.398, -0.320] 0/20/0 |
+| 0.1 | 0.316 | +0.198 [+0.125, +0.270] 19/1/0 | +0.414 [+0.354, +0.475] 20/0/0 | +3.146 [+2.955, +3.337] 20/0/0 | -0.676 [-0.735, -0.618] 0/20/0 |
+| 0.1 | 1 | +0.157 [+0.097, +0.218] 18/2/0 | +0.582 [+0.514, +0.650] 20/0/0 | +2.209 [+2.041, +2.376] 20/0/0 | -0.737 [-0.797, -0.676] 0/20/0 |
+| 0.1 | 3.162 | +0.213 [+0.094, +0.332] 17/3/0 | +1.282 [+1.132, +1.432] 20/0/0 | +2.460 [+2.232, +2.688] 20/0/0 | -0.512 [-0.582, -0.443] 0/20/0 |
+| 0.1 | 10 | +0.310 [+0.218, +0.402] 18/2/0 | +2.538 [+2.389, +2.686] 20/0/0 | +2.984 [+2.778, +3.190] 20/0/0 | -0.402 [-0.451, -0.353] 0/20/0 |
+| 0.316 | 0.1 | +0.348 [+0.253, +0.442] 20/0/0 | +0.497 [+0.392, +0.603] 20/0/0 | +4.121 [+3.884, +4.358] 20/0/0 | -0.428 [-0.476, -0.380] 0/20/0 |
+| 0.316 | 0.316 | +0.279 [+0.200, +0.359] 19/1/0 | +0.461 [+0.381, +0.541] 20/0/0 | +3.043 [+2.838, +3.248] 20/0/0 | -0.779 [-0.835, -0.724] 0/20/0 |
+| 0.316 | 1 | +0.184 [+0.121, +0.247] 19/1/0 | +0.520 [+0.451, +0.589] 20/0/0 | +2.088 [+1.924, +2.252] 20/0/0 | -0.858 [-0.923, -0.792] 0/20/0 |
+| 0.316 | 3.162 | +0.272 [+0.181, +0.363] 18/2/0 | +1.233 [+1.083, +1.383] 20/0/0 | +2.258 [+2.019, +2.498] 20/0/0 | -0.714 [-0.798, -0.630] 0/20/0 |
+| 0.316 | 10 | +0.370 [+0.281, +0.460] 20/0/0 | +2.313 [+2.122, +2.505] 20/0/0 | +2.707 [+2.456, +2.957] 20/0/0 | -0.679 [-0.774, -0.585] 0/20/0 |
+| 1 | 0.1 | +0.477 [+0.357, +0.596] 20/0/0 | +0.591 [+0.441, +0.741] 20/0/0 | +3.910 [+3.674, +4.147] 20/0/0 | -0.639 [-0.706, -0.572] 0/20/0 |
+| 1 | 0.316 | +0.282 [+0.182, +0.383] 18/2/0 | +0.447 [+0.348, +0.545] 20/0/0 | +2.769 [+2.588, +2.951] 20/0/0 | -1.053 [-1.131, -0.976] 0/20/0 |
+| 1 | 1 | +0.255 [+0.191, +0.319] 19/1/0 | +0.442 [+0.350, +0.534] 20/0/0 | +1.775 [+1.623, +1.927] 20/0/0 | -1.170 [-1.240, -1.100] 0/20/0 |
+| 1 | 3.162 | +0.423 [+0.259, +0.587] 18/2/0 | +1.023 [+0.835, +1.210] 20/0/0 | +1.744 [+1.502, +1.985] 20/0/0 | -1.229 [-1.343, -1.114] 0/20/0 |
+| 1 | 10 | +0.450 [+0.238, +0.662] 19/1/0 | +1.769 [+1.460, +2.078] 20/0/0 | +1.982 [+1.645, +2.319] 20/0/0 | -1.404 [-1.595, -1.213] 0/20/0 |
+| 3.162 | 0.1 | +0.169 [+0.041, +0.297] 13/7/0 | +0.240 [+0.130, +0.351] 17/3/0 | +3.028 [+2.767, +3.289] 20/0/0 | -1.522 [-1.696, -1.347] 0/20/0 |
+| 3.162 | 0.316 | **-0.494 [-0.638, -0.350] 1/19/0** | **-0.347 [-0.503, -0.190] 5/15/0** | +1.484 [+1.273, +1.696] 20/0/0 | -2.338 [-2.525, -2.152] 0/20/0 |
+| 3.162 | 1 | **-0.378 [-0.537, -0.220] 3/17/0** | **-0.259 [-0.385, -0.134] 2/18/0** | +0.696 [+0.545, +0.847] 20/0/0 | -2.250 [-2.442, -2.057] 0/20/0 |
+| 3.162 | 3.162 | +0.065 [-0.056, +0.187] 11/9/0 | +0.399 [+0.265, +0.533] 20/0/0 | +0.759 [+0.607, +0.912] 20/0/0 | -2.213 [-2.385, -2.041] 0/20/0 |
+| 3.162 | 10 | +0.184 [+0.059, +0.308] 15/5/0 | +0.615 [+0.393, +0.836] 20/0/0 | +0.637 [+0.398, +0.876] 20/0/0 | -2.749 [-2.973, -2.525] 0/20/0 |
+| 10 | 0.1 | **-3.757 [-4.273, -3.241] 0/20/0** | **-3.319 [-3.848, -2.790] 0/20/0** | **-1.311 [-1.895, -0.728] 2/18/0** | -5.861 [-6.413, -5.308] 0/20/0 |
+| 10 | 0.316 | **-1.567 [-1.801, -1.334] 0/20/0** | **-1.137 [-1.371, -0.903] 0/20/0** | +0.008 [-0.258, +0.273] 9/11/0 | -3.815 [-4.159, -3.471] 0/20/0 |
+| 10 | 1 | **-0.775 [-0.863, -0.687] 0/20/0** | **-0.401 [-0.491, -0.312] 0/20/0** | +0.001 [-0.092, +0.095] 8/12/0 | -2.944 [-3.099, -2.788] 0/20/0 |
+| 10 | 3.162 | **-0.488 [-0.689, -0.287] 0/20/0** | -0.074 [-0.266, +0.117] 14/6/0 | **-0.190 [-0.363, -0.017] 7/13/0** | -3.163 [-3.387, -2.939] 0/20/0 |
+| 10 | 10 | **-0.217 [-0.361, -0.073] 5/15/0** | +0.167 [+0.107, +0.227] 19/1/0 | **-0.179 [-0.240, -0.118] 2/18/0** | -3.565 [-3.756, -3.374] 0/20/0 |
+
+Points with the interval above 0 / below 0 (of 30), before -> after: against LinUCB 22 / 7 -> 25 / 2; against UCB1
+24 / 5 -> 30 / 0; against always SQL 25 / 3 -> 29 / 1. New minus old: above 0 at 10 points, below 0 at 2.
+
+* Always SQL ahead of the being (interval below 0), before: penalty 10 at weights 0.1 (-1.311), 3.16 (-0.190) and 10
+  (-0.179); after: only penalty 10, weight 10: -0.087 [-0.146, -0.028] (4/16/0). There the being still skips 88% of
+  the tasks (before 92%); with every plan priced 10 x, skipping most is close to right, but always SQL earns 0.250
+  against the being's 0.163.
+* LinUCB still ahead, after: penalty 10 at weight 1, -0.104 [-0.165, -0.043] (4/16/0), and weight 3.16, -0.108
+  [-0.189, -0.028] (5/15/0) (before: -0.775 and -0.488). Ties at penalty 10, weights 0.1 (+0.032), 0.316 (-0.028) and
+  10 (-0.125 [-0.258, +0.009]). The remaining gap at penalty 10: the being now answers (skip 15%, LinUCB 24%) but
+  submits more wrong answers (1.6 against 0.7 per 100 tasks at weight 1) while exploring per (template, context,
+  plan) cell, and on exact series it still skips 74% of the tasks (seen on the tuning seeds first): series rules need
+  revealed examples, which only attempts give, and attempting without a rule costs 10 x reward per wrong answer.
+* Worse: penalty 0.1 and 0.316 at weight 0.1, new minus old -0.039 [-0.069, -0.010] (6/14/0) and -0.044 [-0.084,
+  -0.004] (5/15/0): at both points the tuning seeds chose beta 1 for the new rule and 2 for the old one (tuning
+  objective 7.834 vs 7.864 and 7.800 vs 7.818); the being still leads LinUCB there (+0.285, +0.304). Wrong answers
+  rise wherever the fix acts (penalty 3.16 and 10: from 0.1-2.4 to 0.8-4.8 per 100 tasks): more answers, more of them
+  wrong, more reward.
+
+Judged against the pre-registration: (1) **not met**: the being is still significantly behind LinUCB at 2 points with
+penalty >= 3.16 (penalty 10, weights 1 and 3.16; upper ends -0.043 and -0.028), though behind UCB1 nowhere; (2) met:
+headline new minus old +0.000 (0/0/20); (3) met: 25 of 30 points ahead of LinUCB (>= 22). Overall the pre-registered
+success criterion is not met; the over-skipping is largely removed (skip share at penalty 10, weights 0.1 to 3.16:
+51-81% -> 14-18%) and 5 of the 7 losses to LinUCB are gone, 2 small ones remain.
 
 ## Not measured
 

@@ -189,6 +189,15 @@ The being estimates per cell also the chance that a plan's answer is wrong (pool
 0.25) and scores `(min(1, p_right + beta x sd) x reward - p_wrong x penalty) / energy`. With the default design every
 decision is the one of the first measurement (the sweep's default point reproduces its numbers exactly).
 
+Track W1b (2026-11-08, `value_ucb`, default on): that score put the optimism bonus on the right-answer chance only
+(scaled by the reward) and used a point estimate for the penalty term, so with a harsh penalty an untried plan
+scored `(0.5 + bonus) x reward - 0.25 x penalty` < 0 and lost to the skip bar for good; skipped tasks give no
+outcomes, so the estimate never moved. Now the bonus is on the expected reward of the whole outcome (right +reward,
+wrong -penalty, no answer 0; Dirichlet posterior with the same counts and prior): `min(reward, p_right x reward -
+p_wrong x penalty + beta x sd) / energy`, `sd^2 = (p_r(1-p_r) R^2 + p_w(1-p_w) P^2 + 2 p_r p_w R P) / (w + n + 1)`. With
+no penalty this is exactly the old score (a test runs both rules and compares every step). Logs without the
+`wt_ucb` tag replay with the old rule. Measured in docs/measured.md, Track W1b.
+
 ## Tuning separation and budget
 
 Seeds 101..120 are used only for tuning, seeds 1..20 only for reporting; budget 6000 in both. At every point of the

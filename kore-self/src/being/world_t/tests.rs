@@ -526,6 +526,35 @@ fn the_reward_design_is_off_by_default_and_changes_rewards_and_prices_when_on() 
 }
 
 #[test]
+fn value_ucb_is_identical_without_a_penalty_explores_the_penalty_term_and_old_logs_keep_their_rule() {
+    let old = LearnerTCfg { value_ucb: false, ..Default::default() };
+    // logs written before the field (no wt_ucb tag) fold to the old rule; both values round-trip
+    let untagged: Vec<String> = LearnerTCfg::default().tags().into_iter().filter(|t| !t.starts_with("wt_ucb")).collect();
+    assert_eq!(LearnerTCfg::from_tags(&untagged.join(",")), Some(old));
+    assert_eq!(LearnerTCfg::from_tags(&old.tags().join(",")), Some(old));
+    assert_eq!(LearnerTCfg::from_tags(&format!("{},wt_ucb:x", untagged.join(","))), None);
+    // without a penalty the two rules take exactly the same steps
+    let a = run_life(&cfg(3), Pol::Being(LearnerTCfg::default()), None);
+    let b = run_life(&cfg(3), Pol::Being(old), None);
+    assert_eq!((a.reward, a.cost, a.truths.len()), (b.reward, b.cost, b.truths.len()));
+    assert!(a.truths.iter().zip(&b.truths).all(|(x, y)| x.plan == y.plan));
+    // with a harsh penalty an untried plan is no longer certain to lose to the skip bar: the bonus is on the
+    // whole outcome (sd at the penalty's scale), so the old rule scores it below the new one
+    let mut st = StateT::default();
+    let c = WTCfg { penalty_pm: 10_000, start_kinds: 9, ..cfg(1) };
+    st.start(c.clone(), LearnerTCfg::default(), "g".into());
+    let t = (0..500u64).map(|s| WorldT::new(c.clone()).task(s, 0)).find(|t| t.view.tmpl == Tmpl::Lookup).unwrap();
+    let (n, o) = (LearnerT { cfg: LearnerTCfg::default() }.estimate(&st, &t.view, Plan::NaiveNative), LearnerT { cfg: old }.estimate(&st, &t.view, Plan::NaiveNative));
+    assert!(o.score < 0.0 && n.score > o.score, "{} {}", n.score, o.score);
+    assert!(n.score <= t.view.reward as f64 / n.energy.max(1.0) + 1e-9);
+    // after many wrong answers the bonus shrinks and the plan scores below 0 under both rules
+    for i in 0..40 {
+        st.apply(&OutcomeT { step: i, tmpl: Some(Tmpl::Lookup), ctx: Some(t.view.ctx), plan: Some(Plan::NaiveNative), result: "wrong".into(), reward: -10, cost: 1, budget_left: 1000, clock: 30, event_id: format!("w{i}"), example: None, form: None });
+    }
+    assert!(LearnerT { cfg: LearnerTCfg::default() }.estimate(&st, &t.view, Plan::NaiveNative).score < 0.0);
+}
+
+#[test]
 fn out_of_distribution_worlds_accept_no_wrong_answer_and_the_column_search_stays_never_wrong() {
     let mut col_search_wrong = 0;
     let mut answered = 0;
