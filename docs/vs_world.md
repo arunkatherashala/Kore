@@ -21,6 +21,24 @@ cargo run -p kore-self --example measure_vs_world --offline --release -- llm-rep
 
 Measured 2026-11-07, branch `vs-world` from a4ca4231, Windows, 8 CPUs, a machine shared with other work (and with a nearly full disk during the LLM run, see there). Report seeds 1..20, tuning seeds 101..120. Wall time: World v2 770 s, World L 112 s, first world 31 s, rules 9 s, World O 5772 s.
 
+## Update, Track B13: a context-aware chooser (re-run of this comparison)
+
+Track B13 (details: `docs/measured.md`, Track B13) diagnosed why LinUCB beat the being's chooser and added an opt-in estimate to the being's own chooser: every option's success estimate is its cell shrunk toward a shared per-strategy ridge regression over family and difficulty (LinUCB's model, built from the being's own logged cell counts), with LinUCB's optimism `alpha x width`; the B7 rule-record estimate is kept wherever a rule covers the offer. Every decision logs, per option, the linear part, each feature's weight with the attempts behind it, the cell's own counts and the width. The comparison was re-run with the same harness (`measure_vs_world`, now with B13 rows), the same V1-tuned methods (not re-tuned), seeds 1..20 and budgets; every V1 number reproduced exactly. B13 constants were tuned on seeds 101..120 only.
+
+| world | B13 result (report seeds 1..20) | before (V1) |
+|---|---|---|
+| World v2, 12 conditions | **B13 profile (B7 + skip fix + B13) beats LinUCB in 12 of 12**: +0.118 to +0.289, every interval above 0, better in 16 to 20 of 20 worlds; above the best method in 11 of 12 (small hard vs eps-greedy +0.186 [-0.033, +0.404]); current + B13 alone ties LinUCB (-0.019 to +0.061, never below 0); 0.03 to 0.30 below oracle-knows-rules | current -0.18 to -0.38, recommended -0.09 to +0.13 |
+| first world, budget 600 / 3000 | B13 profile -0.299 [-0.450, -0.149] 2/18/0 against LinUCB at 600 (**still loses**; now ties eps-greedy, Thompson, linear Thompson); +0.063 [-0.092, +0.218] at 3000 (ties LinUCB, beats the rest) | -0.450 at 600, +0.007 at 3000 |
+| World L, 4 settings x 2 budgets | B13 profile (one-step, no skip) ties the best method in 7 of 8 (-0.041 to +0.012), below LinUCB in sizes 1600 (-0.022 [-0.038, -0.005]); +0.04 to +0.21 over B1; the B8 lookahead stays better in `keys` (keys 1600: +0.36 over B13) | B1 -0.07 to -0.21 |
+| World O, 600k energy | **negative**: current + B13 3.691 is -0.500 [-0.650, -0.351] below the current learner (19 of 20 worlds); level with the best method (Thompson +0.040 [-0.029, +0.110]), above LinUCB +0.117 [+0.026, +0.209]; B13 explores fewer new families and finds half as many rules. The current learner (B13 off) keeps the V1 win | current +0.540 over Thompson |
+| rule learning | unchanged (the chooser is not involved; the run reproduces V1 exactly) | 0.78 to 0.81 right, 0 wrong |
+
+World v2, B13 profile minus each method (paired, range over the 12 conditions): LinUCB +0.12 to +0.29, linear Thompson +0.21 to +0.31, eps-greedy +0.19 to +0.46, Thompson +0.27 to +0.46, UCB1-tuned / KL-UCB +0.46 to +0.70, Q-learning / SARSA +1.12 to +1.38, MLP +1.34 to +1.92, EXP3 +2.34 to +2.52 (every interval above 0 except eps-greedy and linear Thompson in small hard).
+
+Review additions (`measure_vs_world -- b13-v2 | b13-o`): a **rules-or-LinUCB fallback** (the B7 rule estimate where an accepted rule covers the offer, the tuned LinUCB elsewhere) beats LinUCB in all 12 World v2 conditions (+0.09 to +0.24) and gets most of the B13 profile's gain: the B13 profile is above it by +0.016 to +0.085, significant in 6 of 12 conditions (small clean, small drift, the four medium ones), a tie in the other 6. In World O the fallback (3.771) is above current + B13 (-0.081 [-0.155, -0.006]) and far below the current learner (-0.420). Regret against oracle-knows-rules per window, at window sizes of a tenth, a fifth and a half of the life (World v2) and 50k, 100k, 200k energy (World O): in World v2 the B13 profile's regret is never significantly above LinUCB's or the fallback's in any window at any size, and the mean order B13 <= fallback <= LinUCB holds in 99 of 120, 52 of 60 and 23 of 24 windows; in World O the order does not hold (the fallback lowest from 200k on, B13 significantly above it in one window at 100k and 200k). Details: measured.md, Track B13.
+
+Reading: the being's choosing part is now level with a tuned linear contextual bandit on the bandit's own ground (World v2 current + B13, World L), and with the B7 rule use on top it is clearly ahead in World v2. The short-budget first world remains a loss. A LinUCB-style planner with the B7 rule use, listed as not measured below, is what B13 measured.
+
 ## Methods compared
 
 Every standard method is a fresh implementation in Rust (`vs_world/core.rs`, no libraries), written from the paper cited, inside the existing measurement framework: it plays exactly the worlds the being plays, through the same engines (`world2::engine`, `world_o::engine`, `lookahead::beingl`, the first world's `loop.rs`), on the same seeds and budgets, and is scored the same way (TRUE reward per energy, the checker's verdict, in World v2 and World O; the world's own reward in the first world and World L).
@@ -339,7 +357,7 @@ Privacy: requests are built only by `vs_world/llm.rs::request` from synthetic fe
 
 ## Not measured
 
-* Methods given more than the being's planner has: no standard method learns rules while playing (none has the `discovered` strategy or sees sequence terms); a method combining LinUCB-style sharing with the B7 rule use was not built.
+* Methods given more than the being's planner has: no standard method learns rules while playing (none has the `discovered` strategy or sees sequence terms); a method combining LinUCB-style sharing with the B7 rule use was not built here (Track B13 built and measured it, see the update above).
 * Deep RL with more capacity or tuning than one 32-unit layer and two passes of grid search; policy-gradient methods; Bayesian optimisation of the hyper-parameters; re-tuning the being's own constants.
 * MCTS in World O and the first world (only World v2 and World L have the true-simulator reference); MCTS with more iterations.
 * World O with methods tuned on World O; World O beyond 600,000 energy units (Track B11 went to 1.2M); World O with noise.

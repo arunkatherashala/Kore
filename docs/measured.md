@@ -2429,6 +2429,214 @@ Caveats: one author wrote the worlds, the being, the methods and this measuremen
 
 Not measured: see `docs/vs_world.md`, section "Not measured" (deep RL beyond one small layer, a LinUCB planner with B7 rule use, MCTS in World O and the first world, World O with methods tuned on it, the LLM beyond 3 worlds and budget 60, rule learners outside the DSL, real data).
 
+## Track B13: a context-aware chooser (synthetic worlds, author-defined)
+
+Question: Track V1 found that where rules matter little the being's choosing part loses to a tuned LinUCB (World v2 current -0.18 to -0.38, the recommended profile only ties; first world at budget 600 -0.45; World L -0.07 to -0.21). Why, and can an opt-in change to the being's own chooser beat or tie LinUCB there while keeping the World O and rule-learning wins? Everything is the author's simulation (worlds, families, rewards, the being, the methods); no real data. Code: `kore-self/src/being/linval.rs` (new: the estimate, its tag, its controller key), switch-guarded branches in `world2/learner.rs`, `world2/engine.rs` (genesis tag), `world_o/engine.rs` (genesis tag), `planner.rs` (first world), `lookahead/beingl.rs` (World L), small read-only accessors in `world2/model.rs`, `model.rs`, `lookahead/beingl.rs`, the B13 key in `controller.rs`, the opt-in `chooser` argument of `being_run_v2` (`being_v2_tools.rs`); tests `being/tests_b13.rs`, `being/tests_b13_golden.rs`, one tool test in `being_v2_tools_tests.rs`; diagnosis and tuning `kore-self/examples/diag_b13.rs`; the V1 harness `examples/measure_vs_world.rs` with the B13 rows and the review modes `b13-v2`, `b13-o` added; the review baseline `being/vs_world/fallback.rs` (rules-or-LinUCB) and a read-only `LinUcb::score` in `vs_world/core.rs`. Branch `chooser-b13` from e9ed7d1d, 2026-11-07, Windows, 8 CPUs shared with other work. Tuning and diagnosis on seeds 101..120 only; report seeds 1..20, the V1 budgets and the V1 tuned methods (not re-tuned); 95% t-intervals, paired differences on identical worlds (better/worse/tie of 20).
+
+```
+cargo run -p kore-self --example diag_b13 --offline --release -- ablate-v2 | v2 | b2 | l | b2-disc       (diagnosis, tuning seeds)
+cargo run -p kore-self --example diag_b13 --offline --release -- tune-v2 | tune-v2-ext | tune-b2 | tune-l | tune-l-ext
+cargo run -p kore-self --example measure_vs_world --offline --release -- v2 | l | b2 | rules | o 600000 | b13-v2 | b13-o 600000   (report seeds)
+cargo run -p kore-self --example diag_b13 --offline --release -- o        (World O check, tuning seeds 101..110)
+```
+
+### Step 1: diagnosis (tuning seeds 101..120)
+
+`diag_b13 ablate-v2` scores every decision of a policy in World v2 with the TRUE expected value of every option on the same menu (the World v2 oracle's truth table, measurement only; the policy never sees it) and splits the loss against the best option on that menu by where it arises: attempts on cells (family, difficulty, strategy) with fewer than 3 earlier attempts ("young"), attempts on settled cells where the chosen offer was the best one but the strategy was not ("strategy"), and settled cells on another offer ("offer"). Loss is per unit of attempted energy (reward per energy given up at the same energy).
+
+| World v2 (tuning seeds) | policy | true reward per energy | menu-choice loss | young cells | strategy on the best offer | another offer | skipped menus whose best option beat the life's rate, per 100 steps |
+|---|---|---|---|---|---|---|---|
+| small clean | ours current (B1 planner) | 2.785 | 0.302 | 0.168 | 0.041 | 0.093 | 4.72 |
+| small clean | LinUCB (V1 tuning) | 2.797 | 0.168 | 0.142 | 0.001 | 0.025 | 1.33 |
+| medium clean | ours current | 2.969 | 0.309 | 0.180 | 0.094 | 0.035 | 1.57 |
+| medium clean | LinUCB | 3.047 | 0.133 | 0.113 | 0.002 | 0.018 | 1.14 |
+| medium hard | ours current | 2.965 | 0.426 | 0.181 | 0.131 | 0.114 | 2.55 |
+| medium hard | LinUCB | 3.068 | 0.274 | 0.148 | 0.022 | 0.103 | 5.03 |
+| large clean | ours current | 2.925 | 0.440 | 0.169 | 0.227 | 0.044 | 4.17 |
+| large clean | LinUCB | 3.180 | 0.096 | 0.082 | 0.001 | 0.012 | 0.51 |
+
+* **The main loss is choosing the wrong strategy on the right offer in cells the being has already tried** (0.04 to 0.23 reward per energy against 0.001 to 0.022 for LinUCB), the second is exploring young cells (0.17 to 0.18 against 0.08 to 0.15). Lowering the B1 optimism makes it worse, not better (beta 0.5: the strategy loss rises to 0.29 to 0.51, reward -0.22 to -0.38): the B1 estimates of the strategies are only corrected through optimism, because each one rests on the few attempts of its own (family, difficulty, strategy) cell.
+* **LinUCB's advantage is sharing across a family's difficulties, not its difficulty or type structure.** LinUCB variants on the same tuning seeds: family features only 2.908 / 3.068 / 3.145 / 3.153 (small clean / medium clean / medium hard / large clean), the V1 features 2.797 / 3.047 / 3.068 / 3.180, one parameter per (family, difficulty) cell like the B1 leaves 2.737 / 2.973 / 2.962 / 3.053 (about the being's level), type and difficulty structure without the family 2.71 to 2.80.
+* **First world** (B2 families): there difficulty does matter (family features only: 2.78 at 600 and 2.91 at 3000, far below), and LinUCB with one parameter per (domain, difficulty) cell is the best variant (3.805 at 600, +0.50 over the B1 planner with the same cells): so the B1 estimator itself (each cell shrunk with a fixed weight 4 toward its domain's average, optimism 1.5 sd) explores and corrects worse than a ridge estimate with its width, even on the same cells. Removing the `discovered` arm gives +0.11 at 600 and -0.14 at 3000; the B11 skip fix +0.00 / +0.06.
+* **World L**: the B1 cells are keyed by (family, strategy, previous family and result), 2F + 1 contexts per (family, strategy); LinUCB, which ignores the context, is 0.09 to 0.32 above the B1 planner. Not skipping helps the B1 planner in `keys` (+0.09).
+
+So the cause is the same in the three worlds: the B1 model keys every estimate on one fine cell and shares only by a fixed-weight shrink toward that family's own average, so strategy comparisons rest on few attempts and many cells must be explored. LinUCB shares evidence across cells through a regression and measures its uncertainty from that regression.
+
+### What was built (opt-in; off by default)
+
+`linval.rs`, used by all three choosers (World v2 / World O, the first world, World L):
+
+* Per strategy, a ridge regression (penalty 1 per feature, as LinUCB) of the being's REPORTED successes on visible features of the offer: bias, family, difficulty (World L: bias and family) and, optionally, the family type and type x difficulty. The cell itself is one more feature with penalty `cell_k`; by the block-inverse identity its estimate is `(cell_k x linear part + successes) / (cell_k + attempts)` (the B1 shrink, with the linear estimate in place of the family's average) and its width is `sqrt((cell_k / (cell_k + n))^2 x z'S^-1 z + 1 / (cell_k + n))` (exactly LinUCB's `sqrt(x'A^-1 x)` for that model; a test checks both against an explicit ridge regression fed one outcome at a time). `cell_k = 0`: no cell feature (pure linear).
+* The chooser scores every option with `listed reward x clamp(p + alpha x width, 0, 1) / estimated energy` (the B1 score with LinUCB's optimism), keeps the B1 energy estimate and skip test (or the B11 settled test where the profile has it), and keeps the B7 rule-record estimate for `discovered` wherever a rule covers the offer. "Combined with our rule estimates" therefore means: rules where they apply, the shared linear estimate everywhere else.
+* The fit is a pure function of the cell counts the being folds from its own log, so every decision is re-derived from the log alone (tested in World v2 and World O). Every decision revision states the estimate (`chooser_estimate`) and, for every alternative, `estimate_from_linear`: the linear part, each active feature with its weight and the attempts behind it, the cell's own attempts and successes, `cell_k`, the width, alpha and the optimistic p (or `estimate_from_rule` with the rule id and record).
+* Switches: World v2 and World O genesis tag `w2_lin:a<alpha milli>/k<cell_k milli>/t<0|1>` (read back by the fold; with the switch off no tag and no word of the genesis text changes); first world `ModelChooser::lin` and World L `GreedyL::lin` (with `GreedyL::skip_rule`) are chooser constants, like the B11 skip fix there (the first world's and World L's genesis do not record the chooser, so they are not available through `being_run`). Controller key `context_chooser = on|off` (default off; a bad value makes the whole file unparseable; missing or unparseable file: off; asking for it when not allowed is a refusal, audited). The tool `being_run_v2` takes `chooser: "context"`; it is granted only with that key and only when the being is created (a later request for an existing being without it is refused as `fixed_at_creation`). KILL is checked before every step as before (tested with the switch on).
+* With the switch off every chooser is byte-identical to e9ed7d1d: golden digests of a World v2 logged run, a World O logged run, a first-world logged run, World L logged runs in the four settings and measured lives of all four choosers were computed on e9ed7d1d and are pinned in `tests_b13.rs`.
+
+### Tuning (seeds 101..120 only; objectives fixed before the runs)
+
+Grid alpha 0.25 / 0.5 / 1, cell_k 0 / 1 / 4 / 16, types on / off, then a second pass beyond the edges of the first choice (as in V1). World v2 objective: mean over small clean, medium clean, medium hard, large clean, on top of the current learner and on top of the recommended profile. Chosen: alpha 0.5, cell_k 16, no type features (`LIN_V2`): current +0.182 [+0.059, +0.304] (15 of 20), recommended +0.167 [+0.051, +0.282] (17 of 20); the second pass (cell_k 64 and 256, alpha 0.35 and 0.7) changed the objective by at most 0.001 on top of the recommended profile and was lower on top of the current learner, so the first choice was kept. Type features were worse at alpha 0.5 and 1 in every pair (for example alpha 0.5, cell_k 16: +0.096 with them, +0.182 without) and slightly better at alpha 0.25, where every setting scored lower. First world (budgets 600 and 3000): alpha 0.5, cell_k 4 (`LIN_MENU`): +0.216 [+0.093, +0.339] (17 of 20), +0.212 with the skip fix. World L (four settings, budget 400): alpha 1, pure linear (`LIN_L`), +0.154 [+0.044, +0.264] over B1 with the B1 skip test and +0.170 [+0.061, +0.279] without skipping (17 of 20; the second pass, alpha 1.5 to 3, gave at most +0.001); not skipping was tuned like V1 tuned the methods' skip.
+
+Same check on the decision-level probe (tuning seeds): with B13 the strategy loss on settled cells falls to 0.001 to 0.026 (from 0.04 to 0.23), the young-cell loss to 0.06 to 0.14, the total menu-choice loss to 0.07 to 0.24 (LinUCB 0.10 to 0.27; recommended + B13 0.07 to 0.21).
+
+### Report seeds 1..20: World v2 (12 conditions, n = 20)
+
+B13 profile = the recommended profile of V1 (B7 A, A2, B, C, G and the B11 settled skip test) with the B13 chooser. Methods as tuned in V1; LinUCB is the best standard method in 11 of 12 conditions (eps-greedy in small hard). The current, recommended and method columns reproduce V1 exactly.
+
+| condition | ours current | current + B13 | ours recommended | B13 profile | LinUCB | B13 profile minus LinUCB | B13 profile minus best method | current + B13 minus LinUCB | B13 profile minus recommended |
+|---|---|---|---|---|---|---|---|---|---|
+| small clean | 2.777 | 3.143 | 3.116 | 3.361 [2.994, 3.728] | 3.093 | +0.268 [+0.109, +0.426] 18/2/0 | +0.268 [+0.109, +0.426] 18/2/0 | +0.050 [+0.000, +0.100] 12/8/0 | +0.245 [+0.039, +0.451] 15/5/0 |
+| small noisy | 2.780 | 3.055 | 3.087 | 3.293 [2.917, 3.669] | 3.004 | +0.289 [+0.112, +0.467] 19/1/0 | +0.289 [+0.112, +0.467] 19/1/0 | +0.051 [+0.006, +0.095] 14/6/0 | +0.207 [-0.013, +0.427] 15/5/0 |
+| small drift | 2.724 | 3.120 | 3.004 | 3.309 [2.942, 3.676] | 3.091 | +0.218 [+0.054, +0.381] 17/3/0 | +0.218 [+0.054, +0.381] 17/3/0 | +0.029 [-0.040, +0.099] 12/8/0 | +0.305 [+0.076, +0.534] 15/5/0 |
+| small hard | 2.883 | 3.155 | 3.090 | 3.360 [2.943, 3.777] | 3.111 | +0.249 [+0.011, +0.487] 17/3/0 | +0.186 [-0.033, +0.404] 13/7/0 (eps-greedy) | +0.045 [-0.062, +0.151] 14/6/0 | +0.269 [+0.011, +0.528] 16/4/0 |
+| medium clean | 2.755 | 3.182 | 3.193 | 3.357 [3.108, 3.606] | 3.121 | +0.236 [+0.148, +0.324] 20/0/0 | +0.236 [+0.148, +0.324] 20/0/0 | +0.061 [+0.031, +0.092] 17/3/0 | +0.164 [+0.036, +0.292] 18/2/0 |
+| medium noisy | 2.713 | 3.071 | 3.157 | 3.267 [3.023, 3.511] | 3.026 | +0.241 [+0.123, +0.359] 16/4/0 | +0.241 [+0.123, +0.359] 16/4/0 | +0.044 [-0.005, +0.093] 15/5/0 | +0.110 [-0.038, +0.258] 13/7/0 |
+| medium drift | 2.754 | 3.192 | 3.163 | 3.361 [3.114, 3.607] | 3.131 | +0.230 [+0.119, +0.340] 19/1/0 | +0.230 [+0.119, +0.340] 19/1/0 | +0.061 [+0.023, +0.099] 16/4/0 | +0.198 [+0.023, +0.372] 19/1/0 |
+| medium hard | 2.876 | 3.260 | 3.238 | 3.448 [3.194, 3.702] | 3.227 | +0.221 [+0.089, +0.354] 17/3/0 | +0.221 [+0.089, +0.354] 17/3/0 | +0.033 [-0.012, +0.078] 13/7/0 | +0.211 [+0.001, +0.421] 17/3/0 |
+| large clean | 2.987 | 3.222 | 3.221 | 3.368 [3.141, 3.596] | 3.227 | +0.141 [+0.068, +0.214] 18/2/0 | +0.141 [+0.068, +0.214] 18/2/0 | -0.005 [-0.045, +0.035] 11/9/0 | +0.148 [+0.014, +0.281] 12/8/0 |
+| large noisy | 2.967 | 3.151 | 3.224 | 3.324 [3.090, 3.559] | 3.150 | +0.174 [+0.082, +0.266] 17/3/0 | +0.174 [+0.082, +0.266] 17/3/0 | +0.001 [-0.040, +0.042] 11/9/0 | +0.101 [+0.015, +0.187] 18/2/0 |
+| large drift | 2.841 | 3.077 | 3.049 | 3.214 [3.001, 3.427] | 3.096 | +0.118 [+0.042, +0.195] 17/3/0 | +0.118 [+0.042, +0.195] 17/3/0 | -0.019 [-0.063, +0.024] 8/12/0 | +0.165 [+0.010, +0.320] 14/6/0 |
+| large hard | 2.928 | 3.191 | 3.230 | 3.324 [3.083, 3.565] | 3.191 | +0.134 [+0.040, +0.228] 16/4/0 | +0.134 [+0.040, +0.228] 16/4/0 | +0.001 [-0.055, +0.056] 10/10/0 | +0.094 [-0.041, +0.229] 15/5/0 |
+
+* **The B13 profile beats tuned LinUCB in all 12 conditions** (+0.118 to +0.289, every interval above 0, better in 16 to 20 of 20 worlds) and the best standard method in 11 of 12 (small hard against eps-greedy: +0.186 [-0.033, +0.404], 13 of 20). Against the other methods (paired, every condition): eps-greedy +0.19 to +0.46, Thompson +0.27 to +0.46, linear Thompson +0.21 to +0.31, UCB1-tuned and KL-UCB +0.46 to +0.70, Q-learning and SARSA +1.12 to +1.38, MLP +1.34 to +1.92, EXP3 +2.34 to +2.52; every interval above 0 except linear Thompson in small hard (+0.212 [-0.009, +0.433]) and eps-greedy in small hard.
+* **The chooser change alone (current + B13) ties LinUCB** (-0.019 to +0.061; above 0 in small clean, small noisy, medium clean and medium drift, never below) and gains +0.18 to +0.44 over the current learner (all 12 above 0). The B13 profile gains +0.09 to +0.31 over the recommended profile (above 0 in 9 of 12; not in small noisy, medium noisy, large hard). So the being's chooser is now level with the tuned contextual bandit on the bandit's own ground, and the B7 rule use comes on top.
+* References that see hidden information: the B13 profile is 0.03 to 0.30 below oracle-knows-rules (interval includes 0 in medium clean and large clean; recommended was 0.19 to 0.57 below), above the MCTS reference with the interval above 0 in 4 conditions (small clean, medium clean, large clean, large noisy) and level with it elsewhere (-0.064 to +0.086).
+
+### Report seeds 1..20: first world with the B2 families (n = 20)
+
+| policy | budget 600 | budget 3000 |
+|---|---|---|
+| ours: current (B2) | 3.142 [2.773, 3.512] | 3.943 [3.583, 4.303] |
+| ours: current + B13 | 3.293 [2.909, 3.678] | 3.940 [3.596, 4.284] |
+| ours: B13 profile (skip fix + B13) | 3.293 [2.907, 3.678] | 3.999 [3.641, 4.358] |
+| LinUCB | 3.592 [3.226, 3.958] | 3.936 [3.623, 4.249] |
+| B13 profile minus LinUCB | **-0.299 [-0.450, -0.149] 2/18/0** | +0.063 [-0.092, +0.218] 11/9/0 |
+| B13 profile minus eps-greedy / Thompson / linear Thompson | -0.147 [-0.320, +0.025] / -0.050 [-0.220, +0.121] / -0.086 [-0.311, +0.139] | +0.348 / +0.206 / +0.184 (all above 0) |
+| B13 profile minus current | +0.151 [-0.076, +0.378] 14/5/1 | +0.056 [-0.056, +0.167] 12/8/0 |
+
+* **Negative result at the short budget: the being still loses to LinUCB at 600** (-0.30, worse in 18 of 20 worlds), less than before (-0.45). It now ties eps-greedy, Thompson and linear Thompson there (it lost to the first two in V1). At 3000 it ties LinUCB (+0.06) and beats every other method. On the tuning seeds the gap at 600 had been small (B13 3.630 against LinUCB 3.688, -0.058 [-0.201, +0.086]), and there removing the rule search and the `discovered` arm changed B13 by only +0.011 at 600 (-0.220 at 3000; without them B13 is level with LinUCB: -0.047 at 600, +0.006 at 3000). On the report seeds the gap is -0.30; why it is larger there was not diagnosed (that would mean tuning on the report seeds).
+
+### Report seeds 1..20: World L (four settings x two budgets, n = 20)
+
+| setting, budget | ours B1 | B13 profile (no skip) | LinUCB | best method (value) | B13 profile minus LinUCB | B13 profile minus best method | B13 profile minus B1 | B13 profile minus lookahead pure d3 |
+|---|---|---|---|---|---|---|---|---|
+| plain 400 | 2.060 | 2.103 | 2.091 | eps-greedy 2.130 | +0.012 [-0.011, +0.035] 12/6/2 | -0.027 [-0.068, +0.013] 10/10/0 | +0.043 [-0.090, +0.176] | +0.062 [-0.014, +0.138] |
+| keys 400 | 1.105 | 1.209 | 1.228 | LinUCB 1.228 | -0.018 [-0.091, +0.054] 11/8/1 | -0.018 [-0.091, +0.054] 11/8/1 | +0.105 [+0.019, +0.190] | -0.120 [-0.269, +0.029] |
+| probe 400 | 2.147 | 2.353 | 2.355 | eps-greedy 2.359 | -0.002 [-0.020, +0.016] 2/6/12 | -0.006 [-0.031, +0.020] 3/6/11 | +0.206 [+0.031, +0.380] | +0.203 [+0.045, +0.360] |
+| sizes 400 | 1.922 | 2.022 | 2.063 | LinUCB 2.063 | -0.041 [-0.087, +0.005] 6/14/0 | -0.041 [-0.087, +0.005] 6/14/0 | +0.100 [-0.030, +0.231] | +0.065 [-0.041, +0.171] |
+| plain 1600 | 2.073 | 2.159 | 2.163 | LinUCB 2.163 | -0.003 [-0.017, +0.011] 9/10/1 | -0.003 [-0.017, +0.011] 9/10/1 | +0.087 [-0.042, +0.215] | +0.047 [+0.008, +0.086] |
+| keys 1600 | 1.108 | 1.214 | 1.227 | Thompson 1.231 | -0.013 [-0.096, +0.070] 9/11/0 | -0.016 [-0.095, +0.062] 10/10/0 | +0.106 [+0.019, +0.193] | **-0.361 [-0.511, -0.211]** |
+| probe 1600 | 2.214 | 2.356 | 2.359 | eps-greedy 2.361 | -0.003 [-0.016, +0.010] 4/6/10 | -0.005 [-0.025, +0.015] 4/8/8 | +0.143 [-0.031, +0.317] | +0.153 [-0.024, +0.330] |
+| sizes 1600 | 1.975 | 2.084 | 2.106 | LinUCB 2.106 | **-0.022 [-0.038, -0.005] 4/16/0** | -0.022 [-0.038, -0.005] 4/16/0 | +0.109 [+0.015, +0.203] | +0.070 [+0.011, +0.130] |
+
+* **World L: the B13 chooser ties the best standard method in 7 of 8 setting-budget pairs** (-0.041 to +0.012, interval containing 0) and is slightly below LinUCB in sizes 1600 (-0.022 [-0.038, -0.005], 16 of 20 worse). With the B1 skip test the B13 chooser is within 0.01 of the profile except in `keys`, where not skipping is better by 0.04 (1.209 against 1.167 at 400, 1.214 against 1.171 at 1600). It gains +0.04 to +0.21 over the B1 planner (above 0 in 4 of 8) and beats every method other than eps-greedy, Thompson and LinUCB in most pairs.
+* In the unlock setting (`keys`) the B8 lookahead stays the better of ours (keys 1600: lookahead pure d3 above the B13 chooser by +0.36): the B13 chooser is a one-step chooser and, like every method, does not learn the key -> vault chain. B13 was not combined with the lookahead (not measured).
+
+### Report seeds 1..20: World O (600,000 energy, n = 20) and rule learning
+
+The B13 switch with the World v2 constants (`LIN_V2`, not tuned on World O), on the current learner and on `fix+b7`; the methods with their V1 World v2 tuning. Whole run after the first 100,000 energy, n = 20 (the V1 rows reproduce exactly):
+
+| policy | whole run | minus ours: current | current + B13 minus policy |
+|---|---|---|---|
+| ours: current | 4.191 [4.017, 4.365] | - | -0.500 [-0.650, -0.351] 1/19/0 |
+| ours: current + B13 chooser | 3.691 [3.476, 3.905] | -0.500 [-0.650, -0.351] 1/19/0 | - |
+| ours: fix+b7 + B13 chooser | 3.680 [3.459, 3.900] | -0.511 [-0.665, -0.358] 2/18/0 | +0.011 [-0.073, +0.095] 10/10/0 |
+| rules-or-LinUCB fallback (`b13-o`) | 3.771 [3.559, 3.984] | -0.420 [-0.595, -0.245] 3/17/0 | -0.081 [-0.155, -0.006] 7/13/0 |
+| Thompson (best method) | 3.651 [3.419, 3.883] | -0.540 | +0.040 [-0.029, +0.110] 12/8/0 |
+| MLP Q | 3.594 [3.316, 3.871] | -0.597 | +0.097 [-0.017, +0.211] 13/7/0 |
+| linear Thompson | 3.590 [3.338, 3.841] | -0.601 | +0.101 [+0.026, +0.176] 14/6/0 |
+| LinUCB | 3.573 [3.315, 3.832] | -0.618 | +0.117 [+0.026, +0.209] 15/5/0 |
+| KL-UCB / UCB1-tuned / eps-greedy | 3.544 / 3.485 / 3.227 | | +0.147 / +0.206 / +0.464 (all above 0) |
+| oracle-knows-rules (sees hidden) | 4.709 [4.633, 4.785] | +0.518 | -1.018 [-1.187, -0.850] 0/20/0 |
+
+* **Negative result: the B13 chooser does not keep the World O win.** It costs -0.500 [-0.650, -0.351] against the current learner (worse in 19 of 20 worlds); with it the being is level with the best standard method (Thompson +0.040, MLP +0.097, intervals containing 0) and only just above LinUCB (+0.117) and linear Thompson (+0.101), and below the simple fallback (-0.081 [-0.155, -0.006]). The current learner stays the best of everything here (+0.42 over the fallback, +0.54 over Thompson).
+* Cause (report-seed description, plus the tuning-seed check below): with the shared estimate a new family starts from what other families taught, not from an optimistic fresh cell, so the being tries far fewer families: 518 learnable families attempted over the 20 lives against 1,137 for the current learner (LinUCB 566); fewer families tried means fewer revealed examples and fewer rules, and in World O the rules are where the reward is (V1). Checked on tuning seeds 101..110 (300,000 energy, `diag_b13 o`): rules accepted per life 36 -> 18, attempts per sequence family 434 -> 314 and per compose family 238 -> 123 (slightly more on formula, grid and knapsack families), families reaching competence 239 -> 156 of about 516, reward per energy after the first 100k 4.036 -> 3.936. So the optimism of the B1 fresh cells, which costs reward in World v2, is what feeds the rule search in World O. B13 stays off by default, and its genesis tag records it where it is used; it should not be switched on for World O (not tried: B13 with an exploration bonus for new families, or with the B12 family-wide rules).
+
+Rule learning on revealed examples does not involve the chooser; the `rules` report on this branch reproduces V1 exactly (B2 search 0.784 / 0.809 right with 4 / 32 clean examples, 0 wrong; B7 robust guard 0.773 / 0.809 under noise).
+
+### Review additions: a rules-or-LinUCB fallback, and regret curves against oracle-knows-rules
+
+**Fallback** (`vs_world/fallback.rs`, a baseline, not part of the being): where an accepted rule or fitted constant covers the offer, `discovered` scored with the same B7 rule-record estimate the B13 profile uses (and B1's optimism 1.5 sd); everywhere else the V1-tuned LinUCB (alpha 0.5, its skip rule), learning only from its own choices. It runs on the same rule machinery as the B13 profile (B7 B, C, G; discovery every 10 steps). Mode `measure_vs_world -- b13-v2` (World v2) and `-- b13-o` (World O), report seeds 1..20.
+
+World v2, true reward per energy (n = 20):
+
+| condition | fallback | B13 profile | current + B13 | LinUCB | B13 profile minus fallback | current + B13 minus fallback | fallback minus LinUCB | fallback minus recommended |
+|---|---|---|---|---|---|---|---|---|
+| small clean | 3.314 [2.951, 3.677] | 3.361 [2.994, 3.728] | 3.143 [2.698, 3.588] | 3.093 [2.634, 3.552] | +0.046 [+0.009, +0.084] 16/4/0 | -0.171 [-0.323, -0.019] 10/10/0 | +0.221 [+0.057, +0.385] 9/2/9 | +0.199 [-0.002, +0.399] 12/8/0 |
+| small noisy | 3.239 [2.869, 3.609] | 3.293 [2.917, 3.669] | 3.055 [2.584, 3.525] | 3.004 [2.533, 3.475] | +0.054 [-0.031, +0.140] 18/2/0 | -0.184 [-0.365, -0.004] 9/11/0 | +0.235 [+0.065, +0.405] 10/3/7 | +0.152 [-0.079, +0.384] 12/8/0 |
+| small drift | 3.258 [2.886, 3.630] | 3.309 [2.942, 3.676] | 3.120 [2.685, 3.556] | 3.091 [2.644, 3.539] | +0.051 [+0.001, +0.101] 16/4/0 | -0.138 [-0.279, +0.004] 10/10/0 | +0.167 [+0.007, +0.327] 8/3/9 | +0.254 [+0.026, +0.483] 13/7/0 |
+| small hard | 3.334 [2.940, 3.729] | 3.360 [2.943, 3.777] | 3.155 [2.670, 3.641] | 3.111 [2.618, 3.603] | +0.025 [-0.134, +0.184] 14/6/0 | -0.179 [-0.373, +0.015] 9/11/0 | +0.224 [+0.039, +0.409] 10/5/5 | +0.244 [-0.039, +0.527] 13/7/0 |
+| medium clean | 3.284 [3.039, 3.529] | 3.357 [3.108, 3.606] | 3.182 [2.879, 3.485] | 3.121 [2.804, 3.437] | +0.073 [+0.052, +0.093] 20/0/0 | -0.102 [-0.186, -0.019] 9/11/0 | +0.163 [+0.069, +0.257] 15/1/4 | +0.092 [-0.040, +0.223] 9/11/0 |
+| medium noisy | 3.194 [2.940, 3.449] | 3.267 [3.023, 3.511] | 3.071 [2.742, 3.399] | 3.026 [2.693, 3.360] | +0.073 [+0.040, +0.106] 16/3/1 | -0.124 [-0.225, -0.022] 7/13/0 | +0.168 [+0.064, +0.272] 13/5/2 | +0.037 [-0.112, +0.186] 8/12/0 |
+| medium drift | 3.286 [3.032, 3.541] | 3.361 [3.114, 3.607] | 3.192 [2.875, 3.509] | 3.131 [2.798, 3.464] | +0.074 [+0.032, +0.116] 19/1/0 | -0.094 [-0.196, +0.008] 8/12/0 | +0.155 [+0.045, +0.265] 14/3/3 | +0.124 [-0.029, +0.277] 9/11/0 |
+| medium hard | 3.363 [3.085, 3.641] | 3.448 [3.194, 3.702] | 3.260 [2.913, 3.607] | 3.227 [2.863, 3.591] | +0.085 [+0.036, +0.134] 15/5/0 | -0.103 [-0.212, +0.006] 9/11/0 | +0.136 [+0.011, +0.261] 11/7/2 | +0.126 [-0.080, +0.331] 11/9/0 |
+| large clean | 3.349 [3.133, 3.566] | 3.368 [3.141, 3.596] | 3.222 [2.936, 3.508] | 3.227 [2.949, 3.505] | +0.019 [-0.000, +0.039] 12/8/0 | -0.127 [-0.218, -0.036] 5/15/0 | +0.122 [+0.045, +0.199] 15/2/3 | +0.128 [-0.009, +0.266] 10/10/0 |
+| large noisy | 3.291 [3.068, 3.514] | 3.324 [3.090, 3.559] | 3.151 [2.842, 3.461] | 3.150 [2.855, 3.446] | +0.034 [-0.008, +0.075] 13/7/0 | -0.140 [-0.250, -0.029] 4/16/0 | +0.141 [+0.048, +0.233] 16/4/0 | +0.067 [-0.030, +0.164] 12/8/0 |
+| large drift | 3.199 [2.996, 3.401] | 3.214 [3.001, 3.427] | 3.077 [2.805, 3.348] | 3.096 [2.840, 3.352] | +0.016 [-0.010, +0.042] 15/5/0 | -0.122 [-0.218, -0.026] 6/14/0 | +0.103 [+0.025, +0.180] 15/2/3 | +0.149 [-0.008, +0.307] 12/8/0 |
+| large hard | 3.284 [3.045, 3.522] | 3.324 [3.083, 3.565] | 3.191 [2.890, 3.492] | 3.191 [2.906, 3.475] | +0.041 [-0.009, +0.090] 15/5/0 | -0.092 [-0.199, +0.014] 6/14/0 | +0.093 [+0.011, +0.175] 15/5/0 | +0.053 [-0.072, +0.178] 12/8/0 |
+
+* **The simple fallback gets most of the way.** It beats LinUCB in 12 of 12 conditions (+0.09 to +0.24, all intervals above 0) and ties the recommended profile (above 0 only in small drift). **The B13 profile is above the fallback in every condition on the mean, but by little: +0.016 to +0.085, the interval above 0 in 6 of 12** (small clean, small drift and all four medium conditions); in the four large conditions, small noisy and small hard it ties the fallback. So of the B13 profile's +0.12 to +0.29 over LinUCB, 62% to 90% (by condition) come from using the rules on top of LinUCB itself, and the B13 estimate for the non-rule options adds +0.02 to +0.09. The chooser change alone without rule use (current + B13) is below the fallback (-0.09 to -0.18, interval below 0 in 7 of 12): rule use matters more than the chooser.
+
+**Regret curves** (oracle-knows-rules minus the policy, true reward per energy within windows of the life's energy, paired by world, 95% intervals; every window of every condition is printed by `b13-v2`; the oracle is a strong reference, not an optimum, so a window's regret can be below 0). Medium clean, windows of a fifth of the life (600 energy):
+
+| policy | w1 | w2 | w3 | w4 | w5 |
+|---|---|---|---|---|---|
+| B13 profile | 0.418 [0.279, 0.557] | -0.088 [-0.194, 0.019] | -0.047 [-0.138, 0.044] | -0.066 [-0.138, 0.005] | -0.058 [-0.143, 0.028] |
+| rules-or-LinUCB fallback | 0.537 [0.404, 0.670] | -0.028 [-0.137, 0.082] | -0.002 [-0.094, 0.091] | 0.001 [-0.087, 0.090] | 0.015 [-0.089, 0.119] |
+| LinUCB | 0.746 [0.543, 0.949] | 0.164 [-0.025, 0.353] | 0.160 [0.029, 0.291] | 0.128 [0.002, 0.253] | 0.144 [-0.016, 0.303] |
+| current + B13 | 0.664 [0.446, 0.883] | 0.080 [-0.100, 0.261] | 0.135 [0.030, 0.241] | 0.039 [-0.059, 0.137] | 0.115 [-0.007, 0.238] |
+| B13 regret minus fallback regret | -0.119 [-0.193, -0.044] | -0.060 [-0.115, -0.005] | -0.045 [-0.104, +0.013] | -0.068 [-0.132, -0.004] | -0.073 [-0.135, -0.011] |
+
+Most of the regret of every policy is in the first window (exploration); after it the B13 profile and the fallback are near the oracle and LinUCB stays 0.13 to 0.16 behind. The B13 profile's advantage over the fallback is largest in the first window (faster early learning).
+
+**Window-size sensitivity** (World v2, 12 conditions, windows of a tenth, a fifth and a half of the life's energy):
+
+| window size | windows (12 conditions) | B13 profile has the lowest mean regret of the three | full order B13 <= fallback <= LinUCB (means) | fallback <= LinUCB (means) | B13 below LinUCB, interval excludes 0 | B13 above LinUCB, interval excludes 0 | B13 below fallback, interval excludes 0 | B13 above fallback, interval excludes 0 |
+|---|---|---|---|---|---|---|---|---|
+| a tenth | 120 | 97 | 99 | 120 | 86 | 0 | 25 | 0 |
+| a fifth | 60 | 52 | 52 | 60 | 49 | 0 | 19 | 0 |
+| a half | 24 | 23 | 23 | 24 | 21 | 0 | 10 | 0 |
+
+The ordering holds at every window size: in no window of any size is the B13 profile's regret significantly above LinUCB's or the fallback's, and the fallback's mean regret is at most LinUCB's in every window. With smaller windows the B13-fallback difference is more often inside the noise (25 of 120 windows significant at a tenth, 10 of 24 at a half). ("Lowest of the three" counts ties of means as lowest; the full-order count can exceed it by ties.)
+
+**World O** (`b13-o`: oracle-knows-rules, current + B13, current, LinUCB, fallback; base windows of 50,000 energy, aggregated to 100,000 and 200,000). Whole run after the first 100k: current + B13 minus fallback -0.081 [-0.155, -0.006] 7/13/0, current minus fallback +0.420 [+0.245, +0.595] 17/3/0, fallback minus LinUCB +0.198 [+0.117, +0.279] 18/1/1. Regret per window of 100,000 energy:
+
+| policy | 0k-100k | 100k-200k | 200k-300k | 300k-400k | 400k-500k | 500k-600k |
+|---|---|---|---|---|---|---|
+| ours: current + B13 | 0.123 [0.080, 0.166] | 0.374 [0.191, 0.557] | 0.701 [0.330, 1.072] | 1.437 [0.896, 1.978] | 1.354 [0.933, 1.775] | 1.226 [0.718, 1.734] |
+| ours: current | 0.131 [0.044, 0.218] | 0.239 [0.075, 0.403] | 0.537 [0.114, 0.961] | 0.549 [0.242, 0.857] | 0.460 [0.241, 0.678] | 0.805 [0.377, 1.233] |
+| LinUCB | 0.134 [0.094, 0.174] | 0.396 [0.210, 0.582] | 0.908 [0.448, 1.367] | 1.655 [1.049, 2.260] | 1.402 [0.963, 1.840] | 1.319 [0.842, 1.796] |
+| rules-or-LinUCB fallback | 0.140 [0.095, 0.185] | 0.358 [0.191, 0.524] | 0.606 [0.298, 0.914] | 1.120 [0.709, 1.530] | 1.308 [0.887, 1.729] | 1.297 [0.853, 1.742] |
+| current + B13 minus fallback | -0.017 [-0.062, +0.028] | +0.017 [-0.029, +0.062] | +0.094 [-0.031, +0.220] | +0.317 [+0.037, +0.598] | +0.046 [-0.112, +0.203] | -0.071 [-0.378, +0.236] |
+
+Window-size sensitivity, World O (12 windows of 50k, 6 of 100k, 3 of 200k):
+
+| window size | current + B13 has the lowest mean regret of the three (B13, LinUCB, fallback) | B13 below LinUCB, interval excludes 0 | above LinUCB | B13 below fallback, interval excludes 0 | above fallback |
+|---|---|---|---|---|---|
+| 50,000 | 3 of 12 | 0 | 0 | 0 | 0 |
+| 100,000 | 2 of 6 | 1 | 0 | 0 | 1 |
+| 200,000 | 2 of 3 | 1 | 0 | 0 | 1 |
+
+In World O the World v2 ordering does not hold at any window size: the three are level in the first 200,000 energy, and once the families reach the top tier the fallback has the lowest regret (current + B13 above it in 300k-400k, +0.317 [+0.037, +0.598], and in 200k-400k at the 200k size); current + B13 is never significantly above LinUCB and below it in one window at the two larger sizes. All three are far above the current learner's regret from 300k on (0.46 to 0.81 per 100k window against 1.1 to 1.7).
+
+### Verdict
+
+* **Cause found**: the B1 estimate rests on one fine cell per option and shares only through a fixed-weight shrink toward the same family's average; the being loses mostly by keeping a worse strategy on offers it already knows, and by exploring many young cells. LinUCB's edge was sharing across the cells of a family through a regression, with a width that measures what the regression knows.
+* **The B13 chooser fixes it where rules matter little**: World v2 B13 profile above tuned LinUCB in 12 of 12 conditions (+0.12 to +0.29) and above the best method in 11 of 12; the chooser change alone ties LinUCB. World L: ties the best method in 7 of 8, slightly below LinUCB in one. First world: ties at 3000, **still loses at 600** (-0.30 against LinUCB, a negative result).
+* **The World O win is not kept with B13 on**: current + B13 is -0.500 [-0.650, -0.351] below the current learner (19 of 20 worlds) and only level with the best standard method (Thompson +0.040); B13 makes the being try fewer new families, so it finds half as many rules. **The simple rules-or-LinUCB fallback ties or beats the B13 design in half the World v2 conditions** (B13 profile above it by +0.016 to +0.085, significant in 6 of 12) **and beats current + B13 in World O** (+0.081). B13 is therefore a World v2 / World L improvement of the chooser, opt-in, not a general one; rule learning is untouched.
+* The choice stays explainable: every decision lists, per option, the linear part and every feature weight with the attempts behind it, the cell's own counts, the width and the optimism, or the rule and its record.
+
+### Caveats
+
+One author wrote the worlds, the being, the methods and this measurement. The B13 constants differ per world (World v2 / World O: alpha 0.5, cell_k 16; first world: alpha 0.5, cell_k 4; World L: alpha 1, pure linear, no skip), each tuned on that world's tuning seeds, as V1 tuned the methods per world; the methods were not re-tuned. The estimate uses the cell counts the being already keeps, so it inherits their properties: reported (noisy) outcomes, no forgetting under drift (World v2 drift conditions) except through B3b where that is on. Type features were tried and not used. In World O the switch was not tuned (World v2 constants), as V1 did for the methods. "Best method" is picked after the fact on the report seeds, which favours the methods.
+
+### What is tested (not measured)
+
+`being/tests_b13.rs`: with the switch off every chooser is byte-identical to e9ed7d1d (golden digests of World v2, World O, first-world and World L logged runs and of measured lives of all four choosers, computed on e9ed7d1d with `tests_b13_golden.rs`); the estimate equals an explicit ridge regression with a penalised cell feature fed one outcome at a time (mean, width and optimistic p, cell_k 0, 1, 4, 16); the tag round-trips and bad tags are refused; the World v2 genesis carries the switch (no tag when off); with the switch on (with the B7 profile) a World v2 run is deterministic, the unlogged measurement takes the same steps, the state folds back from the log with the switch, all 500 decisions are re-derived from the log, every decision revision names the estimate and gives for every alternative its features, weights, attempts behind them, cell counts and width (or the rule record); the kill switch stops before the next step and the stop is logged; World O with the switch folds, reads the switch from its genesis and re-derives all 1,500 decisions; the first-world and World L choosers with the switch are deterministic and explain their estimate; the controller key is validated (bad value: invalid file), off by default, fails closed when the file is missing or invalid, and a request without it is a refusal; `linval.rs` names no hidden world parameter. `being_v2_tools_tests.rs`: through the tool, `chooser: "context"` without the key runs with the B1 estimate and audits the refusal, a bad value refuses the run (fail closed), with the key the being is created with the switch and every decision replays, a later plain run keeps it, and a being created without it cannot get it later (audited). `tests_b13.rs` also checks that the rules-or-LinUCB baseline is deterministic and uses both rule answers and LinUCB choices.
+
+### What B13 does not show
+
+Anything outside these author-defined worlds; B13 combined with the B8 lookahead, B9 experiments, B3b adaptation or the B12 family-wide rules (with B12's chooser switches on, B12 decides); World O with B13 constants tuned on World O; the first world's genesis or World L's genesis recording the switch (they are chooser constants there, not available through `being_run`); budgets other than the V1 ones; real data.
+
 ## Not measured
 
 Real-life data of any kind (the free-text section above is also synthetic); the probabilities of the live ledger (`predict_make`/`predict_score` have not been run on real data; the S4 numbers above are synthetic sequences only; the older `self_ledger_snapshot` rows are not scored by any measurement); behaviour with
