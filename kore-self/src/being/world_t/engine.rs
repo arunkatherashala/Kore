@@ -34,12 +34,15 @@ pub struct Cell {
     pub n: u32,
     pub succ: u32,
     pub spent: i64,
+    /// Attempts whose answer the checker rejected (a failure without an answer is not counted here).
+    pub wrong: u32,
 }
 
 impl Cell {
-    fn add(&mut self, ok: bool, cost: i64) {
+    fn add(&mut self, ok: bool, wrong: bool, cost: i64) {
         self.n += 1;
         self.succ += ok as u32;
+        self.wrong += wrong as u32;
         self.spent += cost;
     }
 }
@@ -173,11 +176,12 @@ impl StateT {
         if let (Some(t), Some(c), Some(p)) = (o.tmpl, o.ctx, o.plan) {
             if o.result != "skip" && o.result != "unpaid" {
                 let ok = o.result == "correct";
+                let bad = o.result == "wrong";
                 let k = (t.idx() as u8, c.idx() as u8, p.idx() as u8);
-                self.cells.entry(k).or_default().add(ok, o.cost);
-                self.by_ctx_plan.entry((k.1, k.2)).or_default().add(ok, o.cost);
-                self.by_tmpl_plan.entry((k.0, k.2)).or_default().add(ok, o.cost);
-                self.by_plan.entry(k.2).or_default().add(ok, o.cost);
+                self.cells.entry(k).or_default().add(ok, bad, o.cost);
+                self.by_ctx_plan.entry((k.1, k.2)).or_default().add(ok, bad, o.cost);
+                self.by_tmpl_plan.entry((k.0, k.2)).or_default().add(ok, bad, o.cost);
+                self.by_plan.entry(k.2).or_default().add(ok, bad, o.cost);
                 push_last(self.cell_recent.entry(k).or_default(), &o.event_id);
             }
             if let Some(f) = o.form {
@@ -351,6 +355,8 @@ pub struct TrueT {
     /// Best true reward per energy any plan (or a perfect series rule) gets on this task (0: none).
     pub best_rpe: f64,
     pub rule_used: bool,
+    /// An answer was submitted and the checker rejected it.
+    pub wrong: bool,
 }
 
 pub struct StepT {
@@ -390,6 +396,9 @@ pub struct EngineT {
     pub cache: ToolCache,
     carry: Vec<NewEvent>,
     pub max_candidates_seen: usize,
+    /// Incremental B2 scan (exactly the full search, `discover_scan.rs`), and the example count of the last pass.
+    pub scan: crate::being::discover_scan::ScanCache,
+    last_pass_examples: Option<usize>,
     /// Timeout and row limit of every query (from the controller).
     pub sql: SqlLimits,
 }
@@ -397,7 +406,7 @@ pub struct EngineT {
 impl EngineT {
     pub fn new(state: StateT, limits: Option<Limits>) -> EngineT {
         let world = WorldT::new(state.cfg.clone().expect("a started state"));
-        EngineT { world, state, limits, refusals: vec![], refusals_total: vec![], refused: BTreeSet::new(), measure: false, cache: HashMap::new(), carry: vec![], max_candidates_seen: 0, sql: SqlLimits::default() }
+        EngineT { world, state, limits, refusals: vec![], refusals_total: vec![], refused: BTreeSet::new(), measure: false, cache: HashMap::new(), carry: vec![], max_candidates_seen: 0, scan: Default::default(), last_pass_examples: None, sql: SqlLimits::default() }
     }
 
     pub fn refuse(&mut self, r: Refusal) {
@@ -446,12 +455,12 @@ impl EngineT {
                 if task.view.tmpl == Tmpl::TsNext {
                     let ok = in_grammar(&self.world, task);
                     let ans = if let Truth::Exact(s) = &task.truth { Some(s.clone()) } else { None };
-                    out.push(PlanResult { plan: *p, correct: ok, energy: p.energy(task.view.rows), answer: if ok { ans } else { None } });
+                    out.push(PlanResult { plan: *p, correct: ok, energy: p.listed(&task.view), answer: if ok { ans } else { None } });
                 }
                 continue;
             }
             let o = self.tool(*p, task, bytes, &order);
-            out.push(PlanResult { plan: *p, correct: o.answer.as_deref().map_or(false, |a| task.check(a)), energy: o.energy, answer: o.answer });
+            out.push(PlanResult { plan: *p, correct: o.answer.as_deref().map_or(false, |a| task.check(a)), energy: scale_energy(o.energy, task.view.cost_pm), answer: o.answer });
         }
         out
     }
@@ -484,7 +493,7 @@ impl EngineT {
         let (cost, result, answer, detail, form, rule_id): (i64, String, Option<String>, String, Option<u8>, Option<String>) = match ch.plan {
             None => (SKIP_COST.min(budget0), "skip".into(), None, format!("skip task {} (energy {})", v.id, SKIP_COST.min(budget0)), None, None),
             Some(p) => {
-                let listed = p.energy(v.rows);
+                let listed = p.listed(&v);
                 if listed > budget0 {
                     (budget0, "unpaid".into(), None, format!("plan {} needs {listed} energy, {budget0} left: not run", p.name()), None, None)
                 } else if let Err(e) = &file {
@@ -495,14 +504,15 @@ impl EngineT {
                 } else {
                     let o = self.tool(p, &task, &bytes, &order);
                     sqls = o.sql.clone();
-                    let e = o.energy.min(budget0);
+                    let e = scale_energy(o.energy, v.cost_pm).min(budget0);
                     (e, String::new(), o.answer.clone(), o.detail.clone(), o.form, o.rule_id.clone())
                 }
             }
         };
         let correct = answer.as_deref().map_or(false, |a| task.check(a));
         let result = if result.is_empty() { if answer.is_none() { "no_answer".into() } else if correct { "correct".into() } else { "wrong".into() } } else { result };
-        let reward = if correct { v.reward } else { 0 };
+        // a wrong answer costs the world's penalty (0 by default); no answer costs nothing beyond its energy
+        let reward = if correct { v.reward } else if result == "wrong" { -((v.reward * v.penalty_pm as i64 + 500) / 1000) } else { 0 };
         let t1 = t0 + cost * SECS_PER_ENERGY;
         let budget_left = budget0 - cost;
         let attempted = ch.plan.is_some() && result != "unpaid";
@@ -582,7 +592,7 @@ impl EngineT {
         };
         self.state.apply(&out);
         chooser.observe(&v, ch.plan, reward, cost);
-        let truth = TrueT { step, energy_before: t0 / SECS_PER_ENERGY, kind: v.tmpl.kind(), tmpl: v.tmpl, ctx: v.ctx, plan: ch.plan, answered: answer.is_some(), correct, reward, cost, wrong_accepted: reward > 0 && !answer.as_deref().map_or(false, |a| task.check(a)), best_rpe, rule_used: rule_id.is_some() };
+        let truth = TrueT { step, energy_before: t0 / SECS_PER_ENERGY, kind: v.tmpl.kind(), tmpl: v.tmpl, ctx: v.ctx, plan: ch.plan, answered: answer.is_some(), correct, reward, cost, wrong_accepted: reward > 0 && !answer.as_deref().map_or(false, |a| task.check(a)), best_rpe, rule_used: rule_id.is_some(), wrong: result == "wrong" };
         let mut events = pre;
         events.extend([dev, aev, oev]);
         Ok(StepT { outcome: out, truth, events, revision, prediction, resolved })
@@ -591,7 +601,12 @@ impl EngineT {
     /// One B2 discovery pass over the being's revealed series examples, with the controller's caps.
     pub fn discover_pass(&mut self) -> Vec<NewRuleT> {
         let max_c = self.limits.as_ref().map_or(usize::MAX, |l| l.max_candidates);
-        let o = discover::search_composed(&self.state.examples, &[], max_c);
+        // no new example since the last pass: the search would return the same rules, all already taken
+        if self.last_pass_examples == Some(self.state.examples.len()) {
+            return vec![];
+        }
+        self.last_pass_examples = Some(self.state.examples.len());
+        let o = self.scan.search(&self.state.examples, discover::K_TRAIN, discover::K_VAL, &[], max_c, &[]);
         if o.truncated {
             self.refuse(Refusal::new("max_search_candidates", max_c as u64, o.wanted as u64, format!("a discovery pass would try {} candidates; it stopped after {}", o.wanted, o.candidates)));
         }

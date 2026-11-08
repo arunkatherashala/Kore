@@ -12,6 +12,7 @@
 use super::engine::{Cell, StateT};
 use super::tools::ts_sig;
 use super::world::{plans_for, Plan, ViewT, SKIP_COST};
+
 use serde_json::json;
 
 pub const LEARNER_T: &str = "wt-model-ucb";
@@ -92,6 +93,8 @@ pub struct Est {
     pub succ: u32,
     pub prior: f64,
     pub prior_from: &'static str,
+    /// Estimated chance that the plan's answer is wrong (matters only when wrong answers are penalized).
+    pub p_wrong: f64,
     pub p: f64,
     pub sd: f64,
     pub energy: f64,
@@ -104,8 +107,14 @@ pub struct LearnerT {
 
 impl LearnerT {
     pub fn prior(&self, st: &StateT, v: &ViewT, plan: Plan) -> (f64, &'static str) {
+        let (m, _, from) = self.prior2(st, v, plan);
+        (m, from)
+    }
+
+    /// Prior chance of a right answer and of a wrong answer, and where they come from.
+    pub fn prior2(&self, st: &StateT, v: &ViewT, plan: Plan) -> (f64, f64, &'static str) {
         if !self.cfg.pooled {
-            return (0.5, "flat");
+            return (0.5, 0.25, "flat");
         }
         // a series rule starts from its own verification record (the B7 rule-record idea): its training and
         // held-out examples reproduced, best live rule of the signature
@@ -113,34 +122,36 @@ impl LearnerT {
             let sig = ts_sig(v);
             let best = st.rules.iter().filter(|r| r.sig == sig && !r.retired).map(|r| { let k = (r.train_ok + r.val_ok) as f64; (k + 1.0) / (k + 2.0) }).fold(0.0, f64::max);
             if best > 0.0 {
-                return (best, "rule record");
+                return (best, (1.0 - best) / 2.0, "rule record");
             }
         }
-        let rate = |c: Option<&Cell>| c.filter(|c| c.n >= POOL_MIN).map(|c| (c.succ as f64 + 0.5) / (c.n as f64 + 1.0));
-        if let Some(r) = rate(st.by_ctx_plan.get(&(v.ctx.idx() as u8, plan.idx() as u8))) {
-            return (r, "context+plan");
+        let rate = |c: Option<&Cell>| c.filter(|c| c.n >= POOL_MIN).map(|c| ((c.succ as f64 + 0.5) / (c.n as f64 + 1.0), (c.wrong as f64 + 0.25) / (c.n as f64 + 1.0)));
+        if let Some((r, w)) = rate(st.by_ctx_plan.get(&(v.ctx.idx() as u8, plan.idx() as u8))) {
+            return (r, w, "context+plan");
         }
-        if let Some(r) = rate(st.by_tmpl_plan.get(&(v.tmpl.idx() as u8, plan.idx() as u8))) {
-            return (r, "template+plan");
+        if let Some((r, w)) = rate(st.by_tmpl_plan.get(&(v.tmpl.idx() as u8, plan.idx() as u8))) {
+            return (r, w, "template+plan");
         }
-        if let Some(r) = rate(st.by_plan.get(&(plan.idx() as u8))) {
-            return (r, "plan");
+        if let Some((r, w)) = rate(st.by_plan.get(&(plan.idx() as u8))) {
+            return (r, w, "plan");
         }
-        (0.5, "none")
+        (0.5, 0.25, "none")
     }
 
     pub fn estimate(&self, st: &StateT, v: &ViewT, plan: Plan) -> Est {
         let c = st.cells.get(&(v.tmpl.idx() as u8, v.ctx.idx() as u8, plan.idx() as u8)).copied().unwrap_or_default();
-        let (m, from) = self.prior(st, v, plan);
+        let (m, mw, from) = self.prior2(st, v, plan);
         let w = self.cfg.prior_w_milli as f64 / 1000.0;
+        let p_wrong = (c.wrong as f64 + mw * w) / (c.n as f64 + w).max(1e-9);
         let a = m * w + c.succ as f64;
         let b = (1.0 - m) * w + (c.n - c.succ) as f64;
         let p = a / (a + b).max(1e-9);
         let sd = (p * (1.0 - p) / (a + b + 1.0)).sqrt();
         // energy: listed, except a search whose cost the being has observed
-        let energy = if plan == Plan::ColSearch && c.n > 0 { c.spent as f64 / c.n as f64 } else { plan.energy(v.rows) as f64 };
+        let energy = if plan == Plan::ColSearch && c.n > 0 { c.spent as f64 / c.n as f64 } else { plan.listed(v) as f64 };
         let opt = (p + self.cfg.beta_milli as f64 / 1000.0 * sd).min(1.0);
-        Est { plan, n: c.n, succ: c.succ, prior: m, prior_from: from, p, sd, energy, score: opt * v.reward as f64 / energy.max(1.0) }
+        // expected reward: optimistic chance of a right answer x reward, minus the expected penalty of a wrong one
+        Est { plan, n: c.n, succ: c.succ, prior: m, prior_from: from, p_wrong, p, sd, energy, score: (opt * v.reward as f64 - p_wrong * v.penalty()) / energy.max(1.0) }
     }
 
     pub fn choose(&self, st: &StateT, v: &ViewT) -> ChoiceT {

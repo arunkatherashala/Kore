@@ -201,6 +201,10 @@ impl Plan {
     }
     /// Listed energy for a file with `rows` data lines (ColSearch: the price of the first two candidates;
     /// its real cost depends on how many forms it tries).
+    /// The listed energy of the plan on a task (the base price under the world's energy weight).
+    pub fn listed(self, v: &ViewT) -> i64 {
+        scale_energy(self.energy(v.rows), v.cost_pm)
+    }
     pub fn energy(self, rows: usize) -> i64 {
         let r = rows as i64;
         match self {
@@ -254,13 +258,18 @@ pub struct WTCfg {
     /// Out-of-distribution world (never used in tuning): tables of 1000 to 2500 rows with their columns in
     /// reverse order, series and column rules the default world never uses. Off by default (no tag).
     pub ood: bool,
+    /// Reward design (Track W1 follow-up): penalty for a wrong answer, per mille of the task's listed reward
+    /// (0 = none, the default), and the weight of a plan's energy above 1, per mille (1000 = the default
+    /// prices; 2000 doubles the price difference between cheap and heavy plans). Visible to every policy.
+    pub penalty_pm: u32,
+    pub cost_pm: u32,
 }
 
 pub const DEFAULT_BUDGET: i64 = 6000;
 
 impl WTCfg {
     pub fn new(seed: u64, budget: i64) -> WTCfg {
-        WTCfg { seed, budget, start_kinds: 3, intro_every: (budget / 10).max(1), files: 6, ood: false }
+        WTCfg { seed, budget, start_kinds: 3, intro_every: (budget / 10).max(1), files: 6, ood: false, penalty_pm: 0, cost_pm: 1000 }
     }
     pub fn validate(&self) -> Result<(), String> {
         if !(1..=1_000_000).contains(&self.budget) {
@@ -275,6 +284,9 @@ impl WTCfg {
         if !(1..=20).contains(&self.files) {
             return Err("files must be 1..=20".into());
         }
+        if self.penalty_pm > 20_000 || !(100..=10_000).contains(&self.cost_pm) {
+            return Err("penalty_pm must be 0..=20000 and cost_pm 100..=10000".into());
+        }
         Ok(())
     }
     pub fn tags(&self) -> Vec<String> {
@@ -282,11 +294,18 @@ impl WTCfg {
         if self.ood {
             t.push("wt_ood:1".into());
         }
+        // the reward design is tagged only when it differs from the default (older logs stay valid)
+        if self.penalty_pm != 0 {
+            t.push(format!("wt_penalty_pm:{}", self.penalty_pm));
+        }
+        if self.cost_pm != 1000 {
+            t.push(format!("wt_cost_pm:{}", self.cost_pm));
+        }
         t
     }
     pub fn from_tags(tags: &str) -> Option<WTCfg> {
         let g = |k: &str| crate::being::state::tag(tags, k).and_then(|x| x.parse::<i64>().ok());
-        let c = WTCfg { seed: g("wt_seed")? as u64, budget: g("wt_budget")?, start_kinds: g("wt_start")? as usize, intro_every: g("wt_intro")?, files: g("wt_files")? as u64, ood: g("wt_ood") == Some(1) };
+        let c = WTCfg { seed: g("wt_seed")? as u64, budget: g("wt_budget")?, start_kinds: g("wt_start")? as usize, intro_every: g("wt_intro")?, files: g("wt_files")? as u64, ood: g("wt_ood") == Some(1), penalty_pm: g("wt_penalty_pm").unwrap_or(0) as u32, cost_pm: g("wt_cost_pm").unwrap_or(1000) as u32 };
         c.validate().ok().map(|_| c)
     }
 }
@@ -332,6 +351,24 @@ pub struct ViewT {
     /// Tolerance of a TsNear task (absolute), 0 otherwise.
     pub tol: i64,
     pub prompt: String,
+    /// The world's reward design (public): wrong-answer penalty and energy weight, per mille.
+    pub penalty_pm: u32,
+    pub cost_pm: u32,
+}
+
+impl ViewT {
+    /// The penalty of a wrong answer to this task (reward units).
+    pub fn penalty(&self) -> f64 {
+        self.reward as f64 * self.penalty_pm as f64 / 1000.0
+    }
+}
+
+/// A plan's energy under the world's energy weight: 1 + weight x (base energy - 1), rounded half up.
+pub fn scale_energy(e: i64, cost_pm: u32) -> i64 {
+    if e <= 1 {
+        return e.max(0);
+    }
+    1 + ((e - 1) * cost_pm as i64 + 500) / 1000
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -630,7 +667,7 @@ impl WorldT {
         let reward = tmpl.base_reward() + 2 * size as i64;
         let prompt = prompt_of(tmpl, &f.name, &param, &cols, prefix, tol);
         let id = format!("t{step}-{}-{}", tmpl.name(), f.name.split('.').next().unwrap_or(""));
-        TaskT { view: ViewT { step, id, tmpl, ctx: f.ctx, file: f.name.clone(), rows, size, reward, param, cols, prefix, tol, prompt }, truth, file_idx: fi }
+        TaskT { view: ViewT { step, id, tmpl, ctx: f.ctx, file: f.name.clone(), rows, size, reward, param, cols, prefix, tol, prompt, penalty_pm: self.cfg.penalty_pm, cost_pm: self.cfg.cost_pm }, truth, file_idx: fi }
     }
 
     /// The bytes a tool may read for a task: the file, or for a series task its visible prefix.
