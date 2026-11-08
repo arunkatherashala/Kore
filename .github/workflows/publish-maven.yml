@@ -1,16 +1,55 @@
 name: Publish to Maven Central
 
 on:
-  push:
-    tags:
-      - 'v*'
+  # Manual only. Started by "Auto Version Bump & Deploy" (itself manual) on the new v* tag,
+  # or by hand on a v* tag. No push/tag/release triggers: a pushed tag alone never publishes.
+  # Every publishing job needs the guard job (v* tag + green CI) and runs in the "release"
+  # environment (add required reviewers and the registry secrets there in GitHub settings).
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  guard:
+    name: "Release guard: v* tag and green CI"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Require a v* tag whose commit passed the full CI gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          case "$REF" in refs/tags/v*) ;; *) fail "publish only runs on a v* tag (got $REF)";; esac
+          ci() { gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$1&event=push&per_page=1" --jq '.workflow_runs[0].conclusion // "none"'; }
+          C="$(ci "$SHA")"
+          echo "CI for tag commit $SHA: $C"
+          if [ "$C" != "success" ]; then
+            # The release workflow tags its own version-bump commit ([skip ci]); then the commit it bumped must be green.
+            MSG="$(gh api "repos/$REPO/commits/$SHA" --jq '.commit.message' | head -1)"
+            WHO="$(gh api "repos/$REPO/commits/$SHA" --jq '.commit.committer.name')"
+            NPAR="$(gh api "repos/$REPO/commits/$SHA" --jq '.parents | length')"
+            case "$MSG" in "chore: auto-bump "*) ;; *) fail "tag commit has no successful CI run and is not a version-bump commit";; esac
+            [ "$WHO" = "github-actions[bot]" ] && [ "$NPAR" = "1" ] || fail "version-bump commit not made by the release workflow"
+            ALLOWED=" pyproject.toml kore-python/kore_fileformat.py kore-python/README.md kore-node/package.json kore-node/README.md kore-ruby/kore_fileformat.gemspec kore-ruby/README.md kore-go/go.mod kore-go/README.md kore-php/composer.json kore-php/README.md maven/README.md maven/pom.xml csharp/Kore.FileFormat/README.md csharp/Kore.FileFormat/Kore.FileFormat.csproj kore-standalone/Cargo.toml kore-standalone/README.md "
+            for f in $(gh api "repos/$REPO/commits/$SHA" --jq '.files[].filename'); do
+              case "$ALLOWED" in *" $f "*) ;; *) fail "version-bump commit also changes $f";; esac
+            done
+            PARENT="$(gh api "repos/$REPO/commits/$SHA" --jq '.parents[0].sha')"
+            C="$(ci "$PARENT")"
+            echo "CI for bumped commit $PARENT: $C"
+          fi
+          [ "$C" = "success" ] || fail "CI has not passed (conclusion: $C); not publishing"
+
   build-and-publish:
+    needs: guard
+    environment: release
     runs-on: ubuntu-latest
     
     steps:
