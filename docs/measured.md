@@ -2889,7 +2889,7 @@ With no penalty this is exactly the old score (test
 at all five penalty-0 points). No controller key: no other world and no live World T run changes (the tool's runs
 have penalty 0); logs without the `wt_ucb` tag replay with the old rule.
 
-Measured 2026-11-08 at commit COMMIT (code; branch `wt-overskip` from abd8de1e), Windows, 6 threads. Same protocol
+Measured 2026-11-08 at commit a5f834bf (code; branch `wt-overskip` from abd8de1e), Windows, 6 threads. Same protocol
 as Track W1: every policy re-tuned at every point on seeds 101..120 (6 configurations each; the old being tuned
 separately with its own 6 betas), reported on seeds 1..20, budget 6000, paired 95% t-intervals, (wins/losses/ties of
 20). The old being re-run here reproduces Track W1 exactly (22 / 24 / 25 points ahead of LinUCB / UCB1 / always
