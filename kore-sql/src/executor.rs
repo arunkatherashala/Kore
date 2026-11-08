@@ -318,7 +318,7 @@ impl KqlContext {
         }
 
         let query = parse_cached(sql_trim)?;
-        validate_functions(&query, self)?;
+        validate_functions(&query, self, sql_trim)?;
         if !crate::testing::no_bind_check() { crate::bind::check_query(&query, self)?; }
 
         // Phase 17: try vectorized fast-path before falling into the row-loop
@@ -342,7 +342,7 @@ impl KqlContext {
     /// Supports multiple CTEs: `WITH a AS (...), b AS (...) SELECT ...`
     fn execute_cte(&self, sql: &str) -> Result<DataBlock, KoreError> {
         let query = parse_cached(sql)?;
-        validate_functions(&query, self)?;
+        validate_functions(&query, self, sql)?;
         if !crate::testing::no_bind_check() { crate::bind::check_query(&query, self)?; }
         CURRENT_UDFS.with(|cell| { *cell.borrow_mut() = self.udfs.clone(); });
         execute_query(&query, self)
@@ -1051,8 +1051,23 @@ fn derived_block(stmt: &SelectStmt, ctx: &KqlContext, col_aliases: &[String]) ->
     Ok(b)
 }
 
+/// The function name `upper` (as the parser folds it) spelled as it is written in `sql`: the text of the first
+/// identifier token followed by `(` that folds to it. Only used for the error message; name resolution is unchanged.
+/// Falls back to the lower-case name (the old message) for names that are not in the text (internal rewrites).
+fn spelled_as_written(sql: &str, upper: &str) -> String {
+    use crate::lexer::{Lexer, Token};
+    if let Ok(toks) = Lexer::new(sql).tokenize() {
+        for w in toks.windows(2) {
+            if let (Token::Ident(s), Token::LParen) = (&w[0], &w[1]) {
+                if s.eq_ignore_ascii_case(upper) { return s.clone(); }
+            }
+        }
+    }
+    upper.to_ascii_lowercase()
+}
+
 /// A call to a function that exists nowhere (not built in, not a registered UDF) is an error, not a NULL.
-fn validate_functions(q: &Query, ctx: &KqlContext) -> Result<(), KoreError> {
+fn validate_functions(q: &Query, ctx: &KqlContext, sql: &str) -> Result<(), KoreError> {
     let mut unknown: Option<String> = None;
     crate::ast_walk::walk_query(q, true, &mut |e| {
         if let Expr::FuncCall { name, .. } = e {
@@ -1062,7 +1077,7 @@ fn validate_functions(q: &Query, ctx: &KqlContext) -> Result<(), KoreError> {
         }
     });
     if let Some(n) = unknown {
-        return Err(KoreError::InvalidArgument(format!("unknown function: {}", n.to_ascii_lowercase())));
+        return Err(KoreError::InvalidArgument(format!("unknown function: {}", spelled_as_written(sql, &n))));
     }
     // aggregates and window functions are not allowed in WHERE (Spark rejects them; evaluating them row by row gives nonsense)
     fn where_clause_misuse(s: &SelectStmt) -> bool {

@@ -234,14 +234,17 @@ fn unknown_function_is_an_error_naming_the_function() {
         ("SELECT SUM(nosuch(x)) OVER (ORDER BY id) FROM t", "nosuch"),
         ("SELECT id FROM t WHERE id IN (SELECT REGEXP_LIKEE(s, 'a') FROM td)", "REGEXP_LIKEE"),
         ("SELECT UPPER(no_such_inner(s)) FROM t", "no_such_inner"),
+        ("select No_Such_Fn(1) from t", "No_Such_Fn"),
+        ("WITH q AS (SELECT id FROM t) SELECT MyFn(id) FROM q", "MyFn"),
+        // a column of the same spelling is not taken for the function: only an identifier followed by `(`
+        ("SELECT id AS nosuch2, NoSuch2(id) FROM t", "NoSuch2"),
     ];
     for (name, set) in paths(50) {
         set(true);
         for (sql, f) in cases {
             let e = match c.query(sql) { Ok(b) => panic!("{name}: {sql}: expected an error, got {} rows", b.num_rows), Err(e) => e.to_string() };
-            assert!(e.contains("unknown function"), "{name}: {sql}: {e}");
-            // the message names the function (the parser folds names to one case, so compare case-insensitively)
-            assert!(e.to_ascii_lowercase().contains(&format!("unknown function: {}", f.to_ascii_lowercase())), "{name}: {sql}: {e}");
+            // the message names the function exactly as it is written in the SQL
+            assert!(e.ends_with(&format!("unknown function: {f}")), "{name}: {sql}: {e}");
         }
         // REGEXP_LIKE is a real function on this tip (World T saw it return NULL on an older engine)
         assert_eq!(rows(&c, "SELECT REGEXP_LIKE(s, '^r') FROM t WHERE s IS NOT NULL ORDER BY id").len(), nn(&data(50, 3).s) as usize, "{name}");
