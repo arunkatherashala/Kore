@@ -49,6 +49,8 @@ mod predict_tools;
 mod being;
 mod being_tools;
 mod being_v2_tools;
+mod world_t_sandbox;
+mod world_t_tools;
 mod authorize;
 mod chat;
 mod chat_tools;

@@ -26,6 +26,7 @@
 //! adaptation            = on      # World v2: may the model adapt to changes (B3b; B10, default off)
 //! rule_retirement       = on      # World v2: may the being retire rules its later answers contradict (B10, default off)
 //! context_chooser       = on      # World v2: may a new being use the context-aware chooser estimate (B13, default off)
+//! world_t_run           = on      # may World T runs happen at all (Track W1, default off; also needs authorize())
 //! ```
 //!
 //! The B9 keys fail closed on their own: without `experiments = on` AND a non-zero energy share AND a
@@ -184,6 +185,8 @@ impl Controller {
                 _ if super::linval::is_key(k) => super::linval::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 // B10 keys (World v2 rules use, adaptation, rule retirement) are read by `world2::skills`; here they are only validated
                 _ if super::world2::skills::is_key(k) => super::world2::skills::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
+                // Track W1 key (World T runs, default off) is read by `world_t::ctl`; here it is only validated
+                _ if super::world_t::ctl::is_key(k) => super::world_t::ctl::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 _ => return Err(format!("line {n}: unknown key '{k}'")),
             }
             seen.push(k);
