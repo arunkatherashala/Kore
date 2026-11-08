@@ -29,9 +29,10 @@ pub struct LearnerTCfg {
     pub skip: bool,
 }
 
+/// Default: the constants chosen on the tuning seeds 101..120 (docs/measured.md, Track W1).
 impl Default for LearnerTCfg {
     fn default() -> Self {
-        LearnerTCfg { beta_milli: 1000, prior_w_milli: 2000, pooled: true, skip: true }
+        LearnerTCfg { beta_milli: 2000, prior_w_milli: 2000, pooled: true, skip: true }
     }
 }
 

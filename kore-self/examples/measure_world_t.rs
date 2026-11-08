@@ -178,7 +178,7 @@ fn tune(args: &[String]) {
 
 /// The configurations chosen on the tuning seeds (see docs/measured.md, Track W1).
 fn tuned() -> (LearnerTCfg, UcbCfg, LinCfg) {
-    (LearnerTCfg { beta_milli: 500, prior_w_milli: 1000, pooled: true, skip: true }, UcbCfg { c: 0.1, per_ctx: true, skip: true }, LinCfg { alpha: 0.1, skip: true })
+    (LearnerTCfg { beta_milli: 2000, prior_w_milli: 2000, pooled: true, skip: true }, UcbCfg { c: 0.03, per_ctx: true, skip: true }, LinCfg { alpha: 1.0, skip: true })
 }
 
 struct Agg {
