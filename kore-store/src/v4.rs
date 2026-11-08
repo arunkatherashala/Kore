@@ -138,7 +138,7 @@ fn stage_bytes(raw: &[u8], stage: u8, level: i32, small: i32, dict: Option<&Shar
 }
 
 /// Encode one column: `(transform id, stage id, uses_dict, payload)`.
-fn encode_column(data: &ColumnData, codec: ColumnCodec, dict: Option<&SharedDict>, level: i32, small: i32) -> Result<(u8, u8, bool, Vec<u8>), KoreError> {
+pub(crate) fn encode_column(data: &ColumnData, codec: ColumnCodec, dict: Option<&SharedDict>, level: i32, small: i32) -> Result<(u8, u8, bool, Vec<u8>), KoreError> {
     use rayon::prelude::*;
     let transforms = match codec.transform { Transform::Auto => candidate_transforms(data), t => vec![t] };
     // Two phases (cost): with several transforms, each is scored by min(raw, zstd level 1) and only the
@@ -330,7 +330,7 @@ pub fn read(data: &[u8], wanted: Option<&[&str]>, dicts: &DictSet) -> Result<Dat
     }
 }
 
-fn decode_payload(payload: &[u8], dtype: DType, transform: u8, stage: u8, dict: Option<&SharedDict>, n: usize) -> Result<ColumnData, KoreError> {
+pub(crate) fn decode_payload(payload: &[u8], dtype: DType, transform: u8, stage: u8, dict: Option<&SharedDict>, n: usize) -> Result<ColumnData, KoreError> {
     let t = Transform::from_id_v4(transform)?;
     if stage == STAGE_ZSTD_DICT {
         let mut pos = 0;

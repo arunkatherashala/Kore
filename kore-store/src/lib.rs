@@ -25,6 +25,7 @@ pub mod v3;
 pub mod v4;
 pub mod dict;
 pub mod keyindex;
+pub mod rules;
 
 pub use reader::KoreReader;
 pub use writer::KoreWriter;
@@ -32,6 +33,7 @@ pub use codec::{ColumnCodec, Stage, Transform, WriteOptions};
 pub use v4::CompactOptions;
 pub use dict::{DictSet, SharedDict};
 pub use keyindex::{KeyIndex, KeyIndexBuilder, Verify};
+pub use rules::RuleOptions;
 
 use kore_core::KoreError;
 

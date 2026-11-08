@@ -39,6 +39,9 @@ impl KoreReader {
         if crate::v4::is_v4(data) {
             return crate::v4::read(data, wanted, &crate::dict::DictSet::new());
         }
+        if crate::rules::is_v5(data) {
+            return crate::rules::read(data, wanted, &crate::dict::DictSet::new());
+        }
         if crate::keyindex::is_key_index(data) {
             return Err(KoreError::InvalidArgument(
                 "this is a KORE key index object (.kidx), not a data file; open it with KeyIndex::from_bytes".into()));
@@ -71,6 +74,9 @@ impl KoreReader {
         }
         if crate::v4::is_v4(data) {
             return crate::v4::read(data, wanted, dicts);
+        }
+        if crate::rules::is_v5(data) {
+            return crate::rules::read(data, wanted, dicts);
         }
         Self::from_bytes_columns_opt(data, wanted)
     }
