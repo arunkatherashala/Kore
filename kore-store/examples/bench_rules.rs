@@ -102,6 +102,8 @@ fn main() {
                 "logs" => gen::logs(n, 20261107),
                 "sequences" => gen::sequences(n, 20261107),
                 "random" => gen::random(n, 20261107),
+                // the control without the uniform-[0,1) doubles: no column has a rule (worst case of rule mode)
+                "random_norule" => { let mut b = gen::random(n, 20261107); b.columns.retain(|c| c.name != "f64_unit"); b }
                 "events" => events(Path::new(&get("--events").expect("--events JSONL")), n),
                 s => panic!("unknown set {s}"),
             };

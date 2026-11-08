@@ -372,12 +372,15 @@ pub fn search(cols: &[&ColumnData], lv: Levels) -> Vec<Cand> {
                         // + and * are symmetric: only x <= y
                         if (op == 0 || op == 1) && y < x { continue; }
                         if x == y && op >= 2 { continue; }
+                        // the rounding variant with the most exact rows on the sample (ties: unrounded)
+                        let (a, b) = (&fv[x], &fv[y]);
+                        let mut best: Option<(f64, u8)> = None;
                         for &rd in &rounds {
-                            let (a, b) = (&fv[x], &fv[y]);
-                            if hit_rate(&rows, |i| tv[i].map(|z| z.to_bits() == fpred(op, rd, a[i], b[i]))) >= 0.5 {
-                                out.push(Cand { target: t, family: FLOAT_REL, deps: vec![nums[x], nums[y]], body: float_body(tv, a, b, op, rd, lv) });
-                                break;
-                            }
+                            let h = hit_rate(&rows, |i| tv[i].map(|z| z.to_bits() == fpred(op, rd, a[i], b[i])));
+                            if h >= 0.5 && best.map_or(true, |(bh, _)| h > bh) { best = Some((h, rd)); }
+                        }
+                        if let Some((_, rd)) = best {
+                            out.push(Cand { target: t, family: FLOAT_REL, deps: vec![nums[x], nums[y]], body: float_body(tv, a, b, op, rd, lv) });
                         }
                     }
                 }

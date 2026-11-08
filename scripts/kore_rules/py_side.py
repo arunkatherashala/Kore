@@ -38,6 +38,19 @@ def load(d):
     return pa.table(arrays, names=names), b"".join(raw)
 
 
+def same_bits(a, b):
+    """Table equality with floats compared by their bits (NaN payloads included)."""
+    if a.schema != b.schema or a.num_rows != b.num_rows:
+        return False
+    for x, y in zip(a.columns, b.columns):
+        x, y = x.combine_chunks(), y.combine_chunks()
+        if pa.types.is_floating(x.type):
+            x, y = x.view(pa.int64()), y.view(pa.int64())
+        if not x.equals(y):
+            return False
+    return True
+
+
 def main():
     d, out = sys.argv[1], sys.argv[2]
     t, raw = load(d)
@@ -51,7 +64,7 @@ def main():
         s = time.perf_counter()
         back = pq.read_table(p, memory_map=False)
         res["parquet_zstd22_read_s"] = time.perf_counter() - s
-        assert back.equals(t)
+        assert same_bits(back, t)
         del back
         os.remove(p)
         c = os.path.join(tmp, "t.csv")

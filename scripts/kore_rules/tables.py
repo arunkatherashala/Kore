@@ -8,12 +8,16 @@ import os
 import sys
 
 
+def nb(b):
+    return "not measured" if b is None else f"{b:,}"
+
+
 def main():
     d = sys.argv[1]
     rows = []
     for f in sorted(glob.glob(os.path.join(d, "store_*.json"))):
         s = json.load(open(f))
-        p = os.path.join(d, f"py_{s['set']}_{s['rows']}.json")
+        p = os.path.join(d, os.path.basename(f).replace("store_", "py_"))
         py = json.load(open(p)) if os.path.exists(p) else {}
         rows.append((s, py))
     order = {"events": 0, "sensors": 1, "orders": 2, "logs": 3, "sequences": 4, "random": 5}
@@ -39,7 +43,7 @@ def main():
     print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for s, py in rows:
         print(f"| {s['set']} | {s['rows']:,} | {s['v4_default']:,} | {s['v4_19']:,} | {s['rules_default']:,} | {s['rules_19']:,} | "
-              f"{s['rules_default'] / s['v4_default']:.4f} | {py.get('parquet_zstd22', 0):,} | {py.get('csv_xz9', 0):,} | {py.get('raw_xz9', 0):,} |")
+              f"{s['rules_default'] / s['v4_default']:.4f} | {nb(py.get("parquet_zstd22"))} | {nb(py.get("csv_xz9"))} | {nb(py.get("raw_xz9"))} |")
 
     print("\n### Speed (median over the repetitions; ratios are paired, same process, alternating order)\n")
     print("| dataset | rows | encode v4 | encode rule mode | encode ratio rule/v4 (per rep) | decode v4 | decode rule mode | decode ratio rule/v4 (per rep) | rule-mode encode MB/s (raw) | rule-mode decode MB/s (raw) |")
@@ -66,7 +70,7 @@ def main():
         print("|---|---:|---:|---|")
         for c in s["columns"]:
             rb = c["rule_bytes"]
-            print(f"| {c['name']} | {c['v4_bytes']:,} | {rb if rb is None else format(rb, ',')} | {c['rule'] or 'none (v4 payload kept)'} |")
+            print(f"| {c['name']} | {c['v4_bytes']:,} | {"-" if rb is None else format(rb, ",")} | {c['rule'] or 'none (v4 payload kept)'} |")
 
 
 if __name__ == "__main__":
