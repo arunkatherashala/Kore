@@ -105,13 +105,14 @@ fn rule_header(p: &[u8], num_cols: usize) -> Result<(u8, u64, Vec<usize>, usize)
     let family = rd.u8()?;
     let dg = rd.u64le()?;
     let nd = rd.u8()? as usize;
-    if nd > 2 { return Err(bad("too many rule source columns")); }
+    if nd > cross::MAX_SUM_TERMS { return Err(bad("too many rule source columns")); }
     let mut deps = Vec::with_capacity(nd);
     for _ in 0..nd { deps.push(rd.count(num_cols.saturating_sub(1))?); }
     match family {
         1..=6 if nd == 0 => {}
-        7..=9 if nd >= 1 => {}
-        1..=9 => return Err(bad("rule family with the wrong number of source columns")),
+        7..=9 if (1..=2).contains(&nd) => {}
+        10 if nd >= 2 => {}
+        1..=10 => return Err(bad("rule family with the wrong number of source columns")),
         f => return Err(bad(format!("unknown rule family {f}"))),
     }
     Ok((family, dg, deps, rd.pos))

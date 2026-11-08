@@ -27,6 +27,8 @@ def dump(t, d, key):
         ty = a.type
         if pa.types.is_decimal(ty):
             a = a.cast(pa.float64())
+        elif pa.types.is_timestamp(ty):
+            a = a.cast(pa.int64())  # epoch units of the timestamp type (e.g. microseconds)
         elif pa.types.is_date(ty):
             a = pc.strftime(a, format="%Y-%m-%d").cast(pa.large_string())
         elif pa.types.is_integer(ty):

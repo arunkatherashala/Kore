@@ -450,3 +450,43 @@ fn partial_row_reads_equal_the_full_read() {
     assert!(KoreReader::from_bytes_rows_with_dicts(&bytes, None, 10..3001, &DictSet::new()).is_err());
     assert!(KoreReader::from_bytes_rows_with_dicts(&bytes, None, 5..4, &DictSet::new()).is_err());
 }
+
+#[test]
+fn float_sum_and_offset_families() {
+    // total = sum of 5 money columns in cents, with a missing fee on some rows, nulls in a term and in
+    // the target, NaN and -0.0 targets, and a term with more than 2 decimals
+    let n = 6000;
+    let mut r = Rng::new(41);
+    let money = |r: &mut Rng, hi: u64| (r.below(hi) as f64) / 100.0;
+    let (mut a, mut b, mut c, mut d, mut e, mut t) = (vec![], vec![], vec![], vec![], vec![], vec![]);
+    for i in 0..n {
+        let (x1, x2, x3, x4) = (money(&mut r, 10_000), [0.0, 0.5, 1.0, 2.5][r.below(4) as usize], 0.5, money(&mut r, 2_000));
+        let x5 = if i % 13 == 0 { None } else { Some([0.0, 2.5][r.below(2) as usize]) };
+        let cents: i64 = [x1, x2, x3, x4, x5.unwrap_or(0.0)].iter().map(|v| (v * 100.0).round() as i64).sum();
+        let tot = match i % 97 { 0 => None, 1 => Some(f64::NAN), 2 => Some(-0.0), 3 => Some(1.0 / 3.0), _ => Some((cents + if i % 11 == 0 { -250 } else { 0 }) as f64 / 100.0) };
+        a.push(Some(x1)); b.push(Some(x2)); c.push(Some(x3)); d.push(Some(x4)); e.push(x5); t.push(tot);
+    }
+    // an order relation: drop = pick + positive lag
+    let mut clock = 1_700_000_000_000i64;
+    let pick: Vec<Option<i64>> = (0..n).map(|_| { clock += r.below(1_000_000) as i64; Some(clock) }).collect();
+    let drop: Vec<Option<i64>> = pick.iter().map(|p| p.map(|p| p + 60_000 + r.below(1000) as i64)).collect();
+    let blk = block(vec![
+        Column::float64("fare", a), Column::float64("extra", b), Column::float64("tax", c), Column::float64("tip", d),
+        Column::float64("fee", e), Column::float64("total", t), Column::int64("pickup", pick), Column::int64("dropoff", drop),
+    ]);
+    let (_, rep) = roundtrip(&blk);
+    let tot = rule_of(&rep, "total").unwrap();
+    assert!(tot.contains("(sum), in units of 10^-2"), "{tot}");
+    for x in ["fare", "extra", "tax", "tip", "fee"] { assert!(tot.contains(x), "{tot}"); }
+    let dr = rule_of(&rep, "dropoff").unwrap_or("");
+    assert!(dr.contains("pickup + offset residual"), "{dr}");
+    // corrupted sum payloads with valid CRCs are refused or exact
+    let bytes = KoreWriter::to_bytes_rules(&blk, &RuleOptions::default()).unwrap();
+    let start = v6_dir(&bytes).1 + 4;
+    for i in (start..bytes.len()).step_by(7) {
+        let mut d = bytes.clone();
+        d[i] ^= 0x21;
+        recrc(&mut d);
+        if let Ok(got) = KoreReader::from_bytes(&d) { same(&blk, &got); }
+    }
+}

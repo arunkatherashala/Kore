@@ -18,6 +18,9 @@ use crate::DType;
 pub const INT_REL: u8 = 7;
 pub const FLOAT_REL: u8 = 8;
 pub const LOOKUP: u8 = 9;
+pub const FLOAT_SUM: u8 = 10;
+/// Most source columns of a float sum (family 10).
+pub const MAX_SUM_TERMS: usize = 8;
 
 const POW10: [f64; 16] = [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15];
 const MAX_SHIFT: usize = 8;
@@ -108,6 +111,118 @@ fn float_body(t: &[Option<f64>], a: &[Option<f64>], b: &[Option<f64>], op: u8, r
     let r: Vec<u64> = (0..t.len()).filter_map(|i| t[i].map(|x| x.to_bits() ^ fpred(op, round, a[i], b[i]))).collect();
     stream::put_u64_stream(&mut out, &r, lv);
     out
+}
+
+// ── float sums of up to 8 columns (family 10) ────────────────────────────────
+
+/// round = 0xFF: `((a_1 + a_2) + a_3) + ...` in f64 in the listed order. round = s: the sum in integer units of
+/// 10^-s, `(sum of round(a_j * 10^s)) / 10^s` (exact integer arithmetic, so no float epsilon), e.g. money in
+/// cents with s = 2. A null term counts as 0, an integer term as `as f64`.
+fn sum_pred(terms: &[&Vec<Option<f64>>], round: u8, i: usize) -> u64 {
+    if round == 0xFF {
+        let mut x = 0.0f64;
+        for (j, t) in terms.iter().enumerate() { let v = t[i].unwrap_or(0.0); x = if j == 0 { v } else { x + v }; }
+        return x.to_bits();
+    }
+    let p = POW10[round as usize];
+    let mut u = 0i64;
+    for t in terms { u = u.wrapping_add(units(t[i], p)); }
+    ((u as f64) / p).to_bits()
+}
+
+/// `round(x * p)` as i64 (saturating; null = 0).
+#[inline]
+fn units(x: Option<f64>, p: f64) -> i64 { x.map_or(0, |v| (v * p).round() as i64) }
+
+/// Integer units of the prediction (round = s only).
+fn sum_units(terms: &[&Vec<Option<f64>>], p: f64, i: usize) -> i64 {
+    let mut u = 0i64;
+    for t in terms { u = u.wrapping_add(units(t[i], p)); }
+    u
+}
+
+/// Body: `nulls | round:u8 | residuals`. round = 0xFF: xor of the bits with the f64 sum (u64 planes).
+/// round = s: per non-null value the residual in integer units, `round(t * 10^s) - prediction` (zigzag
+/// varints; a missing or extra fee becomes a small number), then `n_exc | exception rows | raw bits` for the
+/// values that are not exactly `units / 10^s` (NaN, -0.0, more digits).
+fn sum_body(t: &[Option<f64>], terms: &[&Vec<Option<f64>>], round: u8, lv: Levels) -> Vec<u8> {
+    let mut out = vec![];
+    stream::put_nulls(&mut out, &t.iter().map(|x| x.is_none()).collect::<Vec<_>>(), lv);
+    out.push(round);
+    if round == 0xFF {
+        let r: Vec<u64> = (0..t.len()).filter_map(|i| t[i].map(|x| x.to_bits() ^ sum_pred(terms, round, i))).collect();
+        stream::put_u64_stream(&mut out, &r, lv);
+        return out;
+    }
+    let pw = POW10[round as usize];
+    let (mut res, mut exc_pos, mut exc_bits) = (Vec::with_capacity(t.len() * 2), vec![], vec![]);
+    let mut k = 0usize;
+    for i in 0..t.len() {
+        let Some(x) = t[i] else { continue };
+        let tu = (x * pw).round() as i64;
+        if x.is_finite() && ((tu as f64) / pw).to_bits() == x.to_bits() {
+            stream::put_zz(&mut res, tu.wrapping_sub(sum_units(terms, pw, i)));
+        } else {
+            stream::put_zz(&mut res, 0);
+            exc_pos.push(k);
+            exc_bits.push(x.to_bits());
+        }
+        k += 1;
+    }
+    stream::put_stream(&mut out, &res, lv);
+    put_varint(&mut out, exc_pos.len() as u64);
+    if !exc_pos.is_empty() {
+        let mut pb = vec![];
+        let mut prev = 0usize;
+        for (j, &q) in exc_pos.iter().enumerate() { put_varint(&mut pb, (if j == 0 { q } else { q - prev - 1 }) as u64); prev = q; }
+        stream::put_stream(&mut out, &pb, lv);
+        stream::put_u64_stream(&mut out, &exc_bits, lv);
+    }
+    out
+}
+
+fn sum_decode(rd: &mut Rd, n: usize, deps: &[&ColumnData]) -> Result<ColumnData, KoreError> {
+    let nulls = stream::get_nulls(rd, n)?;
+    let round = rd.u8()?;
+    if round != 0xFF && round as usize >= POW10.len() { return Err(bad("unknown float sum rounding")); }
+    if deps.len() < 2 || deps.len() > MAX_SUM_TERMS { return Err(bad("wrong number of source columns")); }
+    let terms: Vec<Vec<Option<f64>>> = deps.iter().map(|d| as_f64(d).ok_or_else(|| bad("float sum needs numeric sources"))).collect::<Result<_, _>>()?;
+    let refs: Vec<&Vec<Option<f64>>> = terms.iter().collect();
+    let m = nulls.iter().filter(|&&x| !x).count();
+    if round == 0xFF {
+        let r = stream::get_u64_stream(rd, m)?;
+        let mut k = 0;
+        return Ok(ColumnData::Float64((0..n).map(|i| if nulls[i] { None } else {
+            let x = f64::from_bits(sum_pred(&refs, round, i) ^ r[k]);
+            k += 1;
+            Some(x)
+        }).collect()));
+    }
+    let pw = POW10[round as usize];
+    let res = stream::get_zz_stream(rd, m)?;
+    let ne = rd.count(m)?;
+    let mut exc: Vec<(usize, u64)> = vec![];
+    if ne > 0 {
+        let gaps = stream::get_uint_stream(rd, ne, m as u64)?;
+        let bits = stream::get_u64_stream(rd, ne)?;
+        let mut prev: Option<usize> = None;
+        for (g, b) in gaps.into_iter().zip(bits) {
+            let q = match prev { None => g as usize, Some(q) => q.checked_add(1 + g as usize).ok_or_else(|| bad("overflow"))? };
+            if q >= m { return Err(bad("exception position out of range")); }
+            exc.push((q, b));
+            prev = Some(q);
+        }
+    }
+    let (mut k, mut e) = (0usize, 0usize);
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        if nulls[i] { out.push(None); continue; }
+        let v = if e < exc.len() && exc[e].0 == k { e += 1; f64::from_bits(exc[e - 1].1) }
+                else { (sum_units(&refs, pw, i).wrapping_add(res[k]) as f64) / pw };
+        out.push(Some(v));
+        k += 1;
+    }
+    Ok(ColumnData::Float64(out))
 }
 
 fn float_decode(rd: &mut Rd, n: usize, deps: &[&ColumnData]) -> Result<ColumnData, KoreError> {
@@ -258,6 +373,7 @@ pub fn decode(family: u8, rd: &mut Rd, dtype: DType, n: usize, deps: &[&ColumnDa
     match family {
         INT_REL => { need(DType::I64)?; int_decode(rd, n, deps) }
         FLOAT_REL => { need(DType::F64)?; float_decode(rd, n, deps) }
+        FLOAT_SUM => { need(DType::F64)?; sum_decode(rd, n, deps) }
         LOOKUP => lookup_decode(rd, dtype, n, deps),
         f => Err(bad(format!("unknown rule family {f}"))),
     }
@@ -282,6 +398,12 @@ pub fn describe(family: u8, rd: &mut Rd, n: usize, names: &[&str]) -> String {
             let o = ["*", "+", "-", "/"].get(op as usize).copied().unwrap_or("?");
             let r = if round == 0xFF { String::new() } else { format!(", rounded to {round} decimals") };
             format!("= {} {o} {} (f64){r}", nm(0), nm(1))
+        }
+        FLOAT_SUM => {
+            if stream::get_nulls(rd, n).is_err() { return "?".into(); }
+            let round = rd.u8().unwrap_or(0xFF);
+            let r = if round == 0xFF { String::new() } else { format!(", in units of 10^-{round}") };
+            format!("= {} (sum){r}", names.join(" + "))
         }
         LOOKUP => match rd.u8() {
             Ok(0) => format!("= {} shifted by {}", nm(0), rd.varint().unwrap_or(0)),
@@ -422,6 +544,52 @@ pub fn search(cols: &[&ColumnData], lv: Levels) -> Vec<Cand> {
                 }
             }
             out.extend(top(lazy));
+            // sums of 3 to 8 columns. With a decimal scale s of the target (money: s = 2) the search runs in
+            // integer units of 10^-s: greedy forward selection, each step adding the column that makes the most
+            // sample rows exact (ties: smaller absolute error); then the integer-unit sum and the plain f64 sum
+            // of the chosen columns are tested; kept if at least half of the sample is exact.
+            let mut best_sum: Option<(f64, Vec<usize>, u8)> = None;
+            if let Some(&sc) = rounds.get(1) {
+                let pw = POW10[sc as usize];
+                let tu: Vec<Option<i64>> = rows.iter().map(|&i| tv[i].map(|z| (z * pw).round() as i64)).collect();
+                let su: Vec<Vec<i64>> = (0..nums.len()).map(|x| rows.iter().map(|&i| units(fv[x][i], pw)).collect()).collect();
+                let mut acc = vec![0i64; rows.len()];
+                let mut chosen: Vec<usize> = vec![];
+                let score = |acc: &Vec<i64>| -> (usize, u128) {
+                    let mut h = 0usize;
+                    let mut e = 0u128;
+                    for (k, t) in tu.iter().enumerate() { if let Some(t) = t { let d = t.wrapping_sub(acc[k]); if d == 0 { h += 1; } e += d.unsigned_abs() as u128; } }
+                    (h, e)
+                };
+                let mut cur = score(&acc);
+                for _ in 0..MAX_SUM_TERMS {
+                    // the column that adds the most exact rows; if none adds any, the one that lowers the error most
+                    let (mut by_hits, mut by_err): (Option<((usize, u128), usize)>, Option<((usize, u128), usize)>) = (None, None);
+                    for x in 0..nums.len() {
+                        // sum terms: float columns only (integer ids and counts are not amounts)
+                        if chosen.contains(&x) || !matches!(cols[nums[x]], ColumnData::Float64(_)) { continue; }
+                        let trial: Vec<i64> = acc.iter().zip(&su[x]).map(|(a, b)| a.wrapping_add(*b)).collect();
+                        let sc2 = score(&trial);
+                        if sc2.0 > cur.0 && by_hits.map_or(true, |(p, _)| sc2.0 > p.0 || (sc2.0 == p.0 && sc2.1 < p.1)) { by_hits = Some((sc2, x)); }
+                        if sc2.1 < cur.1 && by_err.map_or(true, |(p, _)| sc2.1 < p.1) { by_err = Some((sc2, x)); }
+                    }
+                    let Some((sc2, x)) = by_hits.or(by_err) else { break };
+                    cur = sc2;
+                    chosen.push(x);
+                    for (k, v) in su[x].iter().enumerate() { acc[k] = acc[k].wrapping_add(*v); }
+                    if chosen.len() >= 3 {
+                        let refs: Vec<&Vec<Option<f64>>> = chosen.iter().map(|&x| &fv[x]).collect();
+                        for rd in [sc, 0xFF] {
+                            let h = hit_rate(&rows, |i| tv[i].map(|z| z.to_bits() == sum_pred(&refs, rd, i)));
+                            if h >= 0.5 && best_sum.as_ref().map_or(true, |(bh, _, _)| h > *bh) { best_sum = Some((h, chosen.clone(), rd)); }
+                        }
+                    }
+                }
+            }
+            if let Some((_, terms, rd)) = best_sum {
+                let refs: Vec<&Vec<Option<f64>>> = terms.iter().map(|&x| &fv[x]).collect();
+                out.push(Cand { target: t, family: FLOAT_SUM, deps: terms.iter().map(|&x| nums[x]).collect(), body: sum_body(tv, &refs, rd, lv) });
+            }
         }
         // lookups
         if let Some(tcell) = &cell[t] {
