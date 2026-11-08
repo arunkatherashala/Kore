@@ -2,7 +2,10 @@
 //! file that references a shared dictionary (plus the `.kdic` object) into <dir>. Used to check that a
 //! reader built from code before version 4 reads the v2 file and refuses both v4 files at the version
 //! field (see docs/kore_size.md). Also a key index object (`sample_index.kidx`) and a version-4 file written
-//! with `CompactOptions::fast()`, for the same check (docs/kore_speed_v4.md).
+//! with `CompactOptions::fast()`, for the same check (docs/kore_speed_v4.md). Also version-4 files written
+//! with `CompactOptions::quick()` (with and without the dictionary) and container-version-5 files
+//! (`with_compact_directory`), for the check that the b44d2a91 reader reads the quick files and refuses
+//! the version-5 files at the version field (docs/kore_speed_v4.md section 6).
 use kore_core::{Column, ColumnData, DataBlock};
 use kore_store::{CompactOptions, KoreWriter, SharedDict};
 
@@ -30,4 +33,9 @@ fn main() {
     let ix = ib.build().unwrap();
     std::fs::write(dir.join("sample_index.kidx"), ix.to_bytes()).unwrap();
     std::fs::write(dir.join("sample_v4_fast.kore"), KoreWriter::to_bytes_compact(&block, &CompactOptions::fast()).unwrap()).unwrap();
+    let qd = CompactOptions::quick().with_column("text", kore_store::ColumnCodec::new(kore_store::Transform::Plain, kore_store::Stage::Zstd)).with_dict("text", d.clone());
+    std::fs::write(dir.join("sample_v4_quick.kore"), KoreWriter::to_bytes_compact(&block, &CompactOptions::quick()).unwrap()).unwrap();
+    std::fs::write(dir.join("sample_v4_quick_dict.kore"), KoreWriter::to_bytes_compact(&block, &qd).unwrap()).unwrap();
+    std::fs::write(dir.join("sample_v5.kore"), KoreWriter::to_bytes_compact(&block, &CompactOptions::new().with_compact_directory(true)).unwrap()).unwrap();
+    std::fs::write(dir.join("sample_v5_dict.kore"), KoreWriter::to_bytes_compact(&block, &o.clone().with_compact_directory(true)).unwrap()).unwrap();
 }
