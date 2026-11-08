@@ -26,7 +26,7 @@ be burstier, messier and phrased differently.
 | B9 experiments: rule targets covered per world, experiments minus passive discovery, World v2 large clean / B2 world budget 3000 (synthetic) | 20 worlds each | passive discovery (current learner); random probes with the same budget | +7.35 [+5.53, +9.17] / +1.70 [+1.02, +2.38]; reward per energy -0.044 [-0.316, +0.229] / -0.097 [-0.284, +0.090]; 0 wrong rules (Track B9) | 2026-11-06 | f4bb0f8a |
 | B11 long-run decline and World O (synthetic) | 8 worlds x 1M steps (decline); 20 worlds (World O); 20 worlds (B1 check) | B1 skip test; oracle-knows-rules | settled skip test vs B1 over 1M steps +0.208 [+0.066, +0.350]; world 1 4.164 -> 4.152 (B1 4.096 -> 4.020); B1 budget 600 +0.001 [-0.007, +0.009], 3000 +0.049 [+0.010, +0.087]; World O regret current 0.131 -> 0.836 per 100k-energy window, no faster learning of later families (Spearman +0.025 [-0.060, +0.110]) | 2026-11-07 | open-world |
 | V1 versus standard methods (synthetic): ours minus the best tuned standard method; World v2 12 conditions / first world budget 600 / 3000 / World O | 20 worlds per condition | 10 standard methods (eps-greedy, UCB1-tuned, KL-UCB, Thompson, EXP3, LinUCB, linear Thompson, Q-learning, SARSA, MLP Q), tuned on seeds 101..120; oracles; MCTS on the true simulator | World v2: current -0.18 to -0.38 (11 of 12 below 0), recommended (B7 + skip fix) -0.088 to +0.131 (none significant); first world -0.450 [-0.659, -0.241] / +0.007 [-0.105, +0.119]; World O (600k) current +0.540 [+0.380, +0.701] over the best method; rule learning 0.78-0.81 right, 0 wrong vs brute force 0.59-0.71 and k-NN / trees 0.05-0.55 (Track V1) | 2026-11-07 | vs-world |
-| W1 World T, data work in a sandbox (synthetic): being minus tuned LinUCB / UCB1 / random / always SQL, reward per energy; OOD worlds | 20 worlds, budget 6000 | random plan, always SQL, UCB1 and LinUCB tuned on seeds 101..120; oracle that sees every plan's true result | +0.127 [+0.084, +0.171] / +0.538 [+0.468, +0.608] / +1.494 / +2.259; 0.241 below the oracle; later kinds not learned faster (Spearman -0.005 [-0.118, +0.109]); 0 wrong answers accepted, 0 wrong of 6,257 rule and 881 column-search answers; OOD: being 2.633 vs LinUCB 2.118, 0 wrong accepted, 0 wrong verified-search answers (Track W1) | 2026-11-07 | world-t |
+| W1 World T, data work in a sandbox (synthetic): being minus tuned LinUCB / UCB1 / always SQL, reward per energy, default reward design; 6 x 5 reward-design sweep; OOD | 20 worlds per point, budget 6000 | random plan, always SQL, UCB1 and LinUCB, each tuned on seeds 101..120 with 6 configurations per grid point; reward-best oracle (sees every plan's true result) | +0.127 [+0.084, +0.171] / +0.496 [+0.416, +0.575] / +2.259; 0.686 below the reward-best oracle; sweep: being ahead (interval above 0) at 22 / 24 / 25 of 30 points, behind LinUCB and UCB1 from a wrong-answer penalty of 3.16 x reward, behind always SQL at 3 points of penalty 10 x; series rules and column search precision 1.000 before the checker (6,257 and 881 answers); 0 wrong accepted; later kinds not faster (Spearman -0.005 [-0.118, +0.109]); OOD +0.516 over LinUCB, mostly from skipping (Track W1) | 2026-11-08 | world-t |
 
 ## How to reproduce
 
@@ -2434,168 +2434,227 @@ Not measured: see `docs/vs_world.md`, section "Not measured" (deep RL beyond one
 
 Question: in a more realistic sandbox of data work (tables with export quirks, time series, logs; nine task kinds with
 exact checkers), does the being learn from its own log which tool or plan works for which kind of task, how does
-it compare with standard methods on the same tasks, seeds and budgets, and are later task kinds learned faster?
-Design: `docs/world_t.md`. Code: `kore-self/src/being/world_t/` (new), `src/world_t_sandbox.rs`,
-`src/world_t_tools.rs`, harness `kore-self/examples/measure_world_t.rs`:
+it compare with standard methods on the same tasks, seeds and budgets, how robust is that to the reward design, and
+are later task kinds learned faster? Design: `docs/world_t.md`. Code: `kore-self/src/being/world_t/` (new),
+`src/world_t_sandbox.rs`, `src/world_t_tools.rs`, harness `kore-self/examples/measure_world_t.rs`:
 
 ```
-cargo run -p kore-self --example measure_world_t --offline --release -- tune   --home <scratch dir> --seeds 101..120
-cargo run -p kore-self --example measure_world_t --offline --release -- report --home <scratch dir> --seeds 1..20
-cargo run -p kore-self --example measure_world_t --offline --release -- ood    --home <scratch dir> --seeds 1..20
+cargo run -p kore-self --example measure_world_t --offline --release -- sweep  --home <scratch dir>
+cargo run -p kore-self --example measure_world_t --offline --release -- report --home <scratch dir> --beta 2 --ucb-c 0.003 --lin-alpha 1
+cargo run -p kore-self --example measure_world_t --offline --release -- ood    --home <scratch dir> --beta 2 --ucb-c 0.003 --lin-alpha 1
 ```
 
-Measured 2026-11-07, branch `world-t` from 8591da53, Windows, 8 CPUs shared with other builds, 4 threads. Budget
-6000 energy per life (about 1,600 to 2,300 tasks), all kinds open by 60% of the life. Every file of a world was
-written to a sandbox under a temp data root through `safe_path` and read back by every policy; it was removed after
-its world. Tuning seeds 101..120 only; report seeds 1..20; 95% t-intervals; paired differences on identical worlds
-(better/worse/tie of 20). Wall time: tuning 33 configurations x 20 worlds about 3 h, report 587 s, OOD 1038 s.
+Measured 2026-11-08 (first pass 2026-11-07), branch `world-t` from 8591da53, Windows, 8 CPUs shared with other
+builds, 4 threads. Budget 6000 energy per life; all kinds open by 60% of the life. Every file of a world was written
+to a sandbox under a temp data root through `safe_path` and read back by every policy (each file read from disk
+once per world and then kept in memory); removed after its world. Wall time: sweep 1053 s tuning + 340 s report;
+main report 39 s; OOD 126 s. 95% t-intervals; paired differences on identical worlds (better/worse/tie of 20).
 
-Policies: the being (pooled prior, tuned), the being with a flat prior (ablation), random plan, always SQL (the SQL
-plan with the sniffing loader where a template has one, else skip), a UCB1 bandit over plans, LinUCB over the visible
-task features, and the oracle, which SEES the true result of every plan on every task (and whether a perfect series
-rule would answer it) and takes the right answer with the highest reward per energy, or skips when no plan is right.
-The oracle is a per-task reference: it does not skip a task that some plan answers right but at a poor reward per
-energy, so a policy that skips well can beat it (it does, out of distribution). No reference has the being's rule
-book.
+### Tuning separation and budget
 
-Tuning (objective fixed before the run: mean reward per energy over seeds 101..120): being beta 0.5 / 1 / 2 x prior
-weight 1 / 2 / 4 -> beta 2, weight 2 (3.917 [3.735, 4.098]; beta 2 is the edge of the grid); UCB1 c 0.03 / 0.1 / 0.3 / 1
-x arms per template or per template x context x skip -> c 0.03, template x context, skip (3.329; c at the edge);
-LinUCB alpha 0.1 / 0.3 / 1 / 3 x skip -> alpha 1, skip (3.756). One pass each, not more.
+Seeds 101..120 were used for tuning only; seeds 1..20 for reporting only (never for tuning). Budget 6000 in both.
+At every grid point every tuned policy gets the same tuning budget: 6 configurations, each run on the 20 tuning seeds,
+objective fixed in advance = mean reward per energy; the best configuration is then run on seeds 1..20.
 
-### Results (seeds 1..20)
-
-| policy | reward per energy | right share of answers | right share of tasks | wrong answers per 100 tasks | wrong answers accepted |
-|---|---|---|---|---|---|
-| being (pooled prior) | 3.865 [3.735, 3.995] | 0.860 [0.845, 0.874] | 0.684 [0.665, 0.704] | 11.2 [10.0, 12.4] | 0 |
-| being, flat prior (ablation) | 3.888 [3.744, 4.032] | 0.843 [0.827, 0.860] | 0.674 [0.658, 0.690] | 12.6 [11.2, 13.9] | 0 |
-| random plan | 2.371 [2.317, 2.425] | 0.710 [0.689, 0.731] | 0.617 [0.599, 0.634] | 25.2 [23.3, 27.2] | 0 |
-| always SQL | 1.606 [1.533, 1.678] | 1.000 | 0.434 [0.396, 0.472] | 0.0 | 0 |
-| UCB1 bandit (tuned) | 3.327 [3.231, 3.423] | 0.867 [0.851, 0.882] | 0.827 [0.809, 0.846] | 12.7 [11.3, 14.1] | 0 |
-| LinUCB (tuned) | 3.738 [3.627, 3.848] | 0.801 [0.787, 0.814] | 0.660 [0.644, 0.677] | 16.4 [15.3, 17.6] | 0 |
-| oracle (SEES HIDDEN) | 4.106 [4.002, 4.211] | 1.000 | 0.988 [0.986, 0.990] | 0.0 | 0 |
-
-Being (pooled) minus each, paired:
-
-| other | reward per energy | right share of answers |
+| policy | the 6 configurations | fixed |
 |---|---|---|
-| being, flat prior | -0.023 [-0.067, +0.020] 9/11/0 | +0.016 [+0.009, +0.024] 16/4/0 |
-| random plan | +1.494 [+1.388, +1.599] 20/0/0 | +0.150 [+0.120, +0.179] 20/0/0 |
-| always SQL | +2.259 [+2.095, +2.423] 20/0/0 | -0.140 [-0.155, -0.126] 0/20/0 |
-| UCB1 bandit | +0.538 [+0.468, +0.608] 20/0/0 | -0.007 [-0.026, +0.012] 8/12/0 |
-| LinUCB | +0.127 [+0.084, +0.171] 18/2/0 | +0.059 [+0.044, +0.074] 19/1/0 |
-| oracle (sees hidden) | -0.241 [-0.312, -0.171] 1/19/0 | -0.140 [-0.155, -0.126] 0/20/0 |
+| being | beta 0.5, 1, 2, 4, 8, 16 | prior weight 2, pooled prior, skip on |
+| UCB1 | c 0.001, 0.003, 0.01, 0.03, 0.1, 0.3 | arms per (template, context, plan), skip on |
+| LinUCB | alpha 0.1, 0.3, 1, 3, 10, 30 | skip on |
+| random plan, always SQL | nothing to tune | |
 
-Learning curve, reward per energy per tenth of the life (mean over the 20 worlds; kinds keep opening until 60%):
+At the main point (no penalty, energy weight 1) the chosen values are inside their grids: being beta 2 (3.917 on
+the tuning seeds; first pass: beta 0.5 / 1 / 2 with the edge at 2, extended here to 4, 8, 16, none better), UCB1 c
+0.003 (3.381; first pass: c 0.03 at its lower edge, extended down here), LinUCB alpha 1 (3.756). Over the 30 grid
+points a chosen value sat at an edge of its grid for UCB1 at 15 points (all at c = 0.001: UCB1 wants almost no
+exploration bonus there), for the being at 1 (beta 0.5 at penalty 10, weight 10) and for LinUCB at 1 (alpha 0.1, same
+point). Those grids were not extended further, to keep the budget equal.
 
-| policy | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
-|---|---|---|---|---|---|---|---|---|---|---|
-| being (pooled) | 3.68 | 3.85 | 3.88 | 3.79 | 3.85 | 3.93 | 3.85 | 3.91 | 3.98 | 3.91 |
-| being (flat) | 3.56 | 3.81 | 3.92 | 3.82 | 3.88 | 3.93 | 3.89 | 4.02 | 4.02 | 4.02 |
-| UCB1 | 3.17 | 3.30 | 3.33 | 3.31 | 3.32 | 3.28 | 3.34 | 3.42 | 3.40 | 3.42 |
-| LinUCB | 3.40 | 3.66 | 3.76 | 3.61 | 3.70 | 3.83 | 3.77 | 3.88 | 3.90 | 3.88 |
-| oracle (sees hidden) | 4.20 | 4.16 | 4.15 | 4.05 | 4.09 | 4.05 | 4.09 | 4.07 | 4.11 | 4.11 |
+### Main point (no penalty, energy weight 1; seeds 1..20)
 
-The being's last tenth minus its first: +0.229 [-0.150, +0.609]; its gap to the oracle shrinks from the first to the
-last tenth by 0.325 [0.179, 0.471].
+| policy | reward per energy | right share of answers | coverage (answered / tasks) | skip share | wrong answers per 100 tasks | wrong accepted |
+|---|---|---|---|---|---|---|
+| being | 3.865 [3.735, 3.995] | 0.860 [0.845, 0.874] | 0.796 [0.775, 0.817] | 0.125 [0.104, 0.147] | 11.2 [10.0, 12.4] | 0 |
+| being, skip off | 3.666 [3.560, 3.772] | 0.871 [0.858, 0.885] | 0.914 [0.905, 0.923] | 0 | 11.8 [10.5, 13.0] | 0 |
+| being, flat prior | 3.888 [3.744, 4.032] | 0.843 [0.827, 0.860] | 0.799 [0.782, 0.817] | 0.104 [0.087, 0.122] | 12.6 [11.2, 13.9] | 0 |
+| random plan | 2.371 [2.317, 2.425] | 0.710 [0.689, 0.731] | 0.869 [0.859, 0.878] | 0 | 25.2 [23.3, 27.2] | 0 |
+| always SQL | 1.606 [1.533, 1.678] | 1.000 | 0.434 [0.396, 0.472] | 0.566 [0.528, 0.603] | 0 | 0 |
+| UCB1 | 3.369 [3.258, 3.480] | 0.863 [0.846, 0.879] | 0.915 [0.900, 0.931] | 0.049 [0.034, 0.065] | 12.5 [11.1, 13.9] | 0 |
+| UCB1, skip off | 3.312 [3.220, 3.404] | 0.870 [0.855, 0.886] | 0.963 [0.958, 0.968] | 0 | 12.5 [11.0, 14.0] | 0 |
+| LinUCB | 3.738 [3.627, 3.848] | 0.801 [0.787, 0.814] | 0.825 [0.810, 0.840] | 0.079 [0.064, 0.095] | 16.4 [15.3, 17.6] | 0 |
+| LinUCB, skip off | 3.549 [3.459, 3.639] | 0.809 [0.797, 0.821] | 0.894 [0.885, 0.904] | 0 | 17.1 [16.0, 18.2] | 0 |
+| reward-best oracle (SEES HIDDEN) | 4.551 [4.429, 4.673] | 1.000 | 0.745 [0.727, 0.762] | 0.255 [0.238, 0.272] | 0 | 0 |
+| answer-everything oracle (SEES HIDDEN) | 4.106 [4.002, 4.211] | 1.000 | 0.988 [0.986, 0.990] | 0.012 | 0 | 0 |
 
-Later kinds learned faster? Per world, the Spearman correlation of a kind's opening position (0..8) with the tasks
-of that kind needed to reach competence (8 of the last 10 choices within 90% of the best reward per energy on the
-task; negative = later kinds faster), and the regret (best minus chosen reward per energy) over the first 30 tasks of
-each kind:
+The reward-best oracle takes, on every task, the option with the highest true reward minus rho x energy (skip
+included, rho = its own realized reward per energy); the answer-everything oracle answers every task some plan gets
+right. Only the reward-best oracle is used as the yardstick below.
 
-| policy | Spearman | early regret, kinds open at the start | early regret, kinds opened later |
-|---|---|---|---|
-| being (pooled) | -0.005 [-0.118, +0.109] | 1.753 [1.577, 1.928] | 1.748 [1.635, 1.862] |
-| being (flat) | +0.018 [-0.121, +0.157] | 1.960 [1.760, 2.159] | 1.850 [1.708, 1.991] |
-| UCB1 | -0.091 [-0.248, +0.067] | 2.004 [1.739, 2.270] | 2.008 [1.844, 2.173] |
-| LinUCB | +0.056 [-0.093, +0.204] | 2.108 [1.850, 2.366] | 1.898 [1.752, 2.044] |
+Being minus each, paired: LinUCB +0.127 [+0.084, +0.171] 18/2/0; UCB1 +0.496 [+0.416, +0.575] 20/0/0; always SQL
++2.259 [+2.095, +2.423] 20/0/0; random +1.494 20/0/0; flat prior -0.023 [-0.067, +0.020] 9/11/0; **reward-best oracle
+-0.686 [-0.742, -0.631] 0/20/0**.
 
-Pooled minus flat, early regret on the later kinds: -0.101 [-0.235, +0.032] (8/12/0).
+Skipping. Skipping costs 1 energy and earns nothing; it pays off when the best plan's expected reward per energy is
+below what the being realizes on average. Being minus being with skip off +0.198 [+0.152, +0.245] (20/0/0); LinUCB
+minus its skip-off variant +0.189 [+0.144, +0.233]; UCB1 +0.057 [+0.008, +0.106]. With skip off for both, being
+minus LinUCB is +0.117 [+0.075, +0.160] (17/3/0) against +0.127 with skip on for both, and being minus UCB1 +0.354
+[+0.290, +0.419] against +0.496: **at the main point almost none of the lead over LinUCB comes from skipping** (both
+gain about the same from it), and about 0.14 of the 0.50 lead over UCB1 does. The being skips 12.5% of the tasks
+(the reward-best oracle 25.5%), mostly large group queries and lookups whose energy exceeds their worth.
 
-What it learned, per kind (pooled over the 20 worlds; plan shares of the kind's tasks):
+Learning curve (reward per energy per tenth of the life): being 3.68 3.85 3.88 3.79 3.85 3.93 3.85 3.91 3.98 3.91;
+LinUCB 3.40 ... 3.88; reward-best oracle 4.58 ... 4.54. The being's last tenth minus its first +0.229 [-0.150,
++0.609] (contains 0); its gap to the reward-best oracle shrinks by 0.267 [0.114, 0.420].
 
-| kind | right share of answers | plans used | being / oracle reward per energy |
-|---|---|---|---|
-| colstat | 0.973 | naive+native 54%, sniff+native 27%, skip 20% | 2.84 / 3.28 |
-| group | 0.965 | skip 48%, sniff+sql 36%, naive+sql 16% | 2.16 / 2.66 |
-| lookup | 0.981 | naive+native 41%, sniff+native 37%, skip 21% | 2.88 / 3.17 |
-| ts_exact | 0.905 | own rule 72%, season7 25%, drift 3% | 5.63 / 7.00 |
-| ts_noisy | 0.882 | season24 50%, season7 46%, last 3% | 7.94 / 8.53 |
-| derived | 0.581 | product 54%, ratio 26%, skip 10% (search 10%) | 3.59 / 4.30 |
-| fix_row | 1.000 | field count 60%, type check 33%, skip 8% | 4.29 / 4.84 |
-| format | 0.781 | extension 82%, sniffer 13%, skip 6% | 2.62 / 3.01 |
-| logs | 0.800 | substring count 86%, parse 13%, skip 1% | 5.35 / 5.47 |
+Later kinds learned faster? Spearman of a kind's opening position with the tasks needed to reach competence
+(negative = later kinds faster): being -0.005 [-0.118, +0.109], flat prior +0.018, UCB1 -0.070, LinUCB +0.056; regret
+over the first 30 tasks of a kind (against the best plan of the answer-everything oracle) for kinds opened later vs at
+the start: being 1.748 vs 1.753. Negative result: no faster learning of later kinds; the pooled prior lowers that
+early regret by 0.10 [-0.03, +0.24] (interval contains 0) and does not raise reward.
 
-Rules and the verified searches: 138 series rules accepted from the being's own revealed examples (0 on the noisy
-series); 6,257 rule answers, 6,257 right, 0 wrong; 881 column-rule search answers, 881 right, 0 wrong. Wrong answers
-accepted (a reward paid for an answer its exact checker rejects): 0 in every policy and world.
+Per kind (being): right share of answers / plans / reward per energy of being vs reward-best oracle: colstat 0.973,
+naive+native 54% sniff+native 27% skip 20%, 2.84 vs 3.19; group 0.965, skip 48% sniff+sql 36%, 2.16 vs 1.86; lookup
+0.981, 2.88 vs 3.09; ts_exact 0.905, own rule 72%, 5.63 vs 7.00; ts_noisy 0.882, season24 50% season7 46%, 7.94 vs
+8.49; derived 0.581, product 54% ratio 26% search 10%, 3.59 vs 5.08; fix_row 1.000, 4.29 vs 5.20; format 0.781, 2.62
+vs 2.70; logs 0.800, 5.35 vs 5.82.
 
-### Out of distribution (seeds 1..20, `ood = true`, never used in tuning)
+### The being's own rules, before and after the checker
 
-Tables of 1000 to 2500 rows (a size never seen in tuning) with their columns in reverse order; exact series that are
-Fibonacci-like or doubling-plus-constant (in the B2 grammar, absent from the default world) or weekly; derived columns
-with unseen fees and rates, discounts on payroll and tiered rules on invoices. Same tuned constants.
+"0 wrong accepted" means: no reward was paid for an answer that the exact checker rejected. It holds for every
+policy by construction of the checkers. The rule tools' own precision, before any checking:
 
-| policy | reward per energy | right share of answers | wrong answers per 100 tasks | wrong accepted |
+| | run | chosen | answers produced | no answer (rule did not apply / no form fits) | rejected by the checker | precision before the checker |
+|---|---|---|---|---|---|---|
+| series rules (ts-rule, 138 rules, 0 on the noisy series) | main | 7,404 | 6,257 | 1,147 | 0 | 1.000 |
+| column-rule search | main | 915 | 881 | 34 | 0 | 1.000 |
+| series rules (120 rules, 0 on the noisy series) | OOD | 9,205 | 7,478 | 1,727 | 0 | 1.000 |
+| column-rule search | OOD | 3,135 | 2,836 | 299 | 0 | 1.000 |
+
+The unverified cheap plans are another matter: the being submits 11.2 wrong answers per 100 tasks at the main point
+(derived columns via col-product / col-ratio, fmt-extension, log-grep), because without a penalty a cheap plan that
+is right half the time pays.
+
+### Reward design sweep (6 x 5 grid, every policy re-tuned at every point)
+
+Wrong-answer penalty (multiple of the task's listed reward): 0, 0.1, 0.316, 1, 3.16, 10. Energy weight (multiplies
+each plan's energy above 1; skip stays 1): 0.1, 0.316, 1, 3.16, 10 (0.1x to 10x of the default 1, log-spaced; the
+penalty's default is 0, so its axis is 0 plus 0.1x to 10x of the listed reward). Report seeds 1..20.
+
+Being minus each, reward per energy, paired (better/worse/tie of 20; **bold** = interval below 0, the reference wins):
+
+| penalty | weight | minus LinUCB | minus UCB1 | minus always SQL | minus reward-best oracle |
+|---|---|---|---|---|---|
+| 0 | 0.1 | +0.228 [+0.156, +0.300] | +0.374 [+0.296, +0.453] | +4.173 | -0.376 |
+| 0 | 0.316 | +0.141 [+0.087, +0.195] | +0.384 [+0.331, +0.436] | +3.188 | -0.634 |
+| 0 | 1 | +0.127 [+0.084, +0.171] | +0.496 [+0.416, +0.575] | +2.259 | -0.686 |
+| 0 | 3.16 | +0.206 [+0.103, +0.309] | +1.309 [+1.182, +1.435] | +2.579 | -0.394 |
+| 0 | 10 | +0.285 [+0.214, +0.357] | +2.616 [+2.475, +2.758] | +3.131 | -0.255 |
+| 0.1 | 0.1 | +0.324 [+0.246, +0.402] | +0.481 | +4.190 | -0.359 |
+| 0.1 | 0.316 | +0.198 [+0.125, +0.270] | +0.414 | +3.146 | -0.676 |
+| 0.1 | 1 | +0.157 [+0.097, +0.218] | +0.582 | +2.209 | -0.737 |
+| 0.1 | 3.16 | +0.213 [+0.094, +0.332] | +1.282 | +2.460 | -0.512 |
+| 0.1 | 10 | +0.310 [+0.218, +0.402] | +2.538 | +2.984 | -0.402 |
+| 0.316 | 0.1 | +0.348 [+0.253, +0.442] | +0.497 | +4.121 | -0.428 |
+| 0.316 | 0.316 | +0.279 [+0.200, +0.359] | +0.461 | +3.043 | -0.779 |
+| 0.316 | 1 | +0.184 [+0.121, +0.247] | +0.520 | +2.088 | -0.858 |
+| 0.316 | 3.16 | +0.272 [+0.181, +0.363] | +1.233 | +2.258 | -0.714 |
+| 0.316 | 10 | +0.370 [+0.281, +0.460] | +2.313 | +2.707 | -0.679 |
+| 1 | 0.1 | +0.477 [+0.357, +0.596] | +0.591 | +3.910 | -0.639 |
+| 1 | 0.316 | +0.282 [+0.182, +0.383] | +0.447 | +2.769 | -1.053 |
+| 1 | 1 | +0.255 [+0.191, +0.319] | +0.442 | +1.775 | -1.170 |
+| 1 | 3.16 | +0.423 [+0.259, +0.587] | +1.023 | +1.744 | -1.229 |
+| 1 | 10 | +0.450 [+0.238, +0.662] | +1.769 | +1.982 | -1.404 |
+| 3.16 | 0.1 | +0.169 [+0.041, +0.297] | +0.240 [+0.130, +0.351] | +3.028 | -1.522 |
+| 3.16 | 0.316 | **-0.494 [-0.638, -0.350]** | **-0.347 [-0.503, -0.190]** | +1.484 | -2.338 |
+| 3.16 | 1 | **-0.378 [-0.537, -0.220]** | **-0.259 [-0.385, -0.134]** | +0.696 | -2.250 |
+| 3.16 | 3.16 | +0.065 [-0.056, +0.187] | +0.399 | +0.759 | -2.213 |
+| 3.16 | 10 | +0.184 [+0.059, +0.308] | +0.615 | +0.637 | -2.749 |
+| 10 | 0.1 | **-3.757 [-4.273, -3.241]** | **-3.319 [-3.848, -2.790]** | **-1.311 [-1.895, -0.728]** | -5.861 |
+| 10 | 0.316 | **-1.567 [-1.801, -1.334]** | **-1.137 [-1.371, -0.903]** | +0.008 [-0.258, +0.273] | -3.815 |
+| 10 | 1 | **-0.775 [-0.863, -0.687]** | **-0.401 [-0.491, -0.312]** | +0.001 [-0.092, +0.095] | -2.944 |
+| 10 | 3.16 | **-0.488 [-0.689, -0.287]** | -0.074 [-0.266, +0.117] | **-0.190 [-0.363, -0.017]** | -3.163 |
+| 10 | 10 | **-0.217 [-0.361, -0.073]** | +0.167 [+0.107, +0.227] | **-0.179 [-0.240, -0.118]** | -3.565 |
+
+Share of the grid the being leads (interval above 0 / below 0, of 30 points): against LinUCB 22 / 7; against UCB1
+24 / 5; against always SQL 25 / 3. Accuracy-versus-reward picture (from the per-point table printed by `sweep`; mean
+over worlds, being / LinUCB / UCB1 / always SQL):
+
+| penalty, weight | reward per energy | right share of answers | wrong per 100 tasks | skip share |
 |---|---|---|---|---|
-| being (pooled) | 2.633 [2.468, 2.799] | 0.843 [0.820, 0.865] | 9.2 [7.7, 10.8] | 0 |
-| being (flat) | 2.559 [2.361, 2.758] | 0.807 [0.786, 0.827] | 11.9 [10.3, 13.4] | 0 |
-| random plan | 1.117 [1.079, 1.154] | 0.669 [0.647, 0.691] | 29.0 [27.0, 31.1] | 0 |
-| always SQL | 0.919 [0.885, 0.954] | 1.000 | 0.0 | 0 |
-| UCB1 bandit | 1.461 [1.383, 1.538] | 0.813 [0.790, 0.837] | 17.1 [14.9, 19.4] | 0 |
-| LinUCB | 2.118 [1.939, 2.296] | 0.693 [0.672, 0.713] | 20.9 [19.4, 22.4] | 0 |
-| oracle (sees hidden, per task, no skip of right-but-costly tasks) | 1.899 [1.832, 1.967] | 1.000 | 0.0 | 0 |
+| 0, 1 | 3.87 / 3.74 / 3.37 / 1.61 | 0.860 / 0.801 / 0.863 / 1.000 | 11.2 / 16.4 / 12.5 / 0 | 0.13 / 0.08 / 0.05 / 0.57 |
+| 1, 1 | 3.38 / 3.13 / 2.94 / 1.61 | 0.926 / 0.941 / 0.945 / 1.000 | 5.7 / 4.4 / 4.7 / 0 | 0.11 / 0.21 / 0.10 / 0.57 |
+| 3.16, 1 | 2.30 / 2.68 / 2.56 / 1.61 | 0.969 / 0.981 / 0.969 / 1.000 | 1.6 / 1.4 / 2.5 / 0 | 0.40 / 0.25 / 0.16 / 0.57 |
+| 10, 1 | 1.61 / 2.38 / 2.01 / 1.61 | 0.997 / 0.991 / 0.974 / 1.000 | 0.1 / 0.7 / 1.9 / 0 | 0.59 / 0.24 / 0.20 / 0.57 |
+| 10, 0.1 | 2.41 / 6.16 / 5.72 / 3.72 | 0.991 / 0.996 / 0.988 / 1.000 | 0.2 / 0.3 / 0.9 / 0 | 0.59 / 0.22 / 0.20 / 0.55 |
+| 10, 10 | 0.07 / 0.29 / -0.10 / 0.25 | 0.996 / 0.953 / 0.886 / 1.000 | 0.1 / 2.9 / 8.3 / 0 | 0.92 / 0.32 / 0.16 / 0.59 |
+| 0, 10 | 3.38 / 3.10 / 0.77 / 0.25 | 0.761 / 0.675 / 0.772 / 1.000 | 13.9 / 19.5 / 15.2 / 0 | 0.32 / 0.30 / 0.26 / 0.59 |
 
-Being minus: flat +0.074 [+0.012, +0.136] 14/6/0; UCB1 +1.173 [+1.044, +1.302] 20/0/0; LinUCB +0.516 [+0.395,
-+0.637] 20/0/0; the per-task oracle +0.734 [+0.597, +0.871] 20/0/0 (the being skips 72% to 95% of the table tasks,
-whose energy grows with the rows, and spends it on series and logs; the oracle answers them). Rules: 120 accepted (0
-on noisy series), 7,478 rule answers, 0 wrong; column-rule search 2,836 answers, 0 wrong. **The 0-wrong rule holds
-out of distribution**: no wrong answer was accepted by any policy, and neither verified search (series rules,
-column rules) gave a wrong answer; the cheap unverified plans still submit wrong answers (9.2 per 100 tasks for the
-being, mostly `col-product` / `col-ratio` on derived columns and `fmt-extension`, `log-grep`).
+Crossover points. Against LinUCB and UCB1 the ranking flips between penalty 1 and 3.16 x the listed reward (at energy
+weights 0.316 and 1; at 0.1 the being still leads at 3.16), and at penalty 10 the being is behind both at almost
+every weight. Against always SQL it flips only at penalty 10: at weight 0.1 (always SQL ahead by 1.31), 3.16 and 10
+(ahead by 0.18 to 0.19), with ties at 0.316 and 1. **Region where an accuracy-first policy beats the being: penalty
+10 x reward** (always SQL, which never answers wrong, earns more there at three of the five weights), and LinUCB and
+UCB1 beat it from penalty 3.16 up. Why: with a harsh penalty the being over-skips (51% to 92% of tasks at penalty 10,
+against 16% to 32% for the bandits). Its wrong-answer estimate starts from a pooled or flat prior of about 0.25 with
+weight 2, so a plan it has not tried enough carries a large expected penalty and loses to the skip bar; the bandits
+learn the penalty only from realized rewards and keep answering. Where the penalty is at most 1 x the reward the
+being leads everywhere.
 
-### SQL guard (tested, not measured)
+### Out of distribution (seeds 1..20, `ood = true`, never used in tuning; main-point constants)
 
-`guarded_sql`: write statements (INSERT, UPDATE, DELETE, DROP, CREATE, a second statement) refused before the
-engine runs and logged as `controller_refusal` (cap `sql_read_only`); a query over its timeout (a 300,000-row group
-and sort at 1 ms; any query at 0 ms) refused with its result discarded (`sql_timeout_ms`); a result over the row
-limit refused (`sql_max_rows`); in a logged run every generated query's text, limits, result digest and the
-checker's outcome are in the step's action and outcome events, and with timeout 0 or row limit 0 every query is
-refused and each refusal logged. In the measured runs (limits 2000 ms and 1000 rows) no query was refused.
+Tables of 1000 to 2500 rows with their columns in reverse order; Fibonacci-like and doubling series (in the B2 grammar,
+absent from the default world) and weekly series; derived columns with unseen fees and rates, discounts on payroll and
+tiered rules on invoices.
+
+| policy | reward per energy | right share of answers | coverage | skip share | wrong per 100 tasks | wrong accepted |
+|---|---|---|---|---|---|---|
+| being | 2.633 [2.468, 2.799] | 0.843 [0.820, 0.865] | 0.580 | 0.368 | 9.2 [7.7, 10.8] | 0 |
+| being, skip off | 1.635 [1.575, 1.695] | 0.871 | 0.890 | 0 | 11.5 | 0 |
+| being, flat prior | 2.559 [2.361, 2.758] | 0.807 | 0.610 | 0.329 | 11.9 | 0 |
+| random plan | 1.117 | 0.669 | 0.877 | 0 | 29.0 | 0 |
+| always SQL | 0.919 | 1.000 | 0.422 | 0.578 | 0 | 0 |
+| UCB1 | 1.781 [1.670, 1.891] | 0.784 | 0.732 | 0.226 | 15.9 | 0 |
+| UCB1, skip off | 1.442 | 0.820 | 0.933 | 0 | 16.8 | 0 |
+| LinUCB | 2.118 [1.939, 2.296] | 0.693 | 0.681 | 0.254 | 20.9 | 0 |
+| LinUCB, skip off | 1.503 | 0.728 | 0.875 | 0 | 23.8 | 0 |
+| reward-best oracle (SEES HIDDEN) | 3.281 [3.129, 3.432] | 1.000 | 0.516 | 0.484 | 0 | 0 |
+| answer-everything oracle (SEES HIDDEN) | 1.899 | 1.000 | 0.986 | 0.014 | 0 | 0 |
+
+Being minus: LinUCB +0.516 [+0.395, +0.637] 20/0/0; UCB1 +0.853 [+0.726, +0.979] 20/0/0; always SQL +1.714; reward-best
+oracle -0.647 [-0.725, -0.570] 0/20/0. Out of distribution **skipping carries most of the lead**: being minus its
+skip-off variant +0.999 [+0.864, +1.134]; with skip off for both, being minus LinUCB +0.132 [+0.093, +0.170] (against
++0.516 with skip on for both) and minus UCB1 +0.193 (against +0.853). The large tables make most table tasks cost more
+energy than they are worth; the being skips 72% to 95% of them. The 0-wrong rule holds: 0 wrong answers accepted in
+every policy; 0 of 7,478 series-rule and 0 of 2,836 column-search answers rejected by the checker.
 
 ### Verdict
 
-* **It learns which plan works where, from its own log, and beats the tuned standard methods.** Being minus LinUCB
-  +0.127 [+0.084, +0.171] reward per energy (18 of 20 worlds), minus UCB1 +0.538 (20 of 20), random +1.49, always
-  SQL +2.26; 0.241 below the oracle. It uses the cheap naive loader where exports are clean and the sniffing loader
-  elsewhere, its own series rules on 72% of the exact-series tasks (all right), the seasonal plan that matches each
-  noisy context, and skips the expensive group queries on large files. The gap to the oracle closes over the life
-  (by 0.33 from the first to the last tenth); the being's own curve rises (+0.23) but that interval contains 0.
-* **Most of the edge over LinUCB is skipping and rules, not plan choice**: LinUCB answers more tasks (it skips
-  less), and has no series rules.
-* **Accuracy is not its objective.** It maximizes reward per energy with no penalty for a wrong answer, so it
-  submits wrong cheap answers where a cheaper plan is right often enough (derived columns: 0.58 right; format 0.78;
-  logs 0.80). Always SQL is never wrong and is the worst policy by reward per energy. Wrong answers accepted: 0
-  everywhere, by construction of the exact checkers (the meaningful number is the wrong answers submitted).
-* **Negative: later kinds are not learned faster.** Spearman about 0 for every policy; the pooled prior does not
-  help reward (pooled minus flat -0.023 [-0.067, +0.020]); it makes the being right more often (+0.016 [+0.009,
-  +0.024] share of answers) and lowers the early regret on later kinds a little (-0.101 [-0.235, +0.032], interval
-  contains 0). Out of distribution the pooled prior is ahead (+0.074 [+0.012, +0.136]).
-* **Out of distribution** the being degrades least (2.63 against LinUCB 2.12 and UCB1 1.46) and the 0-wrong rule of
-  its verified searches holds.
+* At the default reward design (no penalty) and wherever the wrong-answer penalty is at most 1 x the listed reward,
+  the being leads tuned LinUCB, UCB1 and always SQL at every energy weight from 0.1 to 10 (main point +0.127 over
+  LinUCB), and is 0.69 below the reward-best oracle. Its lead there is plan choice and its own rules (series rules on
+  72% of exact-series tasks, precision 1.000 before the checker), not skipping.
+* **Negative: with a harsh penalty (3.16 x the reward at weights 0.316 and 1, and 10 x at almost every weight) the
+  being loses to LinUCB and UCB1, and at 10 x always SQL beats it at three of five weights.** It over-skips: its prior
+  for the wrong-answer chance makes untried plans look too risky. The being leads on 22 of 30 grid points against
+  LinUCB, 24 against UCB1, 25 against always SQL.
+* Accuracy is traded for reward unless wrong answers cost something: 11.2 wrong answers per 100 tasks at no penalty,
+  0.1 at penalty 10 (where the being is the most accurate policy and earns the least).
+* Later kinds are not learned faster (negative); the pooled prior does not raise reward at the main point (-0.023
+  [-0.067, +0.020]), helps out of distribution (+0.074 [+0.012, +0.136]).
+* Out of distribution the being stays ahead (+0.52 over LinUCB), mostly by skipping; the verified searches stay at
+  precision 1.000.
 
-Caveats: one author wrote the data generator, the quirks, the tools, the learner, the references and this
-measurement; plan outcomes are deterministic given the file (no checker noise); the sniffing loader was written for
-these quirks and is right on almost every table task, so the table part is mostly "which cheap plan is good enough
-here"; the tuned constants of the being and UCB1 sit at the edge of their grids (one pass); the references have no
-rule book; the oracle is per task and does not optimise skipping; the SQL timeout is enforced after the query
-returns.
+Caveats: one author wrote the data generator, the quirks, the tools, the learner, the references and this measurement;
+plan outcomes are deterministic given the file (no checker noise); the sniffing loader was written for these quirks;
+equal but small tuning budgets (6 configurations), UCB1 at its grid edge at 15 of 30 points; the reward-best oracle uses
+its own running rate, a strong reference but not a proven optimum; the SQL timeout is enforced after the query
+returns; one life length (6000).
 
-Not measured: real data of any kind; a language model as a planner or as an SQL writer; noise in the checkers;
-menus of several tasks; drift of the quirks over the life; longer lives than 6000 energy; the logged run at full
-length through the gate (tests run it for 40 + 10 steps; the measurement runs are in memory with the same steps, a
-test checks it); the timeout under real engine slowness.
+Not measured: real data of any kind; a language model as a planner or as an SQL writer; noise in the checkers; menus of
+several tasks; drift of the quirks over the life; longer lives; the logged run at full length through the gate (tests
+run it for 40 + 10 steps; the measurement runs are in memory with the same steps, a test checks it); a prior for the
+wrong-answer chance tuned to the penalty (the likely fix for the harsh-penalty region); the timeout under real engine
+slowness.
 
 ## Not measured
 

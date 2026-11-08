@@ -62,20 +62,34 @@ pub fn remove_pool(owner: &str, w: &WorldT) -> Result<(), String> {
     Ok(())
 }
 
-/// Reads sandbox files through `safe_path`.
+/// Reads sandbox files through `safe_path`. Each file is read from disk once per `DirSandbox` and then kept in
+/// memory (the pool does not change during a run; a file read per step was the measurement's main cost).
 pub struct DirSandbox {
     pub owner: String,
     pub rel: String,
+    read_once: std::cell::RefCell<std::collections::HashMap<String, Vec<u8>>>,
 }
 
 impl DirSandbox {
     pub fn new(owner: &str, seed: u64) -> DirSandbox {
-        DirSandbox { owner: owner.to_string(), rel: sandbox_rel(seed) }
+        DirSandbox { owner: owner.to_string(), rel: sandbox_rel(seed), read_once: Default::default() }
     }
 }
 
 impl Sandbox for DirSandbox {
     fn read(&self, name: &str) -> Result<Vec<u8>, String> {
+        plain_name(name)?;
+        if let Some(b) = self.read_once.borrow().get(name) {
+            return Ok(b.clone());
+        }
+        let b = self.read_disk(name)?;
+        self.read_once.borrow_mut().insert(name.to_string(), b.clone());
+        Ok(b)
+    }
+}
+
+impl DirSandbox {
+    fn read_disk(&self, name: &str) -> Result<Vec<u8>, String> {
         let p = path_of(&self.owner, &self.rel, name)?;
         let m = std::fs::metadata(&p).map_err(|e| format!("{name}: {e}"))?;
         if !m.is_file() || m.len() > MAX_FILE {

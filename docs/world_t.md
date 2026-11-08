@@ -71,7 +71,8 @@ life, default 6000), `start_kinds` (3), `intro_every` (budget / 10: energy betwe
 `files` (6 per context and pool), `ood` (off; see "Out of distribution").
 
 The sandbox holds a pool of about 200 files per world, written to `<data root>/<owner>/world_t/seed_<seed>/`
-through `safety::safe_path` (plain file names only; no `..`, no absolute paths, no symlink escape) and read back by
+through `safety::safe_path` (plain file names only; no `..`, no absolute paths, no symlink escape; each file is read
+from disk once per run and then kept in memory, the pool does not change during a run) and read back by
 the engine through the `Sandbox` trait. The `being/` code itself has no file access (a source-scan test).
 
 Contexts (visible: in the file name and the task): six table contexts (`sales`, `orders`, `payments`,
@@ -143,8 +144,8 @@ a rule now costs 1 energy like the other series tools. Score of a plan: `min(1, 
 energy` (the B1 planner's rule; the energy of the column search is its observed mean); it takes the best and
 skips when that score is below `rate x (E - 1) / E` (rate = the reward per energy realized so far; after 40
 energy). `ts-rule` is an option only when the being holds a rule for the series' signature. Constants were tuned on seeds 101..120 only: beta 2.0 and prior weight 2
-(grid beta 0.5 / 1 / 2 x weight 1 / 2 / 4; beta 2.0 is the edge of the grid, a further pass was not run). They are
-the defaults of `LearnerTCfg`.
+(first pass: beta 0.5 / 1 / 2 x weight 1 / 2 / 4, beta 2.0 at the edge; second pass: beta 0.5 to 16, beta 2.0 inside;
+see "Tuning separation and budget"). They are the defaults of `LearnerTCfg`.
 
 ## Log, fold, replay
 
@@ -162,12 +163,47 @@ and after 12 steps (stop logged), and the caps.
 ## Reference policies (measurement only)
 
 random plan (uniform over the template's fixed plans, no skip); always SQL (sniff+sql or log-sql where the
-template has one, else skip); a UCB1 bandit over plans (arms (template, plan) or (template, context, plan), reward
-per energy scaled to [0, 1], optional skip; tuned); LinUCB (one ridge model per plan over one-hot bias, template,
-context, size class and template x context, success as the target, score x reward / energy, optional skip;
-tuned); the oracle, which SEES the true result of every plan on every task (and whether a perfect series rule
-would answer it) and takes the right answer of highest reward per energy, or skips. The references have no rule
-book of their own (`ts-rule` is the being's).
+template has one, else skip); a UCB1 bandit over plans (arms per (template, context, plan), reward per energy scaled
+to [0, 1], shifted when wrong answers are penalized; optional skip; tuned); LinUCB (one ridge model per plan over
+one-hot bias, template, context, size class and template x context, success as the target, plus a second target
+"the answer was wrong" on the same design matrix for the penalty; score (UCB of success x reward - mean wrong x
+penalty) / energy; optional skip; tuned). The references have no rule book of their own (`ts-rule` is the being's).
+
+Two oracles, both SEE the true result of every plan on every task (and whether a perfect series rule would answer
+it):
+
+* the **reward-best oracle**, the yardstick of the gap: on each task the option, skip included, of highest true
+  reward minus rho x energy (the penalty of a wrong answer included; a skip is worth -rho), with rho its own realized
+  reward per energy so far (the renewal comparison of the World O oracle-planner); a strong reference, not a proven
+  optimum;
+* the **answer-everything oracle** (the reference of the first measurement): answers every task some plan answers
+  right, with the right plan of highest reward per energy, and skips only when no plan is right. It never skips a task
+  it can answer however expensive, so a policy that skips well can beat it; no claim is based on it.
+
+## Reward design (Track W1 follow-up)
+
+Two public, logged parameters of the world (tags only when not the default, so earlier logs keep their meaning):
+`penalty_pm`, the reward of a wrong answer is minus this share of the task's listed reward (default 0: a wrong answer
+earns 0); `cost_pm`, a plan's energy is `1 + weight x (base energy - 1)` (default weight 1; a skip always costs 1).
+The being estimates per cell also the chance that a plan's answer is wrong (pooled like its right-answer prior; flat
+0.25) and scores `(min(1, p_right + beta x sd) x reward - p_wrong x penalty) / energy`. With the default design every
+decision is the one of the first measurement (the sweep's default point reproduces its numbers exactly).
+
+## Tuning separation and budget
+
+Seeds 101..120 are used only for tuning, seeds 1..20 only for reporting; budget 6000 in both. At every point of the
+reward-design grid every tuned policy gets the same budget: 6 configurations, each run on the 20 tuning seeds, the
+objective (mean reward per energy) fixed in advance. Being: beta 0.5, 1, 2, 4, 8, 16 (prior weight 2, pooled, skip
+on). UCB1: c 0.001, 0.003, 0.01, 0.03, 0.1, 0.3 (arms per template x context, skip on). LinUCB: alpha 0.1, 0.3, 1, 3,
+10, 30 (skip on). The first measurement had ended at grid edges (being beta 2 of 0.5 / 1 / 2; UCB1 c 0.03 of 0.03 to
+1); the grids above extend both, and at the default point the optimum is inside (beta 2, c 0.003, alpha 1). Elsewhere
+in the grid UCB1 still chose its lowest c at 15 of 30 points, and the being and LinUCB their edge at 1 point each.
+
+## Skips and coverage
+
+A skip costs 1 energy and earns nothing. The measurement reports, per policy, coverage (tasks answered / tasks
+met), the skip share and the wrong answers per 100 tasks, and runs skip-off variants of the being, UCB1 and LinUCB
+(the same constants, skip disabled) to see how much of a lead comes from skipping.
 
 ## Out of distribution (never used in tuning)
 
@@ -204,4 +240,5 @@ building the tasks. The engine crates were not changed; each item is pinned by `
 Author-defined data, quirks, rules, grammar and rewards; deterministic plan outcomes (no noise in the checker or
 the tools); one task per step (no menu); the sniffing loader is right on almost every table task by construction,
 so much of the table learning is "which cheap plan is good enough here"; the timeout is enforced after the query
-returns, not by interrupting it; the oracle is a reference that sees hidden results, not a competitor.
+returns, not by interrupting it; the oracles are references that see hidden results, not competitors. With a harsh
+wrong-answer penalty the being's prior for the wrong-answer chance makes it over-skip (docs/measured.md, Track W1).
