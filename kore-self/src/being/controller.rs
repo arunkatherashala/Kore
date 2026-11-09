@@ -27,6 +27,9 @@
 //! rule_retirement       = on      # World v2: may the being retire rules its later answers contradict (B10, default off)
 //! context_chooser       = on      # World v2: may a new being use the context-aware chooser estimate (B13, default off)
 //! world_t_run           = on      # may World T runs happen at all (Track W1, default off; also needs authorize())
+//! rule_library          = on      # first world: may a new being keep, use and retire a rule library (B14, default off)
+//! curiosity             = on      # first world: may a new being spend a curiosity budget (B14, default off)
+//! max_curiosity_energy_pm = 20    # curiosity energy at most this share (per mille) of the energy spent so far (B14, default 0, hard max 100)
 //! ```
 //!
 //! The B9 keys fail closed on their own: without `experiments = on` AND a non-zero energy share AND a
@@ -187,6 +190,8 @@ impl Controller {
                 _ if super::world2::skills::is_key(k) => super::world2::skills::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 // Track W1 key (World T runs, default off) is read by `world_t::ctl`; here it is only validated
                 _ if super::world_t::ctl::is_key(k) => super::world_t::ctl::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
+                // Track B14 keys (rule library, curiosity budget; default off) are read by `b14::ctl`; here they are only validated
+                _ if super::b14::ctl::is_key(k) => super::b14::ctl::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 _ => return Err(format!("line {n}: unknown key '{k}'")),
             }
             seen.push(k);

@@ -204,7 +204,7 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
 }
 
 /// The text of `controller.txt` (None: missing, too large, unsafe permissions or unreadable: the B10 parts then fail closed).
-fn load_controller_text(owner: &str) -> Option<String> {
+pub(crate) fn load_controller_text(owner: &str) -> Option<String> {
     let p = crate::safety::owner_dir(owner).join(controller::FILE);
     let meta = std::fs::metadata(&p).ok()?;
     if meta.len() > 16 * 1024 || authorize::perm_problem(&p).is_some() {

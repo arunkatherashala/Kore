@@ -152,11 +152,13 @@ pub struct Engine<'a> {
     pub scan: discover_scan::ScanCache,
     /// true: rescan every example on every pass and check (the code before the rule scan fix; tests compare both).
     pub reference_scan: bool,
+    /// Track B14: the rule library (None: off, the engine is exactly as before).
+    pub lib: Option<super::b14::library::Library>,
 }
 
 impl<'a> Engine<'a> {
     pub fn new(world: World, state: BeingState, thinker: &'a dyn Thinker) -> Engine<'a> {
-        Engine { world, state, thinker, advisor: None, carry: vec![], carry_rules: vec![], limits: None, refusals: vec![], refusals_total: vec![], refused: Default::default(), last_blocks: 0, max_candidates_seen: 0, scan: Default::default(), reference_scan: discover_scan::reference_default() }
+        Engine { world, state, thinker, advisor: None, carry: vec![], carry_rules: vec![], limits: None, refusals: vec![], refusals_total: vec![], refused: Default::default(), last_blocks: 0, max_candidates_seen: 0, scan: Default::default(), reference_scan: discover_scan::reference_default(), lib: None }
     }
 
     pub fn with_limits(mut self, limits: Option<Limits>) -> Engine<'a> {
@@ -511,6 +513,14 @@ impl<'a> Engine<'a> {
             redacted: false,
         };
         let oev_id = event_id(&oev.source, &oev.occurred_at, &oev.text);
+        // Track B14: a decision that used a library rule or curiosity cites the events behind it too
+        let mut evidence = evidence;
+        if let Some(extra) = ch.rationale.get(super::b14::CITES_KEY).and_then(|v| v.as_array()) {
+            evidence.extend(extra.iter().filter_map(|x| x.as_str().map(|s| s.to_string())));
+        }
+        if ch.policy == super::b14::curiosity::CUR_POLICY {
+            self.state.b14_cur_energy += done.cost;
+        }
         let revision = NewRevision {
             entity_type: "decision".into(),
             key,
@@ -832,7 +842,7 @@ impl<'a> Engine<'a> {
         out
     }
 
-    fn retire(&mut self, rule: &Rule, why: &str, reason: &str, mut cites: Vec<String>, into: Option<String>, detail: Value) -> (NewEvent, NewRevision) {
+    pub(crate) fn retire(&mut self, rule: &Rule, why: &str, reason: &str, mut cites: Vec<String>, into: Option<String>, detail: Value) -> (NewEvent, NewRevision) {
         let at = iso_at(self.state.clock);
         let text = format!("rule {} for {} difficulty {} retired at step {}: {reason}; it stays in the log and is no longer applied", rule.id, rule.dom_name(), rule.sig % 10, self.state.step);
         let mut tags = vec!["rule_retired".to_string(), format!("rule_id:{}", rule.id), format!("reason:{why}"), format!("at_step:{}", self.state.step), format!("sig:{}", rule.sig)];
@@ -954,6 +964,13 @@ pub struct RunCfg {
     pub transfer: Option<bool>,
     /// `Some(true)` creates a being whose model may start new domains from similar learned ones (needs the transfer world); fixed once created.
     pub learn_transfer: Option<bool>,
+    /// Track B14 (creation-time, menu world with extended patterns only): rule library and curiosity budget.
+    /// Fixed once created (a `b14_setup` note); None asks for nothing.
+    pub b14: Option<super::b14::ctl::B14Setup>,
+    /// Track B14: what controller.txt allows (None: no controller was given, so B14 is refused: fail closed).
+    pub b14_ctl: Option<super::b14::ctl::B14Ctl>,
+    /// Track B14: library entries from an earlier life to import as candidates (needs the library).
+    pub b14_import: Vec<super::b14::library::LibEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -1052,6 +1069,7 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
     let version_before = log.latest_version();
     let mut state = BeingState::from_log(log)?;
     let mut created = false;
+    let mut b14_refusals: Vec<Refusal> = vec![];
     // validated before anything is written, so a refused request never creates a being
     if cfg.discover_every.unwrap_or(0) > 0 && !state.genesis.as_ref().map_or(cfg.extended == Some(true) || cfg.ext2 == Some(true), |g| g.extended) {
         return Err(LogError::Invalid("discovery needs a being created with pattern_families extended (only then are revealed examples logged)".into()));
@@ -1160,13 +1178,42 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
             if learn_transfer && !transfer {
                 return Err(LogError::Invalid("learn_transfer needs a being created with transfer".into()));
             }
+            let want_b14 = cfg.b14.filter(|b| !b.is_off());
+            if want_b14.is_some() && !(chooser == Chooser::Model && extended) {
+                return Err(LogError::Invalid("the B14 rule library and curiosity need chooser model and pattern_families extended or extended2".into()));
+            }
             let g = Genesis { world_seed: cfg.world_seed.unwrap_or(1), loop_seed: cfg.loop_seed.unwrap_or(1), budget, explore_c: c, chooser, extended: extended || ext2, ext2, rule_drift: cfg.rule_drift.unwrap_or(false), drift, adapt: adapt_mode, advice, transfer, learn_transfer };
             let (ev, id) = genesis_event(&g);
             log.append_events(&[ev])?;
             state.start(g, id);
             created = true;
+            if let Some(want) = want_b14 {
+                let (granted, refs) = b14_ctl_of(cfg).grant(&want);
+                b14_refusals.extend(refs);
+                if !granted.is_off() {
+                    log.append_events(&[granted.event()])?;
+                    state.b14 = Some(granted);
+                }
+            }
         }
     }
+    if !created {
+        if let Some(want) = cfg.b14.filter(|b| !b.is_off()) {
+            let have = state.b14.unwrap_or_default();
+            if have.library != want.library || (have.curiosity_pm > 0) != (want.curiosity_pm > 0) {
+                return Err(LogError::Invalid(format!("the B14 switches are fixed when the being is created; this being has {:?}, the request says {:?}", state.b14, want)));
+            }
+        }
+    }
+    // B14: what is used in this run is what the being was created with AND what controller.txt allows now
+    let b14_now = match state.b14 {
+        Some(setup) => {
+            let (now, refs) = b14_ctl_of(cfg).grant(&setup);
+            b14_refusals.extend(refs);
+            now
+        }
+        None => Default::default(),
+    };
     let g = state.genesis.clone().expect("genesis exists now");
     if advisor.is_some() && g.advice.kind == AdvisorKind::None {
         return Err(LogError::Invalid("this being was created without an advisor; the advisor is fixed at creation".into()));
@@ -1180,15 +1227,32 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
 
     let menu = g.chooser == Chooser::Model;
     let mut mc = ModelChooser::for_genesis(&g);
+    // Track B14 (off unless the being was created with it and the controller allows it now)
+    let mut b14_ch: Option<super::b14::curiosity::Curious> = if menu && !b14_now.is_off() {
+        let lib = b14_now.library.then(super::b14::library::LibCfg::default);
+        let cur = (b14_now.curiosity_pm > 0).then(|| super::b14::curiosity::CurCfg { pm: b14_now.curiosity_pm, ..super::b14::curiosity::DEFAULT_CUR });
+        Some(super::b14::curiosity::Curious::new(ModelChooser::for_genesis(&g), &world_for(&g), lib, cur))
+    } else {
+        None
+    };
     let mut engine = Engine::new(world_for(&g), state, thinker).with_advisor(advisor).with_limits(cfg.ctl.clone());
     if !engine.reference_scan {
         // the scan of the previous run in this process, if it scanned exactly the first of these examples
         engine.scan = discover_scan::adopt(&engine.state.examples);
     }
+    for r in b14_refusals {
+        engine.refuse(r);
+    }
+    if menu && b14_now.library {
+        engine.enable_library(super::b14::library::LibCfg::default(), &cfg.b14_import);
+    } else if !cfg.b14_import.is_empty() {
+        engine.refuse(Refusal::new(super::b14::ctl::KEY_LIBRARY, 0, cfg.b14_import.len() as u64, "library entries were offered for import but this being runs without the rule library; nothing was imported"));
+    }
     let mut new_rules: Vec<Rule> = vec![];
     let mut retired: Vec<String> = vec![];
     let mut pending = Batch::default();
     let mut pending_steps = 0usize;
+    pending.events.extend(engine.library_notes());
     let (mut done, mut reward, mut cost) = (0u64, 0i64, 0i64);
     let stopped;
     loop {
@@ -1202,7 +1266,14 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
             }
             break;
         }
-        let stepped = if menu { engine.step_menu(&mut mc) } else { engine.step(picker) };
+        let stepped = if menu {
+            match b14_ch.as_mut() {
+                Some(c) => engine.step_menu(c),
+                None => engine.step_menu(&mut mc),
+            }
+        } else {
+            engine.step(picker)
+        };
         match stepped {
             Ok(out) => {
                 done += 1;
@@ -1227,8 +1298,18 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
                         pending.revisions.push(nr.revision);
                         new_rules.push(nr.rule);
                     }
+                    for nr in engine.library_pass() {
+                        pending.events.push(nr.event);
+                        pending.revisions.push(nr.revision);
+                        new_rules.push(nr.rule);
+                    }
                 }
                 for (ev, rev) in engine.housekeeping() {
+                    retired.push(tag(&ev.tags.join(","), "rule_id").unwrap_or("").to_string());
+                    pending.events.push(ev);
+                    pending.revisions.push(rev);
+                }
+                for (ev, rev) in engine.library_retire() {
                     retired.push(tag(&ev.tags.join(","), "rule_id").unwrap_or("").to_string());
                     pending.events.push(ev);
                     pending.revisions.push(rev);
@@ -1278,4 +1359,9 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
         discover_scan::stash(std::mem::take(&mut engine.scan), &engine.state.examples);
     }
     Ok(RunSummary { steps_run: done, stopped, reward, cost, state: engine.state, version_before, version_after: log.latest_version(), created, new_rules, refusals: engine.refusals_total, retired })
+}
+
+/// Track B14: what controller.txt allows (no controller given: everything refused, fail closed).
+fn b14_ctl_of(cfg: &RunCfg) -> super::b14::ctl::B14Ctl {
+    cfg.b14_ctl.clone().unwrap_or_else(|| super::b14::ctl::B14Ctl { closed: Some("no controller was given to this run".into()), ..Default::default() })
 }

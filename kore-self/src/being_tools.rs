@@ -174,8 +174,18 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
     // refusals made before the run starts are audited now, so that a run that fails later still leaves them
     audit_refusals(owner, &refused);
     let mut refused_pre: Vec<(String, u64, u64, String)> = std::mem::take(&mut refused);
+    // Track B14 (opt-in, fixed when the being is created; needs rule_library / curiosity in controller.txt)
+    let b14_ctl = crate::being::b14::ctl::B14Ctl::from_text(crate::being_v2_tools::load_controller_text(owner).as_deref());
+    let want_lib = flag("rule_library")?.unwrap_or(false);
+    let want_cur = flag("curiosity")?.unwrap_or(false);
+    let b14 = (want_lib || want_cur).then(|| crate::being::b14::ctl::B14Setup {
+        library: want_lib,
+        curiosity_pm: if want_cur { if b14_ctl.curiosity_pm > 0 { b14_ctl.curiosity_pm } else { crate::being::b14::curiosity::DEFAULT_CUR.pm } } else { 0 },
+    });
     let cfg = RunCfg {
         ctl: Some(limits),
+        b14,
+        b14_ctl: Some(b14_ctl),
         ext2,
         rule_drift: flag("rule_drift")?,
         transfer: flag("transfer")?,
@@ -479,6 +489,8 @@ pub fn tool_defs() -> Vec<Value> {
             "compose": { "type": "boolean", "description": "B5, with discover: discovery may also build rules by composing building blocks it has already verified (differences, running sums, parity subsequence in front of a verified form). Only if controller.txt says composition = on; otherwise the request is refused and audited" },
             "transfer": { "type": "boolean", "description": "B6, needs pattern_families extended2 at creation: a two-phase life. Phase 1 offers only sequence tasks; from a hidden time on a second sequence domain (the same families seen through a hidden map of the values) and a control domain (unit conversions) are offered too. Fixed once the being exists" },
             "learn_transfer": { "type": "boolean", "description": "B6, needs transfer at creation: the model may start the cells of a new domain from the posterior of a learned domain whose accepted rules explain the new domain's logged examples, with a guard that switches a link off when it predicts worse, and the rule search tries rules accepted in the other domain first. Only if controller.txt says transfer = on (and at most max_transfer_links links); otherwise refused and audited. Fixed once the being exists" },
+            "rule_library": { "type": "boolean", "description": "B14, menu world with extended patterns, at creation: the being uses the record of each verified rule on its own revealed examples to estimate the discovered strategy where the rule applies, retires rules its revealed answers contradict, and checks imported rules on its own examples before using them. Only if controller.txt says rule_library = on; otherwise refused and audited. Fixed once the being exists" },
+            "curiosity": { "type": "boolean", "description": "B14, menu world with extended patterns, at creation: a curiosity budget (max_curiosity_energy_pm per mille of the energy spent so far) spent on the options with the highest learning value. Only if controller.txt says curiosity = on and max_curiosity_energy_pm > 0; otherwise refused and audited. Fixed once the being exists" },
             "prune": { "type": "boolean", "description": "B5: the being may retire rules whose recent success rate fell below a threshold and merge rules a simpler one explains; every retirement is a logged revision, nothing is deleted. Only if controller.txt says pruning = on; otherwise refused and audited" },
             "stop_after_budget": { "type": "boolean", "description": "Default true: stop when no task is affordable. False: the world refills the budget at the next world day (logged) and the run continues" }
           }, "required": ["steps"] } }),
