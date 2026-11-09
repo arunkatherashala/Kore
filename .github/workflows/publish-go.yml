@@ -1,4 +1,4 @@
-﻿name: Publish Go Package
+name: Publish Go Package
 
 on:
   # Manual only. Started by "Auto Version Bump & Deploy" (itself manual) on the new v* tag,
@@ -56,7 +56,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v7
         with:
           go-version: '1.21'
 
