@@ -1,15 +1,23 @@
 name: Auto Version Bump & Deploy
 
-# Release only after the full CI quality gate has passed for the pushed commit.
-# Flow: push to fileformat -> "KORE CI — Format Quality Gate" runs -> only if every
-# CI job succeeded does this workflow bump the version, tag it and trigger the
-# publish workflows (PyPI, crates.io, npm, Maven, NuGet, RubyGems, GitHub Release).
-# If CI fails or is cancelled, nothing is published.
+# Releases are MANUAL. A push to fileformat only runs CI; it never publishes.
+# To release: GitHub -> Actions -> "Auto Version Bump & Deploy" -> Run workflow,
+# pick patch / minor / major and type "release" in the confirm box.
+# The run refuses unless the full CI quality gate concluded success for the exact
+# commit at the head of fileformat. Only people with write access can start it.
 on:
-  workflow_run:
-    workflows: ["KORE CI — Format Quality Gate"]
-    types: [completed]
-    branches: [fileformat]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump (semver): patch = fixes, minor = new feature, major = breaking change"
+        required: true
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      confirm:
+        description: 'Type "release" to publish to PyPI, crates.io, npm, Maven, NuGet, RubyGems'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -18,13 +26,7 @@ permissions:
 jobs:
   auto-bump-deploy:
     runs-on: ubuntu-latest
-    # Gate: CI must have succeeded, for a push (not a pull request), and the push
-    # must not be the bot's own version bump (that commit carries [skip ci] anyway).
-    if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'fileformat' &&
-      github.event.workflow_run.actor.login != 'github-actions[bot]'
+    if: github.ref == 'refs/heads/fileformat' && inputs.confirm == 'release'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,25 +34,31 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      - name: Release only the commit CI tested
+      - name: Require a successful CI run for this exact commit
         id: same
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TESTED="${{ github.event.workflow_run.head_sha }}"
-          HEAD_NOW="$(git rev-parse HEAD)"
-          if [ "$HEAD_NOW" != "$TESTED" ]; then
-            echo "fileformat moved on ($HEAD_NOW) since CI tested $TESTED; the newer push gets its own CI run. Not releasing."
-            echo "go=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "go=true" >> "$GITHUB_OUTPUT"
+          SHA="$(git rev-parse HEAD)"
+          CONC="$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&per_page=1" --jq '.workflow_runs[0].conclusion // "none"')"
+          echo "CI conclusion for $SHA: $CONC"
+          if [ "$CONC" != "success" ]; then
+            echo "::error::CI has not passed for $SHA (conclusion: $CONC). Not releasing."
+            exit 1
           fi
+          echo "go=true" >> "$GITHUB_OUTPUT"
 
-      - name: Read and bump patch version
+      - name: Read and bump version (patch, minor or major as chosen)
         if: steps.same.outputs.go == 'true'
         id: bump
         run: |
           CURRENT=$(grep '^version' pyproject.toml | head -1 | grep -oP '[0-9]+\.[0-9]+\.[0-9]+')
           IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-          NEW="$MAJOR.$MINOR.$((PATCH + 1))"
+          case "${{ inputs.bump }}" in
+            major) NEW="$((MAJOR + 1)).0.0" ;;
+            minor) NEW="$MAJOR.$((MINOR + 1)).0" ;;
+            *)     NEW="$MAJOR.$MINOR.$((PATCH + 1))" ;;
+          esac
           echo "current=$CURRENT" >> $GITHUB_OUTPUT
           echo "new=$NEW" >> $GITHUB_OUTPUT
           echo "Bumping: $CURRENT → $NEW"
