@@ -173,6 +173,13 @@ pub struct BeingState {
     pub xfer: XferState,
     /// Latest outcome event ids per (domain, difficulty), oldest first (evidence of a transfer link).
     cell_recent: BTreeMap<(usize, u8), VecDeque<String>>,
+    /// Track B14: the switches of this being (from its `b14_setup` note; None: off, the being is as before).
+    pub b14: Option<super::b14::ctl::B14Setup>,
+    /// Track B14: library entries carried over from an earlier life (`rule_lib_import` notes), in log order.
+    pub b14_imports: Vec<super::b14::library::LibEntry>,
+    /// Track B14: energy spent on curiosity steps (decisions of policy `b14-curious`), folded from the log.
+    pub b14_cur_energy: i64,
+    b14_cur_pending: bool,
 }
 
 /// A change flagged by the detector, with the logged outcomes it rests on.
@@ -497,6 +504,17 @@ impl BeingState {
             if let Some(d) = decision_from_tags(&e.tags) {
                 self.note_decision_advice(d);
             }
+            self.b14_cur_pending = tag(&e.tags, "policy") == Some(super::b14::curiosity::CUR_POLICY);
+        } else if e.kind == "note" && has_tag(&e.tags, super::b14::ctl::SETUP_TAG) {
+            if self.b14.is_none() {
+                self.b14 = super::b14::ctl::B14Setup::from_tags(&e.tags);
+            }
+        } else if e.kind == "note" && has_tag(&e.tags, super::b14::library::IMPORT_TAG) {
+            if let Some(x) = super::b14::library::LibEntry::from_event(e) {
+                if !self.b14_imports.iter().any(|y| y.id() == x.id()) {
+                    self.b14_imports.push(x);
+                }
+            }
         } else if e.kind == "note" && has_tag(&e.tags, "genesis") {
             if let Some(g) = genesis_from_tags(&e.tags) {
                 if self.genesis.is_none() {
@@ -521,6 +539,9 @@ impl BeingState {
             }
         } else if e.kind == "outcome" {
             if let Some(o) = outcome_from_event(e) {
+                if std::mem::take(&mut self.b14_cur_pending) {
+                    self.b14_cur_energy += o.cost;
+                }
                 self.apply(&o);
             }
         }

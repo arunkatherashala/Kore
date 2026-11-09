@@ -43,6 +43,8 @@ pub mod world2;
 pub mod world_o;
 /// World T, data work in a sandbox (opt-in: separate files and log source; see docs/world_t.md).
 pub mod world_t;
+/// Track B14: rule library and always-on curiosity (opt-in; see b14/mod.rs).
+pub mod b14;
 /// Track V1: versus standard methods (measurement only; see docs/vs_world.md).
 pub mod vs_world;
 #[path = "loop.rs"]
