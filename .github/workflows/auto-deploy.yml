@@ -1,11 +1,17 @@
 name: Auto Version Bump & Deploy
 
-# Releases are MANUAL. A push to fileformat only runs CI; it never publishes.
-# To release: GitHub -> Actions -> "Auto Version Bump & Deploy" -> Run workflow,
-# pick patch / minor / major and type "release" in the confirm box.
-# The run refuses unless the full CI quality gate concluded success for the exact
-# commit at the head of fileformat. Only people with write access can start it.
+# A push to fileformat only runs CI; it never publishes.
+# Releases happen in two ways:
+#  1. Weekly, automatically: every Sunday 03:00 UTC, IF fileformat has commits since
+#     the last v* tag other than the bot's own version bumps, AND the full CI quality
+#     gate concluded success for the head commit. Weekly releases are patch bumps.
+#     No new commits, or CI not green: nothing is released (the run says why).
+#  2. By hand, any time: GitHub -> Actions -> "Auto Version Bump & Deploy" -> Run
+#     workflow, pick patch / minor / major and type "release" in the confirm box.
+# Both paths refuse unless CI passed for the exact commit at the head of fileformat.
 on:
+  schedule:
+    - cron: "0 3 * * 0"   # Sundays 03:00 UTC (08:30 IST)
   workflow_dispatch:
     inputs:
       bump:
@@ -26,7 +32,9 @@ permissions:
 jobs:
   auto-bump-deploy:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/fileformat' && inputs.confirm == 'release'
+    if: >-
+      github.ref == 'refs/heads/fileformat' &&
+      (github.event_name == 'schedule' || inputs.confirm == 'release')
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,15 +42,33 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      - name: Require a successful CI run for this exact commit
+      - name: Require new changes since the last release and a successful CI run for this exact commit
         id: same
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT: ${{ github.event_name }}
         run: |
           SHA="$(git rev-parse HEAD)"
+          LAST="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
+          if [ -n "$LAST" ]; then
+            NEW="$(git log --format='%an' "$LAST..HEAD" | grep -vc '^github-actions\[bot\]$' || true)"
+          else
+            NEW="$(git rev-list --count HEAD)"
+          fi
+          echo "Last release: ${LAST:-none}; commits since then (not counting bot version bumps): $NEW"
+          if [ "$NEW" = "0" ]; then
+            echo "No changes since $LAST. Nothing to release."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           CONC="$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&per_page=1" --jq '.workflow_runs[0].conclusion // "none"')"
           echo "CI conclusion for $SHA: $CONC"
           if [ "$CONC" != "success" ]; then
+            if [ "$EVENT" = "schedule" ]; then
+              echo "::warning::Weekly release skipped: CI has not passed for $SHA (conclusion: $CONC)."
+              echo "go=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
             echo "::error::CI has not passed for $SHA (conclusion: $CONC). Not releasing."
             exit 1
           fi
