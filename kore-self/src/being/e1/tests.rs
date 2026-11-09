@@ -181,14 +181,15 @@ fn genome_predicts_outside_the_grammar_and_keeps_the_b2_self_check() {
     assert!(p > 0.0 && p < 1.0, "{p}");
 }
 
-/// A being with examples of the product recurrence (outside the grammar) at difficulty 5, plus two other families.
+/// A being with examples of the product recurrence (outside the grammar) at difficulty 5, plus the consecutive primes.
 fn prod_state(n: usize) -> BeingState {
     let gn = genesis(5, 3000);
     let w = world_for(&gn);
     let mut st = BeingState::default();
     st.start(gn, String::new());
     for i in 0..n {
-        for kind in [Kind::NegProd, Kind::NegPrimes, Kind::ExtAlt] {
+        // two families interleaved, so both fall on training and held-out positions
+        for kind in [Kind::NegProd, Kind::NegPrimes] {
             let t = w.task_of_kind(1000 + i as u64, kind);
             st.examples.push(Example { event_id: format!("ex-{i}-{}", kind as u64), sig: 5, terms: t.view.params.clone(), next: t.expected() });
         }
