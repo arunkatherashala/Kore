@@ -39,6 +39,11 @@ pub fn cmd_diag(args: &[String]) {
             Some(spearman(&x, &y)).filter(|v| v.is_finite())
         }).collect();
         println!("\n## {c}: top_rho {} ; uncensored-only {}", ci(&rho), ci(&rho_c));
+        for (lo, hi) in [(32u64, 96u64), (96, 160), (160, 400)] {
+            let bs: Vec<(u64, u64, u64)> = rs.iter().flat_map(|r| bad_split(r, budget)).filter(|x| x.0 >= lo && x.0 < hi).collect();
+            let n = bs.len().max(1) as f64;
+            println!("seq {lo}-{hi}: n {} bad attempts before first rule {:.2}, after it {:.2}", bs.len(), bs.iter().map(|x| x.1 as f64).sum::<f64>() / n, bs.iter().map(|x| x.2 as f64).sum::<f64>() / n);
+        }
         println!("| type | block | n | reached | median att | p75 att | censored | not reached & censored | first-10 ratio |");
         println!("|---|---|---|---|---|---|---|---|---|");
         for ty in ["seq", "compose", "grid", "knap", "formula", "all"] {
@@ -59,4 +64,17 @@ pub fn cmd_diag(args: &[String]) {
             }
         }
     }
+}
+
+/// Where the bad attempts of a top-tier sequence family come from: before its first rule, after it.
+pub fn bad_split(r: &RunB12, budget: i64) -> Vec<(u64, u64, u64)> {
+    let mut v = vec![];
+    for f in r.run.fams.iter().filter(|f| f.learnable() && f.tier >= MAX_TIER && f.retire <= budget && f.ftype.map(|t| t.name()) == Some("seq")) {
+        let Some(d) = r.diag.iter().find(|d| d.fid == f.fid) else { continue };
+        let Some(c) = f.competent_after else { continue };
+        let last_bad = c.0.saturating_sub(10);
+        let before = d.attempts_before_rule.unwrap_or(last_bad).min(last_bad);
+        v.push((f.fid, before, last_bad - before));
+    }
+    v
 }

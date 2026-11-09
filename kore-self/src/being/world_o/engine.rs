@@ -51,18 +51,20 @@ pub struct LearnerOCfg {
     /// Track B13 switch (the chooser's linear success estimate; off by default). Not combined with the B12
     /// chooser: with B12's chooser switches on, B12 decides.
     pub lin: Option<crate::being::linval::LinCfg>,
+    /// Track L2 switch (the meta-prior across families; off by default, see `being/l2/`).
+    pub l2: Option<crate::being::l2::wo::L2Cfg>,
 }
 
 impl Default for LearnerOCfg {
     fn default() -> Self {
         let l = LearnerCfg::default();
-        LearnerOCfg { beta_milli: l.beta_milli, skip_milli: l.skip_milli, skip_rule: SkipRule::Rate, use_: UseCfg::default(), l2l: L2LCfg::default(), lin: None }
+        LearnerOCfg { beta_milli: l.beta_milli, skip_milli: l.skip_milli, skip_rule: SkipRule::Rate, use_: UseCfg::default(), l2l: L2LCfg::default(), lin: None, l2: None }
     }
 }
 
 impl LearnerOCfg {
     pub fn learner(&self) -> LearnerO {
-        LearnerO { inner: Learner2 { beta: self.beta_milli as f64 / 1000.0, skip_frac: self.skip_milli as f64 / 1000.0, use_: self.use_, lin: self.lin }, skip_rule: self.skip_rule, l2l: self.l2l, view: None }
+        LearnerO { inner: Learner2 { beta: self.beta_milli as f64 / 1000.0, skip_frac: self.skip_milli as f64 / 1000.0, use_: self.use_, lin: self.lin }, skip_rule: self.skip_rule, l2l: self.l2l, view: None, l2: self.l2, l2view: None }
     }
     fn w2(&self) -> LearnerCfg {
         LearnerCfg { beta_milli: self.beta_milli, skip_milli: self.skip_milli, use_: self.use_, skills: Default::default(), lin: self.lin }
@@ -79,6 +81,15 @@ pub struct LearnerO {
     pub l2l: L2LCfg,
     /// Track B12: what the learner reads of the World O state (set by `prepare_o` before each choice).
     pub view: Option<B12View>,
+    /// Track L2 switch and what its chooser reads of the World O state (with B12's chooser on, B12 decides).
+    pub l2: Option<crate::being::l2::wo::L2Cfg>,
+    pub l2view: Option<crate::being::l2::wo::L2View>,
+}
+
+impl LearnerO {
+    fn l2_chooser(&self) -> bool {
+        self.l2.map_or(false, |c| c.trust) && !self.l2l.chooser_on()
+    }
 }
 
 impl Chooser2 for LearnerO {
@@ -89,10 +100,16 @@ impl Chooser2 for LearnerO {
         if self.l2l.chooser_on() {
             b12::prepare(self, st);
         }
+        if self.l2_chooser() {
+            crate::being::l2::wo::prepare(self, st);
+        }
     }
     fn choose(&mut self, st: &State2, offers: &[Offer2]) -> Option<Choice2> {
         if self.l2l.chooser_on() {
             return b12::choose(self, st, offers);
+        }
+        if self.l2_chooser() {
+            return crate::being::l2::wo::choose(self, st, offers);
         }
         let ch = self.inner.choose(st, offers)?;
         if self.skip_rule == SkipRule::Rate {
@@ -153,6 +170,8 @@ pub struct StateO {
     pub closed: u64,
     /// Track B12 state (empty with the switches off).
     pub b12: B12State,
+    /// Track L2 state (empty with L2 off).
+    pub l2: crate::being::l2::wo::L2State,
 }
 
 impl StateO {
@@ -163,6 +182,7 @@ impl StateO {
         self.cfg = Some(cfg);
         self.learner = learner;
         self.b12.cfg = learner.l2l;
+        self.l2.cfg = learner.l2;
     }
 
     pub fn open_family(&mut self, o: &Open) {
@@ -174,12 +194,18 @@ impl StateO {
         if self.b12.cfg.prior_k > 0 {
             b12::on_open(self, o);
         }
+        if self.l2.on() {
+            crate::being::l2::wo::on_open(self, o);
+        }
     }
 
     /// A family closed: archive its slot's evidence, drop its working examples and rules.
     pub fn close_slot(&mut self, slot: usize) {
         if self.b12.cfg.prior_k > 0 {
             b12::on_close(self, slot);
+        }
+        if self.l2.on() {
+            crate::being::l2::wo::on_close(self, slot);
         }
         for d in 1..=5u8 {
             for s in STRATEGIES_EXT {
@@ -220,6 +246,9 @@ impl StateO {
         }
         if self.b12.cfg.form_prior > 0 {
             b12::on_rule(self, &rid);
+        }
+        if self.l2.on() {
+            crate::being::l2::wo::on_rule(self, &rid);
         }
         let kids: Vec<usize> = self.bases.iter().filter(|(_, b)| **b == fam).map(|(k, _)| *k).collect();
         for k in kids {
@@ -271,8 +300,12 @@ impl StateO {
             }
         } else if e.kind == "note" && has("rule") && has("worldo") {
             if let Some(r) = rule_from_event(e) {
-                if self.apply_rule(r) && has("b12_reduced") {
+                let ok = self.apply_rule(r);
+                if ok && has("b12_reduced") {
                     self.b12.reduced_rules += 1;
+                }
+                if ok && has("l2_form") {
+                    self.l2.accepted += 1;
                 }
             }
         } else if e.kind == "note" && has("controller_refusal") && tag(&e.tags, "cap") == Some(b12::CAP_EXPLORE) {
@@ -297,7 +330,11 @@ fn learner_from_tags(tags: &str) -> Option<LearnerOCfg> {
         Some(x) => Some(crate::being::linval::LinCfg::parse(x)?),
         None => None,
     };
-    Some(LearnerOCfg { beta_milli, skip_milli, skip_rule, use_, l2l, lin })
+    let l2 = match tag(tags, crate::being::l2::wo::TAG) {
+        Some(x) => Some(crate::being::l2::wo::L2Cfg::parse(x)?),
+        None => None,
+    };
+    Some(LearnerOCfg { beta_milli, skip_milli, skip_rule, use_, l2l, lin, l2 })
 }
 
 pub fn genesis_event_o(cfg: &WOCfg, l: &LearnerOCfg) -> (NewEvent, String) {
@@ -317,6 +354,9 @@ pub fn genesis_event_o(cfg: &WOCfg, l: &LearnerOCfg) -> (NewEvent, String) {
     if let Some(lc) = &l.lin {
         tags.push(format!("{}:{}", crate::being::world2::engine::LIN_TAG, lc.code()));
     }
+    if let Some(c) = &l.l2 {
+        tags.push(c.tag());
+    }
     let text = format!(
         "world O being created: seed {}, budget {} energy units, menu of {}, {} families open at the start, a new family every {} energy units, each living {} x that, {} families per tier, {} per mille of families change their hidden rule once, feedback noise {} per mille; learner beta {:.3}, skip fraction {:.3}, skip test {}{}. Simulated open-ended world with author-defined families and rewards",
         cfg.seed, cfg.budget, cfg.menu, cfg.start, cfg.intro_every, cfg.life_intros, cfg.tier_every, cfg.drift_pm, cfg.noise_pm, l.beta_milli as f64 / 1000.0, l.skip_milli as f64 / 1000.0, l.skip_rule.code(),
@@ -324,6 +364,10 @@ pub fn genesis_event_o(cfg: &WOCfg, l: &LearnerOCfg) -> (NewEvent, String) {
     );
     let text = match &l.lin {
         Some(lc) => format!("{text}{}", lc.words()),
+        None => text,
+    };
+    let text = match &l.l2 {
+        Some(c) => format!("{text}{}", c.words()),
         None => text,
     };
     let ev = NewEvent { source: SOURCE_O.into(), occurred_at: iso_at(0), kind: "note".into(), text, tags, redacted: false };
@@ -460,6 +504,11 @@ impl EngineO {
             let a = self.world.announce(j);
             evs.push(family_event(&a, false, step, clock, &self.world.fams[j as usize].name()));
             self.state.close_slot(slot);
+            if self.state.l2.on() {
+                if let Some(up) = self.state.l2.last_close.clone() {
+                    evs.push(crate::being::l2::wo::update_event(&self.state, &up, step, clock));
+                }
+            }
             self.scan = Default::default();
             self.fam_scan.clear();
         }
@@ -671,13 +720,20 @@ impl EngineO {
         };
         let mut out = vec![];
         for f in found {
-            if let Some(nr) = self.accept_found(&f, None) {
+            if let Some(nr) = self.accept_found(&f, None, None) {
                 out.push(nr);
             }
         }
         if self.state.b12.cfg.form_prior > 0 {
             for (f, how) in b12::family_pass(self) {
-                if let Some(nr) = self.accept_found(&f, Some(how)) {
+                if let Some(nr) = self.accept_found(&f, Some(how), None) {
+                    out.push(nr);
+                }
+            }
+        }
+        if self.state.l2.cfg.map_or(false, |c| c.forms) {
+            for (f, how) in crate::being::l2::wo::family_pass(self) {
+                if let Some(nr) = self.accept_found(&f, None, Some(&how)) {
                     out.push(nr);
                 }
             }
@@ -686,7 +742,7 @@ impl EngineO {
     }
 
     /// `b12`: a family-wide rule of Track B12 M4 (with how it was accepted).
-    fn accept_found(&mut self, f: &Found, b12: Option<b12::FamilyHow>) -> Option<NewRuleO> {
+    fn accept_found(&mut self, f: &Found, b12: Option<b12::FamilyHow>, l2: Option<&crate::being::l2::wo::L2How>) -> Option<NewRuleO> {
         let nblocks = if f.xf.is_id() { 0 } else { self.last_blocks as u32 };
         let mut rule = Rule::new_x(f.sig, f.xf, f.form, f.train_ok, f.val_ok, self.state.s2.step, nblocks);
         if self.state.s2.rules.iter().any(|r| r.id == rule.id) {
@@ -724,10 +780,18 @@ impl EngineO {
             }
             text = h.text(&text);
         }
+        if let Some(h) = l2 {
+            tags.push("l2_form".into());
+            tags.push(format!("l2_post_milli:{}", (h.posterior * 1000.0).floor() as u64));
+            text = h.text(&text, self.state.l2.cfg.map_or(0.0, |c| c.delta()));
+        }
         let event = NewEvent { source: SOURCE_O.into(), occurred_at: at.clone(), kind: "note".into(), text, tags, redacted: false };
         let ev_id = event_id(&event.source, &event.occurred_at, &event.text);
         rule.event_id = ev_id.clone();
         let mut caused_by = f.cite.clone();
+        if let Some(h) = l2 {
+            caused_by.extend(h.form_events.iter().cloned());
+        }
         caused_by.push(ev_id);
         let rationale = json!({
             "rule_id": rule.id, "slot": slot, "family_id": fid, "difficulty": d, "form": rule.form.code(), "dsl": rule.form.dsl(), "transform": f.xf.code(),
@@ -736,6 +800,9 @@ impl EngineO {
         let mut rationale = rationale;
         if let Some(h) = &b12 {
             rationale["b12_family_rule"] = h.json();
+        }
+        if let Some(h) = l2 {
+            rationale["l2_form_posterior"] = h.json();
         }
         let revision = NewRevision {
             entity_type: "rule".into(),
@@ -748,8 +815,12 @@ impl EngineO {
             author: "rule:being-discover".into(),
             caused_by,
         };
-        if self.state.apply_rule(rule.clone()) && b12.as_ref().map_or(false, |h| h.reduced) {
+        let ok = self.state.apply_rule(rule.clone());
+        if ok && b12.as_ref().map_or(false, |h| h.reduced) {
             self.state.b12.reduced_rules += 1;
+        }
+        if ok && l2.is_some() {
+            self.state.l2.accepted += 1;
         }
         Some(NewRuleO { rule, event, revision })
     }
@@ -814,6 +885,14 @@ pub struct RunOSummary {
 
 /// Run the World O being on its own log with its own learner (or `chooser`, for references and tests).
 pub fn run_o(log: &mut VersionedLog, cfg: &RunOCfg, policy: &Policy, chooser: Option<&mut dyn Chooser2>) -> Result<RunOSummary, LogError> {
+    run_o_granted(log, cfg, policy, chooser, None)
+}
+
+/// As `run_o`, with the controller's answer to a request for the Track L2 meta-prior (`l2::ctl::grant`). A new
+/// being asking for L2 without a grant (`run_o` passes none: fail closed) is created without it, and the refusal
+/// is logged before its genesis event.
+pub fn run_o_granted(log: &mut VersionedLog, cfg: &RunOCfg, policy: &Policy, chooser: Option<&mut dyn Chooser2>, l2_grant: Option<Result<bool, Refusal>>) -> Result<RunOSummary, LogError> {
+    let mut pre_refusals: Vec<Refusal> = vec![];
     let version_before = log.latest_version();
     let rows: Vec<EventRow> = log.open_latest().rows();
     let mut state = StateO::from_events(&rows);
@@ -829,7 +908,19 @@ pub fn run_o(log: &mut VersionedLog, cfg: &RunOCfg, policy: &Policy, chooser: Op
         None => {
             let w = cfg.world.clone().ok_or_else(|| LogError::Invalid("no World O being exists yet; a world config is needed to create one".into()))?;
             w.validate().map_err(LogError::Invalid)?;
-            let l = cfg.learner.unwrap_or_default();
+            let mut l = cfg.learner.unwrap_or_default();
+            if l.l2.is_some() {
+                let r = match l2_grant {
+                    Some(Ok(true)) => None,
+                    Some(Err(r)) => Some(r),
+                    _ => crate::being::l2::ctl::grant(true, None).err(),
+                };
+                if let Some(r) = r {
+                    l.l2 = None;
+                    log.append_events(&[refusal_event_o(&r, 0, 0)])?;
+                    pre_refusals.push(r);
+                }
+            }
             if l.beta_milli > 10_000 || l.skip_milli > 10_000 {
                 return Err(LogError::Invalid("learner constants must be within 0..=10".into()));
             }
@@ -845,6 +936,7 @@ pub fn run_o(log: &mut VersionedLog, cfg: &RunOCfg, policy: &Policy, chooser: Op
         None => &mut own,
     };
     let mut engine = EngineO::new(state, cfg.ctl.clone());
+    engine.refusals_total.extend(pre_refusals);
     let (mut new_rules, mut truths) = (vec![], vec![]);
     let mut pending = Batch::default();
     if let Some(r) = engine.cap_explore(cfg.max_explore_pm) {

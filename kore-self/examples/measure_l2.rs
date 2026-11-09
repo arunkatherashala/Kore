@@ -17,11 +17,16 @@ mod report;
 mod full;
 #[path = "measure_l2_parts/diag.rs"]
 mod diag;
+#[path = "measure_l2_parts/conds.rs"]
+mod conds;
+#[path = "measure_l2_parts/report.rs"]
+mod l2report;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
         Some("diag") => diag::cmd_diag(&args[1..]),
+        Some("report") => l2report::cmd_report(&args[1..]),
         _ => eprintln!("usage: measure_l2 diag|report [--seeds a..b] [--budget N] [--conds a,b]"),
     }
 }
