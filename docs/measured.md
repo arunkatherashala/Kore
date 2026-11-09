@@ -2864,6 +2864,51 @@ run it for 40 + 10 steps; the measurement runs are in memory with the same steps
 wrong-answer chance tuned to the penalty (the likely fix for the harsh-penalty region); the timeout under real engine
 slowness.
 
+## Track L2: learning to learn across families (synthetic world, author-defined families)
+
+Question: Tracks B11 and B12 found that the being does not learn later World O families faster than earlier ones (top-tier Spearman of family order vs attempts to competence: current +0.025 [-0.060, +0.110]; B12 `form` -0.098 [-0.171, -0.026], mostly an immediate gain, "level 2 over level 1: -0.014"), and Track W1 the same in World T (-0.005 [-0.118, +0.109]). Why, and can a principled mechanism make the being's own past learning speed up new learning? Everything is the author's simulation (World O families, grammar, rewards, the being). Code: `kore-self/src/being/l2/` (new: `meta.rs` the maths, `wo.rs` World O state, hooks, rule pass and chooser, `ctl.rs` the controller key, `tests.rs`), switch-guarded hooks in `world_o/engine.rs` (one field each in `LearnerOCfg`, `LearnerO`, `StateO`; one call each in open, close, rule; the L2 rule pass after the B12 pass; the genesis tag; `run_o_granted`), one key arm in `controller.rs`, one `mod` line in `being/mod.rs`; measurement `examples/measure_l2.rs` (modes `diag`, `report`; parts in `examples/measure_l2_parts/`). Branch `l2l-v2` from abd8de1e, 2026-11-08, Windows, 8 CPUs shared with three other agents (wall times are not comparable).
+
+### Step 1: diagnosis (tuning seeds 101..120, life 1,200,000, `measure_l2 diag`)
+
+Top tier (families 32+), learnable families, per 48-family block (pooled over 20 worlds; share that reaches competence, median attempts to competence among those that do; the floor is 10 because competence needs the last 10 attempts at >= 0.9 of the best the means allow, `world_o/measure.rs:172-173`):
+
+| condition | type | families 32-79 | 80-127 | 128-175 | 176-223 |
+|---|---|---|---|---|---|
+| current | seq | 43%, 34 | 38%, 33 | 32%, 32 | 29%, 28 |
+| current | compose | 36%, 19 | 30%, 22 | 21%, 22 | 19%, 17 |
+| form (B12) | seq | 99%, 17 | 93%, 17 | 88%, 17 | 88%, 17 |
+| form (B12) | compose | 97%, 17 | 88%, 17 | 87%, 18 | 84%, 18 |
+
+Grid, knapsack and formula families sit at the floor (median 10) in every block under both learners. Top-tier Spearman on these seeds: current +0.040 [-0.035, +0.115], form 0.000 [-0.063, +0.063]; leaving out the families whose life is cut by the end of the budget changes it little (+0.031, +0.013), so censoring is not the cause. For `form`, a top-tier sequence family that reaches competence has 4.00 / 3.99 / 3.89 bad attempts before its first rule and 3.86 / 3.67 / 3.98 after it (families 32-95 / 96-159 / 160+, seeds 101..116): flat over the life.
+
+Why later families are not faster:
+
+* What the being carries across families stops growing before the top tier starts. The B12 rule-form prior is a fixed step: a form accepted in `FORM_MIN_FAMS` = 2 earlier families needs 2 + 1 answers instead of 3 + 1 (`world_o/b12.rs:59-61`, applied at `b12.rs:520`), whatever the number of families behind it and however often a wrong form agrees by chance. The tier-2+ forms have all been seen twice long before family 32, so every top-tier family gets the same treatment: about 4 attempts before its rule, at family 40 and at family 200.
+* A fresh rule's answers start from a prior pooled over every `discovered` attempt of every family, with and without a rule (`world2/model.rs:165-180`: `p_s` over all cells, then the family level with weight 4), and a new rule resets its cells (`State2::apply_rule`; `world_o/engine.rs:255` for the compose families that reuse it). The being never learns that its own fresh rules are reliable, so each family again spends about 4 attempts on other strategies after its rule exists.
+* Strategy choice for grid, knapsack and formula families is at the floor from the first top-tier family on; nothing is left to speed up there.
+* The B12 hierarchical prior (M2) did learn per-type success rates, but it removed the optimism that made the being try new hard families (fewer examples, fewer rules; Track B12), so it is not used here.
+
+### What was built (opt-in; off by default; controller key `l2_meta_prior`)
+
+A hierarchical (empirical-Bayes) meta-prior over what earlier families taught, re-derived from the log by the fold:
+
+* **Form posterior** (`meta.rs` `FormPrior`, `wo.rs` `family_pass`). Over the earlier sequence families: a Dirichlet prior over rule forms, `pi(f) = (n_f + 1) / (N + L + 1)`, with an "other" category for the families that closed without a rule; and the chance `eps` that a seen form which is NOT a family's rule still reproduces one of its revealed answers, estimated (Beta(1, 1)) from every seen form tried on every example of every closed family whose rule was another form. A seen form that reproduces `k` of a new family's answers and contradicts none has posterior `pi(f) / (sum of pi(g) over the consistent seen forms + pi(other) eps^k)`; it is accepted for every difficulty of the family without a rule when the posterior is >= 1 - delta (delta = 0.02) and k >= 1. Early in life `eps` is about 1/2 and "other" is heavy, so many answers are needed; the need falls as families accumulate. Runs after the B2 and B12 passes; the rule event names the earlier families with that form and the posterior, and its revision cites their rule events.
+* **Rule trust** (`meta.rs` `trust_prior`, `wo.rs` `choose`). Where a live rule covers an offer, the estimate of `discovered` starts from an empirical-Bayes Beta prior over the post-rule success shares of the rules of earlier closed families (method of moments; weight 2..40, shrunk by the mean's own uncertainty when few families are known; at least 3 families with at least 3 answers), in place of the pooled B1 prior. Every such decision states the prior (mean, weight, family ids). With B12's chooser switches on, B12 decides (not combined).
+* **Logging**: every family closing writes an `l2_update` note (what it added: its form or "other", the chance-agreement counts, its rules' record; the prior now and the families it rests on). Genesis tag `wo_l2m:forms/trust/delta_milli/min_ex`.
+* **Controller**: `l2_meta_prior = on|off` in `controller.txt` (`l2/ctl.rs`; default off; a bad value or a duplicate makes the whole file unparseable; missing or unparseable file: off). A new World O being asking for L2 gets it only through `l2::wo::run_o_ctl` with a controller text that allows it; otherwise (and always through the plain `run_o`) it is created without L2 and a `controller_refusal` (cap `l2_meta_prior`) is logged before its genesis. An existing being keeps what it was created with.
+
+Constants (delta 0.02, k >= 1, the trust bounds) were set from the design before any run; one tuning run on seeds 101..110 (life 1,200,000) compared `current`, `form`, `l2` (current + L2), `form+l2`, and L2's two parts alone: `form+l2` minus `form`: Spearman -0.061 [-0.102, -0.020] (8 of 10 lower), last-third minus first-third attempts -4.36 [-7.42, -1.29] (8 of 10), reward +0.004 [-0.008, +0.016]; `l2` on the current learner: Spearman -0.007 [-0.056, +0.042], reward +0.128 [-0.098, +0.354] (without family-wide rules most sequence families never get a rule, so there is little to speed up). No constant was changed after that run. Nothing was tuned on the report seeds.
+
+### Pre-registration
+
+Written before any report-seed run and committed on its own (commit named in the status table): pre-registered 2026-11-08 before report-seed runs.
+
+* Candidate: `form+l2` (the B12 recommended learner `form`, plus the L2 meta-prior with the constants above). Reference "current being": the default learner `current`. Report seeds 1..20, World O default config, life 1,200,000 energy units, windows of 100,000, the controller of B12 (live-rule cap 200, candidate cap 100,000, no composition), 95% t-intervals, paired on identical worlds, wins/ties/losses of 20.
+* PRIMARY (both parts must hold): (a) top-tier Spearman per world of family index vs attempts to competence (the B11/B12 statistic: learnable top-tier families, not reached = slowest) for `form+l2`: 95% interval entirely below 0; (b) paired whole-life reward per energy after the first window, `form+l2` minus `current`: not significantly worse (interval not entirely below 0).
+* SECONDARY: (1) the same on World T; (2) attempts to competence (not reached = 100, capped at 100) of the last third of a world's learnable top-tier families minus the first third, paired within world: interval entirely below 0; (3) no significant regression on vs-world (`examples/measure_vs_world.rs`), World v2, and the World O headline (reward per energy vs `current`).
+* ATTRIBUTION (secondary; needed because `form` alone already had Spearman -0.098 [-0.171, -0.026] on these seeds in Track B12): `form+l2` minus `form`, paired: Spearman interval entirely below 0; last-third minus first-third interval entirely below 0; reward not significantly worse. Also reported, not a criterion: `l2` (L2 on the current learner) against `current`.
+
+
 ## Not measured
 
 Real-life data of any kind (the free-text section above is also synthetic); the probabilities of the live ledger (`predict_make`/`predict_score` have not been run on real data; the S4 numbers above are synthetic sequences only; the older `self_ledger_snapshot` rows are not scored by any measurement); behaviour with
