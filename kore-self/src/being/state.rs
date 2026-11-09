@@ -180,6 +180,8 @@ pub struct BeingState {
     /// Track B14: energy spent on curiosity steps (decisions of policy `b14-curious`), folded from the log.
     pub b14_cur_energy: i64,
     b14_cur_pending: bool,
+    /// Track E1: the evolution setup, passes, evaluations spent and latest elites (folded from `e1_setup` / `e1_pass` notes).
+    pub e1: super::e1::evolve::E1State,
 }
 
 /// A change flagged by the detector, with the logged outcomes it rests on.
@@ -387,7 +389,7 @@ impl BeingState {
     /// The building blocks: forms of the plain rules the being holds and has not retired, in acceptance order.
     pub fn blocks(&self) -> Vec<super::discover::Form> {
         let mut v: Vec<super::discover::Form> = vec![];
-        for r in self.rules.iter().filter(|r| r.xf.is_id() && !r.retired) {
+        for r in self.rules.iter().filter(|r| r.xf.is_id() && !r.retired && !r.form.is_gp()) {
             if !v.contains(&r.form) {
                 v.push(r.form);
             }
@@ -509,6 +511,10 @@ impl BeingState {
             if self.b14.is_none() {
                 self.b14 = super::b14::ctl::B14Setup::from_tags(&e.tags);
             }
+        } else if e.kind == "note" && has_tag(&e.tags, super::e1::ctl::SETUP_TAG) {
+            self.e1.fold_setup(&e.tags);
+        } else if e.kind == "note" && has_tag(&e.tags, super::e1::evolve::PASS_TAG) {
+            self.e1.fold_pass(&e.tags);
         } else if e.kind == "note" && has_tag(&e.tags, super::b14::library::IMPORT_TAG) {
             if let Some(x) = super::b14::library::LibEntry::from_event(e) {
                 if !self.b14_imports.iter().any(|y| y.id() == x.id()) {

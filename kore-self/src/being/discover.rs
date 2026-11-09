@@ -62,14 +62,16 @@ pub const MAX_LAG: usize = 3;
 pub const MAX_DEGREE: u8 = 3;
 /// Every `VAL_EVERY`-th example of a signature (index % VAL_EVERY == VAL_EVERY - 1) is held out.
 pub const VAL_EVERY: usize = 3;
-const MAX_NUM: i128 = 100;
-const MAX_DEN: i128 = 12;
+pub(crate) const MAX_NUM: i128 = 100;
+pub(crate) const MAX_DEN: i128 = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Form {
     /// Bit i of `mask` set = lag i+1 is used.
     Lin { mask: u8, constant: bool },
     Poly(u8),
+    /// Track E1: an expression found by evolutionary search (`e1::genome`); never produced with E1 off.
+    Gp(super::e1::genome::Code),
 }
 
 impl Form {
@@ -78,12 +80,15 @@ impl Form {
         match self {
             Form::Lin { mask, constant } => mask.count_ones() as usize + *constant as usize,
             Form::Poly(d) => *d as usize + 1,
+            Form::Gp(g) => g.nparams(),
         }
     }
     fn order(&self) -> (usize, u8, u8) {
         match self {
             Form::Lin { mask, constant } => (self.size(), 0, mask * 2 + *constant as u8),
             Form::Poly(d) => (self.size(), 1, *d),
+            // after every grammar form: an evolved rule is applied only where no grammar rule applies
+            Form::Gp(g) => (64 + g.len(), 2, g.modulus()),
         }
     }
     /// Stable short code used in tags and ids: `lin.12.c`, `lin.3`, `poly.2`.
@@ -94,9 +99,13 @@ impl Form {
                 format!("lin.{lags}{}", if *constant { ".c" } else { "" })
             }
             Form::Poly(d) => format!("poly.{d}"),
+            Form::Gp(g) => g.code_str(),
         }
     }
     pub fn parse(code: &str) -> Option<Form> {
+        if code.starts_with("gp.") {
+            return super::e1::genome::Code::parse(code).map(Form::Gp);
+        }
         let parts: Vec<&str> = code.split('.').collect();
         match parts.as_slice() {
             ["poly", d] => d.parse::<u8>().ok().filter(|d| (1..=MAX_DEGREE).contains(d)).map(Form::Poly),
@@ -136,12 +145,17 @@ impl Form {
                 }
                 format!("next = {}   (n = index of the term, first term n = 0)", terms.join(" + "))
             }
+            Form::Gp(g) => g.dsl(),
         }
+    }
+    /// Track E1: true for an evolved expression (not one of the 17 grammar forms).
+    pub fn is_gp(&self) -> bool {
+        matches!(self, Form::Gp(_))
     }
     fn lags(&self) -> Vec<usize> {
         match self {
             Form::Lin { mask, .. } => (1..=MAX_LAG).filter(|l| mask & (1 << (l - 1)) != 0).collect(),
-            Form::Poly(_) => vec![],
+            Form::Poly(_) | Form::Gp(_) => vec![],
         }
     }
 }
@@ -164,9 +178,9 @@ pub fn forms() -> Vec<Form> {
 // ---- exact rational arithmetic (i128 fractions, checked) ----
 
 #[derive(Clone, Copy, Debug)]
-struct Fr {
-    n: i128,
-    d: i128,
+pub(crate) struct Fr {
+    pub(crate) n: i128,
+    pub(crate) d: i128,
 }
 
 fn gcd(a: i128, b: i128) -> i128 {
@@ -178,7 +192,7 @@ fn gcd(a: i128, b: i128) -> i128 {
 }
 
 impl Fr {
-    fn int(n: i128) -> Fr {
+    pub(crate) fn int(n: i128) -> Fr {
         Fr { n, d: 1 }
     }
     fn norm(n: i128, d: i128) -> Option<Fr> {
@@ -189,13 +203,13 @@ impl Fr {
         let s = if d < 0 { -1 } else { 1 };
         Some(Fr { n: s * n / g, d: s * d / g })
     }
-    fn add(self, o: Fr) -> Option<Fr> {
+    pub(crate) fn add(self, o: Fr) -> Option<Fr> {
         Fr::norm(self.n.checked_mul(o.d)?.checked_add(o.n.checked_mul(self.d)?)?, self.d.checked_mul(o.d)?)
     }
     fn sub(self, o: Fr) -> Option<Fr> {
         self.add(Fr { n: o.n.checked_neg()?, d: o.d })
     }
-    fn mul(self, o: Fr) -> Option<Fr> {
+    pub(crate) fn mul(self, o: Fr) -> Option<Fr> {
         Fr::norm(self.n.checked_mul(o.n)?, self.d.checked_mul(o.d)?)
     }
     fn div(self, o: Fr) -> Option<Fr> {
@@ -205,7 +219,7 @@ impl Fr {
 
 /// Unique exact solution of `rows * x = rhs` (more rows than columns allowed), or None
 /// if the system is inconsistent, under-determined or the arithmetic overflows.
-fn solve(rows: &[Vec<i64>], rhs: &[i64]) -> Option<Vec<Fr>> {
+pub(crate) fn solve(rows: &[Vec<i64>], rhs: &[i64]) -> Option<Vec<Fr>> {
     let m = rows.len();
     let n = rows.first()?.len();
     let mut a: Vec<Vec<Fr>> = rows.iter().zip(rhs).map(|(r, y)| r.iter().map(|v| Fr::int(*v as i128)).chain(std::iter::once(Fr::int(*y as i128))).collect()).collect();
@@ -255,6 +269,7 @@ pub fn predict(form: &Form, t: &[i64]) -> Option<i64> {
             let row = |i: usize| -> Vec<i64> { (0..=*d as u32).map(|j| (i as i64).pow(j)).collect() };
             ((0..len).map(row).collect(), t.to_vec(), row(len))
         }
+        Form::Gp(g) => return super::e1::genome::predict(g, t),
     };
     if rows.len() < form.size() + MIN_SLACK {
         return None;
@@ -384,6 +399,15 @@ pub fn predict_x(xf: Xf, form: &Form, t: &[i64]) -> Option<i64> {
     Some(v)
 }
 
+/// Track E1: the prefix after the transforms of `xf` (what the form is fitted on). None: not defined.
+pub(crate) fn transformed(xf: Xf, t: &[i64]) -> Option<Vec<i64>> {
+    let mut s = t.to_vec();
+    for op in xf.ops() {
+        s = fwd(*op, &s)?;
+    }
+    Some(s)
+}
+
 // ---- examples, rules ----
 
 /// One revealed example: the prefix the being was shown and the exact next term the checker later revealed.
@@ -473,6 +497,12 @@ impl Rule {
         (self.xf.cost(), o.0, o.1, o.2)
     }
     pub fn text(&self) -> String {
+        if self.form.is_gp() {
+            return format!(
+                "being evolved rule {} for {} tasks of difficulty {}: {}{}; found by evolutionary search (mutation and crossover of expressions, Track E1) inside an author-defined expression language (lags 1-3, term index, small integer constants, coefficients fitted per task from its own prefix, +, -, *, optional modulus); reproduced the revealed next term exactly on {} training and {} held-out logged examples and was never applicable-and-wrong on them",
+                self.id, self.dom_name(), self.sig % 10, if self.xf.is_id() { String::new() } else { format!("take {} of the prefix, then ", self.xf.words()) }, self.form.dsl(), self.train_ok, self.val_ok
+            );
+        }
         if !self.xf.is_id() {
             return format!(
                 "being composed rule {} for {} tasks of difficulty {}: take {} of the prefix, then {}; the form is a building block the being had already verified; coefficients are fitted per task from its own prefix; reproduced the revealed next term exactly on {} training and {} held-out logged examples and was never applicable-and-wrong on them (composition of verified blocks inside an author-defined space)",
@@ -620,7 +650,7 @@ pub fn search_transfer(examples: &[Example], blocks: &[Form], max_candidates: us
 pub fn toggle_constant(f: &Form) -> Option<Form> {
     match f {
         Form::Lin { mask, constant } => Some(Form::Lin { mask: *mask, constant: !*constant }),
-        Form::Poly(_) => None,
+        Form::Poly(_) | Form::Gp(_) => None,
     }
 }
 

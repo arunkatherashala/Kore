@@ -45,6 +45,8 @@ pub mod world_o;
 pub mod world_t;
 /// Track B14: rule library and always-on curiosity (opt-in; see b14/mod.rs).
 pub mod b14;
+/// Track E1: evolutionary search over the rule DSL (opt-in; see e1/mod.rs).
+pub mod e1;
 /// Track V1: versus standard methods (measurement only; see docs/vs_world.md).
 pub mod vs_world;
 #[path = "loop.rs"]

@@ -30,6 +30,8 @@
 //! rule_library          = on      # first world: may a new being keep, use and retire a rule library (B14, default off)
 //! curiosity             = on      # first world: may a new being spend a curiosity budget (B14, default off)
 //! max_curiosity_energy_pm = 20    # curiosity energy at most this share (per mille) of the energy spent so far (B14, default 0, hard max 100)
+//! evolution             = on      # first world: may a new being run evolutionary search over its rule DSL (E1, default off)
+//! evolution_budget_pm   = 20      # evolution compute at most this share (per mille) of the energy spent so far (E1, default 0, hard max 100)
 //! ```
 //!
 //! The B9 keys fail closed on their own: without `experiments = on` AND a non-zero energy share AND a
@@ -192,6 +194,8 @@ impl Controller {
                 _ if super::world_t::ctl::is_key(k) => super::world_t::ctl::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 // Track B14 keys (rule library, curiosity budget; default off) are read by `b14::ctl`; here they are only validated
                 _ if super::b14::ctl::is_key(k) => super::b14::ctl::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
+                // Track E1 keys (evolutionary search, budget; default off) are read by `e1::ctl`; here they are only validated
+                _ if super::e1::ctl::is_key(k) => super::e1::ctl::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 _ => return Err(format!("line {n}: unknown key '{k}'")),
             }
             seen.push(k);
