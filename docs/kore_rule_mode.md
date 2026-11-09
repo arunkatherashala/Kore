@@ -225,23 +225,53 @@ New files:
 
 ## 4. Result in short
 
+**Correction, 2026-11-08** (re-measured after the version-4 timestamp fix, docs/kore_v4_int_select.md,
+commit b596067b). The earlier headline "taxi 1.55x smaller than v4 level 19", released with 1.8.20/1.8.21,
+compared rule mode with a version-4 writer that chose `Varint` instead of `Delta` for the two taxi
+timestamp columns. About 8.6 MB of that gap was this version-4 selection bug, not rules. The version-4
+writer now picks delta there, so the headline below compares rule mode with the **fixed** version 4 and
+with Parquet. Rule mode reuses the version-4 column encoder (`v4::encode_for_write`, and
+`v4::encode_column` for embedded columns), so the rule-mode numbers below are also built on the fixed
+version 4. The sections after section 4 still hold the earlier measurement (against the old version 4)
+and are kept unchanged as history.
+
 All numbers are from one run on one machine (section 5). Rule mode is compared at zstd level 19 with the
-maximum-level baselines: v4 level 19, Parquet zstd-22 and xz-9.
+maximum-level baselines: v4 level 19 (fixed), Parquet zstd-22 and xz-9. Parquet and xz were re-measured
+on 2026-11-08 with the same scripts and gave the same sizes as before (they do not depend on the fix).
 
 * **Real data: NYC TLC Yellow Taxi trip records, January 2024** (one Parquet file supplied by the user,
   SHA-256 c4d59da7..., 2,964,624 rows x 19 columns).
-  * Sizes: rule mode at level 19 is 29,518,146 bytes (0.524 B/value). v4 level 19 is 45,758,509 (1.55x larger),
-    Parquet zstd-22 45,674,181 (1.55x), CSV + xz-9 34,640,960 (1.17x), and the user's original Parquet file
-    49,961,641 bytes.
-  * About half of the gain is not a rule. For the two timestamp columns the version-4 writer's cheap transform
-    pre-selection (a zstd level 1 score) picks `Varint` (10.5 MB each), while plain delta gives 6.2 MB; rule
-    mode's integer search tries delta in full. That accounts for 8.6 MB of the 16.2 MB difference.
-  * The other 7.6 MB come from rules: the fare sum (4.8 MB -> 0.34 MB), the decimal scale on the money and
-    distance columns, and lookups (`mta_tax`, `improvement_surcharge`, `Airport_fee`, `RatecodeID`).
-* **TPC-DS (standard benchmark, generated locally by DuckDB's dsdgen).** store_sales (1M rows) is 1.86x
-  smaller than v4 level 19 and web_sales (all 719,384 rows) 2.12x: the `ext_*`/`net_*` money columns are
-  products, quotients and sums of each other. The dimension tables customer, customer_address and item gain
-  1.04-1.10x.
+  * Sizes: rule mode at level 19 is 29,506,067 bytes (0.524 B/value). The fixed v4 level 19 is 36,892,694
+    (**1.25x larger**), Parquet zstd-22 45,674,181 (**1.55x**), CSV + xz-9 34,640,960 (1.17x), raw buffers
+    + xz-9 38,227,492 (1.30x), and the user's original Parquet file 49,961,641 bytes.
+  * So the true rule-mode gain on this file is **1.25x against the fixed version 4** and 1.55x against
+    Parquet zstd-22. The fixed version 4 alone is already 1.24x smaller than Parquet zstd-22, but still
+    1.06x larger than CSV + xz-9.
+  * The rule gain (7.4 MB) comes from the fare sum (4.8 MB -> 0.34 MB), the decimal scale on the money and
+    distance columns, and lookups (`mta_tax`, `improvement_surcharge`, `Airport_fee`, `RatecodeID`). Both
+    timestamp columns now keep the version-4 delta payload (6,216,354 and 6,354,806 bytes; rule mode had
+    6,216,444 and 6,366,795).
+  * Earlier measurement (superseded, 2026-11-07, against the version 4 with the timestamp selection bug):
+    rule mode level 19 29,518,146 bytes; v4 level 19 45,758,509 (1.55x larger), Parquet zstd-22 45,674,181
+    (1.55x), CSV + xz-9 34,640,960 (1.17x). About half of that gain was not a rule: the old version-4
+    pre-selection (a zstd level 1 score) picked `Varint` for the two timestamp columns (10.5 MB each), while
+    delta gives 6.2 MB; that accounted for 8.6 MB of the 16.2 MB difference.
+* **TPC-DS, generated locally by DuckDB dsdgen** (SF1; store_sales first 1M rows, the other tables in
+  full). Rule mode level 19 against the fixed v4 level 19 / Parquet zstd-22 / CSV + xz-9 / raw + xz-9:
+
+  | table | rule mode L19 | v4 L19 old -> fixed | rule vs fixed v4 | vs Parquet zstd-22 | vs CSV + xz-9 | vs raw + xz-9 |
+  |---|---:|---:|---:|---:|---:|---:|
+  | store_sales | 18,499,338 | 34,351,503 -> 34,154,679 | 1.85x | 2.00x | 2.00x | 1.51x |
+  | web_sales | 17,850,212 | 37,823,671 -> 37,755,149 | 2.12x | 2.28x | 2.29x | 1.75x |
+  | customer | 3,098,025 | 3,417,888 -> 3,315,395 | 1.07x | 1.29x | 1.29x | 1.18x |
+  | customer_address | 573,848 | 595,331 -> 595,331 | 1.04x | 1.35x | 1.54x | 1.70x |
+  | item | 836,259 | 870,249 -> 870,249 | 1.04x | 1.22x | 1.25x | 1.24x |
+
+  The `ext_*`/`net_*` money columns of the fact tables are products, quotients and sums of each other. The
+  version-4 fix changes TPC-DS by 0-3 % (customer -3.0 %, store_sales -0.6 %), and the rule-mode files are
+  byte-for-byte the same size as before: the columns where version 4 improved were already won by rules.
+  Earlier measurement (superseded, against the old version 4): store_sales 1.86x, web_sales 2.12x, the
+  dimension tables 1.04-1.10x.
 * **Generated data from this branch** (written for the rules, so they show what the families can do, not what
   real data gives), at 1M rows against v4 level 19: orders 2.93x, logs 1.42x, sensors 1.15x.
 * **The realistic events generator** (docs/kore_size.md): 1.00x (8.514 against 8.537 B/value). The hash ids and
