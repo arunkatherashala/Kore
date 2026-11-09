@@ -27,6 +27,7 @@ be burstier, messier and phrased differently.
 | B11 long-run decline and World O (synthetic) | 8 worlds x 1M steps (decline); 20 worlds (World O); 20 worlds (B1 check) | B1 skip test; oracle-knows-rules | settled skip test vs B1 over 1M steps +0.208 [+0.066, +0.350]; world 1 4.164 -> 4.152 (B1 4.096 -> 4.020); B1 budget 600 +0.001 [-0.007, +0.009], 3000 +0.049 [+0.010, +0.087]; World O regret current 0.131 -> 0.836 per 100k-energy window, no faster learning of later families (Spearman +0.025 [-0.060, +0.110]) | 2026-11-07 | open-world |
 | V1 versus standard methods (synthetic): ours minus the best tuned standard method; World v2 12 conditions / first world budget 600 / 3000 / World O | 20 worlds per condition | 10 standard methods (eps-greedy, UCB1-tuned, KL-UCB, Thompson, EXP3, LinUCB, linear Thompson, Q-learning, SARSA, MLP Q), tuned on seeds 101..120; oracles; MCTS on the true simulator | World v2: current -0.18 to -0.38 (11 of 12 below 0), recommended (B7 + skip fix) -0.088 to +0.131 (none significant); first world -0.450 [-0.659, -0.241] / +0.007 [-0.105, +0.119]; World O (600k) current +0.540 [+0.380, +0.701] over the best method; rule learning 0.78-0.81 right, 0 wrong vs brute force 0.59-0.71 and k-NN / trees 0.05-0.55 (Track V1) | 2026-11-07 | vs-world |
 | W1 World T, data work in a sandbox (synthetic): being minus tuned LinUCB / UCB1 / always SQL, reward per energy, default reward design; 6 x 5 reward-design sweep; OOD | 20 worlds per point, budget 6000 | random plan, always SQL, UCB1 and LinUCB, each tuned on seeds 101..120 with 6 configurations per grid point; reward-best oracle (sees every plan's true result) | +0.127 [+0.084, +0.171] / +0.496 [+0.416, +0.575] / +2.259; 0.686 below the reward-best oracle; sweep: being ahead (interval above 0) at 22 / 24 / 25 of 30 points, behind LinUCB and UCB1 from a wrong-answer penalty of 3.16 x reward, behind always SQL at 3 points of penalty 10 x; series rules and column search precision 1.000 before the checker (6,257 and 881 answers); 0 wrong accepted; later kinds not faster (Spearman -0.005 [-0.118, +0.109]); OOD +0.516 over LinUCB, mostly from skipping (Track W1) | 2026-11-08 | world-t |
+| B14 rule library and always-on curiosity, first world long run (synthetic) | 20 worlds x 200,000 steps; transfer 20 worlds x 30,000; short lives 20 worlds | B14 off (the long run's being); tuning seeds 101..120 | steps 50k-200k B14 on minus off +0.491 [+0.287, +0.695] (18/0/2), rule worlds +0.655 (14/0/0), simple +0.109 [-0.076, +0.293]; slope 50k-200k -0.013 [-0.030, +0.003] per 100k (plateau level raised, slope not); curiosity cost on simple worlds +2.5% [-1.9%, +6.8%] (n = 6, 1% criterion not met); library import transfer +475 [-128, +1,078] steps saved per family (7/10/3); budget 600 +0.037 [-0.037, +0.112], 3000 +0.149 [+0.004, +0.293] (Track B14) | 2026-11-08 | a062a62a |
 
 ## How to reproduce
 
@@ -2863,6 +2864,114 @@ several tasks; drift of the quirks over the life; longer lives; the logged run a
 run it for 40 + 10 steps; the measurement runs are in memory with the same steps, a test checks it); a prior for the
 wrong-answer chance tuned to the penalty (the likely fix for the harsh-penalty region); the timeout under real engine
 slowness.
+
+## Track B14: a persistent rule library and always-on curiosity (synthetic first world, author-defined families and rewards)
+
+Question: in long runs of the first world (the long run's being: extended2 families, chooser `model`, discovery every 10 steps, composition and pruning under the long-run controller, budget 3000 with refills) reward per energy stops improving early. Can (1) a rule library in the being's own log (indexed by context, reused in new contexts after a check, retired on evidence) and (2) a small curiosity budget that never runs out make it keep improving? Everything is the author's simulation; no real data. Code: `kore-self/src/being/b14/` (new: `library.rs`, `curiosity.rs`, `ctl.rs`, `measure.rs`, `tests.rs`), small switch-guarded hooks in `being/loop.rs` (Engine field `lib`, `run_full` setup and passes, extra decision citations from the rationale key `b14_cites`, curiosity energy), additive fields and fold rules in `being/state.rs`, key validation in `being/controller.rs`, the opt-in `rule_library` / `curiosity` arguments of `being_run` (`being_tools.rs`), harness `kore-self/examples/measure_b14.rs` (modes `diag`, `arms`, `transfer`, `short`). Branch `b14-rules` from abd8de1e, 2026-11-08, Windows, 8 CPUs shared with two other agents. Tuning on seeds 101..120 only; report seeds 1..20; 95% t-intervals; paired differences on identical worlds, (wins/ties/losses of n). Rule worlds = worlds where an oracle that holds the oracle book earns at least 0.1 more reward per energy than the same oracle without rules (a property of the world, fixed before the runs); the other worlds are simple worlds.
+
+```
+cargo run -p kore-self --example measure_b14 --offline --release -- diag --seeds 101..120 --steps 100000 --window 10000
+cargo run -p kore-self --example measure_b14 --offline --release -- arms --seeds 101..120 --steps 60000 --post 20000 --arms base,lib+cur20:0,lib+cur20:1,lib+cur20:3,lib+cur5:1,lib+cur50:1
+cargo run -p kore-self --example measure_b14 --offline --release -- arms --seeds 1..20 --steps 200000 --window 10000 --post 50000 --arms base,lib,cur20,lib+cur20
+cargo run -p kore-self --example measure_b14 --offline --release -- transfer --seeds 1..20 --steps 30000 --every 1000 --source-steps 50000
+cargo run -p kore-self --example measure_b14 --offline --release -- short --seeds 1..20
+```
+
+### Pre-registered success criteria
+
+Pre-registered 2026-11-08 before report-seed runs (given by the reviewer, copied verbatim; judged only against them):
+
+> PRIMARY: paired difference (B14 on minus B14 off, same seeds/worlds) in mean true reward per energy over the post-plateau part of the run (steps 50k..end of the long run), report seeds 1..20: 95% CI lower bound > 0 AND at least 14 of 20 wins. If not met, B14 "did not beat the plateau" — say so.
+> SECONDARY: (a) slope of windowed reward over 50k..end with B14 on: 95% CI above 0 (vs baseline slope, also reported); (b) curiosity cost on already-solved worlds: paired loss no worse than 1% of baseline reward per energy (CI upper bound of the loss < 1%); (c) transfer: steps-to-competence on a new family with library vs without, paired CI; (d) no significant regression on vs-world / World O / World v2 (CI includes or is above 0).
+> Report every claim in the same format: mean [95% CI] (wins/ties/losses out of 20), seeds, budget/steps, commit.
+
+Operational choices (the criteria text was saved before any report-seed run; the choices below for (b) and (c) were fixed while the first report-seed run was still running, before any of its output was read): "B14 on" = library and curiosity (`lib+cur20`), "off" = the long-run being as it is (`base`); the long run is 200,000 steps (windows of 10,000; the slope is the least-squares slope of the window means from 50k on, per 100k steps); "already-solved worlds" = the simple worlds (rules can add less than 0.1 there), and the cost of curiosity there is `lib+cur20` against `lib` (library on in both, so only curiosity differs), relative to `lib`; "new family" = each of the 14 expressible hidden families in a new world, competence = the rule book answers at least 90% of 40 fresh tasks of the family right (checked every 1,000 steps, not reached = 30,000); the source of the library is a 50,000-step B14 life in world seed + 500.
+
+### Step 1: the plateau, reproduced (tuning seeds 101..120, base being, 100,000 steps)
+
+`measure_b14 diag` (the long run's being in-process, windows of 10,000 steps; reference: a renewal oracle that knows the hidden success rates and holds an "oracle book", the being's own search run by the author on 60 sampled tasks of every hidden family):
+
+| steps | reward per energy | regret vs oracle with book | live rules | families covered (of 14) |
+|---|---|---|---|---|
+| 0k-10k | 3.947 [3.481, 4.414] | 0.580 [0.385, 0.775] | 2.9 | 2.6 |
+| 40k-50k | 3.927 [3.456, 4.399] | 0.599 [0.401, 0.798] | 3.0 | 2.8 |
+| 50k-60k | 3.935 [3.467, 4.404] | 0.592 [0.395, 0.788] | 3.0 | 2.8 |
+| 90k-100k | 3.939 [3.465, 4.413] | 0.588 [0.393, 0.782] | 3.0 | 2.8 |
+
+The curve is flat from the first window on (in this setting the plateau starts before 10,000 steps, not at 50,000). Cause (per-world tables of the mode): sequence difficulties 2 to 5 get 10 to 30 revealed examples early (the fixed strategies fail on most of their families), are then skipped for good, so their signatures (four families each) never reach the B2 support and get no rule; and where a rule exists the `discovered` strategy is almost never chosen (its cell restarts from a pooled prior when a rule is accepted; world 116: four rules at difficulty 2, one `discovered` attempt there in 30,000 steps). Families covered at the end: 2.8 of 14.
+
+### What was built (each a switch, off by default)
+
+| part | what it does |
+|---|---|
+| library estimate | where a live rule applies to the offered prefix, the `discovered` strategy is estimated from the rule's own record on the revealed examples times the record of all rule-produced answers (planner optimism and skip test unchanged); the decision cites the rule's note and the latest examples of its record |
+| library retirement | a live rule whose latest 6 applicable revealed examples (at least 4) have a 95% Wilson upper bound of share right below 0.5 is retired (`rule_retired`, tag `by:library`, revision citing every example of the window) |
+| library reuse | imported entries (`rule_lib_import` notes) and rules of the same difficulty of the other sequence domain are candidates; one becomes a rule after 1 training + 1 held-out exact reproduction on the being's own examples, never applicable-and-wrong (B2 guard and spare equations); `rule` note tagged `via_library`, revision citing the import note and the examples |
+| curiosity | energy at most `pm` per mille of the energy spent so far (the budget never runs out); value = expected information gain about the offer's rule (B9 live hypotheses) + `ei_w` x expected improvement / rate; fires when value >= 0.05; policy `b14-curious`; the decision records the value, its parts, the planner's choice and the budget |
+| controller | `rule_library`, `curiosity`, `max_curiosity_energy_pm` (hard max 100); fail closed; the setup is fixed at creation (`b14_setup` note); a controller that later no longer allows it gives a logged refusal and the run goes without it |
+
+Tuning (seeds 101..120, 60,000 steps, post part from 20,000; minus base): `lib+cur20` with `ei_w` 0 / 1 / 3: +0.482 / +0.492 / +0.479; `pm` 5 / 20 / 50 (ei_w 1): +0.479 / +0.492 / +0.490; `lib` alone +0.300, `cur20` alone +0.365. Chosen: pm 20, ei_w 1 (the defaults set before the grid; best mean, differences within noise). Curiosity used 0.05% to 1.3% of the energy (the 2% budget is rarely binding).
+
+### Report seeds 1..20: the long run (200,000 steps, windows of 10,000; commit a062a62a)
+
+Rule worlds (14): 3, 4, 6, 7, 8, 9, 10, 13, 14, 15, 17, 18, 19, 20; simple worlds (6): 1, 2, 5, 11, 12, 16.
+
+| steps | base | lib | cur20 | lib+cur20 (B14 on) |
+|---|---|---|---|---|
+| 0k-10k | 3.791 [3.467, 4.115] | 4.068 [3.694, 4.442] | 4.015 [3.709, 4.322] | 4.214 [3.891, 4.537] |
+| 10k-20k | 3.806 [3.485, 4.126] | 4.079 [3.715, 4.442] | 4.161 [3.858, 4.463] | 4.283 [3.954, 4.611] |
+| 40k-50k | 3.791 [3.472, 4.111] | 4.080 [3.714, 4.446] | 4.144 [3.837, 4.451] | 4.281 [3.947, 4.615] |
+| 50k-60k | 3.780 [3.462, 4.099] | 4.073 [3.712, 4.434] | 4.135 [3.829, 4.441] | 4.277 [3.948, 4.606] |
+| 90k-100k | 3.792 [3.470, 4.114] | 4.088 [3.724, 4.452] | 4.130 [3.828, 4.432] | 4.279 [3.956, 4.602] |
+| 140k-150k | 3.780 [3.461, 4.100] | 4.073 [3.710, 4.437] | 4.141 [3.837, 4.445] | 4.278 [3.956, 4.601] |
+| 190k-200k | 3.765 [3.454, 4.077] | 4.061 [3.694, 4.427] | 4.125 [3.821, 4.429] | 4.250 [3.929, 4.572] |
+
+| arm | reward per energy, steps 50k-200k | minus base, all 20 | rule worlds (14) | simple worlds (6) | slope per 100k steps, 50k-200k | slope minus base | regret vs oracle with book | curiosity energy share | live rules / families covered at the end |
+|---|---|---|---|---|---|---|---|---|---|
+| base | 3.781 [3.462, 4.100] | - | - | - | -0.005 [-0.016, +0.005] | - | 0.576 [0.404, 0.748] | 0 | 4.6 / 4.3 |
+| lib | 4.075 [3.711, 4.439] | +0.294 [+0.134, +0.453] (11/8/1) | +0.420 [+0.226, +0.613] (11/2/1) | +0.000 (0/6/0) | -0.005 [-0.018, +0.008] | +0.000 [-0.010, +0.010] (7/8/5) | 0.282 [0.132, 0.433] | 0 | 7.9 / 5.6 |
+| cur20 | 4.130 [3.826, 4.433] | +0.349 [+0.171, +0.526] (16/0/4) | +0.462 [+0.237, +0.687] (13/0/1) | +0.084 [-0.098, +0.267] (3/0/3) | -0.006 [-0.014, +0.003] | -0.000 [-0.010, +0.009] (9/0/11) | 0.228 [0.164, 0.291] | 0.10% | 14.2 / 11.8 |
+| lib+cur20 | 4.272 [3.947, 4.597] | **+0.491 [+0.287, +0.695] (18/0/2)** | +0.655 [+0.418, +0.892] (14/0/0) | +0.109 [-0.076, +0.293] (4/0/2) | -0.013 [-0.030, +0.003] | -0.008 [-0.026, +0.009] (7/0/13) | 0.085 [-0.003, +0.173] | 0.08% | 15.3 / 11.6 |
+
+Relative: lib+cur20 / base - 1 = +14.5% [+6.7%, +22.4%] (18/0/2). At 100k (window 90-100k) B14 on is at 4.279 against 3.792 (+0.487 on the means), at 200k (190-200k) 4.250 against 3.765 (+0.485). Curiosity on top of the library (lib+cur20 relative to lib): +5.9% [+1.1%, +10.6%] (16/0/4) over all 20; in the rule worlds +0.235 [+0.048, +0.423] (12/0/2).
+
+### Report seeds 1..20: transfer to a new world (30,000 steps, checkpoints every 1,000)
+
+Source: a 50,000-step B14 life in world seed + 500 (10 to 16 entries). Target: B14 on with the entries imported vs B14 on without; 6 to 13 entries reused per world. Mean steps to competence over the 14 families (12 are reachable; not reached = 30,000): with the library 5,143 to 11,857, without 5,143 to 14,500, base 5,143 to 30,000.
+
+| comparison | steps to competence saved per family (positive = faster) | reward per energy, first 10k steps | reward per energy, 30k steps |
+|---|---|---|---|
+| with library minus without (both B14 on) | +475 [-128, +1,078] (7/10/3) | +0.018 [+0.000, +0.036] (16/0/4) | +0.008 [+0.003, +0.014] (18/0/2) |
+| B14 on without library minus base | +14,393 [+11,241, +17,545] (19/1/0) | - | - |
+
+In 12 of 20 worlds both B14 arms are competent on every reachable family at the first checkpoint (1,000 steps), so the import has nothing left to speed up there; the speed-up of new families comes from curiosity and the library estimate, not from the imported entries.
+
+### Report seeds 1..20: short lives (one budget, no refills)
+
+| budget | lib+cur20 minus base | lib minus base | cur20 minus base |
+|---|---|---|---|
+| 600 | +0.037 [-0.037, +0.112] (12/0/8) | +0.011 [-0.012, +0.035] (4/14/2) | +0.024 [-0.048, +0.097] (9/1/10) |
+| 3000 | +0.149 [+0.004, +0.293] (11/0/9) | +0.101 [-0.015, +0.216] (9/8/3) | +0.064 [-0.054, +0.182] (7/0/13) |
+
+### Against the pre-registered criteria
+
+* PRIMARY: +0.491 [+0.287, +0.695] (18/0/2 of 20), seeds 1..20, 200,000 steps, commit a062a62a: **met** (lower bound > 0, 18 >= 14 wins).
+* (a) slope over 50k-200k with B14 on: -0.013 [-0.030, +0.003] per 100k steps (baseline -0.005 [-0.016, +0.005]; difference -0.008 [-0.026, +0.009], 7/0/13): **not met**. B14 raises the level within the first 10,000 to 20,000 steps; improvement does not continue past 50k, the curve is flat at the higher level.
+* (b) curiosity cost on already-solved (simple) worlds, lib+cur20 relative to lib, n = 6, seeds 1, 2, 5, 11, 12, 16, 200,000 steps: +2.5% [-1.9%, +6.8%] (4/0/2; worst world -0.35%): the loss's upper bound is 1.9%, above 1%: **not met** (no loss on the mean, but with 6 worlds the interval cannot rule out a 1% loss).
+* (c) transfer: steps to competence saved with the library vs without, +475 [-128, +1,078] (7/10/3 of 20), 30,000 steps: interval contains 0; **no established speed-up** from importing a library.
+* (d) vs-world, World O, World v2: the B14 code is not reachable from the World v2, World O, World T or V1 method engines, and with B14 off the first world is the planner bit for bit (test `off_is_the_planner_bit_for_bit`; the golden-digest tests of earlier tracks pass unchanged, 595 of 595 kore-self tests): the difference is exactly 0 by construction (not re-run, so no interval). Not regressed; B14 was not tried in those worlds.
+
+### Verdict
+
+B14 lifts the plateau's level but not its slope: +0.49 reward per energy over steps 50k-200k (18 of 20 worlds, all 14 rule worlds), regret against the oracle with the book 0.576 -> 0.085, families covered 4.3 -> 11.6 of 14; the gain arrives early and the curve is then flat again (slope criterion not met). Both parts help alone (library +0.29, curiosity +0.35) and more together. Curiosity spends about 0.1% of the energy. Importing a library into a new world gives no established speed-up, because curiosity already finds the rules within about 1,000 steps. The cost criterion on solved worlds is not met at n = 6 (point estimate a gain). Short budgets: no loss (+0.04 at 600, +0.15 at 3000).
+
+### Caveats
+
+Author-defined world, families, grammar and rewards; the oracle book (60 tasks per family, searched jointly per difficulty under the never-wrong guard) is weaker than the being's own book in some worlds, so the regret is a reference, not a bound; the 0.1 threshold gives only 6 simple worlds; the long run is in-process (no 200,000-step logged run; tests run the logged path for up to 2,500 steps, with cold restarts); B5 pruning merges rules on logged examples and can lower coverage; curiosity constants tuned at 60,000 steps; one source world per target for transfer.
+
+### What is tested (not measured)
+
+`being/b14/tests.rs` (12 tests, temp dirs only): every earlier opt-in key and the B14 keys parse together; each key given twice, bad values and values above the hard maximum make the file invalid and fail closed; off is the planner bit for bit over 1,500 steps; the curiosity budget holds and does not run out; library candidates need the being's own examples and are blocked by one applicable-and-wrong example; imports are logged once, checked, reused with citations of the import note and the examples, and fold back; library uses cite the rule note; retirement on evidence cites every example and folds back; a logged run equals 400 + 500 steps with a cold restart; not allowed = refused, logged and off (missing, invalid and silent controller; allowed at creation and switched off later); B14 needs the extended world; KILL stops after 40 steps; old logs fold with no B14 state; import tags round trip and a tampered id is refused; the B14 sources read no hidden world parameter and use no file, network or process API.
 
 ## Not measured
 
