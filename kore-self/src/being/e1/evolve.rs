@@ -64,9 +64,11 @@ pub struct EvoCfg {
     pub elites_logged: usize,
     /// Most candidates checked against all examples per pass.
     pub max_verify: usize,
+    /// Choose the target signature with probability proportional to its unexplained examples (false: round robin).
+    pub weighted: bool,
 }
 
-pub const DEFAULT_EVO: EvoCfg = EvoCfg { pm: 20, every: 250, pop: 48, gens: 24, max_pass_evals: 60_000, min_unexplained: 4, window: 400, sample_unexplained: 32, sample_explained: 8, p_cross: 0.5, p_inherit: 0.3, elites_logged: 4, max_verify: 3 };
+pub const DEFAULT_EVO: EvoCfg = EvoCfg { pm: 20, every: 100, pop: 48, gens: 24, max_pass_evals: 60_000, min_unexplained: 4, window: 400, sample_unexplained: 32, sample_explained: 8, p_cross: 0.5, p_inherit: 0.3, elites_logged: 4, max_verify: 3, weighted: true };
 
 /// What the log says about E1 (folded): the setup, passes, evaluations spent, the latest elites per signature.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -451,7 +453,19 @@ pub fn run_pass(st: &BeingState, cfg: &EvoCfg) -> Option<PassOut> {
     if tg.is_empty() {
         return None;
     }
-    let (sig, recent) = &tg[(pass as usize) % tg.len()];
+    let pick = if cfg.weighted {
+        let w: Vec<usize> = tg.iter().map(|(_, rc)| rc.iter().filter(|x| !is_held_out(x.0) && !x.2).count()).collect();
+        let mut u = r.below(w.iter().sum::<usize>().max(1));
+        let mut i = 0;
+        while i + 1 < w.len() && u >= w[i] {
+            u -= w[i];
+            i += 1;
+        }
+        i
+    } else {
+        (pass as usize) % tg.len()
+    };
+    let (sig, recent) = &tg[pick];
     let sig = *sig;
     let unexpl: Vec<&Example> = recent.iter().rev().filter(|x| !is_held_out(x.0) && !x.2).take(cfg.sample_unexplained).map(|x| x.1).collect();
     let expl: Vec<&Example> = recent.iter().rev().filter(|x| !is_held_out(x.0) && x.2).take(cfg.sample_explained).map(|x| x.1).collect();

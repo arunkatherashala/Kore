@@ -51,7 +51,7 @@ fn paired(d: &[f64]) -> String {
     format!("{} ({w}/{t}/{} of {})", ci_n(d), d.len() - w - t, d.len())
 }
 
-/// An arm: parts joined by `+`: `base`, `lib`, `cur<pm>`, `b14` (= lib+cur20), `e1[:<pm>[:<every>[:<pop>[:<gens>]]]]`.
+/// An arm: parts joined by `+`: `base`, `lib`, `cur<pm>`, `b14` (= lib+cur20), `e1[:<pm>[:<every>[:<pop>[:<gens>[:rr]]]]]` (rr: round-robin targets).
 fn arm_cfg(spec: &str, s: u64, steps: u64, window: u64, cover_n: u64) -> RunCfgE1 {
     let mut c = RunCfgB14 { cover_n, ..RunCfgB14::base(s, steps, window) };
     let mut evo: Option<EvoCfg> = None;
@@ -78,6 +78,9 @@ fn arm_cfg(spec: &str, s: u64, steps: u64, window: u64, cover_n: u64) -> RunCfgE
                 }
                 if let Some(v) = xs.get(3) {
                     e.gens = v.parse().unwrap();
+                }
+                if xs.get(4) == Some(&"rr") {
+                    e.weighted = false;
                 }
                 evo = Some(e);
             }
