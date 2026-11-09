@@ -82,6 +82,9 @@ pub struct OutE1 {
     pub evo_rejected: u64,
     pub evo_verified: u64,
     pub run_nanos: u128,
+    /// Evolved rules on the being's own revealed examples AFTER their acceptance (before the checker
+    /// judged the answer): (applicable, the prediction equals the revealed next term).
+    pub evo_after: (u64, u64),
     pub state: Option<BeingState>,
 }
 
@@ -114,6 +117,7 @@ pub fn run_e1(cfg: &RunCfgE1) -> OutE1 {
     let mut n = 0u64;
     let fams = all_families();
     let mut evo_ids: Vec<String> = vec![];
+    let mut evo_from: Vec<(Rule, usize)> = vec![];
     let (mut ev0, mut ns0) = (0u64, 0u128);
     while n < c.steps {
         let res = e.step_menu(&mut ch);
@@ -136,6 +140,7 @@ pub fn run_e1(cfg: &RunCfgE1) -> OutE1 {
         let (_, evolved) = e.evolve_pass();
         for nr in evolved {
             evo_ids.push(nr.rule.id.clone());
+            evo_from.push((nr.rule.clone(), e.state.examples.len()));
             w.evo_accepted += 1;
         }
         let _ = e.housekeeping();
@@ -201,6 +206,14 @@ pub fn run_e1(cfg: &RunCfgE1) -> OutE1 {
         out.evo_nanos = x.nanos;
         out.evo_rejected = x.rejected;
         out.evo_verified = x.verified;
+    }
+    for (r, from) in &evo_from {
+        for x in e.state.examples[*from..].iter().filter(|x| x.sig == r.sig) {
+            if let Some(v) = super::super::discover::predict_x(r.xf, &r.form, &x.terms) {
+                out.evo_after.0 += 1;
+                out.evo_after.1 += (v == x.next) as u64;
+            }
+        }
     }
     out.run_nanos = t_run.elapsed().as_nanos();
     out.state = Some(e.state);

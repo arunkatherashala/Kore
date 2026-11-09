@@ -3110,6 +3110,18 @@ Author-defined world, families, grammar and rewards; the oracle book (60 tasks p
 
 `being/b14/tests.rs` (12 tests, temp dirs only): every earlier opt-in key and the B14 keys parse together; each key given twice, bad values and values above the hard maximum make the file invalid and fail closed; off is the planner bit for bit over 1,500 steps; the curiosity budget holds and does not run out; library candidates need the being's own examples and are blocked by one applicable-and-wrong example; imports are logged once, checked, reused with citations of the import note and the examples, and fold back; library uses cite the rule note; retirement on evidence cites every example and folds back; a logged run equals 400 + 500 steps with a cold restart; not allowed = refused, logged and off (missing, invalid and silent controller; allowed at creation and switched off later); B14 needs the extended world; KILL stops after 40 steps; old logs fold with no B14 state; import tags round trip and a tampered id is refused; the B14 sources read no hidden world parameter and use no file, network or process API.
 
+## Track E1: evolutionary search over the rule DSL (synthetic first world, author-defined families, expression language and rewards)
+
+Question: B14 lifts the first world's long-run plateau but the slope after 50k steps stays flat; the remaining sequence families are not covered by rules, and some (the negative controls) are outside the B2 grammar and composition. Can evolutionary search (genetic programming) over the being's rule DSL (populations of candidate rule expressions, mutation, crossover with each other and with the being's verified rules as inherited genes, selection by exact matches on the being's own training examples) find NEW rule forms that the enumerative discovery cannot, under the existing verification path, inside a bounded compute budget, and does that raise reward and keep it improving?
+
+### Pre-registered success criteria
+
+Pre-registered 2026-11-08 before report-seed runs (given by the reviewer, copied verbatim; judged only against them):
+
+> PRIMARY = paired difference (B14+E1 on minus B14 on, same worlds) in mean true reward per energy over steps 50k..200k, report seeds 1..20: 95% CI lower bound > 0 AND >=14/20 wins. SECONDARY: (a) slope of windowed reward 50k..200k with E1 above B14's slope (paired CI); (b) families covered by verified rules increases (paired CI); (c) 0 wrong rules accepted (precision before checker reported with N, rejected count); (d) evolution compute cost reported (time and energy share) and no significant loss on simple worlds; (e) no regression in World T / vs-world / World O / World v2 (by construction or measured). Tune only on seeds 101..120. Every claim: mean [95% CI] (wins/ties/losses of 20), seeds, steps, commit. A negative result is acceptable and must be reported honestly.
+
+(Results follow below once the report-seed runs are done.)
+
 ## Not measured
 
 Real-life data of any kind (the free-text section above is also synthetic); the probabilities of the live ledger (`predict_make`/`predict_score` have not been run on real data; the S4 numbers above are synthetic sequences only; the older `self_ledger_snapshot` rows are not scored by any measurement); behaviour with

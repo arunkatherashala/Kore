@@ -248,9 +248,11 @@ fn cmd_arms(args: &[String]) {
         let rej: u64 = os.iter().map(|o| o.evo_rejected).sum();
         let ver: u64 = os.iter().map(|o| o.evo_verified).sum();
         let passes: u64 = os.iter().map(|o| o.evo_passes).sum();
+        let after_ap: u64 = os.iter().map(|o| o.evo_after.0).sum();
+        let after_ok: u64 = os.iter().map(|o| o.evo_after.1).sum();
         println!(
-            "  {}: passes {passes}, evolved rules accepted {evolved} (wrong on fresh tasks: {bad} of {chk}), candidates verified {ver}, rejected by the check {rej}; evolved-rule answers {ans}, right {right} (precision before the checker {:.4}); energy-equivalent share {}; time share {}; evolution {secs:.1} s of {run_secs:.1} s per life",
-            arms[a], right as f64 / ans.max(1) as f64, ci_n(&share), ci_n(&tshare)
+            "  {}: passes {passes}, evolved rules accepted {evolved} (wrong on fresh tasks: {bad} of {chk}), candidates verified {ver}, rejected by the check {rej}; evolved rules on the being's later revealed examples: applicable {after_ap}, prediction right {after_ok} (precision before the checker {:.4}); evolved-rule answers given {ans}, judged right {right} ({:.4}, includes execution slips); energy-equivalent share {}; time share {}; evolution {secs:.1} s of {run_secs:.1} s per life",
+            arms[a], after_ok as f64 / after_ap.max(1) as f64, right as f64 / ans.max(1) as f64, ci_n(&share), ci_n(&tshare)
         );
         for t in bad_txt {
             println!("    WRONG: {t}");
