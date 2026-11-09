@@ -281,7 +281,7 @@ fn run2(p: P2, cfg: &W2Cfg) -> Stats {
         }
         P2::Recommended => {
             let lc = LearnerCfg { use_: profile_use(), ..LearnerCfg::default() };
-            let mut l = LearnerO { inner: lc.learner(), skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), l2l: Default::default(), view: None };
+            let mut l = LearnerO { inner: lc.learner(), skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), l2l: Default::default(), view: None, l2: None, l2view: None };
             let mut pr = Probe { inner: &mut l, oracle, s: Stats::default() };
             let r = run_w2_with(cfg, &mut pr, 10, None, lc);
             (r, pr.s)
@@ -290,7 +290,7 @@ fn run2(p: P2, cfg: &W2Cfg) -> Stats {
             let lin = Some(being::linval::LIN_V2);
             if rec {
                 let lc = LearnerCfg { use_: profile_use(), lin, ..LearnerCfg::default() };
-                let mut l = LearnerO { inner: lc.learner(), skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), l2l: Default::default(), view: None };
+                let mut l = LearnerO { inner: lc.learner(), skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), l2l: Default::default(), view: None, l2: None, l2view: None };
                 let mut pr = Probe { inner: &mut l, oracle, s: Stats::default() };
                 let r = run_w2_with(cfg, &mut pr, 10, None, lc);
                 (r, pr.s)
@@ -426,7 +426,7 @@ fn grid_lin() -> Vec<LinCfg> {
 fn w2_run(rec: bool, lin: Option<LinCfg>, cfg: &W2Cfg) -> f64 {
     if rec {
         let lc = LearnerCfg { use_: profile_use(), lin, ..LearnerCfg::default() };
-        let mut l = LearnerO { inner: lc.learner(), skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), l2l: Default::default(), view: None };
+        let mut l = LearnerO { inner: lc.learner(), skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), l2l: Default::default(), view: None, l2: None, l2view: None };
         run_w2_with(cfg, &mut l, 10, None, lc).per_energy()
     } else {
         let lc = LearnerCfg { lin, ..LearnerCfg::default() };

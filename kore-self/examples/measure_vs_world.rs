@@ -202,7 +202,7 @@ pub fn run_ours2(p: Ours2, cfg: &W2Cfg) -> f64 {
         Ours2::Current => run_w2(cfg, &mut Learner2::default(), EVERY, None).per_energy(),
         Ours2::Recommended => {
             let lc = LearnerCfg { use_: profile_use(), ..LearnerCfg::default() };
-            let mut l = LearnerO { inner: lc.learner(), skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), l2l: being::world_o::b12::L2LCfg::default(), view: None };
+            let mut l = LearnerO { inner: lc.learner(), skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), l2l: being::world_o::b12::L2LCfg::default(), view: None, l2: None, l2view: None };
             run_w2_with(cfg, &mut l, EVERY, None, lc).per_energy()
         }
         Ours2::AllSkills => {
@@ -219,7 +219,7 @@ pub fn run_ours2(p: Ours2, cfg: &W2Cfg) -> f64 {
         }
         Ours2::B13Recommended => {
             let lc = LearnerCfg { use_: profile_use(), lin: Some(LIN_V2), ..LearnerCfg::default() };
-            let mut l = LearnerO { inner: lc.learner(), skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), l2l: being::world_o::b12::L2LCfg::default(), view: None };
+            let mut l = LearnerO { inner: lc.learner(), skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), l2l: being::world_o::b12::L2LCfg::default(), view: None, l2: None, l2view: None };
             run_w2_with(cfg, &mut l, EVERY, None, lc).per_energy()
         }
     }
@@ -830,7 +830,7 @@ fn run_x2(j: usize, cfg: &W2Cfg) -> being::world2::measure::W2Run {
         0 => run_w2(cfg, &mut Oracle2::new(World2::new(cfg.clone()), true), 0, None),
         1 => {
             let lc = LearnerCfg { use_: profile_use(), lin: Some(LIN_V2), ..LearnerCfg::default() };
-            let mut l = LearnerO { inner: lc.learner(), skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), l2l: being::world_o::b12::L2LCfg::default(), view: None };
+            let mut l = LearnerO { inner: lc.learner(), skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), l2l: being::world_o::b12::L2LCfg::default(), view: None, l2: None, l2view: None };
             run_w2_with(cfg, &mut l, EVERY, None, lc)
         }
         2 => {
@@ -839,7 +839,7 @@ fn run_x2(j: usize, cfg: &W2Cfg) -> being::world2::measure::W2Run {
         }
         3 => {
             let lc = LearnerCfg { use_: profile_use(), ..LearnerCfg::default() };
-            let mut l = LearnerO { inner: lc.learner(), skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), l2l: being::world_o::b12::L2LCfg::default(), view: None };
+            let mut l = LearnerO { inner: lc.learner(), skip_rule: SkipRule::Settled(DEFAULT_SETTLE_K), l2l: being::world_o::b12::L2LCfg::default(), view: None, l2: None, l2view: None };
             run_w2_with(cfg, &mut l, EVERY, None, lc)
         }
         4 => run_w2(cfg, &mut Player2::new(Method::LinUcb { alpha: 0.5, skip: 1.0 }.agent(cfg.seed)), 0, None),
