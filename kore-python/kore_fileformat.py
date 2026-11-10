@@ -1154,7 +1154,7 @@ def column_stats_from_bytes(data: bytes) -> dict:
     return {c.name: get_column_stats(data, c.name) for c in block.columns}
 
 
-__version__ = "1.7.30"
+__version__ = "1.8.21"
 __all__ = [
     'append_version',
     'list_versions',
@@ -3527,7 +3527,7 @@ class FileMetadata:
     """Custom key-value metadata embedded in a .kore file header.
 
         meta = kore.FileMetadata()
-        meta.set("created_by", "KORE FileFormat v1.7.30")
+        meta.set("created_by", "KORE FileFormat v1.8.21")
         meta.set("source", "sales_pipeline")
         meta.set("schema_version", "2")
         kore.write_with_metadata("data.kore", block, meta)

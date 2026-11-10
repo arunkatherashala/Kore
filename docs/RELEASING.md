@@ -21,7 +21,13 @@ run checks out `stable` and releases what is on `stable`.
       If CI did not pass, a scheduled run skips with a warning and a manual run fails;
    4. bumps the version in every language file and commits it on `stable` as
       `github-actions[bot]` ("chore: auto-bump X → Y"). The scheduled run always makes a
-      **patch** bump. Minor and major bumps are only possible from a manual run;
+      **patch** bump. Minor and major bumps are only possible from a manual run.
+      `scripts/check_versions.py --expect Y` then checks that every package file says Y
+      (Python `__version__`, npm, PHP, Ruby, Go, Maven, C#, standalone crate); if one does not,
+      the run fails before anything is committed, tagged or published. CI runs the same check
+      on every push (job "Compatibility"), so a drifted file is caught early. Up to 1.8.21,
+      Python `__version__`, PHP, Ruby and C# had drifted to 1.7.30 (Go comment 1.6.6), because
+      the bump replaced only the exact old number;
    5. tags the bump commit `vY` and starts publish-release, publish-pypi, publish-nodejs,
       publish-crates, publish-rubygems, publish-maven and publish-nuget on the tag. Each of them
       first runs its `guard` job: the run must be on a `v*` tag, `RELEASE_HOLD` must not be

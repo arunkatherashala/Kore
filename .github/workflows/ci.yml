@@ -203,6 +203,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: "Version numbers agree in every package file"
+        run: python -I scripts/check_versions.py
+
       - name: "(a) Rust: every committed old .kore file opens with the current reader"
         run: cargo test --release -p kore-store --test old_files
 

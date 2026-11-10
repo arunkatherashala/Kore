@@ -189,6 +189,14 @@ jobs:
           sed -i -E "0,/<version>[^<]+<\/version>/s//<version>${NEW}<\/version>/" "maven/pom.xml"
           sed -i -E "0,/\"version\": *\"[^\"]+\"/s//\"version\": \"${NEW}\"/" "kore-node/package.json"
           sed -i -E "0,/^version *= *\"[^\"]+\"/s//version     = \"${NEW}\"/" "kore-standalone/Cargo.toml"
+          # These had drifted too (still 1.7.30 / 1.6.6 at 1.8.21), so set them as well
+          sed -i -E "0,/^__version__ *= *\"[^\"]+\"/s//__version__ = \"${NEW}\"/" "kore-python/kore_fileformat.py"
+          sed -i -E "0,/\"version\": *\"[^\"]+\"/s//\"version\": \"${NEW}\"/" "kore-php/composer.json"
+          sed -i -E "0,/spec\.version( *)= *\"[^\"]+\"/s//spec.version\1= \"${NEW}\"/" "kore-ruby/kore_fileformat.gemspec"
+          sed -i -E "s#<(Version|PackageVersion)>[^<]+</#<\1>${NEW}</#; s#<(AssemblyVersion|FileVersion)>[^<]+</#<\1>${NEW}.0</#" "csharp/Kore.FileFormat/Kore.FileFormat.csproj"
+          sed -i -E "s#(Go bindings v)[0-9][^[:space:]]*#\1${NEW}#" "kore-go/go.mod"
+          # every package file must now say NEW, or nothing is committed, tagged or published
+          python3 -I scripts/check_versions.py --expect "$NEW"
 
       - name: Commit version bump on stable
         if: steps.same.outputs.go == 'true'
