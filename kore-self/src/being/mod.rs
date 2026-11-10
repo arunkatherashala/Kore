@@ -41,6 +41,8 @@ pub mod world;
 pub mod world2;
 /// World O, the open-ended world (opt-in: separate files and log source; see docs/open_world.md).
 pub mod world_o;
+/// Track L2: learning to learn across families (opt-in; see l2/mod.rs).
+pub mod l2;
 /// World T, data work in a sandbox (opt-in: separate files and log source; see docs/world_t.md).
 pub mod world_t;
 /// Track B14: rule library and always-on curiosity (opt-in; see b14/mod.rs).

@@ -29,6 +29,7 @@ be burstier, messier and phrased differently.
 | W1 World T, data work in a sandbox (synthetic): being minus tuned LinUCB / UCB1 / always SQL, reward per energy, default reward design; 6 x 5 reward-design sweep; OOD | 20 worlds per point, budget 6000 | random plan, always SQL, UCB1 and LinUCB, each tuned on seeds 101..120 with 6 configurations per grid point; reward-best oracle (sees every plan's true result) | +0.127 [+0.084, +0.171] / +0.496 [+0.416, +0.575] / +2.259; 0.686 below the reward-best oracle; sweep: being ahead (interval above 0) at 22 / 24 / 25 of 30 points, behind LinUCB and UCB1 from a wrong-answer penalty of 3.16 x reward, behind always SQL at 3 points of penalty 10 x; series rules and column search precision 1.000 before the checker (6,257 and 881 answers); 0 wrong accepted; later kinds not faster (Spearman -0.005 [-0.118, +0.109]); OOD +0.516 over LinUCB, mostly from skipping (Track W1) | 2026-11-08 | world-t |
 | W1b World T over-skipping fix (`value_ucb`, synthetic): being minus tuned LinUCB / UCB1 / always SQL on the 6 x 5 sweep, before (abd8de1e) and after | 20 worlds per point, budget 6000 | same as W1, all re-tuned on seeds 101..120; old being re-tuned separately | penalty 0 unchanged (headline +0.127 [+0.084, +0.171], new minus old +0.000, 0/0/20); points ahead (interval above 0) 22 / 24 / 25 -> 25 / 30 / 29 of 30; still behind LinUCB at penalty 10 x, weights 1 and 3.16 (-0.104, -0.108; before -0.775, -0.488) and always SQL at penalty 10 x, weight 10 (-0.087); pre-registered criterion not met (Track W1b) | 2026-11-08 | wt-overskip |
 | B14 rule library and always-on curiosity, first world long run (synthetic) | 20 worlds x 200,000 steps; transfer 20 worlds x 30,000; short lives 20 worlds | B14 off (the long run's being); tuning seeds 101..120 | steps 50k-200k B14 on minus off +0.491 [+0.287, +0.695] (18/0/2), rule worlds +0.655 (14/0/0), simple +0.109 [-0.076, +0.293]; slope 50k-200k -0.013 [-0.030, +0.003] per 100k (plateau level raised, slope not); curiosity cost on simple worlds +2.5% [-1.9%, +6.8%] (n = 6, 1% criterion not met); library import transfer +475 [-128, +1,078] steps saved per family (7/10/3); budget 600 +0.037 [-0.037, +0.112], 3000 +0.149 [+0.004, +0.293] (Track B14) | 2026-11-08 | a062a62a |
+| L2 learning to learn, World O (synthetic): `form+l2` (B12 `form` plus the L2 meta-prior) top-tier Spearman of family order vs attempts to competence; reward per energy vs `current`; attribution `form+l2` minus `form` | 20 worlds, life 1,200,000, pre-registered (commit 19125b17) | `current`; `form` (B12) | Spearman -0.094 [-0.164, -0.023] (15 of 20 negative): met; reward +0.366 [+0.275, +0.457] (20/0/0): met; but `form+l2` minus `form`: Spearman +0.005 [-0.045, +0.055] (11/0/9), last-third minus first-third attempts +1.14 [-1.42, +3.70] (10/0/10), reward +0.000 [-0.006, +0.007]: the meta-prior adds nothing measurable; last-third minus first-third for `form+l2` +0.06 [-4.05, +4.18]: not met; 0 wrong of 7,501 rules; World T not feasible; World v2 and vs-world v2 unchanged (Track L2) | 2026-11-09 | 19125b17 |
 
 ## How to reproduce
 
@@ -3148,6 +3149,98 @@ Setup: commit d04e1441 (tuned defaults from seeds 101..120: pass every 100 steps
 Caveat on the primary (not pre-registered, reported because it changes the reading): the reward per energy above counts only the energy of world steps; the evolution compute is a budget in energy-equivalents and is **not** charged to the being. Charged at the author-set rate (1,000 evaluations per energy unit), per world and arm: reward over steps 50k..200k divided by (world-step energy over steps 50k..200k + evolution evaluations of the same windows / 1,000). An evaluation is attributed to the window in which its pass ran: the windowed counter is the difference of the cumulative evaluation count at the window boundaries, so the window 50k..200k holds the passes run after steps 50,001 through 200,000 (the pass after step 50,000 belongs to the window before). From the exact integers (re-run of seeds 1..20 with the same command and a print-only change to `measure_e1.rs` in the commit that adds this note; every other printed number and the per-world file are byte-identical to the d04e1441 run, apart from wall times), the difference is **-0.020 [-0.065, +0.024] (5/1/14 of 20)**, relative -0.50% [-1.55%, +0.54%]; B14+E1 charged 4.252 [3.922, 4.582] against B14 4.272 [3.947, 4.597]. The evolution share of the window's energy is 0.0180 [0.0151, 0.0209] (life share 0.0181); the measured gain (+1.3%) is smaller than the compute it costs. This exact number replaces an approximation (-0.021 [-0.065, +0.024], 5/1/14) computed from the life share printed with 3 decimals. The exchange rate is an author choice, so this is a sensitivity check, not a verdict; the uncharged primary reproduced exactly (+0.057 [+0.010, +0.104], 14/1/5).
 
 Reading: evolutionary search finds rules the enumerative discovery cannot (mostly PatFib and three of the four negative controls), safely (0 wrong of 65, precision 1.000 before the checker), and lifts the level of the plateau slightly in rule worlds; it does not make reward keep improving after 50k steps (slope criterion not met), costs about a third of the wall time, and its reward gain does not exceed its own compute at the author-set exchange rate. Wall time of the report run: 7,404 s (20 single-seed processes, 4 at a time, one thread each).
+
+## Track L2: learning to learn across families (synthetic world, author-defined families)
+
+Question: Tracks B11 and B12 found that the being does not learn later World O families faster than earlier ones (top-tier Spearman of family order vs attempts to competence: current +0.025 [-0.060, +0.110]; B12 `form` -0.098 [-0.171, -0.026], mostly an immediate gain, "level 2 over level 1: -0.014"), and Track W1 the same in World T (-0.005 [-0.118, +0.109]). Why, and can a principled mechanism make the being's own past learning speed up new learning? Everything is the author's simulation (World O families, grammar, rewards, the being). Code: `kore-self/src/being/l2/` (new: `meta.rs` the maths, `wo.rs` World O state, hooks, rule pass and chooser, `ctl.rs` the controller key, `tests.rs`), switch-guarded hooks in `world_o/engine.rs` (one field each in `LearnerOCfg`, `LearnerO`, `StateO`; one call each in open, close, rule; the L2 rule pass after the B12 pass; the genesis tag; `run_o_granted`), one key arm in `controller.rs`, one `mod` line in `being/mod.rs`; measurement `examples/measure_l2.rs` (modes `diag`, `report`; parts in `examples/measure_l2_parts/`). Branch `l2l-v2` from abd8de1e, 2026-11-08, Windows, 8 CPUs shared with three other agents (wall times are not comparable).
+
+### Step 1: diagnosis (tuning seeds 101..120, life 1,200,000, `measure_l2 diag`)
+
+Top tier (families 32+), learnable families, per 48-family block (pooled over 20 worlds; share that reaches competence, median attempts to competence among those that do; the floor is 10 because competence needs the last 10 attempts at >= 0.9 of the best the means allow, `world_o/measure.rs:172-173`):
+
+| condition | type | families 32-79 | 80-127 | 128-175 | 176-223 |
+|---|---|---|---|---|---|
+| current | seq | 43%, 34 | 38%, 33 | 32%, 32 | 29%, 28 |
+| current | compose | 36%, 19 | 30%, 22 | 21%, 22 | 19%, 17 |
+| form (B12) | seq | 99%, 17 | 93%, 17 | 88%, 17 | 88%, 17 |
+| form (B12) | compose | 97%, 17 | 88%, 17 | 87%, 18 | 84%, 18 |
+
+Grid, knapsack and formula families sit at the floor (median 10) in every block under both learners. Top-tier Spearman on these seeds: current +0.040 [-0.035, +0.115], form 0.000 [-0.063, +0.063]; leaving out the families whose life is cut by the end of the budget changes it little (+0.031, +0.013), so censoring is not the cause. For `form`, a top-tier sequence family that reaches competence has 4.00 / 3.99 / 3.89 bad attempts before its first rule and 3.86 / 3.67 / 3.98 after it (families 32-95 / 96-159 / 160+, seeds 101..116): flat over the life.
+
+Why later families are not faster:
+
+* What the being carries across families stops growing before the top tier starts. The B12 rule-form prior is a fixed step: a form accepted in `FORM_MIN_FAMS` = 2 earlier families needs 2 + 1 answers instead of 3 + 1 (`world_o/b12.rs:59-61`, applied at `b12.rs:520`), whatever the number of families behind it and however often a wrong form agrees by chance. The tier-2+ forms have all been seen twice long before family 32, so every top-tier family gets the same treatment: about 4 attempts before its rule, at family 40 and at family 200.
+* A fresh rule's answers start from a prior pooled over every `discovered` attempt of every family, with and without a rule (`world2/model.rs:165-180`: `p_s` over all cells, then the family level with weight 4), and a new rule resets its cells (`State2::apply_rule`; `world_o/engine.rs:255` for the compose families that reuse it). The being never learns that its own fresh rules are reliable, so each family again spends about 4 attempts on other strategies after its rule exists.
+* Strategy choice for grid, knapsack and formula families is at the floor from the first top-tier family on; nothing is left to speed up there.
+* The B12 hierarchical prior (M2) did learn per-type success rates, but it removed the optimism that made the being try new hard families (fewer examples, fewer rules; Track B12), so it is not used here.
+
+### What was built (opt-in; off by default; controller key `l2_meta_prior`)
+
+A hierarchical (empirical-Bayes) meta-prior over what earlier families taught, re-derived from the log by the fold:
+
+* **Form posterior** (`meta.rs` `FormPrior`, `wo.rs` `family_pass`). Over the earlier sequence families: a Dirichlet prior over rule forms, `pi(f) = (n_f + 1) / (N + L + 1)`, with an "other" category for the families that closed without a rule; and the chance `eps` that a seen form which is NOT a family's rule still reproduces one of its revealed answers, estimated (Beta(1, 1)) from every seen form tried on every example of every closed family whose rule was another form. A seen form that reproduces `k` of a new family's answers and contradicts none has posterior `pi(f) / (sum of pi(g) over the consistent seen forms + pi(other) eps^k)`; it is accepted for every difficulty of the family without a rule when the posterior is >= 1 - delta (delta = 0.02) and k >= 1. Early in life `eps` is about 1/2 and "other" is heavy, so many answers are needed; the need falls as families accumulate. Runs after the B2 and B12 passes; the rule event names the earlier families with that form and the posterior, and its revision cites their rule events.
+* **Rule trust** (`meta.rs` `trust_prior`, `wo.rs` `choose`). Where a live rule covers an offer, the estimate of `discovered` starts from an empirical-Bayes Beta prior over the post-rule success shares of the rules of earlier closed families (method of moments; weight 2..40, shrunk by the mean's own uncertainty when few families are known; at least 3 families with at least 3 answers), in place of the pooled B1 prior. Every such decision states the prior (mean, weight, family ids). With B12's chooser switches on, B12 decides (not combined).
+* **Logging**: every family closing writes an `l2_update` note (what it added: its form or "other", the chance-agreement counts, its rules' record; the prior now and the families it rests on). Genesis tag `wo_l2m:forms/trust/delta_milli/min_ex`.
+* **Controller**: `l2_meta_prior = on|off` in `controller.txt` (`l2/ctl.rs`; default off; a bad value or a duplicate makes the whole file unparseable; missing or unparseable file: off). A new World O being asking for L2 gets it only through `l2::wo::run_o_ctl` with a controller text that allows it; otherwise (and always through the plain `run_o`) it is created without L2 and a `controller_refusal` (cap `l2_meta_prior`) is logged before its genesis. An existing being keeps what it was created with.
+
+Constants (delta 0.02, k >= 1, the trust bounds) were set from the design before any run; one tuning run on seeds 101..110 (life 1,200,000) compared `current`, `form`, `l2` (current + L2), `form+l2`, and L2's two parts alone: `form+l2` minus `form`: Spearman -0.061 [-0.102, -0.020] (8 of 10 lower), last-third minus first-third attempts -4.36 [-7.42, -1.29] (8 of 10), reward +0.004 [-0.008, +0.016]; `l2` on the current learner: Spearman -0.007 [-0.056, +0.042], reward +0.128 [-0.098, +0.354] (without family-wide rules most sequence families never get a rule, so there is little to speed up). No constant was changed after that run. Nothing was tuned on the report seeds.
+
+### Pre-registration
+
+Written before any report-seed run and committed on its own (commit named in the status table): pre-registered 2026-11-08 before report-seed runs.
+
+* Candidate: `form+l2` (the B12 recommended learner `form`, plus the L2 meta-prior with the constants above). Reference "current being": the default learner `current`. Report seeds 1..20, World O default config, life 1,200,000 energy units, windows of 100,000, the controller of B12 (live-rule cap 200, candidate cap 100,000, no composition), 95% t-intervals, paired on identical worlds, wins/ties/losses of 20.
+* PRIMARY (both parts must hold): (a) top-tier Spearman per world of family index vs attempts to competence (the B11/B12 statistic: learnable top-tier families, not reached = slowest) for `form+l2`: 95% interval entirely below 0; (b) paired whole-life reward per energy after the first window, `form+l2` minus `current`: not significantly worse (interval not entirely below 0).
+* SECONDARY: (1) the same on World T; (2) attempts to competence (not reached = 100, capped at 100) of the last third of a world's learnable top-tier families minus the first third, paired within world: interval entirely below 0; (3) no significant regression on vs-world (`examples/measure_vs_world.rs`), World v2, and the World O headline (reward per energy vs `current`).
+* ATTRIBUTION (secondary; needed because `form` alone already had Spearman -0.098 [-0.171, -0.026] on these seeds in Track B12): `form+l2` minus `form`, paired: Spearman interval entirely below 0; last-third minus first-third interval entirely below 0; reward not significantly worse. Also reported, not a criterion: `l2` (L2 on the current learner) against `current`.
+
+### Report seeds 1..20 (World O default config, life 1,200,000 energy units, windows of 100,000, n = 20 worlds)
+
+Run: `measure_l2 report --seeds 1..20` (default conditions `current,form,l2,form+l2`, references `current,form`; B12 constants prior_k 8, explore_n 10, explore_w 500, explore_pm 50; L2 delta 0.02, min_ex 1), commit 19125b17 (the pre-registration commit; no code or constant changed after it), 2026-11-09, release build, 4 rayon threads on 8 shared CPUs, 80 lives in 13,731 s wall. The `current` and `form` rows reproduce Track B12 on the same seeds exactly (Spearman +0.025 / -0.098, reward +0.366, 7,471 rules judged), so the runs are the same worlds and the same learners.
+
+Per condition, mean [95% t-interval] over the 20 worlds:
+
+| condition | top-tier Spearman (negative = later faster) | attempts to competence, first third of top-tier families | last third | last minus first, paired | first-10 regret proxy | reward per energy after window 1 | rules accepted per world | competent share, top tier |
+|---|---|---|---|---|---|---|---|---|
+| current | +0.025 [-0.060, +0.110] (8 of 20 negative) | 48.20 [41.67, 54.73] | 57.26 [50.87, 63.65] | +9.06 [+1.02, +17.10] (7 of 20 lower) | 0.626 [0.601, 0.650] | 4.223 [4.040, 4.406] | 126.4 | 0.600 [0.541, 0.660] |
+| form | -0.098 [-0.171, -0.026] (17 of 20 negative) | 23.72 [20.72, 26.72] | 22.64 [19.36, 25.92] | -1.08 [-5.11, +2.96] (13 of 20 lower) | 0.498 [0.469, 0.527] | 4.589 [4.456, 4.722] | 381.4 | 0.916 [0.896, 0.936] |
+| l2 | +0.008 [-0.069, +0.085] (10 of 20 negative) | 44.43 [39.20, 49.65] | 51.31 [45.23, 57.40] | +6.88 [-0.69, +14.46] (7 of 20 lower) | 0.616 [0.590, 0.641] | 4.255 [4.056, 4.454] | 146.2 | 0.643 [0.593, 0.693] |
+| form+l2 | -0.094 [-0.164, -0.023] (15 of 20 negative) | 22.88 [19.90, 25.87] | 22.95 [19.91, 25.98] | +0.06 [-4.05, +4.18] (11 of 20 lower) | 0.494 [0.465, 0.522] | 4.589 [4.457, 4.721] | 381.6 | 0.920 [0.902, 0.938] |
+
+Paired differences (condition minus reference, same worlds), mean [95% t-interval] (difference above 0 / equal / below 0, of 20):
+
+| comparison | reward per energy after window 1 | Spearman | last-third minus first-third attempts | first-10 regret proxy |
+|---|---|---|---|---|
+| form+l2 minus current | +0.366 [+0.275, +0.457] (20 / 0 / 0) | -0.119 [-0.181, -0.056] (5 / 0 / 15) | -9.00 [-15.55, -2.44] (6 / 0 / 14) | -0.132 [-0.162, -0.102] (0 / 0 / 20) |
+| form+l2 minus form | +0.000 [-0.006, +0.007] (10 / 0 / 10) | +0.005 [-0.045, +0.055] (11 / 0 / 9) | +1.14 [-1.42, +3.70] (10 / 0 / 10) | -0.004 [-0.011, +0.003] (7 / 0 / 13) |
+| form minus current | +0.366 [+0.275, +0.456] (20 / 0 / 0) | -0.123 [-0.176, -0.070] (3 / 0 / 17) | -10.14 [-17.44, -2.84] (6 / 0 / 14) | -0.128 [-0.157, -0.099] (0 / 0 / 20) |
+| l2 minus current | +0.032 [-0.026, +0.091] (11 / 1 / 8) | -0.017 [-0.054, +0.020] (7 / 2 / 11) | -2.18 [-6.66, +2.30] (5 / 2 / 13) | -0.010 [-0.022, +0.002] (8 / 2 / 10) |
+| l2 minus form | -0.334 [-0.436, -0.231] (0 / 0 / 20) | +0.107 [+0.064, +0.150] (18 / 0 / 2) | +7.96 [+0.78, +15.15] (12 / 0 / 8) | +0.118 [+0.094, +0.142] (20 / 0 / 0) |
+
+Wrong rules (every accepted rule of a sequence family judged on 60 sampled tasks at acceptance): current 0 of 2,438; form 0 of 7,471; l2 0 of 2,822; form+l2 0 of 7,501.
+
+Secondary checks outside World O:
+
+* World T: not feasible. The L2 meta-prior exists only for World O (`l2/wo.rs`); `examples/measure_world_t.rs` has no L2 learner, so there is no `form+l2` to run in World T. Not measured.
+* World v2 and vs-world: the L2 meta-prior is a World O mechanism and cannot be switched on in those worlds; what can be checked is that its code (off by default) changes nothing there. At commit 19125b17, `measure_world_v2 report` (seeds 1..20, 7 conditions) reproduces the table of the section "World v2" to the last digit (learner 2.777 / 2.755 / 2.713 / 2.754 / 2.876 / 2.987 / 2.928), and `measure_vs_world v2` (seeds 1..20, 12 conditions) reproduces every mean of the Track V1/B13 World v2 table (ours current, current + B13, ours recommended, B13 profile, LinUCB) and the B13-profile-minus-LinUCB differences with their win counts. No regression, by identity. `measure_vs_world o` (World O, 5,772 s wall in Track V1) was not rerun; the World O headline is the reward row above.
+
+Verdict per pre-registered criterion:
+
+| criterion | result | verdict |
+|---|---|---|
+| PRIMARY (a): `form+l2` top-tier Spearman interval entirely below 0 | -0.094 [-0.164, -0.023], 15 of 20 negative | met |
+| PRIMARY (b): `form+l2` minus `current` reward not significantly worse | +0.366 [+0.275, +0.457], 20 / 0 / 0 | met |
+| SECONDARY (1): the same on World T | no L2 learner for World T | not measured (not feasible) |
+| SECONDARY (2): `form+l2` last-third minus first-third interval entirely below 0 | +0.06 [-4.05, +4.18], 11 of 20 lower | not met |
+| SECONDARY (3): no regression on vs-world, World v2, World O headline | World v2 and vs-world v2 identical to the recorded tables (L2 off there); World O +0.366 [+0.275, +0.457] vs `current` | met (World v2, vs-world v2, World O headline; vs-world World O mode not rerun) |
+| ATTRIBUTION: `form+l2` minus `form` Spearman interval entirely below 0 | +0.005 [-0.045, +0.055], 11 / 0 / 9 | not met |
+| ATTRIBUTION: `form+l2` minus `form` last-third minus first-third interval entirely below 0 | +1.14 [-1.42, +3.70], 10 / 0 / 10 | not met |
+| ATTRIBUTION: `form+l2` minus `form` reward not significantly worse | +0.000 [-0.006, +0.007], 10 / 0 / 10 | met |
+
+**Headline: a signal on the tuning seeds (101..110), none on the report seeds (1..20); the L2 meta-prior adds nothing over `form`.** The protocol (separate tuning and report seeds, the attribution ablation `form+l2` minus `form`, both fixed before the report run) is what kept this from being claimed as a gain.
+
+What this says: the pre-registered primary is met, but only because of the B12 `form` learner the candidate is built on: `form` alone gives the same Spearman (-0.098 against -0.094) and the same reward (+0.366), and the L2 meta-prior adds nothing measurable on top of it on the report seeds (Spearman +0.005 [-0.045, +0.055], thirds +1.14 [-1.42, +3.70], reward +0.000). The tuning-seed effect of `form+l2` over `form` (Spearman -0.061 [-0.102, -0.020], thirds -4.36 [-7.42, -1.29], seeds 101..110) did not replicate on seeds 1..20. On the current learner, L2 also gives no significant change (Spearman -0.017 [-0.054, +0.020], reward +0.032 [-0.026, +0.091]). Under no condition does the last third of a world's top-tier families reach competence in fewer attempts than the first third (`form+l2` +0.06 [-4.05, +4.18]). Track L2 is negative: the meta-prior as built does not make later World O families faster to learn than `form` already does. It stays opt-in and off by default; it accepted no wrong rule.
+
 
 ## Not measured
 

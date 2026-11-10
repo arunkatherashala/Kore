@@ -32,6 +32,7 @@
 //! max_curiosity_energy_pm = 20    # curiosity energy at most this share (per mille) of the energy spent so far (B14, default 0, hard max 100)
 //! evolution             = on      # first world: may a new being run evolutionary search over its rule DSL (E1, default off)
 //! evolution_budget_pm   = 20      # evolution compute at most this share (per mille) of the energy spent so far (E1, default 0, hard max 100)
+//! l2_meta_prior         = on      # World O: may a new being use the Track L2 meta-prior across families (default off)
 //! ```
 //!
 //! The B9 keys fail closed on their own: without `experiments = on` AND a non-zero energy share AND a
@@ -190,6 +191,8 @@ impl Controller {
                 _ if super::linval::is_key(k) => super::linval::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 // B10 keys (World v2 rules use, adaptation, rule retirement) are read by `world2::skills`; here they are only validated
                 _ if super::world2::skills::is_key(k) => super::world2::skills::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
+                // Track L2 key (the meta-prior across families, default off) is read by `l2::ctl`; here it is only validated
+                _ if super::l2::ctl::is_key(k) => super::l2::ctl::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 // Track W1 key (World T runs, default off) is read by `world_t::ctl`; here it is only validated
                 _ if super::world_t::ctl::is_key(k) => super::world_t::ctl::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 // Track B14 keys (rule library, curiosity budget; default off) are read by `b14::ctl`; here they are only validated
