@@ -294,6 +294,8 @@ on 2026-11-08 with the same scripts and gave the same sizes as before (they do n
 
 ## 5. Measurements
 
+> **Superseded for the version-4 comparison (2026-11-08).** The tables in this section were measured on 2026-11-07 against the version-4 writer that still had the timestamp selection bug (fixed in commit b596067b). Every "v4" column and every ratio against v4 here (for example "taxi 1.55x" against v4 level 19) is against that old version 4 and is **not** the current result. The current taxi numbers are in section 4: rule mode is 1.25x smaller than the fixed version 4 level 19, and 1.55x smaller than Parquet zstd-22. The Parquet, xz, DuckDB and SQLite columns do not depend on the fix and are still valid.
+
 Setup:
 
 * One run per dataset and size, on one machine (Windows 11, 8 logical CPUs, release build), on 2026-11-07/08.
@@ -358,7 +360,7 @@ Other formats are written from the same values, with exact bits, via Arrow buffe
 * SQLite: one table, inserted in one transaction, then VACUUM; once without and once with an index on the
   key column.
 
-#### Headline: size against the maximum-level baselines (B/value = file bytes / (rows x columns); ratio = baseline bytes / rule-mode bytes)
+#### Size against the maximum-level baselines (earlier measurement; v4 columns are against the old version 4, see the note at the top of section 5) (B/value = file bytes / (rows x columns); ratio = baseline bytes / rule-mode bytes)
 
 Rule mode at zstd level 19 (`CompactOptions::default().with_zstd_level(19).with_rules()`), so every column is compared with v4 at the same level.
 
