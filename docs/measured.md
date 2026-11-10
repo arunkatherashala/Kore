@@ -2952,6 +2952,8 @@ Verdict per pre-registered criterion:
 | ATTRIBUTION: `form+l2` minus `form` last-third minus first-third interval entirely below 0 | +1.14 [-1.42, +3.70], 10 / 0 / 10 | not met |
 | ATTRIBUTION: `form+l2` minus `form` reward not significantly worse | +0.000 [-0.006, +0.007], 10 / 0 / 10 | met |
 
+**Headline: a signal on the tuning seeds (101..110), none on the report seeds (1..20); the L2 meta-prior adds nothing over `form`.** The protocol (separate tuning and report seeds, the attribution ablation `form+l2` minus `form`, both fixed before the report run) is what kept this from being claimed as a gain.
+
 What this says: the pre-registered primary is met, but only because of the B12 `form` learner the candidate is built on: `form` alone gives the same Spearman (-0.098 against -0.094) and the same reward (+0.366), and the L2 meta-prior adds nothing measurable on top of it on the report seeds (Spearman +0.005 [-0.045, +0.055], thirds +1.14 [-1.42, +3.70], reward +0.000). The tuning-seed effect of `form+l2` over `form` (Spearman -0.061 [-0.102, -0.020], thirds -4.36 [-7.42, -1.29], seeds 101..110) did not replicate on seeds 1..20. On the current learner, L2 also gives no significant change (Spearman -0.017 [-0.054, +0.020], reward +0.032 [-0.026, +0.091]). Under no condition does the last third of a world's top-tier families reach competence in fewer attempts than the first third (`form+l2` +0.06 [-4.05, +4.18]). Track L2 is negative: the meta-prior as built does not make later World O families faster to learn than `form` already does. It stays opt-in and off by default; it accepted no wrong rule.
 
 
