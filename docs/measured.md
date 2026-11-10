@@ -3351,6 +3351,9 @@ base 0.585; on the report seeds B14+E1 minus B14 had sd about 0.10.
 
 ### Gate 0 result (2026-11-10, harness at d34657b7, `measure_n1diag gate0`)
 
+Check: every summary number below was recomputed from the 60 per-world rows (seeds 1..60, one row each) and matches.
+The raw output is not committed (a copy is kept outside the repository).
+
 World T, penalty 0, energy weight 1, budget 6000, default files; B1 beta tuned on seeds 101..120 only, then one
 report run on seeds 1..60.
 
@@ -3359,11 +3362,14 @@ report run on seeds 1..60.
 * Report (seeds 1..60), reward per energy: B0 3.889 [3.809, 3.968]; B1 4.109 [4.024, 4.193]; B2 (LinUCB alpha 1)
   3.730 [3.651, 3.809]; KP file reference (true per-file rates, the being's own rules) 4.467 [4.386, 4.548].
 * **GATE 0: B1 minus B0 +0.220 [+0.193, +0.247] (60/0/0)**, paired sd 0.104. B2 minus B0 -0.159 [-0.190, -0.127]
-  (4/0/56). KP file minus B0 +0.579 [+0.552, +0.606]; KP file minus B1 +0.359 [+0.335, +0.382] (60/0/0).
+  (4/0/56). Caveat on B2: this LinUCB has the W1 context features only and no file feature, so it does not get the
+  file information that B1 uses; the B2 numbers are not a fair "B1 beats LinUCB" comparison. A LinUCB with a one-hot
+  file feature is a baseline of Track W2 (`docs/b1_default_prereg.md`, branch `brain-d1`). KP file minus B0 +0.579 [+0.552, +0.606]; KP file minus B1 +0.359 [+0.335, +0.382] (60/0/0).
 * Secondary (c) for B1, share of the KP-file gap closed, (B1 - B0) / (KP file - B0): **0.380**, bootstrap 95%
   [0.342, 0.416].
-* Wrong answers per 100 tasks (not a pre-registered Gate 0 statistic; reported for milestone M4): B0 11.10, B1 7.77;
-  B1 minus B0 -3.33 [-4.02, -2.64] (fewer in 57 of 60 worlds, more in 3).
+* Exploratory (not pre-registered for Gate 0; no claim is made on it): wrong answers per 100 tasks, B0 11.10, B1 7.77;
+  B1 minus B0 -3.33 [-4.02, -2.64] (fewer in 57 of 60 worlds, more in 3). It is pre-registered as a secondary of Track
+  W2 on fresh seeds 201..260.
 * Wall time per life (8 worlds in parallel; another build was running on the machine, so these are rough): B0 11.5 s,
   B1 14.2 s, B2 11.3 s.
 
