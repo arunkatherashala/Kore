@@ -3307,7 +3307,7 @@ base 0.585; on the report seeds B14+E1 minus B14 had sd about 0.10.
   learner of the file-level structure (no N1 code exists), real data, the harsh-penalty points of the sweep, OOD,
   B14+E1 against these references.
 
-### Pre-registration (reviewed draft, 5 reviewer edits applied; final only when the owner approves; no N1 code before that)
+### Pre-registration (approved by the owner 2026-11-10, with PRIMARY rule (b); no N1 code before Gate 0 is reported)
 
 * Candidate: N1, a learned outcome model for World T (outcome and energy per plan from template, context, size class,
   rows and the file's identity, sharing across the templates of a file; hierarchical over cell, file and plan), used
@@ -3324,8 +3324,11 @@ base 0.585; on the report seeds B14+E1 minus B14 had sd about 0.10.
   (W/T/L of 60). Whatever it shows, it is reported. If B1 already closes most of the KP file headroom (secondary (c)
   computed for B1 >= 0.5), the expected conclusion is "a finer key is enough; N1 is not needed", and N1 is built only
   if the owner still asks for it.
-* PRIMARY (the model's own value): N1 minus B1, reward per energy over the life: 95% paired CI lower bound > 0 AND
-  mean difference >= +0.04 AND at least 42 of 60 wins. Only the PRIMARY decides the result.
+* PRIMARY (the model's own value): N1 minus B1, reward per energy over the life: 95% paired CI lower bound >= +0.01
+  AND mean difference >= +0.03 AND at least 42 of 60 wins. Only the PRIMARY decides the result. (Rule (b), chosen
+  over a draft rule "lower bound > 0 and mean >= +0.04", which would pass only about half the time at a true effect
+  of +0.04. At paired sd 0.10 and n = 60 (standard error about 0.013), rule (b) passes with probability about 60% at
+  a true +0.04 and about 85% at +0.05, before the wins condition, which makes it stricter.)
 * SECONDARY (all reported, none is claimed as a win): (a) N1 minus B0; (b) N1 minus B2; (c) share of the gap to the
   KP file reference closed, (N1 - B0) / (KP file - B0), with CI; (d) calibration: Brier score of N1's P(right) on
   its own attempts vs the cell estimate (paired CI); (e) harsh penalties: all sweep points with penalty >= 3.16
