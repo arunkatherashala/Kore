@@ -8,9 +8,11 @@
 //! true mean energy, estimated OUT OF SAMPLE from two all-skip lives of the same world started at steps
 //! 10,000,000 and 20,000,000 (every plan evaluated on every task of those lives, about 12,000 tasks; no
 //! task of the measured life is among them), but never the realized outcome of the task in front of it.
-//! Variants: key = (template, context, plan) (the being's own cells) or (template, file, plan); series
+//! Variants: key = (template, context, plan) (the being's own cells), (template, context, size class,
+//! plan) or (template, file, plan) (a key not seen in the pass falls back to the cell); series
 //! rules = the oracle's (a perfect rule on every in-grammar exact series, as the reward-best oracle) or
-//! the being's own (B2 search every 10 steps on its own examples, as the being); decision rule = the
+//! the being's own (B2 search every 10 steps on its own examples, as the being; the column-form discovery
+//! that orders the column search runs in every variant); decision rule = the
 //! being's (highest p x reward / energy, skip below the realized rate x (E - 1) / E after 40 energy) or the
 //! renewal rule of the reward-best oracle (highest p x reward - rho x energy, skip below -rho).
 //!
@@ -61,6 +63,7 @@ struct Agg {
 struct Tables {
     cell: HashMap<(usize, usize, usize), Agg>,
     file: HashMap<(usize, String, usize), Agg>,
+    size: HashMap<(usize, usize, u8, usize), Agg>,
     tasks: u64,
     unsolvable: u64,
 }
@@ -79,6 +82,11 @@ impl Tables {
                 t.wrong += a.wrong;
                 t.energy += a.energy;
             }
+            let t = self.size.entry((v.tmpl.idx(), v.ctx.idx(), v.size, r.plan.idx())).or_default();
+            t.n += a.n;
+            t.right += a.right;
+            t.wrong += a.wrong;
+            t.energy += a.energy;
             let t = self.file.entry((v.tmpl.idx(), v.file.clone(), r.plan.idx())).or_default();
             t.n += a.n;
             t.right += a.right;
@@ -87,10 +95,16 @@ impl Tables {
         }
     }
     /// (p right, p wrong, mean energy) of a plan on a view; None when never observed.
-    fn get(&self, v: &ViewT, plan: Plan, fine: bool) -> Option<(f64, f64, f64)> {
+    /// fine: 0 = (template, context, plan), 1 = (template, context, size, plan), 2 = (template, file, plan).
+    fn get(&self, v: &ViewT, plan: Plan, fine: u8) -> Option<(f64, f64, f64)> {
         // the being's TsRule on a TsNear task has no row (the references evaluate the rule on TsNext only)
         let f = |a: &Agg| (a.right / a.n, a.wrong / a.n, a.energy / a.n);
-        if fine {
+        if fine == 1 {
+            if let Some(a) = self.size.get(&(v.tmpl.idx(), v.ctx.idx(), v.size, plan.idx())) {
+                return Some(f(a));
+            }
+        }
+        if fine == 2 {
             if let Some(a) = self.file.get(&(v.tmpl.idx(), v.file.clone(), plan.idx())) {
                 return Some(f(a));
             }
@@ -118,14 +132,18 @@ impl ChooserT for Recorder {
 
 #[derive(Clone, Copy, Debug)]
 struct KpCfg {
-    fine: bool,
+    fine: u8,
     oracle_rules: bool,
     ratio: bool,
+    /// With `fine == 2`: use the file's row only once the life has met the file this many times before (any
+    /// template); 0 = always. Measures how much of the file-level headroom lies in files already met.
+    after: u32,
 }
 
 impl KpCfg {
     fn label(&self) -> String {
-        format!("kp_{}_{}_{}", if self.fine { "file" } else { "cell" }, if self.oracle_rules { "orules" } else { "own" }, if self.ratio { "ratio" } else { "renew" })
+        let after = if self.after > 0 { format!("{}", self.after) } else { String::new() };
+        format!("kp_{}{after}_{}_{}", ["cell", "size", "file"][self.fine as usize], if self.oracle_rules { "orules" } else { "own" }, if self.ratio { "ratio" } else { "renew" })
     }
 }
 
@@ -134,6 +152,7 @@ struct Kp {
     t: Arc<Tables>,
     c: KpCfg,
     rule_answer: Option<String>,
+    visits: HashMap<String, u32>,
     rew: f64,
     cost: f64,
 }
@@ -157,8 +176,24 @@ impl ChooserT for Kp {
         let rho_being = if st.total_cost > 0 { st.total_reward as f64 / st.total_cost as f64 } else { 0.0 };
         let rho = if self.cost > 0.0 { self.rew / self.cost } else { 0.0 };
         let mut best: Option<(f64, Plan, f64)> = None;
+        let seen = self.visits.get(&v.file).copied().unwrap_or(0);
+        *self.visits.entry(v.file.clone()).or_default() += 1;
+        let fine = if self.c.fine == 2 && seen < self.c.after { 0 } else { self.c.fine };
         for p in plans {
-            let (pr, pw, e) = self.t.get(v, p, self.c.fine).unwrap_or((0.0, 0.0, p.listed(v) as f64));
+            let (pr, pw, mut e) = self.t.get(v, p, fine).unwrap_or((0.0, 0.0, p.listed(v) as f64));
+            // the column search's energy depends on the search order the being's own column-form
+            // discovery has learned (the parameter pass uses the default order): as the being, use the
+            // observed mean energy of the cell once it has been run
+            // every other plan's energy is a function of the visible row count: its listed energy (as the
+            // being; the key's mean would blur it)
+            if p != Plan::ColSearch {
+                e = p.listed(v) as f64;
+            }
+            if p == Plan::ColSearch {
+                if let Some(c) = st.cells.get(&(v.tmpl.idx() as u8, v.ctx.idx() as u8, p.idx() as u8)).filter(|c| c.n > 0) {
+                    e = c.spent as f64 / c.n as f64;
+                }
+            }
             let e = e.max(1.0);
             let s = if self.c.ratio { (pr * r - pw * pen) / e } else { pr * r - pw * pen - rho * e };
             if best.map_or(true, |b| s > b.0) {
@@ -195,6 +230,9 @@ struct LifeOut {
     skips: u64,
     /// reward per energy per tenth of the life (by energy spent)
     tenths: Vec<f64>,
+    /// (reward, energy) per task kind
+    by_kind: [(i64, i64); 9],
+    files_met: usize,
 }
 
 impl LifeOut {
@@ -211,7 +249,8 @@ fn life_t(cfg: &WTCfg, ch: &mut dyn ChooserT, discover: bool, step0: u64, lcfg: 
     eng.measure = true;
     let world = being::world_t::world::WorldT::new(cfg.clone());
     let mem = MemSandbox(&world);
-    let mut o = LifeOut { reward: 0, cost: 0, tasks: 0, answered: 0, right: 0, skips: 0, tenths: vec![] };
+    let mut o = LifeOut { reward: 0, cost: 0, tasks: 0, answered: 0, right: 0, skips: 0, tenths: vec![], by_kind: [(0, 0); 9], files_met: 0 };
+    let mut met = std::collections::HashSet::new();
     let mut tr = vec![(0i64, 0i64); 10];
     while let Ok(s) = eng.step(ch, &mem) {
         let k = ((o.cost * 10) / cfg.budget).clamp(0, 9) as usize;
@@ -220,6 +259,11 @@ fn life_t(cfg: &WTCfg, ch: &mut dyn ChooserT, discover: bool, step0: u64, lcfg: 
         tr[k].0 += s.truth.reward;
         tr[k].1 += s.truth.cost;
         o.tasks += 1;
+        if let Some(f) = s.events.iter().filter(|e| e.kind == "action").flat_map(|e| e.tags.iter()).find_map(|t| t.strip_prefix("file:")) {
+            met.insert(f.to_string());
+        }
+        o.by_kind[s.truth.kind.idx()].0 += s.truth.reward;
+        o.by_kind[s.truth.kind.idx()].1 += s.truth.cost;
         o.answered += s.truth.answered as u64;
         o.right += s.truth.correct as u64;
         o.skips += s.truth.plan.is_none() as u64;
@@ -227,13 +271,14 @@ fn life_t(cfg: &WTCfg, ch: &mut dyn ChooserT, discover: bool, step0: u64, lcfg: 
             eng.discover_pass();
         }
     }
+    o.files_met = met.len();
     o.tenths = tr.iter().map(|(r, c)| *r as f64 / (*c).max(1) as f64).collect();
     o
 }
 
 fn cmd_wt(args: &[String]) {
     let ss = seeds(args, (101, 120));
-    let kps: Vec<KpCfg> = [false, true].iter().flat_map(|&fine| [true, false].iter().flat_map(move |&orr| [false, true].iter().map(move |&ratio| KpCfg { fine, oracle_rules: orr, ratio }))).collect();
+    let kps: Vec<KpCfg> = [0u8, 1, 2].iter().flat_map(|&fine| [true, false].iter().flat_map(move |&orr| [false, true].iter().map(move |&ratio| KpCfg { fine, oracle_rules: orr, ratio, after: 0 }))).chain([1u32, 3, 10].iter().map(|&after| KpCfg { fine: 2, oracle_rules: false, ratio: true, after })).collect();
     let t0 = std::time::Instant::now();
     let rows: Vec<(u64, Vec<(String, f64)>, String)> = ss
         .par_iter()
@@ -250,7 +295,8 @@ fn cmd_wt(args: &[String]) {
             let chk = run_life(&cfg, Pol::Being(LearnerTCfg::default()), None).rpe();
             assert!((chk - being.rpe()).abs() < 1e-12, "life loop differs from run_life");
             out.push(("being".into(), being.rpe()));
-            let mut extra = format!("being_tenths={}", being.tenths.iter().map(|x| format!("{x:.4}")).collect::<Vec<_>>().join(","));
+            let kfmt = |l: &LifeOut| l.by_kind.iter().map(|(r, c)| format!("{r}:{c}")).collect::<Vec<_>>().join(",");
+            let mut extra = format!("kinds_being={} being_tenths={}", kfmt(&being), being.tenths.iter().map(|x| format!("{x:.4}")).collect::<Vec<_>>().join(","));
             for (name, l) in [("being_flat", LearnerTCfg { pooled: false, ..Default::default() }), ("being_b1", LearnerTCfg { beta_milli: 1000, ..Default::default() }), ("being_b4", LearnerTCfg { beta_milli: 4000, ..Default::default() }), ("being_b0", LearnerTCfg { beta_milli: 0, ..Default::default() })] {
                 out.push((name.into(), run_life(&cfg, Pol::Being(l), None).rpe()));
             }
@@ -258,15 +304,19 @@ fn cmd_wt(args: &[String]) {
             let rb = life_t(&cfg, &mut RewardBestT::new(), false, 0, LearnerTCfg::default());
             out.push(("reward_best".into(), rb.rpe()));
             for c in &kps {
-                let mut k = Kp { t: t.clone(), c: *c, rule_answer: None, rew: 0.0, cost: 0.0 };
-                let l = life_t(&cfg, &mut k, !c.oracle_rules, 0, LearnerTCfg::default());
+                let mut k = Kp { t: t.clone(), c: *c, rule_answer: None, visits: HashMap::new(), rew: 0.0, cost: 0.0 };
+                let l = life_t(&cfg, &mut k, true, 0, LearnerTCfg::default());
                 out.push((c.label(), l.rpe()));
-                if c.fine && c.oracle_rules && !c.ratio {
+                if c.fine == 0 && !c.oracle_rules && c.ratio {
+                    extra.push_str(&format!(" kinds_kpcellownratio={}", kfmt(&l)));
+                }
+                if c.fine == 2 && c.oracle_rules && !c.ratio {
                     extra.push_str(&format!(" kpbest_skip={:.4} kpbest_right_of_answered={:.4}", l.skips as f64 / l.tasks as f64, l.right as f64 / l.answered.max(1) as f64));
                 }
             }
             let det = t.file.values().filter(|a| a.right == 0.0 || a.right == a.n).count() as f64 / t.file.len() as f64;
             extra.push_str(&format!(" param_tasks={} unsolvable_share={:.4} file_keys={} file_keys_deterministic_share={:.4} cell_keys={}", t.tasks, t.unsolvable as f64 / t.tasks as f64, t.file.len(), det, t.cell.len()));
+            extra.push_str(&format!(" being_tasks={} being_files_met={}", being.tasks, being.files_met));
             extra.push_str(&format!(" being_skip={:.4} being_right_of_answered={:.4} rb_skip={:.4}", being.skips as f64 / being.tasks as f64, being.right as f64 / being.answered.max(1) as f64, rb.skips as f64 / rb.tasks as f64));
             eprintln!("world {s} done at {:.0} s", t0.elapsed().as_secs_f64());
             (s, out, extra)
