@@ -74,3 +74,34 @@ fn existing_worlds_are_byte_identical_with_world_t_off() {
     let got = digests();
     assert_eq!(got, GOLDEN.map(String::from).to_vec(), "an existing world's log changed: {got:?}");
 }
+
+/// World T default being (B0 of Track N1 Gate 0): the digest of a logged life (seed 11, budget 1500) and of the
+/// steps of a measurement life (seed 101, budget 6000). Pinned at 6b8a1bf8, before the estimator was split into
+/// `estimate` / `estimate_from` and `choose` / `choose_with` for the file-keyed baseline; with that baseline
+/// off (it lives only in measurement code) the default being is bit-for-bit what it was.
+fn world_t_digests() -> Vec<String> {
+    use crate::being::policy::Policy;
+    use crate::being::world_t::engine::{run_t, MemSandbox, RunTCfg, DEFAULT_DISCOVER_EVERY};
+    use crate::being::world_t::learner::LearnerTCfg;
+    use crate::being::world_t::measure::{run_life, Pol};
+    use crate::being::world_t::world::{WTCfg, WorldT};
+    let mut out = vec![];
+    let d = tempfile::tempdir().unwrap();
+    let mut log = open_log(d.path());
+    let c = WTCfg::new(11, 1500);
+    let w = WorldT::new(c.clone());
+    run_t(&mut log, &RunTCfg { world: Some(c), learner: None, discover_every: DEFAULT_DISCOVER_EVERY, ctl: Some(lim()), sql: None }, &Policy::new(5000), None, &MemSandbox(&w)).unwrap();
+    out.push(log_digest(&log));
+    let life = run_life(&WTCfg::new(101, 6000), Pol::Being(LearnerTCfg::default()), None);
+    let s: String = life.truths.iter().map(|t| format!("{}|{:?}|{}|{}|{}\n", t.step, t.plan, t.correct, t.reward, t.cost)).collect();
+    out.push(format!("{}:{}:{}", sha256_hex(&[s.as_bytes()])[..16].to_string(), life.reward, life.cost));
+    out
+}
+
+const GOLDEN_WT: [&str; 2] = ["091ce2aa622226d4", "beb34713af0726b8:22847:6000"];
+
+#[test]
+fn world_t_default_being_is_byte_identical() {
+    let got = world_t_digests();
+    assert_eq!(got, GOLDEN_WT.map(String::from).to_vec(), "the default World T being changed: {got:?}");
+}

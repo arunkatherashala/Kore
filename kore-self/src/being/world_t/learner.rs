@@ -149,15 +149,23 @@ impl LearnerT {
 
     pub fn estimate(&self, st: &StateT, v: &ViewT, plan: Plan) -> Est {
         let c = st.cells.get(&(v.tmpl.idx() as u8, v.ctx.idx() as u8, plan.idx() as u8)).copied().unwrap_or_default();
-        let (m, mw, from) = self.prior2(st, v, plan);
+        // energy: listed, except a search whose cost the being has observed
+        let energy = if plan == Plan::ColSearch && c.n > 0 { c.spent as f64 / c.n as f64 } else { plan.listed(v) as f64 };
+        self.estimate_from(v, plan, c, self.prior2(st, v, plan), energy)
+    }
+
+    /// The Beta estimate of one key from its counts `c`, a prior (chance right, chance wrong, source) and the
+    /// plan's energy. `estimate` uses the (template, context, plan) cell with the pooled prior; measurement
+    /// baselines (the file-keyed table of Track N1 Gate 0) may pass a finer key's counts with the cell's
+    /// estimate as the prior.
+    pub fn estimate_from(&self, v: &ViewT, plan: Plan, c: Cell, prior: (f64, f64, &'static str), energy: f64) -> Est {
+        let (m, mw, from) = prior;
         let w = self.cfg.prior_w_milli as f64 / 1000.0;
         let p_wrong = (c.wrong as f64 + mw * w) / (c.n as f64 + w).max(1e-9);
         let a = m * w + c.succ as f64;
         let b = (1.0 - m) * w + (c.n - c.succ) as f64;
         let p = a / (a + b).max(1e-9);
         let sd = (p * (1.0 - p) / (a + b + 1.0)).sqrt();
-        // energy: listed, except a search whose cost the being has observed
-        let energy = if plan == Plan::ColSearch && c.n > 0 { c.spent as f64 / c.n as f64 } else { plan.listed(v) as f64 };
         let beta = self.cfg.beta_milli as f64 / 1000.0;
         let (r, pen) = (v.reward as f64, v.penalty());
         let value = if self.cfg.value_ucb && pen > 0.0 {
@@ -175,8 +183,13 @@ impl LearnerT {
     }
 
     pub fn choose(&self, st: &StateT, v: &ViewT) -> ChoiceT {
+        self.choose_with(st, v, |p| self.estimate(st, v, p))
+    }
+
+    /// The chooser (score, optimism, skip test) over the estimates `est` gives for the plans on offer.
+    pub fn choose_with(&self, st: &StateT, v: &ViewT, est: impl Fn(Plan) -> Est) -> ChoiceT {
         let opts = options(st, v);
-        let ests: Vec<Est> = opts.iter().map(|p| self.estimate(st, v, *p)).collect();
+        let ests: Vec<Est> = opts.iter().map(|p| est(*p)).collect();
         let mut bi = 0;
         for (i, e) in ests.iter().enumerate() {
             if e.score > ests[bi].score {

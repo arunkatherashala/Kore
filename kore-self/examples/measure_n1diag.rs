@@ -1,6 +1,10 @@
 //! Track N1 step 0: headroom and plateau diagnosis (measurement only; docs/measured.md, "Track N1 step 0").
 //!   cargo run -p kore-self --example measure_n1diag --offline --release -- wt --seeds 101..120
 //!   cargo run -p kore-self --example measure_n1diag --offline --release -- fw --seeds 101..120 --steps 200000 --arms lib+cur20,lib+cur20:3
+//!   cargo run -p kore-self --example measure_n1diag --offline --release -- gate0 tune --seeds 101..120
+//!   cargo run -p kore-self --example measure_n1diag --offline --release -- gate0 report --seeds 1..60 --b1-beta-milli B
+//! Gate 0 (`gate0`, Track N1 pre-registration): B1 = the file-keyed being (measurement only, below) against
+//! B0 = the default being; `tune` on seeds 101..120 (B1 beta 0.5 1 2 4 8 16), `report` on the fixed seeds 1..60 only.
 //! Prints one tab-separated row per world (statistics are computed from those rows); raw outputs are never committed.
 //!
 //! World T (`wt`, penalty 0, energy weight 1, budget 6000, in-memory sandbox = the generator's bytes):
@@ -29,7 +33,7 @@ mod versioned;
 mod being;
 
 use being::world_t::baselines::{LinCfg, RewardBestT};
-use being::world_t::engine::{ChooserT, EngineT, MemSandbox, PlanResult, StateT, DEFAULT_DISCOVER_EVERY};
+use being::world_t::engine::{Cell, ChooserT, EngineT, MemSandbox, PlanResult, StateT, DEFAULT_DISCOVER_EVERY};
 use being::world_t::learner::{options, ChoiceT, LearnerT, LearnerTCfg};
 use being::world_t::measure::{run_life, Pol};
 use being::world_t::world::{plans_for, Plan, TaskT, Tmpl, ViewT, WTCfg, DEFAULT_BUDGET, SKIP_COST};
@@ -481,11 +485,221 @@ fn cmd_fw(args: &[String]) {
     }
 }
 
+// ---------------------------------------------------------------- Gate 0 (Track N1 pre-registration)
+
+/// B1, the file-keyed being (measurement only): the being's own Beta estimator per (template, file, plan),
+/// its prior the being's cell estimate (the posterior mean of the (template, context, plan) cell with the
+/// pooled prior, chance right and chance wrong), prior weight as the being (2); energy, chooser, optimism
+/// and skip test are the being's, unchanged. No model, no sharing across templates. The file counts are
+/// the cell's own increments from the action on that file (read off the state the engine folds), so they
+/// count exactly what the cell counts.
+struct FileKeyed {
+    l: LearnerT,
+    files: HashMap<(usize, String, usize), Cell>,
+    pending: Option<((usize, String, usize), (u8, u8, u8), Cell)>,
+}
+
+impl FileKeyed {
+    fn new(cfg: LearnerTCfg) -> FileKeyed {
+        FileKeyed { l: LearnerT { cfg }, files: HashMap::new(), pending: None }
+    }
+}
+
+impl ChooserT for FileKeyed {
+    fn name(&self) -> String {
+        "b1-file-keyed (measurement only)".into()
+    }
+    fn choose(&mut self, st: &StateT, v: &ViewT) -> ChoiceT {
+        if let Some((fk, ck, before)) = self.pending.take() {
+            let after = st.cells.get(&ck).copied().unwrap_or_default();
+            if after.n > before.n {
+                let e = self.files.entry(fk).or_default();
+                e.n += after.n - before.n;
+                e.succ += after.succ - before.succ;
+                e.wrong += after.wrong - before.wrong;
+                e.spent += after.spent - before.spent;
+            }
+        }
+        let (l, files) = (&self.l, &self.files);
+        let ch = l.choose_with(st, v, |p| {
+            let ce = l.estimate(st, v, p);
+            let fc = files.get(&(v.tmpl.idx(), v.file.clone(), p.idx())).copied().unwrap_or_default();
+            l.estimate_from(v, p, fc, (ce.p, ce.p_wrong, "cell estimate"), ce.energy)
+        });
+        if let Some(p) = ch.plan {
+            let ck = (v.tmpl.idx() as u8, v.ctx.idx() as u8, p.idx() as u8);
+            self.pending = Some(((v.tmpl.idx(), v.file.clone(), p.idx()), ck, st.cells.get(&ck).copied().unwrap_or_default()));
+        }
+        ch
+    }
+}
+
+fn mean(x: &[f64]) -> f64 {
+    x.iter().sum::<f64>() / x.len() as f64
+}
+
+/// two-sided 95% t quantile
+fn tq(df: usize) -> f64 {
+    match df {
+        19 => 2.093,
+        59 => 2.001,
+        _ => 1.96 + 2.5 / df as f64,
+    }
+}
+
+fn ci(x: &[f64]) -> (f64, f64, f64) {
+    let n = x.len() as f64;
+    let m = mean(x);
+    let sd = (x.iter().map(|v| (v - m) * (v - m)).sum::<f64>() / (n - 1.0)).sqrt();
+    let h = tq(x.len() - 1) * sd / n.sqrt();
+    (m, m - h, m + h)
+}
+
+fn diff_line(name: &str, a: &[f64], b: &[f64]) -> String {
+    let d: Vec<f64> = a.iter().zip(b).map(|(x, y)| x - y).collect();
+    let (m, lo, hi) = ci(&d);
+    let (w, t, l) = d.iter().fold((0, 0, 0), |acc, v| if *v > 1e-12 { (acc.0 + 1, acc.1, acc.2) } else if *v < -1e-12 { (acc.0, acc.1, acc.2 + 1) } else { (acc.0, acc.1 + 1, acc.2) });
+    let n = d.len() as f64;
+    let sd = (d.iter().map(|v| (v - m) * (v - m)).sum::<f64>() / (n - 1.0)).sqrt();
+    format!("{name}: {m:+.3} [{lo:+.3}, {hi:+.3}] ({w}/{t}/{l}), paired sd {sd:.3}")
+}
+
+const B1_BETAS: [u32; 6] = [500, 1000, 2000, 4000, 8000, 16000];
+
+fn b1_cfg(beta_milli: u32) -> LearnerTCfg {
+    LearnerTCfg { beta_milli, ..Default::default() }
+}
+
+fn cmd_gate0(args: &[String]) {
+    let t0 = std::time::Instant::now();
+    match args.first().map(|s| s.as_str()) {
+        Some("tune") => {
+            let ss = seeds(args, (101, 120));
+            let rows: Vec<(u64, f64, Vec<f64>)> = ss
+                .par_iter()
+                .map(|&s| {
+                    let cfg = WTCfg::new(s, DEFAULT_BUDGET);
+                    let b0 = life_t(&cfg, &mut LearnerT { cfg: LearnerTCfg::default() }, true, 0, LearnerTCfg::default()).rpe();
+                    let b1: Vec<f64> = B1_BETAS.iter().map(|&b| life_t(&cfg, &mut FileKeyed::new(b1_cfg(b)), true, 0, b1_cfg(b)).rpe()).collect();
+                    eprintln!("world {s} done at {:.0} s", t0.elapsed().as_secs_f64());
+                    (s, b0, b1)
+                })
+                .collect();
+            println!("seed\tb0\t{}", B1_BETAS.iter().map(|b| format!("b1_beta{b}")).collect::<Vec<_>>().join("\t"));
+            for (s, b0, b1) in &rows {
+                println!("{s}\t{b0:.6}\t{}", b1.iter().map(|x| format!("{x:.6}")).collect::<Vec<_>>().join("\t"));
+            }
+            let b0: Vec<f64> = rows.iter().map(|r| r.1).collect();
+            let (m0, lo0, hi0) = ci(&b0);
+            println!("# tuning seeds {}..{}: B0 {m0:.3} [{lo0:.3}, {hi0:.3}]", ss[0], ss[ss.len() - 1]);
+            let mut best = (f64::MIN, 0u32);
+            for (k, &b) in B1_BETAS.iter().enumerate() {
+                let x: Vec<f64> = rows.iter().map(|r| r.2[k]).collect();
+                let (m, lo, hi) = ci(&x);
+                println!("# B1 beta {:.1}: {m:.3} [{lo:.3}, {hi:.3}]; {}", b as f64 / 1000.0, diff_line("minus B0", &x, &b0));
+                if m > best.0 {
+                    best = (m, b);
+                }
+            }
+            println!("# chosen B1 beta {:.1} (objective {:.3}); wall {:.0} s", best.1 as f64 / 1000.0, best.0, t0.elapsed().as_secs_f64());
+        }
+        Some("report") => {
+            // the pre-registered report seeds, fixed before any report run: exactly 1..60
+            let s = arg(args, "--seeds").expect("--seeds 1..60");
+            assert_eq!(s, "1..60", "Gate 0 reports on the pre-registered seeds 1..60 only");
+            let beta: u32 = arg(args, "--b1-beta-milli").expect("--b1-beta-milli (chosen on the tuning seeds)").parse().unwrap();
+            let ss: Vec<u64> = (1..=60).collect();
+            // per seed: (b0, b1, b2, kp file own ratio), wall seconds of each life, extra
+            let rows: Vec<(u64, [f64; 4], [f64; 4], String)> = ss
+                .par_iter()
+                .map(|&s| {
+                    let cfg = WTCfg::new(s, DEFAULT_BUDGET);
+                    let mut wall = [0.0; 4];
+                    let t = std::time::Instant::now();
+                    let b0 = life_t(&cfg, &mut LearnerT { cfg: LearnerTCfg::default() }, true, 0, LearnerTCfg::default());
+                    wall[0] = t.elapsed().as_secs_f64();
+                    let t = std::time::Instant::now();
+                    let mut fk = FileKeyed::new(b1_cfg(beta));
+                    let b1 = life_t(&cfg, &mut fk, true, 0, b1_cfg(beta));
+                    wall[1] = t.elapsed().as_secs_f64();
+                    let t = std::time::Instant::now();
+                    let b2 = run_life(&cfg, Pol::Lin(LinCfg { alpha: 1.0, skip: true }), None).rpe();
+                    wall[2] = t.elapsed().as_secs_f64();
+                    let t = std::time::Instant::now();
+                    let mut rec = Recorder { t: Tables::default() };
+                    for off in [10_000_000u64, 20_000_000] {
+                        life_t(&cfg, &mut rec, false, off, LearnerTCfg::default());
+                    }
+                    let kc = KpCfg { fine: 2, oracle_rules: false, ratio: true, after: 0 };
+                    let mut k = Kp { t: Arc::new(rec.t), c: kc, rule_answer: None, visits: HashMap::new(), rew: 0.0, cost: 0.0 };
+                    let kp = life_t(&cfg, &mut k, true, 0, LearnerTCfg::default());
+                    wall[3] = t.elapsed().as_secs_f64();
+                    let extra = format!(
+                        "b0_skip={:.4} b1_skip={:.4} b0_right_of_answered={:.4} b1_right_of_answered={:.4} b0_wrong_per100={:.3} b1_wrong_per100={:.3} b1_file_keys={}",
+                        b0.skips as f64 / b0.tasks as f64,
+                        b1.skips as f64 / b1.tasks as f64,
+                        b0.right as f64 / b0.answered.max(1) as f64,
+                        b1.right as f64 / b1.answered.max(1) as f64,
+                        100.0 * (b0.answered - b0.right) as f64 / b0.tasks as f64,
+                        100.0 * (b1.answered - b1.right) as f64 / b1.tasks as f64,
+                        fk.files.len()
+                    );
+                    eprintln!("world {s} done at {:.0} s", t0.elapsed().as_secs_f64());
+                    (s, [b0.rpe(), b1.rpe(), b2, kp.rpe()], wall, extra)
+                })
+                .collect();
+            println!("seed\tb0\tb1\tb2_linucb\tkp_file_own_ratio\twall_b0\twall_b1\twall_b2\twall_kp\textra");
+            for (s, v, w, e) in &rows {
+                println!("{s}\t{}\t{}\t{e}", v.iter().map(|x| format!("{x:.6}")).collect::<Vec<_>>().join("\t"), w.iter().map(|x| format!("{x:.2}")).collect::<Vec<_>>().join("\t"));
+            }
+            let col = |k: usize| rows.iter().map(|r| r.1[k]).collect::<Vec<f64>>();
+            let (b0, b1, b2, kp) = (col(0), col(1), col(2), col(3));
+            for (nm, x) in [("B0", &b0), ("B1", &b1), ("B2 LinUCB alpha 1", &b2), ("KP file, own rules, being's rule", &kp)] {
+                let (m, lo, hi) = ci(x);
+                println!("# {nm}: {m:.3} [{lo:.3}, {hi:.3}]");
+            }
+            println!("# {}", diff_line("GATE 0: B1 minus B0", &b1, &b0));
+            println!("# {}", diff_line("B2 minus B0", &b2, &b0));
+            println!("# {}", diff_line("KP file minus B0", &kp, &b0));
+            println!("# {}", diff_line("KP file minus B1", &kp, &b1));
+            // (c): share of the KP-file gap closed, ratio of the mean paired differences; 95% CI by a paired
+            // percentile bootstrap over the 60 worlds (20,000 resamples, fixed generator seed) and by the delta method
+            let d1: Vec<f64> = b1.iter().zip(&b0).map(|(a, b)| a - b).collect();
+            let dk: Vec<f64> = kp.iter().zip(&b0).map(|(a, b)| a - b).collect();
+            let share = mean(&d1) / mean(&dk);
+            let n = d1.len();
+            let mut rng = being::world::Rng::new(0x6A7E0);
+            let mut bs: Vec<f64> = (0..20_000)
+                .map(|_| {
+                    let (mut a, mut b) = (0.0, 0.0);
+                    for _ in 0..n {
+                        let i = rng.below(n as u64) as usize;
+                        a += d1[i];
+                        b += dk[i];
+                    }
+                    a / b
+                })
+                .collect();
+            bs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let (ma, mb) = (mean(&d1), mean(&dk));
+            let cov = |x: &[f64], mx: f64, y: &[f64], my: f64| x.iter().zip(y).map(|(a, b)| (a - mx) * (b - my)).sum::<f64>() / (n as f64 - 1.0);
+            let var_r = (cov(&d1, ma, &d1, ma) - 2.0 * share * cov(&d1, ma, &dk, mb) + share * share * cov(&dk, mb, &dk, mb)) / (n as f64 * mb * mb);
+            let h = tq(n - 1) * var_r.sqrt();
+            println!("# (c) share of the KP-file gap closed by B1, (B1 - B0) / (KP file - B0): {share:.3}; bootstrap 95% [{:.3}, {:.3}]; delta method [{:.3}, {:.3}]", bs[500], bs[19_499], share - h, share + h);
+            let wall = |k: usize| mean(&rows.iter().map(|r| r.2[k]).collect::<Vec<f64>>());
+            println!("# wall time per life (s, mean of 60, {} worlds in parallel): B0 {:.2}, B1 {:.2}, B2 {:.2}, KP file (incl. its two parameter passes) {:.2}; total {:.0} s", rayon::current_num_threads(), wall(0), wall(1), wall(2), wall(3), t0.elapsed().as_secs_f64());
+            println!("# B1 beta {:.1} (fixed on the tuning seeds)", beta as f64 / 1000.0);
+        }
+        _ => eprintln!("usage: measure_n1diag gate0 tune [--seeds 101..120] | gate0 report --seeds 1..60 --b1-beta-milli B"),
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
         Some("wt") => cmd_wt(&args[1..]),
         Some("fw") => cmd_fw(&args[1..]),
-        _ => eprintln!("usage: measure_n1diag wt|fw [--seeds 101..120] [--steps N] [--arms a,b]"),
+        Some("gate0") => cmd_gate0(&args[1..]),
+        _ => eprintln!("usage: measure_n1diag wt|fw|gate0 [--seeds 101..120] [--steps N] [--arms a,b]"),
     }
 }
