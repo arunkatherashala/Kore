@@ -275,6 +275,17 @@ fn cmd_arms(args: &[String]) {
             println!("    families an evolved rule answers >= 90% of: {:?}", fam_count);
         }
     }
+    // Exact integers per world and arm (print only): reward, world-step energy and evolution evaluations over the post part
+    // (windows starting at or after `from`) and over the whole life, so a compute-charged reward per energy can be recomputed exactly.
+    println!("\nExact per world (post part from step {from}; evaluations per energy unit {EVALS_PER_ENERGY}):");
+    for &s in &ss {
+        for a in 0..arms.len() {
+            let o = get(s, a);
+            let pw: Vec<_> = o.wins.iter().filter(|w| w.from >= from).collect();
+            let (r, c, ev) = (pw.iter().map(|w| w.reward).sum::<i64>(), pw.iter().map(|w| w.cost).sum::<i64>(), pw.iter().map(|w| w.evo_evals).sum::<u64>());
+            println!("  exact {s} {}: post_reward {r} post_cost {c} post_evo_evals {ev} total_reward {} total_cost {} total_evo_evals {}", arms[a], o.total_reward, o.total_cost, o.evo_evals);
+        }
+    }
     if let Some(path) = arg(args, "--per-world") {
         let mut txt = String::new();
         for &s in &ss {
