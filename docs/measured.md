@@ -3153,7 +3153,7 @@ cargo run -p kore-self --example measure_n1diag --offline --release -- fw --seed
 
 Measured 2026-11-10, branch `n1-diag` from 780ca222, harness commit a84d4246, Windows, 4 threads (other agents on the
 same machine). **Tuning seeds 101..120 only; no report seed was run in this step** (the harness refuses seeds <= 100).
-95% t-intervals; paired differences on identical worlds (wins/ties/losses of 20). Wall time: `wt` 311 s, `fw` 1,446 s.
+95% t-intervals; paired differences on identical worlds (wins/ties/losses of 20). Wall time: `wt` 311 s, `fw` 1,446 s. `cargo test --offline -p kore-self` on this branch: 607 passed, 0 failed (507 unit + 100 integration).
 
 ### World T: decomposing the gap to the reward-best oracle (penalty 0, energy weight 1, budget 6000)
 
