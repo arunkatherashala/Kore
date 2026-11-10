@@ -33,7 +33,7 @@ fn shrink(s: f64, n: f64, prior: f64, k: f64) -> f64 {
     (s + k * prior) / (n + k)
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct FamModel {
     cells: Vec<[[Cell; 4]; 5]>,
     /// Track B10 (opt-in): the B3b mechanisms (`adapt_b3b.rs`) on this model. None: off, and the model is
@@ -59,6 +59,36 @@ pub struct FamChange {
     pub n: u32,
     pub succ: u32,
     pub predicted: f64,
+}
+
+/// Track D1b: `FamChange` as stored in a checkpoint (the `kind` literal as text).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FamChangeSer(String, usize, u8, Strategy, bool, f64, u32, u32, f64);
+
+impl From<FamChange> for FamChangeSer {
+    fn from(c: FamChange) -> FamChangeSer {
+        FamChangeSer(c.kind.to_string(), c.fam, c.difficulty, c.strategy, c.drop, c.statistic, c.n, c.succ, c.predicted)
+    }
+}
+
+impl serde::Serialize for FamChange {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        FamChangeSer::from(self.clone()).serialize(s)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for FamChange {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<FamChange, D::Error> {
+        FamChange::try_from(FamChangeSer::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+}
+
+impl TryFrom<FamChangeSer> for FamChange {
+    type Error = String;
+    fn try_from(c: FamChangeSer) -> Result<FamChange, String> {
+        let kind = crate::being::binser::static_str::KNOWN.iter().copied().find(|k| *k == c.0).ok_or_else(|| format!("unknown change kind {:?}", c.0))?;
+        Ok(FamChange { kind, fam: c.1, difficulty: c.2, strategy: c.3, drop: c.4, statistic: c.5, n: c.6, succ: c.7, predicted: c.8 })
+    }
 }
 
 impl FamModel {

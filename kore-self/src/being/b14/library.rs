@@ -57,7 +57,7 @@ impl Default for LibCfg {
 }
 
 /// One portable library entry: a verified (transform, form) for a signature, and where it came from.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct LibEntry {
     pub sig: u8,
     pub xf: Xf,

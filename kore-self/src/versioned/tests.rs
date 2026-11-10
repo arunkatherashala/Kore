@@ -35,7 +35,7 @@ fn ticking(log: &mut VersionedLog) {
 }
 
 fn new_log(root: &Path) -> VersionedLog {
-    VersionedLog::open_or_create_with_clock(root, "tester", tick_clock()).unwrap()
+    VersionedLog::open_or_create_with_format(root, "tester", tick_clock(), LogFormat::V1).unwrap()
 }
 
 fn ev(source: &str, occurred: &str, text: &str) -> NewEvent {
@@ -309,7 +309,7 @@ fn crash_between_segment_write_and_manifest_rename() {
     l.simulate_crash_after_segments(Batch { events: vec![ev("s", "2025-02-01", "lost")], ..Default::default() }).unwrap();
     drop(l);
 
-    let mut l = VersionedLog::open_or_create_with_clock(dir.path(), "tester", tick_clock()).unwrap();
+    let mut l = VersionedLog::open_or_create_with_format(dir.path(), "tester", tick_clock(), LogFormat::V1).unwrap();
     assert_eq!(l.latest_version(), v, "version must be unchanged after the crash");
     assert_eq!(l.snapshot_hash(v).unwrap(), h);
     assert_eq!(l.open_latest().content_hash(), content, "stray segments must be ignored");
@@ -340,7 +340,7 @@ fn commit_cleans_strays_itself() {
 fn bitemporal_backfill_and_open_at_time() {
     let dir = tempfile::tempdir().unwrap();
     // recorded_at comes from the clock; occurred_at is always caller-supplied.
-    let mut l = VersionedLog::open_or_create_with_clock(dir.path(), "bt", || "2026-05-30T00:00:00Z".to_string()).unwrap();
+    let mut l = VersionedLog::open_or_create_with_format(dir.path(), "bt", || "2026-05-30T00:00:00Z".to_string(), LogFormat::V1).unwrap();
     let times = Arc::new(std::sync::Mutex::new(vec![
         "2026-05-01T00:00:00Z".to_string(), // goes backwards: must be clamped to the previous recorded_at
         "2026-06-02T00:00:00Z".to_string(),
@@ -530,7 +530,8 @@ fn misc_basics() {
     let dir = tempfile::tempdir().unwrap();
     assert!(VersionedLog::open_or_create(dir.path(), "../evil").is_err());
     assert!(VersionedLog::open_or_create(dir.path(), "").is_err());
-    let l = VersionedLog::open_or_create(dir.path(), "ok").unwrap();
+    // these tests pin format 1 (created explicitly since Track D1a made format 3 the default)
+    let l = VersionedLog::open_or_create_with_format(dir.path(), "ok", now_iso, LogFormat::V1).unwrap();
     assert_eq!(l.latest_version(), 0);
     let s = l.open_latest();
     let meta: Vec<MetaRow> = s.rows();

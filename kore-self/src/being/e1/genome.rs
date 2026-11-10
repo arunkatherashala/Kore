@@ -95,7 +95,7 @@ fn affine_at(ops: &[u8], i: usize) -> Option<(usize, bool)> {
 }
 
 /// A genome: byte 0 the modulus (0 = none), then the prefix code, padded with `END`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Code(pub [u8; LEN]);
 
 impl Code {

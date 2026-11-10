@@ -33,7 +33,7 @@ use super::world::{iso_at, Domain, ALL_DOMAINS_X};
 use crate::versioned::{event_id, EventRow, NewEvent, NewRevision};
 use serde_json::{json, Value};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum XferMode {
     #[default]
     Off,
@@ -67,7 +67,7 @@ pub const MIN_RIGHT: u32 = 2;
 pub const SRC_MIN_ATTEMPTS: f64 = 20.0;
 pub const SRC_MIN_CELL: f64 = 4.0;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct XferCfg {
     pub mode: XferMode,
     pub tau: f64,
@@ -83,14 +83,14 @@ impl Default for XferCfg {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub enum XferKind {
     Link { guard: bool },
     Revoke { delta: f64, n: u32 },
 }
 
 /// One transfer decision (a link or a revocation) with its evidence, before it is written to the log.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct XferRec {
     pub kind: XferKind,
     pub index: usize,
@@ -105,7 +105,7 @@ pub struct XferRec {
     pub cites: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 pub struct XferState {
     pub cfg: XferCfg,
     /// Links made (live or replayed).

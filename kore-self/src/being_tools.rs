@@ -232,6 +232,8 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
     let mut policy = Policy::new(steps_eff);
     policy.refill_when_exhausted = cfg.refill_when_exhausted;
     policy.max_energy = Some(ctl.max_energy_per_run);
+    // Track D1b: state checkpoints only when controller.txt sets checkpoint_every (default off)
+    policy.checkpoint_every = crate::being::ckpt::every_from_text(crate::being_v2_tools::load_controller_text(owner).as_deref());
     let owner_k = owner.to_string();
     policy.kill = Some(KillCheck(std::sync::Arc::new(move || authorize::kill_active(&owner_k))));
     let s = run_advised(&mut log, &cfg, &ScriptedThinker, &policy, advisor.as_deref()).map_err(log_err)?;
@@ -246,6 +248,7 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
     refused_pre.extend(refused);
     let refused = refused_pre;
     let mut out = s.to_json();
+    out["checkpoint"] = crate::being::ckpt::report_json(&s.ckpt);
     out["controller"] = json!({
         "origin": "controller.txt", "max_live_rules": ctl.max_live_rules, "max_building_blocks": ctl.max_building_blocks, "max_search_candidates": ctl.max_search_candidates,
         "max_steps_per_run": ctl.max_steps_per_run, "max_energy_per_run": ctl.max_energy_per_run, "composition_allowed": ctl.composition, "pruning_allowed": ctl.pruning, "transfer_allowed": ctl.transfer, "max_transfer_links": ctl.max_transfer_links,

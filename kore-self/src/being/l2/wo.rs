@@ -26,7 +26,7 @@ pub const TAG: &str = "wo_l2m";
 pub const CITE_FAMS: usize = 24;
 
 /// The L2 switches (fixed at creation, logged in the genesis event).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct L2Cfg {
     /// Family-wide rules accepted by the form posterior.
     pub forms: bool,
@@ -74,7 +74,7 @@ impl L2Cfg {
 }
 
 /// What one family's closing added to the meta-prior (logged as an `l2_update` note).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct CloseUpdate {
     pub fid: u64,
     pub slot: usize,
@@ -87,7 +87,7 @@ pub struct CloseUpdate {
 }
 
 /// The L2 state of a World O being, folded from its log (part of `StateO`; empty when L2 is off).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct L2State {
     pub cfg: Option<L2Cfg>,
     /// Open sequence families: slot -> family id.

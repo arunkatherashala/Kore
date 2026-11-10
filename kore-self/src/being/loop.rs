@@ -996,6 +996,8 @@ pub struct RunSummary {
     pub refusals: Vec<Refusal>,
     /// Ids of rules retired or merged during this run.
     pub retired: Vec<String>,
+    /// Track D1b: checkpoint restored at the start and written at the end (all empty when off).
+    pub ckpt: super::ckpt::CkptReport,
 }
 
 impl RunSummary {
@@ -1074,7 +1076,9 @@ pub fn run_advised(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, 
 
 pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, policy: &Policy, picker: Option<&mut dyn DomainPicker>, advisor: Option<&dyn Advisor>) -> Result<RunSummary, LogError> {
     let version_before = log.latest_version();
-    let mut state = BeingState::from_log(log)?;
+    // Track D1b: with checkpoints off this is exactly `BeingState::from_log` (the full fold)
+    let (mut state, restored) = if policy.checkpoint_every == 0 { (BeingState::from_log(log)?, Default::default()) } else { super::ckpt::restore::<BeingState>(log)? };
+    let ckpt_base = (policy.checkpoint_every > 0).then(|| (state.clone(), version_before));
     let mut created = false;
     let mut b14_refusals: Vec<Refusal> = vec![];
     // validated before anything is written, so a refused request never creates a being
@@ -1404,7 +1408,8 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
     if !engine.reference_scan {
         discover_scan::stash(std::mem::take(&mut engine.scan), &engine.state.examples);
     }
-    Ok(RunSummary { steps_run: done, stopped, reward, cost, state: engine.state, version_before, version_after: log.latest_version(), created, new_rules, refusals: engine.refusals_total, retired })
+    let ckpt = super::ckpt::write_after_run(log, policy.checkpoint_every, ckpt_base, restored);
+    Ok(RunSummary { steps_run: done, stopped, reward, cost, state: engine.state, version_before, version_after: log.latest_version(), created, new_rules, refusals: engine.refusals_total, retired, ckpt })
 }
 
 /// Track E1: what controller.txt allows (no controller given: refused, fail closed).

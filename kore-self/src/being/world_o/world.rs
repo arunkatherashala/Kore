@@ -33,7 +33,7 @@ pub const ARCHIVE: usize = SLOTS;
 pub const MAX_TIER: u32 = 4;
 pub const SKIP_COST: i64 = 1;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct WOCfg {
     pub seed: u64,
     /// Energy units of the life (no refills).

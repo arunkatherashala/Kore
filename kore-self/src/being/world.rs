@@ -55,7 +55,7 @@ fn mix(parts: &[u64]) -> u64 {
     acc
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Domain {
     Arithmetic = 0,
     Algebra = 1,
@@ -101,7 +101,7 @@ impl Domain {
 }
 
 /// Template of a task. One template per (domain, difficulty).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     ArithAdd,
     ArithAddSub,

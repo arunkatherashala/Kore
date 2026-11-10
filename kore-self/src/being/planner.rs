@@ -188,7 +188,7 @@ pub struct ModelChooser {
 ///   it is not: `skip_frac x rate x (1 - w x SKIP_COST / e)` with `w = n / (n + k)` and `n` the attempts
 ///   in that cell (the same evidence that shrinks its optimism bonus). Early in a life the realized rate
 ///   is a low estimate of what the being will earn, and the stricter B1 bar makes up for it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SkipRule {
     #[default]
     Rate,

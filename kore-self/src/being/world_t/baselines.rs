@@ -142,7 +142,7 @@ fn feats(v: &ViewT) -> [usize; 5] {
     [0, 1 + t, 17 + c, 32 + v.size as usize, 35 + t * 15 + c]
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct LinCfg {
     pub alpha: f64,
     pub skip: bool,

@@ -259,6 +259,16 @@ composition           = on
 pruning               = on
 ";
 
+/// The controller.txt the harness writes: `CONTROLLER`, plus `checkpoint_every = N` when the environment
+/// variable `LONGRUN_CKPT_EVERY` is set (Track D1b measurements; unset = no checkpoints, as before).
+fn controller_file_text() -> String {
+    match std::env::var("LONGRUN_CKPT_EVERY") {
+        Ok(n) if !n.trim().is_empty() => format!("{CONTROLLER}checkpoint_every = {}
+", n.trim()),
+        _ => CONTROLLER.to_string(),
+    }
+}
+
 #[derive(Clone)]
 struct Opts {
     root: PathBuf,
@@ -777,7 +787,7 @@ fn snapshot_mem_ok(o: &Opts) -> bool {
 
 fn prepare(o: &Opts) {
     std::fs::create_dir_all(o.root.join(OWNER)).unwrap();
-    std::fs::write(o.root.join(OWNER).join("controller.txt"), CONTROLLER).unwrap();
+    std::fs::write(o.root.join(OWNER).join("controller.txt"), controller_file_text()).unwrap();
     let fmt = match o.format {
         1 => LogFormat::V1,
         2 => LogFormat::V2,
@@ -1260,9 +1270,15 @@ fn cmd_memfold(o: Opts) {
     let t = Instant::now();
     let log = VersionedLog::open(&root, OWNER).unwrap();
     let (m1, t1) = (ws(), ms(t));
+    // Track D1b: checkpoint restore (newest valid checkpoint + tail fold; the full fold if none), measured
+    // before the full fold so that its peak is its own
+    let t = Instant::now();
+    let (rst, rinfo) = being::ckpt::restore::<BeingState>(&log).unwrap();
+    let (mr, tr) = (ws(), ms(t));
     let t = Instant::now();
     let st = BeingState::from_log(&log).unwrap();
     let (m2, t2) = (ws(), ms(t));
+    let restore_equal = format!("{rst:?}") == format!("{st:?}");
     // the floor of any verified open: read every segment file and hash it (no decoding)
     let t = Instant::now();
     let dir = root.join(OWNER).join("log");
@@ -1272,7 +1288,7 @@ fn cmd_memfold(o: Opts) {
     let t = Instant::now();
     let bytes: usize = files.iter().map(|f| { let b = std::fs::read(dir.join(f)).unwrap(); let _ = versioned::sha256_hex(&[&b]); b.len() }).sum();
     let t_read = ms(t);
-    println!("{}", json!({ "type": "memfold", "steps": st.step, "events": log.event_count(), "genesis_found": g.is_some(), "peak_ws_mb_after": { "start": m0, "genesis_peek": mg, "open": m1, "fold": m2 }, "ms": { "genesis_peek": tg, "open": t1, "fold": t2, "manifest_json_parse_1_thread": t_manifest, "read_and_sha_all_segments_1_thread": t_read }, "segment_files": files.len(), "segment_bytes": bytes }));
+    println!("{}", json!({ "type": "memfold", "steps": st.step, "events": log.event_count(), "genesis_found": g.is_some(), "restore_from_version": rinfo.from_version, "restore_rejected": rinfo.rejected, "restore_equal_full_fold": restore_equal, "peak_ws_mb_after": { "start": m0, "genesis_peek": mg, "open": m1, "restore": mr, "fold": m2 }, "ms": { "genesis_peek": tg, "open": t1, "restore": tr, "fold": t2, "manifest_json_parse_1_thread": t_manifest, "read_and_sha_all_segments_1_thread": t_read }, "segment_files": files.len(), "segment_bytes": bytes }));
 }
 
 /// prof: where the time of one step goes as the history grows (in-process engine, no log): the step
@@ -1402,7 +1418,7 @@ fn cmd_cut(o: Opts, src: PathBuf, upto: u64) {
         std::fs::create_dir_all(dst.join(t)).unwrap();
     }
     std::fs::write(dst.join("MANIFEST"), out).unwrap();
-    std::fs::write(root.join(OWNER).join("controller.txt"), CONTROLLER).unwrap();
+    std::fs::write(root.join(OWNER).join("controller.txt"), controller_file_text()).unwrap();
     let log = VersionedLog::open(&root, OWNER).unwrap();
     println!("{}", json!({ "type": "cut", "versions": n, "latest": log.latest_version(), "events": log.event_count() }));
 }

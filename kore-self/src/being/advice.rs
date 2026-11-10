@@ -33,7 +33,7 @@ pub const RULE_KIND: &str = "rule";
 /// A proposal for rules is requested every this many steps (extended pattern world only).
 pub const RULE_EVERY: u64 = 5;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AdvisorKind {
     #[default]
     None,
@@ -60,7 +60,7 @@ impl AdvisorKind {
 }
 
 /// Creation-time advice settings of a being (part of its genesis event).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct AdviceSetup {
     pub kind: AdvisorKind,
     /// Simulated advisor only: probability of the oracle-correct suggestion.
@@ -377,7 +377,7 @@ impl Advisor for SimulatedAdvisor {
 // Log records
 
 /// The option an advisor named, as the log records it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct AdvisedOption {
     pub slot: usize,
     pub strategy: Strategy,
@@ -388,7 +388,7 @@ pub struct AdvisedOption {
 }
 
 /// Advice read from its log event; waits in the state until the step's outcome.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct PendingAdvice {
     pub id: String,
     pub advisor: String,
@@ -505,7 +505,7 @@ impl AdviceTrace {
 }
 
 /// What the state keeps of the decision about the pending advice.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct DecisionAdvice {
     pub id: String,
     pub followed: bool,

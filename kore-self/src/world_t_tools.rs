@@ -75,14 +75,21 @@ pub fn run_world_t(owner: &str, steps: u64, seed: u64, budget: Option<i64>) -> R
         steps
     };
     let mut log = crate::log_tools::open(owner).map_err(|v| v.to_string())?;
-    let rows: Vec<EventRow> = log.open_latest().rows();
-    let st0 = StateT::from_events(&rows);
+    // Track D1b: checkpoints only when controller.txt sets checkpoint_every (default off)
+    let every = crate::being::ckpt::every_from_text(text.as_deref());
+    let st0 = if every == 0 {
+        let rows: Vec<EventRow> = log.open_latest().rows();
+        StateT::from_events(&rows)
+    } else {
+        crate::being::ckpt::restore::<StateT>(&log).map_err(|e| e.to_string())?.0
+    };
     let wcfg = st0.cfg.clone().unwrap_or_else(|| WTCfg::new(seed, budget.unwrap_or(DEFAULT_BUDGET)));
     let world = WorldT::new(wcfg.clone());
     write_pool(owner, &world)?;
     let sb = DirSandbox::new(owner, wcfg.seed);
     let mut policy = Policy::new(steps_eff);
     policy.max_energy = Some(ctl0.max_energy_per_run);
+    policy.checkpoint_every = every;
     let owner_k = owner.to_string();
     policy.kill = Some(KillCheck(std::sync::Arc::new(move || authorize::kill_active(&owner_k))));
     let cfg = RunTCfg { world: Some(wcfg), learner: Some(LearnerTCfg::default()), discover_every: DEFAULT_DISCOVER_EVERY, ctl: Some(limits), sql: Some(ctl::sql_limits(text.as_deref())) };
@@ -101,6 +108,7 @@ pub fn run_world_t(owner: &str, steps: u64, seed: u64, budget: Option<i64>) -> R
         "steps_run": s.steps_run, "stopped": s.stopped.as_str(), "reward": s.reward, "energy": s.cost,
         "rules_accepted_this_run": s.new_rules.len(), "right": s.state.right, "wrong": s.state.wrong, "no_answer": s.state.no_answer, "skips": s.state.skips,
         "refusals_audited": refused.iter().map(|r| json!({ "cap": r.0, "limit": r.1, "requested": r.2, "what": r.3 })).collect::<Vec<_>>(),
+        "checkpoint": crate::being::ckpt::report_json(&s.ckpt),
     }))
 }
 

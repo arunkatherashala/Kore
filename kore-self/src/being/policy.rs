@@ -70,11 +70,14 @@ pub struct Policy {
     pub kill: Option<KillCheck>,
     /// B5: energy cap of this run (None: none).
     pub max_energy: Option<i64>,
+    /// Track D1b: write a state checkpoint at the end of a run when this many steps have passed since
+    /// the last one, and restore from checkpoints at the start (0: off, the full fold as before).
+    pub checkpoint_every: u64,
 }
 
 impl Policy {
     pub fn new(max_steps: u64) -> Policy {
-        Policy { max_steps, stop: Arc::new(AtomicBool::new(false)), refill_when_exhausted: false, kill: None, max_energy: None }
+        Policy { max_steps, stop: Arc::new(AtomicBool::new(false)), refill_when_exhausted: false, kill: None, max_energy: None, checkpoint_every: 0 }
     }
     /// Checked before every step.
     pub fn gate(&self, steps_done: u64) -> Option<StopReason> {

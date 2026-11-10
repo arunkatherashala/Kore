@@ -59,7 +59,7 @@ pub const MIN_EVIDENCE: f64 = 3.0;
 /// Floor of the Bernoulli variance when standardizing a residual.
 const VAR_FLOOR: f64 = 0.09;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AdaptMode {
     /// B1 learner: all evidence counts forever.
     #[default]
@@ -93,7 +93,7 @@ impl AdaptMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Cell {
     pub n: u64,
     pub succ: u64,
@@ -102,7 +102,7 @@ pub struct Cell {
 }
 
 /// A cell with discounted counts; `t` is the attempt counter at which it was last brought up to date.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, Default, PartialEq)]
 struct WCell {
     n: f64,
     succ: f64,
@@ -159,7 +159,7 @@ pub struct Estimate {
 }
 
 /// A detected change in one (domain, strategy) group.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct Alarm {
     pub domain: Domain,
     pub strategy: Strategy,
@@ -179,7 +179,7 @@ pub struct Alarm {
 }
 
 /// Which detector produced an alarm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Detector {
     /// B3: CUSUM per (domain, strategy); the group's evidence is cut to `keep`.
     #[default]
@@ -200,7 +200,7 @@ impl Detector {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, Default, PartialEq)]
 struct Group {
     up: f64,
     down: f64,
@@ -220,7 +220,7 @@ pub const XFER_K: f64 = 16.0;
 
 /// Track B6: the cells (domain, difficulty, *) of a target domain start from the posterior of the same
 /// difficulty and strategy in a source domain instead of from the strategy-wide estimate only.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct Link {
     pub src: Domain,
     /// Difficulty of the source cell that is lent (the same difficulty, except in the shifted-cells control).
@@ -235,7 +235,7 @@ pub struct Link {
 }
 
 /// A link switched off by the guard (drained by the state, which logs it).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct Revoked {
     pub domain: Domain,
     pub difficulty: u8,
@@ -243,7 +243,7 @@ pub struct Revoked {
     pub n: u32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct Model {
     cells: [[[Cell; 4]; 5]; N_DOM],
     mode: AdaptMode,

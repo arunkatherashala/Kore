@@ -30,7 +30,7 @@
 use std::collections::VecDeque;
 
 /// Settings of the B3b mechanisms. Defaults chosen on tuning seeds 101..120 only (docs/measured.md).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct SwitchCfg {
     /// M1 on/off.
     pub detect: bool,
@@ -60,7 +60,7 @@ pub struct SwitchCfg {
 pub const DEFAULT_SWITCH: SwitchCfg = SwitchCfg { detect: true, window: 6, nats: 8.0, min_old: 8.0, prior_check: true, prior_nats: 1.0, prior_keep: 0.1, prior_max_n: 16.0, spread: 1.0, cross: false, cross_below: f64::INFINITY };
 
 /// Per-cell state.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct CellSw {
     /// Last outcomes, oldest first: (correct, energy spent, listed cost).
     pub recent: VecDeque<(bool, i64, i64)>,

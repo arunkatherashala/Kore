@@ -52,7 +52,7 @@ pub fn mix2(parts: &[u64]) -> u64 {
 }
 
 /// The parameters of one World v2. All integers, so the logged genesis round-trips exactly.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct W2Cfg {
     pub seed: u64,
     pub families: usize,
@@ -119,7 +119,7 @@ impl W2Cfg {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FType {
     Seq = 0,
     Grid = 1,

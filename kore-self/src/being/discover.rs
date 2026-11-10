@@ -65,7 +65,7 @@ pub const VAL_EVERY: usize = 3;
 pub(crate) const MAX_NUM: i128 = 100;
 pub(crate) const MAX_DEN: i128 = 12;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Form {
     /// Bit i of `mask` set = lag i+1 is used.
     Lin { mask: u8, constant: bool },
@@ -313,7 +313,7 @@ pub const XFORMS: [(&str, &[Op]); 7] = [
 ];
 
 /// A chain of transforms (index into `XFORMS`); `Xf::ID` is the plain grammar of B2.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Xf(pub u8);
 
 impl Xf {
@@ -411,7 +411,7 @@ pub(crate) fn transformed(xf: Xf, t: &[i64]) -> Option<Vec<i64>> {
 // ---- examples, rules ----
 
 /// One revealed example: the prefix the being was shown and the exact next term the checker later revealed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct Example {
     /// The outcome event this example was read from.
     pub event_id: String,
@@ -451,7 +451,7 @@ pub fn terms_tag(terms: &[i64]) -> String {
 }
 
 /// An accepted rule: the form for one signature, plus how it was accepted.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct Rule {
     /// Content-derived: sha256 of (version, form code, signature), first 12 hex characters.
     pub id: String,

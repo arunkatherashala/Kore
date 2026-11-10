@@ -10,7 +10,7 @@ pub const SOURCE_T: &str = "being:worldt";
 pub const SKIP_COST: i64 = 1;
 
 /// Task kinds. Opened over the life in a seed-shuffled order (the being is told when a kind opens).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Kind {
     ColStat,
     Group,
@@ -244,7 +244,7 @@ pub fn plans_for(t: Tmpl) -> &'static [Plan] {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct WTCfg {
     pub seed: u64,
     /// Energy units of the life (no refills).

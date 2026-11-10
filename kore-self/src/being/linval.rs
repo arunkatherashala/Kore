@@ -36,7 +36,7 @@ pub const DEFAULT_ALPHA_MILLI: u32 = 500;
 pub const DEFAULT_CELL_K_MILLI: u32 = 4000;
 
 /// The Track B13 switch and its constants (fixed at creation, logged in the genesis event where the world has one).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinCfg {
     /// Optimism in widths (milli).
     pub alpha_milli: u32,

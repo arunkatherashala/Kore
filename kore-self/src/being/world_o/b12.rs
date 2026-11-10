@@ -61,7 +61,7 @@ pub const K_TRAIN_PRIOR: u32 = 2;
 pub const K_VAL_PRIOR: u32 = 1;
 pub const POLICY_EXPLORE: &str = "wo-explore";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct L2LCfg {
     /// M2: cohort size (0: off).
     pub prior_k: u32,
@@ -110,7 +110,7 @@ impl L2LCfg {
 }
 
 /// What the being keeps of a family it has met (for M2): its type, order and per-cell counts.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct FamHist {
     pub fid: u64,
     pub ftype: FType,
@@ -118,14 +118,14 @@ pub struct FamHist {
 }
 
 /// Prior of one cell: mean and weight.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct PCell {
     pub mean: f64,
     pub k: f64,
 }
 
 /// The prior of a new family's cells, formed at its announcement. `None` per strategy: no prior (B1 estimate).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct SlotPrior {
     pub fid: u64,
     pub fams: usize,
@@ -193,7 +193,7 @@ pub fn estimate_h(model: &FamModel, slot: usize, d: u8, s: Strategy, prior: &Slo
 }
 
 /// B12 state of the being, folded from its log (part of `StateO`).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct B12State {
     pub cfg: L2LCfg,
     /// Families met (closed ones with their final counts), in order of announcement.

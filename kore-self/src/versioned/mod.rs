@@ -12,12 +12,14 @@
 //! rows into a single atomic version.
 #![allow(dead_code)]
 
+pub mod checkpoint;
 pub mod codec;
 pub mod forget;
 pub mod hz;
 pub mod manifest;
 pub mod model;
 pub mod sql;
+pub use checkpoint::{CheckpointFile, CKPT_DIR, CKPT_FORMAT};
 pub use forget::{forget_hash, recover_pending, ForgetReport};
 pub mod upgrade;
 pub mod v4log;
@@ -46,7 +48,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// Log format 1: the original segment encoding (kore-store columns + LZ4).
-/// Still the default for newly created logs.
+/// The default for newly created logs until Track D1 (now `DEFAULT_FORMAT`, format 3); format-1
+/// logs still open, read and append exactly as before (the format is read from `schema_meta`).
 pub const FORMAT_VERSION: i64 = 1;
 /// Log format 2: `codec.rs` segments (raw 32-byte ids, delta timestamps,
 /// dictionaries, hz entropy stage) and content-hash idempotent revisions.
@@ -64,6 +67,11 @@ pub const FORMAT_V3: i64 = 3;
 /// older binaries refuse. Reached only by creating a log with `LogFormat::V4` or by the explicit
 /// `upgrade_to_v4`; never silently.
 pub const FORMAT_V4: i64 = 4;
+/// Track D1a: the format of a log created by `open_or_create` / `open_or_create_with_clock`
+/// (format 3: format-2 segments and the journal MANIFEST, 611 B/step against 2,582 for format 1 in
+/// `docs/longrun.md`). Applies only when the log is created; an existing log keeps its format and is
+/// never upgraded automatically. `open_or_create_with_format(.., LogFormat::V1)` still creates format 1.
+pub const DEFAULT_FORMAT: LogFormat = LogFormat::V3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
@@ -840,7 +848,7 @@ impl VersionedLog {
     /// Open `<root>/<owner>/log`, creating it (version 0 = genesis with
     /// `schema_meta`) if no MANIFEST exists. Does not delete anything when the
     /// log already exists; call `recover()` or just commit to clean leftovers.
-    /// New logs use format 1 (see `open_or_create_with_format` for format 2).
+    /// New logs use `DEFAULT_FORMAT` (format 3); see `open_or_create_with_format` for any other.
     pub fn open_or_create(root: &Path, owner: &str) -> Result<VersionedLog, LogError> {
         Self::open_or_create_with_clock(root, owner, now_iso)
     }
@@ -848,7 +856,7 @@ impl VersionedLog {
     /// Like `open_or_create` but with an explicit time source, which also
     /// stamps the genesis version (tests, replays, imports).
     pub fn open_or_create_with_clock(root: &Path, owner: &str, clock: impl Fn() -> String + Send + 'static) -> Result<VersionedLog, LogError> {
-        Self::open_or_create_with_format(root, owner, clock, LogFormat::V1)
+        Self::open_or_create_with_format(root, owner, clock, DEFAULT_FORMAT)
     }
 
     /// Like `open_or_create_with_clock`; `format` applies only when the log is
@@ -1026,10 +1034,25 @@ impl VersionedLog {
     /// without keeping the rows: the events segments are read (checksums verified) a chunk at a time.
     /// If the latest snapshot is already in memory its rows are used. `f` returns false to stop.
     /// Gives the same rows, in the same order, as `open_latest().rows::<EventRow>()`.
-    pub fn for_each_event(&self, mut f: impl FnMut(EventRow) -> bool) -> Result<(), LogError> {
+    pub fn for_each_event(&self, f: impl FnMut(EventRow) -> bool) -> Result<(), LogError> {
+        self.each_event_from(0, f)
+    }
+
+    /// The events of `ev_segs[first..]` (all events segments from that one on), in log order.
+    fn each_event_from(&self, first: usize, f: impl FnMut(EventRow) -> bool) -> Result<(), LogError> {
+        self.each_event_range(first, self.ev_segs.len(), f)
+    }
+
+    /// The events of `ev_segs[first..end]`, in log order.
+    pub(crate) fn each_event_range(&self, first: usize, end: usize, mut f: impl FnMut(EventRow) -> bool) -> Result<(), LogError> {
+        let end = end.min(self.ev_segs.len());
+        let first = first.min(end);
         let head = self.head.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if let Some(s) = head {
-            for r in s.tables[Table::Events.idx()].iter() {
+            let rows = &s.tables[Table::Events.idx()];
+            let ord = |k: usize| self.ev_segs.get(k).map_or(rows.len(), |x| x.0 as usize);
+            let (a, b) = (ord(first), ord(end));
+            for r in rows[a.min(b)..b.min(rows.len())].iter() {
                 if !f(EventRow::from_cells(r)) {
                     break;
                 }
@@ -1037,10 +1060,10 @@ impl VersionedLog {
             return Ok(());
         }
         // small first chunks, so that a read that stops early (the genesis) touches few segments
-        let mut at = 0usize;
+        let mut at = first;
         let mut n = 8usize;
-        while at < self.ev_segs.len() {
-            let chunk = &self.ev_segs[at..(at + n).min(self.ev_segs.len())];
+        while at < end {
+            let chunk = &self.ev_segs[at..(at + n).min(end)];
             at += chunk.len();
             n = (n * 2).min(READ_CHUNK);
             let (dir, entries, dicts) = (&self.dir, &self.entries, &self.dicts);

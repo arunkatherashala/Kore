@@ -113,7 +113,7 @@ impl B14Ctl {
 }
 
 /// The B14 switches of one being, fixed when it is created.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct B14Setup {
     pub library: bool,
     /// Curiosity budget, per mille of the energy spent so far (0 = off).

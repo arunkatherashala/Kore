@@ -33,7 +33,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 pub const FLUSH_EVERY: usize = 25;
 pub const DEFAULT_DISCOVER_EVERY: u64 = 10;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, Default, PartialEq)]
 pub struct ArmStat {
     pub n: u64,
     pub reward: i64,
@@ -41,7 +41,7 @@ pub struct ArmStat {
 }
 
 /// The learner's constants, fixed at creation and logged in the genesis event (for exact replay).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct LearnerCfg {
     pub beta_milli: u32,
     pub skip_milli: u32,
@@ -95,7 +95,7 @@ impl Outcome2 {
 }
 
 /// The being's state in World v2, folded from its log.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct State2 {
     pub cfg: Option<W2Cfg>,
     pub learner: LearnerCfg,
@@ -134,7 +134,7 @@ pub struct State2 {
 
 /// `compose` families whose base is `fam` (family types are observable: the type cycle is public).
 /// One B3b change in World v2 (B10), with the step and the outcome events it rests on.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct Change2 {
     pub index: usize,
     pub step: u64,

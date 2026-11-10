@@ -103,7 +103,7 @@ impl E1Ctl {
 }
 
 /// The E1 switch of one being, fixed when it is created.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct E1Setup {
     /// Evolution budget, per mille of the energy spent so far (0 = off).
     pub pm: u32,

@@ -332,7 +332,12 @@ fn verify(owner: &str) -> Result<Value, Value> {
             let log = VersionedLog::open(base.parent().and_then(|p| p.parent()).unwrap_or(&safety::data_root()), owner).map_err(log_err)?;
             let v = log.latest_version();
             let head = log.snapshot_hash(v).unwrap_or_default();
-            Ok(plain(format!("OK: {} version(s), latest {}, head hash {}", v + 1, v, head)))
+            let msg = format!("OK: {} version(s), latest {}, head hash {}", v + 1, v, head);
+            // Track D1b: state checkpoints, if any, are checked against the full fold
+            Ok(plain(match crate::being::ckpt::audit_summary(&log) {
+                Some(c) => format!("{msg}; {c}"),
+                None => msg,
+            }))
         }
         Err(vl::VerifyError::ManifestMissing) if !base.exists() || std::fs::read_dir(&base).map(|d| d.count() == 0).unwrap_or(true) => {
             Ok(plain("OK: no log exists yet (nothing to verify)".into()))

@@ -43,7 +43,7 @@ pub const DEFAULT_RULE_K: u32 = 8;
 pub const G_MIN: i64 = 1;
 pub const G_MAX: i64 = 1000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UseCfg {
     pub rule_est: bool,
     /// A2: `discovered` is a candidate only where a rule covers the offer (elsewhere it is `careful` under another name).
@@ -109,7 +109,7 @@ pub fn robust_ok(right: u32, wrong: u32, theta_milli: u32) -> bool {
 
 /// One revealed example of a formula or grid task: the visible input, the kind (`fall`, `weight` or `grid`),
 /// and the answer the being was told is right.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct CExample {
     pub event_id: String,
     pub fam: usize,
@@ -120,7 +120,7 @@ pub struct CExample {
 }
 
 /// An accepted constant for one family: `g` of a formula family, or the move rule (4 or 8 neighbours) of a grid family.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct ConstRule {
     pub id: String,
     pub fam: usize,

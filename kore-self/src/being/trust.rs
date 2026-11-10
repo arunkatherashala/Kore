@@ -56,7 +56,7 @@ pub const MIN_EVIDENCE: f64 = 6.0;
 const VAR_FLOOR: f64 = 0.09;
 
 /// Reliability of one advisor for one kind of advice.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, Default, PartialEq)]
 pub struct TrustCell {
     /// Discounted (after an alarm) win and loss counts of the tests.
     pub wins: f64,
@@ -88,7 +88,7 @@ impl TrustCell {
 }
 
 /// A flagged degradation of one advisor in one kind of advice.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct TrustAlarm {
     pub advisor: String,
     pub kind: String,
@@ -98,7 +98,7 @@ pub struct TrustAlarm {
     pub tests: u64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct TrustTable {
     cells: BTreeMap<(String, String), TrustCell>,
     /// Detector settings (defaults are the constants above; the measurement tunes them on the tuning seeds).

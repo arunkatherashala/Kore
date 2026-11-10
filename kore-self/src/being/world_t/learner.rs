@@ -22,7 +22,7 @@ pub const SKIP_MIN_COST: i64 = 40;
 /// Pooled counts needed before a pool is used as the prior.
 pub const POOL_MIN: u32 = 3;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct LearnerTCfg {
     pub beta_milli: u32,
     /// Prior pseudo-count (per mille: 2000 = two pseudo-attempts).

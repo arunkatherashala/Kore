@@ -643,3 +643,71 @@ Note (merge of `restart-fix` and `rulescan-fix` on `brain-v3`): the restart grow
 * The cause of the slow decline in world 1, and whether other `beta` / `skip_frac` values or forgetting remove it.
 * The rule world past 150,000 steps with the real binary (200,000 in-process with `prof`, after the rule scan fix), and
   rule worlds other than world 4 over a long run (world 3 only in the 10,000-step bit-identity check).
+
+## Track D1: default format 3 and state checkpoints
+
+Branch `brain-d1`. Targets were fixed before the code in `docs/d1_prereg.md`; timing and memory against them are
+**not measured yet** (they are to be measured on a quiet machine, see the commands there and below). What follows is the
+design and what the tests check.
+
+**D1a, default format.** `VersionedLog::open_or_create` / `open_or_create_with_clock` (and so every tool through
+`log_tools::open`) now create format 3 (`versioned::DEFAULT_FORMAT`). The format is still read from `schema_meta`, so an
+existing format-1 log opens, reads and appends exactly as before; nothing is upgraded automatically, and
+`open_or_create_with_format(.., LogFormat::V1)` still creates format 1. The original format-1 tests of
+`versioned/tests.rs` now create their logs as format 1 explicitly. Tests: the same being (first world: UCB, B5 rules,
+B6 transfer, B14 + E1; and World T) run on a format-1 and on a format-3 log in two calls folds to the same state and logs
+the same decision sequence.
+
+**D1b, state checkpoint** (`being/ckpt.rs`, `being/binser.rs`, `versioned/checkpoint.rs`).
+
+* What: the state a reader folds from the log (`BeingState`, World T `StateT`, World O `StateO`) at version v, encoded
+  exactly (`binser`: integers fixed width, floats as their 64 bits, maps with any key type).
+* Where: `<owner>/log/checkpoints/<kind>-<v>.kore`, a one-row kore-store file with the columns `ckpt_format` (snapshot
+  format version, now 1), `kind`, `version`, `chain_hash` (MANIFEST hash of entry v), `step`, `content_sha256`,
+  `payload_hex`. Not a segment, not in the MANIFEST; `verify` of the log is unchanged. The newest 2 files per kind are kept.
+* Hash and chain link: `content_sha256` = sha256 over format, kind, v, chain hash, step and payload. Right after the file
+  is written, a note (source `being:checkpoint`, tags `checkpoint`, `ckpt_kind`, `ckpt_v`, `ckpt_step`, `ckpt_sha`) is
+  appended to the log with also `ckpt_file` (sha256 of the whole file), so both hashes are covered by the MANIFEST hash
+  chain and a change of any byte of the file (also bytes the reader never decodes) makes it unusable. No reader folds that source.
+* Restore: newest file first; used only if the snapshot format version is known, the content hash verifies, v <= the
+  latest version, the log's chain hash at v equals the recorded one, the payload decodes with the recorded step count, and
+  the anchor note with exactly that kind, v, content hash and file hash is found while the tail (versions after v) is folded onto it.
+  Otherwise the next older file, and in the end the full fold. A forged file with a self-consistent hash has no anchor; an
+  anchor can only be added by writing to the hash-chained log, which `verify_against(expected head)` reports. A `forget` of
+  an event at or before v re-seals entry v (chain mismatch); a forget after v leaves the checkpoint valid (the tail fold no
+  longer sees the event).
+* Write: atomic (temp file, fsync, rename, directory fsync); a crash before the rename leaves a `.tmp` file no reader looks
+  at, the previous checkpoint stays in use, the next write removes it. The state written is the run's start state with
+  every event of the run folded onto it (equal to the full fold by construction), decoded once more and compared before
+  writing. A failed write never fails the run.
+* Cadence: `checkpoint_every = N` in `controller.txt` (0 or missing = off, the repo convention for new capabilities;
+  allowed 100..=1000000). At the end of a `being_run` (or World T run) a checkpoint is written when N steps have passed
+  since the restored one. With it off, the restart is the old full fold and checkpoint files are not read.
+* Full verification: `self_verify` checks the log as before and, when checkpoint files exist, folds the log up to each
+  checkpoint's version and compares (`ckpt::audit`). Every open still reads and hashes every segment, so the log itself is
+  fully verified at every restart, as before.
+* Not changed (D1c, follow-up): the open (every segment read and hashed, the in-memory id index of about 1.5 KB per step)
+  is still linear in the log; the checkpoint removes only the fold. A KILL file that appears during the open is honoured
+  after the open (and the now short restore), before the first step, as before.
+
+Measurement commands for the targets of `docs/d1_prereg.md` (owner's session, quiet machine, nothing else building).
+The harness reads `LONGRUN_CKPT_EVERY` (adds `checkpoint_every = N` to the `controller.txt` it writes in `run` and
+`cut`); `memfold` reports the restore (checkpoint + tail) next to the full fold. Cut copies hold no checkpoint, so each
+"with checkpoint" copy first gets one untimed priming call (it folds the whole log once and writes the checkpoint).
+
+```
+cargo build -p kore-self --release --offline --bin kore-self --example longrun_being
+E=<target>/release/examples/longrun_being.exe
+# M-a, T1: bytes per step at 50,000 steps, format 3 (the new default) and format 1 (same seeds)
+$E run --root <d1>/f3 --world 1 --steps 50000 --checkpoint-every 50000 --window 50000 --format 3
+$E run --root <d1>/f1 --world 1 --steps 50000 --checkpoint-every 50000 --window 50000 --format 1
+# M-b / M-c, T3-T6: cuts of the 1,000,000-step world-1 log (kw/longrun-data2) at about 300,000 and 1,000,000 steps
+#   (V = the version whose last outcome is step 299,999 resp. the last version); one copy per variant
+$E cut --src <longrun-data2 root> --root <d1>/off/300k --at <V300k>
+LONGRUN_CKPT_EVERY=5000 $E cut --src <longrun-data2 root> --root <d1>/on/300k --at <V300k>
+$E restart --root <d1>/on/300k --chunk 5000                      # priming call (writes the checkpoint), not timed
+$E memfold --root <d1>/off/300k ; $E memfold --root <d1>/on/300k  # in-process: open / restore / full fold, peaks
+$E restart --root <d1>/off/300k --chunk 5000 ; $E restart --root <d1>/on/300k --chunk 5000   # timed calls
+$E restart --root <copy> --chunk 5000 --kill-ms 100 ; $E restart --root <copy> --chunk 5000 --kill-ms 0   # KILL, fresh copies
+# (the same for 1M; M-d: $E compare --root <off copy> --other <on copy> --at <V> after one timed call each)
+```

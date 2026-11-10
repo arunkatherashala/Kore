@@ -74,7 +74,7 @@ pub trait Thinker {
 /// | careful | the listed cost | the scripted table above | the domain rate |
 /// | deep | twice the listed cost | exact for every template of the standard world | half the domain rate |
 /// | discovered | the listed cost | applies the being's own accepted rule when one fits the prefix, else behaves like careful (extended pattern world only) | the domain rate |
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Strategy {
     Fast = 0,
     Careful = 1,

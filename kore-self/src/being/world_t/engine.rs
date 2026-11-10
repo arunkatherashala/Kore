@@ -29,7 +29,7 @@ pub const CITE_LAST: usize = 5;
 
 pub type ToolCache = HashMap<(usize, Tmpl, String, usize, Plan), ToolOut>;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, Default, PartialEq)]
 pub struct Cell {
     pub n: u32,
     pub succ: u32,
@@ -117,7 +117,7 @@ impl OutcomeT {
 }
 
 /// The being's state in World T, folded from its log.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct StateT {
     pub cfg: Option<WTCfg>,
     pub learner: LearnerTCfg,
@@ -679,13 +679,21 @@ pub struct RunTSummary {
     pub truths: Vec<TrueT>,
     pub version_before: u64,
     pub version_after: u64,
+    /// Track D1b: checkpoint restored at the start and written at the end (all empty when off).
+    pub ckpt: crate::being::ckpt::CkptReport,
 }
 
 /// Run the World T being on its own log (or `chooser`, for references and tests), reading files from `sb`.
 pub fn run_t(log: &mut VersionedLog, cfg: &RunTCfg, policy: &Policy, chooser: Option<&mut dyn ChooserT>, sb: &dyn Sandbox) -> Result<RunTSummary, LogError> {
     let version_before = log.latest_version();
-    let rows: Vec<EventRow> = log.open_latest().rows();
-    let mut state = StateT::from_events(&rows);
+    // Track D1b: with checkpoints off this is exactly the old full fold of the snapshot
+    let (mut state, restored) = if policy.checkpoint_every == 0 {
+        let rows: Vec<EventRow> = log.open_latest().rows();
+        (StateT::from_events(&rows), Default::default())
+    } else {
+        crate::being::ckpt::restore::<StateT>(log)?
+    };
+    let ckpt_base = (policy.checkpoint_every > 0).then(|| (state.clone(), version_before));
     let mut created = false;
     match &state.cfg {
         Some(c) => {
@@ -770,7 +778,8 @@ pub fn run_t(log: &mut VersionedLog, cfg: &RunTCfg, policy: &Policy, chooser: Op
     if !pending.events.is_empty() {
         log.commit_batch(pending)?;
     }
-    Ok(RunTSummary { steps_run: done, stopped, reward: rew, cost, state: engine.state, created, new_rules, refusals: engine.refusals_total, truths, version_before, version_after: log.latest_version() })
+    let ckpt = crate::being::ckpt::write_after_run(log, policy.checkpoint_every, ckpt_base, restored);
+    Ok(RunTSummary { steps_run: done, stopped, reward: rew, cost, state: engine.state, created, new_rules, refusals: engine.refusals_total, truths, version_before, version_after: log.latest_version(), ckpt })
 }
 
 /// Re-derive every learner decision of a World T log from the events before it and the world rebuilt

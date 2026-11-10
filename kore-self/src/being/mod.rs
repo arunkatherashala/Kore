@@ -11,6 +11,10 @@
 
 pub mod adapt_b3b;
 pub mod advice;
+/// Track D1b: exact binary encoding of the checkpoint payload.
+pub mod binser;
+/// Track D1b: state checkpoints (off by default; controller key `checkpoint_every`).
+pub mod ckpt;
 pub mod chooser;
 pub mod controller;
 pub mod discover;
@@ -71,6 +75,8 @@ mod tests_b9;
 mod tests_b11;
 #[cfg(test)]
 mod tests_b13;
+#[cfg(test)]
+mod tests_d1;
 
 pub use chooser::{DomainPicker, Ucb1};
 pub use policy::{Policy, StopReason};

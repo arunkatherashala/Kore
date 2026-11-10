@@ -71,7 +71,7 @@ pub struct EvoCfg {
 pub const DEFAULT_EVO: EvoCfg = EvoCfg { pm: 20, every: 100, pop: 48, gens: 24, max_pass_evals: 60_000, min_unexplained: 4, window: 400, sample_unexplained: 32, sample_explained: 8, p_cross: 0.5, p_inherit: 0.3, elites_logged: 4, max_verify: 3, weighted: true };
 
 /// What the log says about E1 (folded): the setup, passes, evaluations spent, the latest elites per signature.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct E1State {
     pub setup: Option<E1Setup>,
     pub passes: u64,

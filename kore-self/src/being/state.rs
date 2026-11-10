@@ -25,7 +25,7 @@ pub const EVIDENCE_WINDOW: usize = 5;
 /// roughly in 0..1 before the exploration bonus is added.
 pub const EFF_NORM: f64 = 10.0;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, Default, PartialEq)]
 pub struct DomainStat {
     pub n: u64,
     pub correct: u64,
@@ -50,7 +50,7 @@ impl DomainStat {
 /// Which chooser the being was created with. `Ucb` is the original
 /// single-task world with the UCB1 domain chooser; `Model` is the menu world
 /// with the learned world model and planner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Chooser {
     Ucb,
     Model,
@@ -72,7 +72,7 @@ impl Chooser {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct Genesis {
     pub world_seed: u64,
     pub loop_seed: u64,
@@ -124,7 +124,7 @@ pub struct Outcome {
 }
 
 /// How often a rule was used and how it fared (folded from outcomes that carry `rule_used`).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct RuleUse {
     pub uses: u32,
     pub right: u32,
@@ -134,7 +134,7 @@ pub struct RuleUse {
 
 pub const RULE_USE_KEEP: usize = 24;
 
-#[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 pub struct BeingState {
     pub genesis: Option<Genesis>,
     pub genesis_event: String,
@@ -185,7 +185,7 @@ pub struct BeingState {
 }
 
 /// A change flagged by the detector, with the logged outcomes it rests on.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct Change {
     pub index: usize,
     pub step: u64,

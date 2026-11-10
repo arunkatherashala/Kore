@@ -48,7 +48,7 @@ pub const DEFAULT_RETIRE_WINDOW: u32 = 6;
 pub const DEFAULT_RETIRE_MIN: u32 = 4;
 pub const DEFAULT_RETIRE_UB_MILLI: u32 = 500;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SkillsCfg {
     pub adapt: bool,
     pub retire: bool,

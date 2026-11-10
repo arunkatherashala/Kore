@@ -38,7 +38,7 @@ pub const FLUSH_EVERY: usize = 25;
 pub const LEARNER_O: &str = "wo-model-ucb";
 
 /// The learner's constants, fixed at creation and logged in the genesis event.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct LearnerOCfg {
     pub beta_milli: u32,
     pub skip_milli: u32,
@@ -156,7 +156,7 @@ impl Chooser2 for LearnerO {
 }
 
 /// The being's state in World O, folded from its log.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct StateO {
     pub cfg: Option<WOCfg>,
     pub learner: LearnerOCfg,
@@ -881,6 +881,8 @@ pub struct RunOSummary {
     pub truths: Vec<TrueO>,
     pub version_before: u64,
     pub version_after: u64,
+    /// Track D1b: checkpoint restored at the start and written at the end (all empty when off).
+    pub ckpt: crate::being::ckpt::CkptReport,
 }
 
 /// Run the World O being on its own log with its own learner (or `chooser`, for references and tests).
@@ -894,8 +896,14 @@ pub fn run_o(log: &mut VersionedLog, cfg: &RunOCfg, policy: &Policy, chooser: Op
 pub fn run_o_granted(log: &mut VersionedLog, cfg: &RunOCfg, policy: &Policy, chooser: Option<&mut dyn Chooser2>, l2_grant: Option<Result<bool, Refusal>>) -> Result<RunOSummary, LogError> {
     let mut pre_refusals: Vec<Refusal> = vec![];
     let version_before = log.latest_version();
-    let rows: Vec<EventRow> = log.open_latest().rows();
-    let mut state = StateO::from_events(&rows);
+    // Track D1b: with checkpoints off this is exactly the old full fold of the snapshot
+    let (mut state, restored) = if policy.checkpoint_every == 0 {
+        let rows: Vec<EventRow> = log.open_latest().rows();
+        (StateO::from_events(&rows), Default::default())
+    } else {
+        crate::being::ckpt::restore::<StateO>(log)?
+    };
+    let ckpt_base = (policy.checkpoint_every > 0).then(|| (state.clone(), version_before));
     let mut created = false;
     match &state.cfg {
         Some(c) => {
@@ -997,7 +1005,8 @@ pub fn run_o_granted(log: &mut VersionedLog, cfg: &RunOCfg, policy: &Policy, cho
     if !pending.events.is_empty() {
         log.commit_batch(pending)?;
     }
-    Ok(RunOSummary { steps_run: done, stopped, reported_reward: rep, true_reward: tru, cost, state: engine.state, created, new_rules, refusals: engine.refusals_total, truths, version_before, version_after: log.latest_version() })
+    let ckpt = crate::being::ckpt::write_after_run(log, policy.checkpoint_every, ckpt_base, restored);
+    Ok(RunOSummary { steps_run: done, stopped, reported_reward: rep, true_reward: tru, cost, state: engine.state, created, new_rules, refusals: engine.refusals_total, truths, version_before, version_after: log.latest_version(), ckpt })
 }
 
 /// Re-derive every learner decision of a World O log from the events before it (and the world rebuilt
