@@ -1,0 +1,294 @@
+# Pinned decode of every committed .kore fixture (written by older versions of the writer).
+# Checked by kore-store/tests/old_files.rs (Rust) and kore-python/compat_check.py (Python).
+# Per file: '== <path>[ needs-dicts][ encrypted]', the latest-version digest
+# ('rows N' + '<column> <type> <nulls> <fnv64>'), and '-- version <ts>' blocks for version logs.
+# Re-pin only when adding a fixture on purpose: KORE_REGEN_OLD_FILES=1 cargo test -p kore-store --test old_files
+== conformance/default.kore
+rows 3000
+i i64 300 c7f0c45dafb75387
+f f64 231 ab4ee14822f066c5
+s str 273 deafcce0e8baff38
+b bool 429 e92683312bed5351
+q i64 0 8af047db7be13147
+== conformance/encrypted.kore encrypted
+rows 3000
+i i64 300 c7f0c45dafb75387
+f f64 231 ab4ee14822f066c5
+s str 273 deafcce0e8baff38
+b bool 429 e92683312bed5351
+q i64 0 8af047db7be13147
+== conformance/row_groups.kore
+rows 3000
+i i64 300 c7f0c45dafb75387
+f f64 231 ab4ee14822f066c5
+s str 273 deafcce0e8baff38
+b bool 429 e92683312bed5351
+q i64 0 8af047db7be13147
+== conformance/shuffle.kore
+rows 3000
+i i64 300 c7f0c45dafb75387
+f f64 231 ab4ee14822f066c5
+s str 273 deafcce0e8baff38
+b bool 429 e92683312bed5351
+q i64 0 8af047db7be13147
+== conformance/shuffle_strlen.kore
+rows 3000
+i i64 300 c7f0c45dafb75387
+f f64 231 ab4ee14822f066c5
+s str 273 deafcce0e8baff38
+b bool 429 e92683312bed5351
+q i64 0 8af047db7be13147
+== conformance/strlen.kore
+rows 3000
+i i64 300 c7f0c45dafb75387
+f f64 231 ab4ee14822f066c5
+s str 273 deafcce0e8baff38
+b bool 429 e92683312bed5351
+q i64 0 8af047db7be13147
+== conformance/versions.kore
+rows 3000
+i i64 300 c7f0c45dafb75387
+f f64 231 ab4ee14822f066c5
+s str 273 deafcce0e8baff38
+b bool 429 e92683312bed5351
+q i64 0 8af047db7be13147
+-- version 100
+rows 2
+only i64 0 a14c003dc26df266
+-- version 200
+rows 3000
+i i64 300 c7f0c45dafb75387
+f f64 231 ab4ee14822f066c5
+s str 273 deafcce0e8baff38
+b bool 429 e92683312bed5351
+q i64 0 8af047db7be13147
+== kore-store/tests/fixtures/dl_log4/events_0000000001.kore needs-dicts
+rows 19
+event_id str 0 a39139c1efa86339
+occurred_at str 0 b036f359912d0959
+recorded_at str 0 53ddec4174937bf6
+source str 0 4551aa45a259f14a
+kind str 0 23bae3b5141f39b2
+text str 0 0b2829937ddccbbd
+tags str 0 56f74ee398183849
+redacted bool 0 3c57aa95cf1eebac
+== kore-store/tests/fixtures/dl_log4/events_0000000002.kore needs-dicts
+rows 20
+event_id str 0 5f6bf74c71348b4d
+occurred_at str 0 1ee4af091148bf3e
+recorded_at str 0 2371489716af86f5
+source str 0 f6978a5eeedce461
+kind str 0 2a116af0e4f86ee5
+text str 0 0b699f051c9e6e4b
+tags str 0 1b85d84e35aa85cb
+redacted bool 0 d066b4e46e4825b5
+== kore-store/tests/fixtures/dl_log4/events_0000000004.kore needs-dicts
+rows 19
+event_id str 0 81f3d73983d01fe6
+occurred_at str 0 c920da60b3d4c1a1
+recorded_at str 0 9df6d9298e07fa71
+source str 0 81575b4df471fa2a
+kind str 0 7b02018b98ff7132
+text str 0 6ddcf954bd7686d3
+tags str 0 4441ccd49120f5b6
+redacted bool 0 3c57aa95cf1eebac
+== kore-store/tests/fixtures/dl_log4/events_0000000005.kore needs-dicts
+rows 20
+event_id str 0 bc6cded78d386471
+occurred_at str 0 2ff68176395aea65
+recorded_at str 0 12fd26020e85a2e1
+source str 0 679326d8dd60dacb
+kind str 0 2a116af0e4f86ee5
+text str 0 65de7e42c5f419db
+tags str 0 1b85d84e35aa85cb
+redacted bool 0 d066b4e46e4825b5
+== kore-store/tests/fixtures/dl_log4/events_0000000007.kore needs-dicts
+rows 20
+event_id str 0 636c05dd72cbdb59
+occurred_at str 0 cd461c356e9d1fda
+recorded_at str 0 99116e59396377c9
+source str 0 f6978a5eeedce461
+kind str 0 2a116af0e4f86ee5
+text str 0 721749562c028b4b
+tags str 0 1b85d84e35aa85cb
+redacted bool 0 d066b4e46e4825b5
+== kore-store/tests/fixtures/dl_log4/events_0000000012.kore
+rows 1
+event_id str 0 9db27bf4a3cf5173
+occurred_at str 0 58b334b91190ff30
+recorded_at str 0 1d06a4b99b45619f
+source str 0 0cea053f09e9d74a
+kind str 0 b5858db0dd4311a4
+text str 0 ea2ba580591c1912
+tags str 0 110d41f7bee900b4
+redacted bool 0 082f2207b4e88cc4
+== kore-store/tests/fixtures/dl_log4/outcomes_0000000010.kore
+rows 1
+pred_id str 0 3974b69b43d40212
+resolved_at str 0 f69c1e663ec34cc1
+actual str 0 40698fc96eaf57b2
+outcome_event_id str 0 6d917f9cbacce6aa
+== kore-store/tests/fixtures/dl_log4/predictions_0000000009.kore
+rows 1
+pred_id str 0 3974b69b43d40212
+made_at str 0 db0c1a0dfd31eeac
+question_id str 0 6ce59bf041ddb934
+target str 0 dec1a414f086dda0
+options str 0 996166804f0379e6
+probs str 0 bbfc82085817f145
+model_id str 0 4d8280f74adb3cd2
+model_version str 0 07fd4bf1b8fac3d7
+features_cite str 0 4fe847bc35e79127
+resolves_by str 0 f69c1e663ec34cc1
+== kore-store/tests/fixtures/dl_log4/revision_causes_0000000003.kore
+rows 2
+rev_id str 0 4d744e441f5ab6ed
+event_id str 0 2e5720c16a2261ee
+== kore-store/tests/fixtures/dl_log4/revisions_0000000003.kore
+rows 1
+rev_id str 0 b1a09e27df5422b9
+entity_type str 0 93eede1740e81183
+key str 0 671a1dad368a1bf0
+stance str 0 a88ec05fb391b33f
+confidence f64 0 8806f075fd344347
+rationale str 0 bddbb7b26937bf0b
+supersedes str 1 af63bd4c8601b7df
+valid_from str 0 fe257f701eba6e17
+author str 0 e5514f3d1a776554
+recorded_at str 0 057ff7f6d06ff16a
+== kore-store/tests/fixtures/dl_log4/revisions_0000000008.kore
+rows 1
+rev_id str 0 d276c8f3748f7867
+entity_type str 0 93eede1740e81183
+key str 0 671a20ad368a2109
+stance str 0 07fd03f1b8fa497f
+confidence f64 0 507aa3dc8e279781
+rationale str 0 ac4bfb2475465d8b
+supersedes str 1 af63bd4c8601b7df
+valid_from str 0 b041e79bf309234e
+author str 0 a6fa6974552c8e6b
+recorded_at str 0 d4c698946c63e223
+== kore-store/tests/fixtures/dl_log4/schema_meta_0000000000.kore
+rows 1
+format_version i64 0 d6af10b864380b28
+created_at str 0 038937ee7219d3fd
+== kore-store/tests/fixtures/events_1000.kore
+rows 1000
+event_id str 0 6bf84831cec08c09
+occurred_at str 0 766a809169b28927
+recorded_at str 0 766a809169b28927
+source str 0 a8a46d79841cc3b5
+kind str 0 4e945f8335c5ebb8
+text str 0 f357186b0d7f0f03
+tags str 339 edaedb7132d976dd
+redacted bool 0 944076b506742d45
+== kore-store/tests/fixtures/events_log.kore
+rows 300
+event_id str 0 c740f49e063227bf
+occurred_at str 0 5344751aafe98c01
+recorded_at str 0 5344751aafe98c01
+source str 0 f61355f66c096c4b
+kind str 0 ee698a88b0f9b7cc
+text str 0 0d32157bdec2b928
+tags str 87 764a9854943a4687
+redacted bool 0 b228cd49e9b1d395
+-- version 100
+rows 100
+event_id str 0 a2f90066cfa766d1
+occurred_at str 0 d91a695eeca835a9
+recorded_at str 0 d91a695eeca835a9
+source str 0 1f88e04ba92d7310
+kind str 0 5fcb4a3d037d2c26
+text str 0 59302ce1c6c8c1a7
+tags str 28 b0d7c9bb09c90660
+redacted bool 0 e40502623db4f3f5
+-- version 200
+rows 200
+event_id str 0 6a0cba4662a30af3
+occurred_at str 0 5863018111a40d59
+recorded_at str 0 5863018111a40d59
+source str 0 29a628243e2426b2
+kind str 0 2207a8d428b50ef9
+text str 0 5631914ca6c7b410
+tags str 60 744d8682b7f441ec
+redacted bool 0 12a3acbb5b526ec5
+-- version 300
+rows 300
+event_id str 0 c740f49e063227bf
+occurred_at str 0 5344751aafe98c01
+recorded_at str 0 5344751aafe98c01
+source str 0 f61355f66c096c4b
+kind str 0 ee698a88b0f9b7cc
+text str 0 0d32157bdec2b928
+tags str 87 764a9854943a4687
+redacted bool 0 b228cd49e9b1d395
+== kore-store/tests/fixtures/events_rowgroups.kore
+rows 600
+event_id str 0 e7d15cbbc6edf960
+occurred_at str 0 6ac8059a775ac4b4
+recorded_at str 0 6ac8059a775ac4b4
+source str 0 b7d4a4e01f4e62ae
+kind str 0 62f2e4108fe73661
+text str 0 98af543d2cfd1cca
+tags str 215 1f645976eda71fd8
+redacted bool 0 76a36b4e7bdbfe05
+== kore-store/tests/fixtures/lowcard_strs.kore
+rows 2500
+tag str 26 cb5a562032fc3a76
+sd str 500 1bc6e4ced5924317
+== kore-store/tests/fixtures/mixed_default.kore
+rows 300
+i i64 30 8f0b86f53ed6876d
+f f64 23 0bfafae56b43c8f8
+b bool 43 e8deb8843c763a19
+s str 28 af801abf2849017f
+== kore-store/tests/fixtures/mixed_notrailer.kore
+rows 300
+i i64 30 8f0b86f53ed6876d
+f f64 23 0bfafae56b43c8f8
+b bool 43 e8deb8843c763a19
+s str 28 af801abf2849017f
+== kore-store/tests/fixtures/rowgroups.kore
+rows 300
+i i64 30 8f0b86f53ed6876d
+f f64 23 0bfafae56b43c8f8
+b bool 43 e8deb8843c763a19
+s str 28 af801abf2849017f
+== kore-store/tests/fixtures/rules_v6.kore
+rows 300
+id i64 0 3d0d3fee60433b4a
+city str 0 127ed35425484d65
+country str 0 fe62cf2155e61a35
+price f64 0 6f5558ebbd5bbe11
+== kore-store/tests/fixtures/sample_v2_6e2e6a7b.kore
+rows 200
+id str 0 bf0de7230aaae3c8
+ts i64 0 dfecc854fa920b45
+text str 0 5e43f93cca3759b9
+== kore-store/tests/fixtures/sample_v3_6e2e6a7b.kore
+rows 200
+id str 0 bf0de7230aaae3c8
+ts i64 0 dfecc854fa920b45
+text str 0 5e43f93cca3759b9
+== kore-store/tests/fixtures/sorted_ints.kore
+rows 5000
+ts i64 0 04e0a8e373efa34c
+== kore-store/tests/fixtures/text.kore
+rows 400
+text str 0 d8ba735bc9a10983
+id str 0 9c0daf2b2cece261
+== kore-store/tests/fixtures/versionlog.kore
+rows 300
+i i64 30 8f0b86f53ed6876d
+f f64 23 0bfafae56b43c8f8
+b bool 43 e8deb8843c763a19
+s str 28 af801abf2849017f
+-- version 10
+rows 5000
+ts i64 0 04e0a8e373efa34c
+-- version 20
+rows 300
+i i64 30 8f0b86f53ed6876d
+f f64 23 0bfafae56b43c8f8
+b bool 43 e8deb8843c763a19
+s str 28 af801abf2849017f

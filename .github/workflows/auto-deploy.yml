@@ -1,14 +1,27 @@
 name: Auto Version Bump & Deploy
 
-# A push to fileformat only runs CI; it never publishes.
+# Releases are made from the branch `stable`, never directly from `fileformat`.
+# A push to fileformat (or stable) only runs CI; it never publishes.
+# This workflow file lives on the default branch fileformat (a cron schedule only runs from the
+# default branch), but every run checks out `stable` and releases what is there.
+#
+# Promotion (by hand): fast-forward stable to a fileformat commit whose CI is green, e.g.
+#   git push origin <sha-on-fileformat>:refs/heads/stable
+# See docs/RELEASING.md.
+#
 # Releases happen in two ways:
-#  1. Weekly, automatically: every Sunday 03:00 UTC, IF fileformat has commits since
-#     the last v* tag other than the bot's own version bumps, AND the full CI quality
-#     gate concluded success for the head commit. Weekly releases are patch bumps.
-#     No new commits, or CI not green: nothing is released (the run says why).
-#  2. By hand, any time: GitHub -> Actions -> "Auto Version Bump & Deploy" -> Run
-#     workflow, pick patch / minor / major and type "release" in the confirm box.
-# Both paths refuse unless CI passed for the exact commit at the head of fileformat.
+#  1. Weekly, automatically: every Sunday 03:00 UTC, IF stable has commits since the last v* tag
+#     other than the bot's own commits, AND the CI quality gate (ci.yml) concluded success for the
+#     commit at the head of stable. Weekly releases are always patch bumps.
+#     No stable branch, no new commits, or CI not green: nothing is released (the run says why).
+#  2. By hand, any time: GitHub -> Actions -> "Auto Version Bump & Deploy" -> Run workflow (on
+#     fileformat), pick patch / minor / major and type "release" in the confirm box.
+# Kill switch: repository variable RELEASE_HOLD = true skips both paths, and every publish-*.yml
+# guard refuses to publish while it is set.
+#
+# A release: bot commit "chore: auto-bump X -> Y" on stable, tag vY on it, dispatch the publish
+# workflows on the tag, then merge stable back into fileformat so the next promotion is a
+# fast-forward. A failed merge-back is reported as a warning (the release itself is done).
 on:
   schedule:
     - cron: "0 3 * * 0"   # Sundays 03:00 UTC (08:30 IST)
@@ -21,13 +34,22 @@ on:
         options: [patch, minor, major]
         default: patch
       confirm:
-        description: 'Type "release" to publish to PyPI, crates.io, npm, Maven, NuGet, RubyGems'
+        description: 'Type "release" to publish what is on branch stable to PyPI, crates.io, npm, Maven, NuGet, RubyGems'
         required: true
         type: string
 
 permissions:
   contents: write
   actions: write
+
+# never two releases at the same time; a second run waits for the first
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  RELEASE_BRANCH: stable
+  DEV_BRANCH: fileformat
 
 jobs:
   auto-bump-deploy:
@@ -36,58 +58,105 @@ jobs:
       github.ref == 'refs/heads/fileformat' &&
       (github.event_name == 'schedule' || inputs.confirm == 'release')
     steps:
+      - name: Release hold and release branch
+        id: pre
+        env:
+          HOLD: ${{ vars.RELEASE_HOLD }}
+          REMOTE: ${{ github.server_url }}/${{ github.repository }}.git
+        run: |
+          if [ "$HOLD" = "true" ]; then
+            echo "::notice::Release skipped: repository variable RELEASE_HOLD is 'true'. Set it to false (or delete it) to release again."
+            echo "### Release skipped: RELEASE_HOLD is true" >> "$GITHUB_STEP_SUMMARY"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          RC=0
+          git ls-remote --exit-code --heads "$REMOTE" "refs/heads/$RELEASE_BRANCH" > /dev/null || RC=$?
+          if [ "$RC" = "2" ]; then
+            echo "::notice::Release skipped: branch '$RELEASE_BRANCH' does not exist. Promote a green $DEV_BRANCH commit first: git push origin <sha>:refs/heads/$RELEASE_BRANCH"
+            {
+              echo "### Release skipped: no \`$RELEASE_BRANCH\` branch"
+              echo "Releases are made from \`$RELEASE_BRANCH\`. Create it from a $DEV_BRANCH commit whose CI is green:"
+              echo '```'
+              echo "git push origin <sha-on-$DEV_BRANCH>:refs/heads/$RELEASE_BRANCH"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$RC" != "0" ]; then
+            echo "::error::Could not list branches of $REMOTE (git ls-remote exit code $RC)."
+            exit 1
+          fi
+          echo "go=true" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
+        if: steps.pre.outputs.go == 'true'
         with:
-          ref: fileformat
+          ref: stable
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      - name: Require new changes since the last release and a successful CI run for this exact commit
+      - name: Require new changes since the last release and a successful CI run for the head of stable
+        if: steps.pre.outputs.go == 'true'
         id: same
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
         run: |
           SHA="$(git rev-parse HEAD)"
+          echo "Releasing from $RELEASE_BRANCH at $SHA"
           LAST="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
           if [ -n "$LAST" ]; then
             NEW="$(git log --format='%an' "$LAST..HEAD" | grep -vc '^github-actions\[bot\]$' || true)"
           else
             NEW="$(git rev-list --count HEAD)"
           fi
-          echo "Last release: ${LAST:-none}; commits since then (not counting bot version bumps): $NEW"
+          echo "Last release: ${LAST:-none}; commits on $RELEASE_BRANCH since then (not counting bot commits): $NEW"
           if [ "$NEW" = "0" ]; then
-            echo "No changes since $LAST. Nothing to release."
+            echo "::notice::No changes on $RELEASE_BRANCH since $LAST. Nothing to release (promote $DEV_BRANCH to $RELEASE_BRANCH first)."
+            echo "### Nothing to release: \`$RELEASE_BRANCH\` has no new commits since $LAST" >> "$GITHUB_STEP_SUMMARY"
             echo "go=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          CONC="$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&per_page=1" --jq '.workflow_runs[0].conclusion // "none"')"
+          # The promoted commit got its CI run when it was pushed to fileformat (or to stable);
+          # any successful push run of ci.yml for this exact SHA counts.
+          CONC="$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&per_page=100" \
+            --jq 'if any(.workflow_runs[]; .conclusion == "success") then "success" else (.workflow_runs[0].conclusion // .workflow_runs[0].status // "none") end')"
           echo "CI conclusion for $SHA: $CONC"
           if [ "$CONC" != "success" ]; then
             if [ "$EVENT" = "schedule" ]; then
-              echo "::warning::Weekly release skipped: CI has not passed for $SHA (conclusion: $CONC)."
+              echo "::warning::Weekly release skipped: CI has not passed for $SHA, the head of $RELEASE_BRANCH (conclusion: $CONC)."
+              echo "### Weekly release skipped: CI not green for \`$SHA\` ($CONC)" >> "$GITHUB_STEP_SUMMARY"
               echo "go=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            echo "::error::CI has not passed for $SHA (conclusion: $CONC). Not releasing."
+            echo "::error::CI has not passed for $SHA, the head of $RELEASE_BRANCH (conclusion: $CONC). Not releasing."
             exit 1
           fi
           echo "go=true" >> "$GITHUB_OUTPUT"
 
-      - name: Read and bump version (patch, minor or major as chosen)
+      - name: Read and bump version (schedule = patch; manual = patch, minor or major as chosen)
         if: steps.same.outputs.go == 'true'
         id: bump
+        env:
+          BUMP: ${{ github.event_name == 'schedule' && 'patch' || inputs.bump }}
         run: |
           CURRENT=$(grep '^version' pyproject.toml | head -1 | grep -oP '[0-9]+\.[0-9]+\.[0-9]+')
           IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-          case "${{ inputs.bump }}" in
+          case "$BUMP" in
             major) NEW="$((MAJOR + 1)).0.0" ;;
             minor) NEW="$MAJOR.$((MINOR + 1)).0" ;;
             *)     NEW="$MAJOR.$MINOR.$((PATCH + 1))" ;;
           esac
+          if git rev-parse -q --verify "refs/tags/v$NEW" > /dev/null; then
+            echo "::error::Tag v$NEW already exists, but pyproject.toml on $RELEASE_BRANCH says $CURRENT. Not releasing."
+            exit 1
+          fi
           echo "current=$CURRENT" >> $GITHUB_OUTPUT
           echo "new=$NEW" >> $GITHUB_OUTPUT
-          echo "Bumping: $CURRENT → $NEW"
+          echo "Bumping ($BUMP): $CURRENT → $NEW"
 
       - name: Update version in all language files
         if: steps.same.outputs.go == 'true'
@@ -121,14 +190,15 @@ jobs:
           sed -i -E "0,/\"version\": *\"[^\"]+\"/s//\"version\": \"${NEW}\"/" "kore-node/package.json"
           sed -i -E "0,/^version *= *\"[^\"]+\"/s//version     = \"${NEW}\"/" "kore-standalone/Cargo.toml"
 
-      - name: Commit version bump
+      - name: Commit version bump on stable
         if: steps.same.outputs.go == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
           git commit -m "chore: auto-bump ${{ steps.bump.outputs.current }} → ${{ steps.bump.outputs.new }} [skip ci]"
-          git push origin fileformat
+          # plain push: rejected (job fails, nothing tagged or published) if stable moved meanwhile
+          git push origin "HEAD:refs/heads/$RELEASE_BRANCH"
 
       - name: Tag and trigger all registry deploys
         if: steps.same.outputs.go == 'true'
@@ -140,9 +210,11 @@ jobs:
           VERSION="v${{ steps.bump.outputs.new }}"
           git tag "$VERSION"
           git push origin "$VERSION"
-          echo "✅ $VERSION tagged"
+          echo "✅ $VERSION tagged on $RELEASE_BRANCH ($(git rev-parse HEAD))"
 
-          # Trigger publish workflows via GitHub API (works with PAT, not GITHUB_TOKEN)
+          # Trigger publish workflows via GitHub API (works with PAT, not GITHUB_TOKEN).
+          # publish-release.yml creates the GitHub Release; its notes are the commits since the
+          # previous v* tag without bot commits.
           for WF in publish-release.yml publish-pypi.yml publish-nodejs.yml publish-crates.yml publish-rubygems.yml publish-maven.yml publish-nuget.yml; do
             echo "Triggering $WF for $VERSION..."
             gh workflow run "$WF" --ref "$VERSION" 2>/dev/null || \
@@ -153,3 +225,43 @@ jobs:
               -d "{\"ref\":\"$VERSION\"}" | head -1 || true
           done
           echo "✅ All publish workflows triggered for $VERSION"
+          echo "### Released $VERSION from \`$RELEASE_BRANCH\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Merge stable back into fileformat (warning only on failure)
+        if: steps.same.outputs.go == 'true'
+        env:
+          VERSION: v${{ steps.bump.outputs.new }}
+        run: |
+          STABLE="$(git rev-parse HEAD)"
+          manual() {
+            echo "::warning::Merge-back of $RELEASE_BRANCH into $DEV_BRANCH failed ($1). The release $VERSION is complete; merge by hand (see the run summary and docs/RELEASING.md)."
+            {
+              echo "### Merge-back needed ($1)"
+              echo "Release $VERSION is published. \`$DEV_BRANCH\` does not contain the version bump yet, so the next promotion would not be a fast-forward. Fix by hand:"
+              echo '```'
+              echo "git fetch origin"
+              echo "git switch $DEV_BRANCH && git pull --ff-only"
+              echo "git merge origin/$RELEASE_BRANCH    # on conflicts keep the new version numbers"
+              echo "git push origin $DEV_BRANCH"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+          for ATTEMPT in 1 2 3; do
+            git fetch --quiet origin "+refs/heads/$DEV_BRANCH:refs/remotes/origin/$DEV_BRANCH" || manual "could not fetch $DEV_BRANCH"
+            git checkout --quiet -B merge-back "origin/$DEV_BRANCH" || manual "could not check out $DEV_BRANCH"
+            if git merge-base --is-ancestor HEAD "$STABLE"; then
+              git merge --quiet --ff-only "$STABLE" || manual "fast-forward failed"
+            elif ! git merge --no-ff --no-edit -m "Merge $RELEASE_BRANCH ($VERSION) into $DEV_BRANCH" "$STABLE"; then
+              git merge --abort || true
+              manual "merge conflict"
+            fi
+            if git push origin "HEAD:refs/heads/$DEV_BRANCH"; then
+              echo "✅ $DEV_BRANCH now contains $RELEASE_BRANCH ($VERSION)"
+              echo "Merged \`$RELEASE_BRANCH\` back into \`$DEV_BRANCH\`." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "Push to $DEV_BRANCH rejected (attempt $ATTEMPT); $DEV_BRANCH may have moved, retrying."
+            sleep $((ATTEMPT * 5))
+          done
+          manual "push to $DEV_BRANCH rejected: branch protected or it kept moving"

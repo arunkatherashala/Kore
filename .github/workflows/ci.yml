@@ -168,7 +168,95 @@ jobs:
           python -m pytest kore-python -q
 
   # ════════════════════════════════════════════════════════════════════════════
-  # JOB 5 — CLIPPY LINT (non-blocking warnings, blocking errors)
+  # JOB 5 — COMPATIBILITY GATE (hard gate — a release needs ci.yml green)
+  #  (a) old files open with the new code: every committed .kore fixture written by an older
+  #      version decodes to its pinned digest (Rust reader and the Python module, PyPI's code).
+  #  (b) the LAST PUBLISHED packages vs the new code: kore-fileformat==OLD_VERSION from PyPI (with
+  #      the kore-ffi native library built from the vOLD_VERSION tag, since the PyPI package ships
+  #      only kore_fileformat.py) reads files the current code writes in formats it supports and
+  #      refuses newer formats cleanly (no crash, no wrong data); same for the kore_fileformat
+  #      crate from crates.io. Update OLD_VERSION (and scripts/compat-crates/reader/Cargo.toml)
+  #      after a release is published.
+  # ════════════════════════════════════════════════════════════════════════════
+  compat:
+    name: "🔁 Compatibility (old files, last release)"
+    needs: format-validate
+    runs-on: ubuntu-latest
+    env:
+      OLD_VERSION: "1.8.21"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            ${{ runner.temp }}/old-target
+            ${{ runner.temp }}/compat-target
+          key: ${{ runner.os }}-cargo-compat-${{ env.OLD_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: "(a) Rust: every committed old .kore file opens with the current reader"
+        run: cargo test --release -p kore-store --test old_files
+
+      - name: Build kore-ffi (current code)
+        run: cargo build --release -p kore-ffi
+
+      - name: "(a) Python: the current kore_fileformat.py opens the old fixtures"
+        run: python -I kore-python/compat_check.py fixtures --local
+
+      - name: "(b) Write files with the current code, plus future-format cases"
+        run: python -I kore-python/compat_check.py write "$RUNNER_TEMP/compat-py" --local
+
+      - name: "(b) Install kore-fileformat==${{ env.OLD_VERSION }} from PyPI into a fresh venv"
+        run: |
+          python -m venv "$RUNNER_TEMP/venv-old"
+          "$RUNNER_TEMP/venv-old/bin/python" -m pip install --disable-pip-version-check --no-cache-dir "kore-fileformat==$OLD_VERSION"
+          "$RUNNER_TEMP/venv-old/bin/python" -m pip show kore-fileformat
+
+      - name: "(b) The published package without a native library refuses cleanly"
+        working-directory: ${{ runner.temp }}
+        run: |
+          env -u LD_LIBRARY_PATH "$RUNNER_TEMP/venv-old/bin/python" -I "$GITHUB_WORKSPACE/kore-python/compat_check.py" \
+            no-native "$RUNNER_TEMP/compat-py" --expect-version "$OLD_VERSION"
+
+      - name: "(b) Build kore-ffi from the v${{ env.OLD_VERSION }} tag (the native library of that release)"
+        run: |
+          git fetch --no-tags --depth=1 origin "+refs/tags/v$OLD_VERSION:refs/tags/v$OLD_VERSION" \
+            || { echo "::error::tag v$OLD_VERSION not found on origin"; exit 1; }
+          git worktree add --detach "$RUNNER_TEMP/kore-old" "v$OLD_VERSION"
+          cd "$RUNNER_TEMP/kore-old"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/old-target" cargo build --release -p kore-ffi
+          ls -l "$RUNNER_TEMP/old-target/release/libkore_ffi.so"
+
+      - name: "(b) kore-fileformat ${{ env.OLD_VERSION }} reads the new files and refuses newer formats"
+        working-directory: ${{ runner.temp }}
+        run: |
+          LD_LIBRARY_PATH="$RUNNER_TEMP/old-target/release" "$RUNNER_TEMP/venv-old/bin/python" -I \
+            "$GITHUB_WORKSPACE/kore-python/compat_check.py" read "$RUNNER_TEMP/compat-py" --expect-version "$OLD_VERSION"
+
+      - name: "(b) crates.io kore_fileformat ${{ env.OLD_VERSION }} reads files of the current crate, refuses others"
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/compat-target
+        run: |
+          grep -q "\"=$OLD_VERSION\"" scripts/compat-crates/reader/Cargo.toml \
+            || { echo "::error::scripts/compat-crates/reader/Cargo.toml must pin kore_fileformat = \"=$OLD_VERSION\""; exit 1; }
+          D="$RUNNER_TEMP/compat-crate"
+          cargo run --release -q --manifest-path scripts/compat-crates/writer/Cargo.toml -- "$D"
+          cp kore-store/tests/fixtures/rules_v6.kore "$D/refuse_rules_v6.kore"
+          cp conformance/default.kore "$D/refuse_kore_store_v2.kore"
+          cp "$RUNNER_TEMP/compat-py/native.kore" "$D/refuse_python_native.kore"
+          cargo run --release -q --manifest-path scripts/compat-crates/reader/Cargo.toml -- "$D"
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # JOB 6 — CLIPPY LINT (non-blocking warnings, blocking errors)
   # ════════════════════════════════════════════════════════════════════════════
   lint:
     name: "🔍 Clippy + Format"

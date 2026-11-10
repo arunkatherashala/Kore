@@ -24,10 +24,15 @@ jobs:
           REPO: ${{ github.repository }}
           REF: ${{ github.ref }}
           SHA: ${{ github.sha }}
+          HOLD: ${{ vars.RELEASE_HOLD }}
         run: |
           fail() { echo "::error::$1"; exit 1; }
+          if [ "$HOLD" = "true" ]; then
+            fail "Publishing is on hold: repository variable RELEASE_HOLD is 'true' (Settings -> Secrets and variables -> Actions -> Variables). Set it to false or delete it, then re-run."
+          fi
           case "$REF" in refs/tags/v*) ;; *) fail "publish only runs on a v* tag (got $REF)";; esac
-          ci() { gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$1&event=push&per_page=1" --jq '.workflow_runs[0].conclusion // "none"'; }
+          # any successful push run of ci.yml for the SHA counts (a promoted commit may also have a newer run on stable)
+          ci() { gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$1&event=push&per_page=100" --jq 'if any(.workflow_runs[]; .conclusion == "success") then "success" else (.workflow_runs[0].conclusion // .workflow_runs[0].status // "none") end'; }
           C="$(ci "$SHA")"
           echo "CI for tag commit $SHA: $C"
           if [ "$C" != "success" ]; then

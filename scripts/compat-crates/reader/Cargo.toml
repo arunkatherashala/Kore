@@ -1,0 +1,12 @@
+# Compatibility gate helper (not a workspace member): reads files with the LAST PUBLISHED
+# kore_fileformat from crates.io. Keep the pin equal to OLD_VERSION in .github/workflows/ci.yml.
+[package]
+name = "kore-compat-reader"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+kore_fileformat = "=1.8.21"
+
+[workspace]

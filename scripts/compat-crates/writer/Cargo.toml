@@ -1,0 +1,12 @@
+# Compatibility gate helper (not a workspace member): writes .kore files with the CURRENT in-repo
+# kore_fileformat crate (kore-standalone, the code published to crates.io). See ci.yml job "compat".
+[package]
+name = "kore-compat-writer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+kore_fileformat = { path = "../../../kore-standalone" }
+
+[workspace]
