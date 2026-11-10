@@ -268,3 +268,34 @@ fn the_kill_switch_and_caps_hold_with_l2_on() {
     assert_eq!(s.steps_run, 39);
     assert!(s.state.s2.live_rules() <= 2);
 }
+
+#[test]
+fn all_track_keys_b14_e1_l2_coexist_and_each_fails_closed_on_its_own() {
+    // after merging B14, E1 and L2: every opt-in key in one file parses, and L2 reads only its own key
+    let all = "experiments = on\nmax_experiment_energy_pm = 50\nmax_experiments_per_run = 10\ncontext_chooser = on\nworld_t_run = on\nrules_use = on\nrule_retirement = on\nrule_library = on\ncuriosity = on\nmax_curiosity_energy_pm = 20\nevolution = on\nevolution_budget_pm = 30\nl2_meta_prior = on\n";
+    assert!(Controller::parse(all).is_ok(), "{:?}", Controller::parse(all));
+    assert!(ctl::allowed(Some(all)));
+    let e1 = crate::being::e1::ctl::E1Ctl::from_text(Some(all));
+    assert!(e1.evolution && e1.budget_pm == 30 && e1.closed.is_none());
+    let b14 = crate::being::b14::ctl::B14Ctl::from_text(Some(all));
+    assert!(b14.library && b14.curiosity && b14.curiosity_pm == 20);
+    // the other tracks' keys alone never switch L2 on
+    let without = all.replace("l2_meta_prior = on\n", "");
+    assert!(Controller::parse(&without).is_ok());
+    assert!(!ctl::allowed(Some(&without)));
+    // a duplicate or a bad value of any key makes the whole file invalid, so L2 (and E1) are off
+    for bad in [
+        format!("{all}l2_meta_prior = on\n"),
+        format!("{all}l2_meta_prior = maybe\n"),
+        format!("{all}evolution = on\n"),
+        format!("{all}rule_library = on\n"),
+        format!("{all}curiosity = off\n"),
+    ] {
+        assert!(Controller::parse(&bad).is_err(), "{bad}");
+        assert!(!ctl::allowed(Some(&bad)), "{bad}");
+        let e1 = crate::being::e1::ctl::E1Ctl::from_text(Some(&bad));
+        assert!(e1.closed.is_some() && !e1.evolution, "{bad}");
+    }
+    // missing file: off
+    assert!(!ctl::allowed(None));
+}

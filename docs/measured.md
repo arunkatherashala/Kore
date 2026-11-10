@@ -3150,6 +3150,8 @@ Caveat on the primary (not pre-registered, reported because it changes the readi
 
 Reading: evolutionary search finds rules the enumerative discovery cannot (mostly PatFib and three of the four negative controls), safely (0 wrong of 65, precision 1.000 before the checker), and lifts the level of the plateau slightly in rule worlds; it does not make reward keep improving after 50k steps (slope criterion not met), costs about a third of the wall time, and its reward gain does not exceed its own compute at the author-set exchange rate. Wall time of the report run: 7,404 s (20 single-seed processes, 4 at a time, one thread each).
 
+**Headroom note (not a measurement):** even with evolution compute brought to zero (for example by running it only on a surprise or event signal), the ceiling is the uncharged difference, +0.057 [+0.010, +0.104] (+1.3%): a small gain, not a fix for the plateau. "Energy" here is the simulation's energy unit (author-defined costs; evolution charged at 1,000 evaluations per unit), not electrical power; real compute cost is the wall time reported in (d) (an E1 life takes about twice the wall time of a B14 life). Any claim about real power or idle cost needs its own wall-time / CPU measurement.
+
 ## Track L2: learning to learn across families (synthetic world, author-defined families)
 
 Question: Tracks B11 and B12 found that the being does not learn later World O families faster than earlier ones (top-tier Spearman of family order vs attempts to competence: current +0.025 [-0.060, +0.110]; B12 `form` -0.098 [-0.171, -0.026], mostly an immediate gain, "level 2 over level 1: -0.014"), and Track W1 the same in World T (-0.005 [-0.118, +0.109]). Why, and can a principled mechanism make the being's own past learning speed up new learning? Everything is the author's simulation (World O families, grammar, rewards, the being). Code: `kore-self/src/being/l2/` (new: `meta.rs` the maths, `wo.rs` World O state, hooks, rule pass and chooser, `ctl.rs` the controller key, `tests.rs`), switch-guarded hooks in `world_o/engine.rs` (one field each in `LearnerOCfg`, `LearnerO`, `StateO`; one call each in open, close, rule; the L2 rule pass after the B12 pass; the genesis tag; `run_o_granted`), one key arm in `controller.rs`, one `mod` line in `being/mod.rs`; measurement `examples/measure_l2.rs` (modes `diag`, `report`; parts in `examples/measure_l2_parts/`). Branch `l2l-v2` from abd8de1e, 2026-11-08, Windows, 8 CPUs shared with three other agents (wall times are not comparable).
@@ -3236,6 +3238,8 @@ Verdict per pre-registered criterion:
 | ATTRIBUTION: `form+l2` minus `form` Spearman interval entirely below 0 | +0.005 [-0.045, +0.055], 11 / 0 / 9 | not met |
 | ATTRIBUTION: `form+l2` minus `form` last-third minus first-third interval entirely below 0 | +1.14 [-1.42, +3.70], 10 / 0 / 10 | not met |
 | ATTRIBUTION: `form+l2` minus `form` reward not significantly worse | +0.000 [-0.006, +0.007], 10 / 0 / 10 | met |
+
+**Negative result. The L2 code stays in the repository, off by default (controller key `l2_meta_prior`), for reproducibility of this section only; it is not part of the recommended being.**
 
 **Headline: a signal on the tuning seeds (101..110), none on the report seeds (1..20); the L2 meta-prior adds nothing over `form`.** The protocol (separate tuning and report seeds, the attribution ablation `form+l2` minus `form`, both fixed before the report run) is what kept this from being claimed as a gain.
 
