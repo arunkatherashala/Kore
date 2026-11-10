@@ -45,11 +45,19 @@ same reward per energy on tuning seeds 101..120 (bit-identical), and the same on
   95% paired t-CI lower bound **>= +0.05** AND mean **>= +0.10** AND at least **45 of 60** wins. (Basis: Gate 0
   measured +0.220 with paired sd 0.104; at n = 60 the standard error is about 0.013, so a true effect of +0.15 or
   more passes almost surely, and a true effect at the threshold +0.10 passes about half the time.)
+  **What the PRIMARY can and cannot show:** the threshold is far below the Gate 0 result, so passing it is expected; it
+  is a replication on fresh seeds with the code moved into the being, not a new finding. The real decision about the
+  default is in the secondaries that were never measured for B1: the sweep (b) (harsh penalties, where the being is
+  weakest), out of distribution (c) and cold start (d).
 * SECONDARY, all reported, none claimed as a win:
   * (a) wrong answers per 100 tasks, B1 minus B0, paired CI.
   * (b) the full World T sweep of Track W1b (6 penalties x 5 energy weights, every policy re-tuned at every point as
-    in W1b, report seeds 201..260): at every point B1 minus B0, B1 minus tuned LinUCB, B1 minus always-SQL, and wrong
-    answers per 100 for every policy. This is the M4 test: is the being, with B1, not dominated at any point (no
+    in W1b, report seeds 201..260): at every point B1 minus B0, B1 minus tuned LinUCB, B1 minus tuned **LinUCB with
+    the file feature**, B1 minus always-SQL, and wrong answers per 100 for every policy. "LinUCB with the file
+    feature" = the W1b LinUCB with a one-hot of the task's file added to its context features (the same information
+    B1 has), alpha tuned on seeds 101..120 at every sweep point as for plain LinUCB. Without it a B1-over-LinUCB gain
+    could come only from the file information plain LinUCB never gets; claims against LinUCB are made against the
+    better of the two LinUCB variants at each point. This is the M4 test: is the being, with B1, not dominated at any point (no
     baseline with higher reward per energy, CI above 0, and fewer wrong answers)?
   * (c) out of distribution: the config `ood = true` (never used in tuning): B1 minus B0, paired CI.
   * (d) cold start: reward per energy on each file's first 3 tasks, B1 minus B0.
@@ -61,8 +69,11 @@ same reward per energy on tuning seeds 101..120 (bit-identical), and the same on
 B1 becomes the default World T estimator only if ALL hold, and then only with the owner's approval:
 
 1. the PRIMARY is met;
-2. no regression: at no sweep point of (b) is B1 minus B0 significantly negative (95% CI entirely below 0);
-3. out of distribution (c): B1 minus B0 is not significantly negative;
+2. no regression over the sweep (b), defined now: for each of the 30 points take the one-sided paired t-test of
+   "B1 minus B0 < 0" on seeds 201..260 and apply the Holm correction over the 30 points at family-wise level 0.05; a
+   regression is any point rejected after Holm. (So one point whose raw 95% CI lies below 0 by chance among 30 is not
+   by itself a regression; every point's raw CI is still reported, and any point with a negative mean is listed);
+3. out of distribution (c): B1 minus B0 is not significantly negative (95% CI entirely below 0 means it is);
 4. the equivalence test passes.
 
 Stage 2 changes the default of `wt_file_key` to true for new beings only. The golden test is then re-pinned for the new
