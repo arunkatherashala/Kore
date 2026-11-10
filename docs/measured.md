@@ -3307,26 +3307,43 @@ base 0.585; on the report seeds B14+E1 minus B14 had sd about 0.10.
   learner of the file-level structure (no N1 code exists), real data, the harsh-penalty points of the sweep, OOD,
   B14+E1 against these references.
 
-### Pre-registration (DRAFT for the reviewer; not final; no N1 code before approval)
+### Pre-registration (reviewed draft, 5 reviewer edits applied; final only when the owner approves; no N1 code before that)
 
 * Candidate: N1, a learned outcome model for World T (outcome and energy per plan from template, context, size class,
   rows and the file's identity, sharing across the templates of a file; hierarchical over cell, file and plan), used
   by the existing chooser in place of its cell estimate. Opt-in switch, off by default; with it off the being is
   bit-for-bit the current being (golden test).
 * Baselines: (B0) the current being (beta 2, pooled prior, skip on, `value_ucb`); (B1) the file-keyed being (the
-  being's Beta estimator per (template, file, plan), prior = its cell estimate, nothing else changed); (B2) LinUCB
-  alpha 1. N1's constants (and B1's beta) tuned on seeds 101..120 only, 6 configurations each as in Track W1.
+  being's Beta estimator per (template, file, plan), prior = its cell estimate, nothing else changed; no model, no
+  sharing across templates); (B2) LinUCB alpha 1. Constants of N1 and B1 (beta) tuned on seeds 101..120 only, 6
+  configurations each as in Track W1.
 * World: World T, penalty 0, energy weight 1, budget 6000, default files (6 per context and pool), sandbox as in W1.
-* Seeds: report seeds 1..60 (n = 60), fixed now, never increased after any report run.
-* PRIMARY: N1 minus B0, reward per energy over the life: 95% paired CI lower bound > 0 AND at least 42 of 60 wins.
-* SECONDARY: (a) N1 minus B1: CI lower bound > 0 (the model adds something over a finer table); (b) N1 minus B2 > 0;
-  (c) share of the gap to the KP file reference (own rules, being's rule) closed, (N1 - B0) / (KP file - B0), with
-  CI; (d) calibration: Brier score of N1's P(right) on its own attempts vs the being's cell estimate (paired CI);
-  (e) no significant loss at the sweep points with penalty >= 3.16 (re-tuned as in W1b) and out of distribution (CI
-  includes or is above 0); (f) 0 wrong answers accepted; wrong answers per 100 tasks reported.
-* Attribution ablation (same seeds): N1 with sharing across templates off (per (template, file, plan) only); N1 with
-  the file input off (cells plus size class only); N1 with the renewal decision rule (reported separately, not part
-  of the primary).
+* Seeds: report seeds 1..60 (n = 60), fixed now, never increased after any report run. Basis: paired sd 0.084-0.124
+  on the tuning seeds; at sd 0.10 a mean difference of 0.04 (about 1% of 3.9) has about 85% power at n = 60.
+* GATE 0 (run first, before any N1 code; B1 is a baseline only): B1 minus B0 on seeds 1..60, mean [95% CI]
+  (W/T/L of 60). Whatever it shows, it is reported. If B1 already closes most of the KP file headroom (secondary (c)
+  computed for B1 >= 0.5), the expected conclusion is "a finer key is enough; N1 is not needed", and N1 is built only
+  if the owner still asks for it.
+* PRIMARY (the model's own value): N1 minus B1, reward per energy over the life: 95% paired CI lower bound > 0 AND
+  mean difference >= +0.04 AND at least 42 of 60 wins. Only the PRIMARY decides the result.
+* SECONDARY (all reported, none is claimed as a win): (a) N1 minus B0; (b) N1 minus B2; (c) share of the gap to the
+  KP file reference closed, (N1 - B0) / (KP file - B0), with CI; (d) calibration: Brier score of N1's P(right) on
+  its own attempts vs the cell estimate (paired CI); (e) harsh penalties: all sweep points with penalty >= 3.16
+  (re-tuned as in W1b), N1 minus B0 and minus B1, reported per point (where the being is weakest); (f) cold start:
+  reward per energy on each file's first 3 tasks, and the out-of-distribution config (`ood = true`, never used in
+  tuning): N1 minus B0 must not be significantly worse (CI includes or is above 0), so a gain from memorizing seen
+  files is not reported as learning; (g) 0 wrong rules accepted; wrong answers per 100 tasks reported; (h) compute
+  cost: wall time per life, reported separately from the simulated energy.
+* Attribution ablation (same seeds): N1 with sharing across templates off; N1 with the file input off (cells plus
+  size class only); N1 with the renewal decision rule (reported separately, not part of the primary).
+* Headroom is an upper bound, not an expectation: the KP references are estimated from about 12,000 other tasks and
+  know true per-key rates; the file-level ceiling from each file's 11th task on is +0.371 over B0, before any
+  exploration cost a real learner pays. Expected gains are below it; the docs must not quote 0.37 as expected.
+* Stop rule: one report run of Gate 0, then (if built) one report run of N1. A PRIMARY not met is recorded as negative,
+  the code stays off by default, nothing is re-tuned on report seeds.
+* Caution: World T is the author's generator; each file is seen about 22 times per life and 93.9% of (template, file,
+  plan) outcomes are deterministic by construction. A result here is not a real-data result; milestone M3 (a world
+  built from a real dataset) stays separate.
 * Every claim: mean [95% CI] (wins/ties/losses of 60), seeds, budget, commit. A negative result is reported as such.
 
 ## Not measured
