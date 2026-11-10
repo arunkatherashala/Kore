@@ -79,7 +79,7 @@ pub const BF_POLY0: i64 = 60;
 fn lags_of(f: &Form) -> Vec<usize> {
     match f {
         Form::Lin { mask, .. } => (1..=3usize).filter(|l| mask & (1 << (l - 1)) != 0).collect(),
-        Form::Poly(_) => vec![],
+        Form::Poly(_) | Form::Gp(_) => vec![],
     }
 }
 
@@ -151,6 +151,8 @@ pub fn bf_predict(f: &Form, t: &[i64]) -> Option<i64> {
                 }
             }
         }
+        // Track E1 expressions are not part of the V1 brute-force baseline (never produced there)
+        Form::Gp(_) => return None,
     }
     if agree { pred } else { None }
 }

@@ -154,11 +154,13 @@ pub struct Engine<'a> {
     pub reference_scan: bool,
     /// Track B14: the rule library (None: off, the engine is exactly as before).
     pub lib: Option<super::b14::library::Library>,
+    /// Track E1: evolutionary search (None: off, the engine is exactly as before).
+    pub evo: Option<super::e1::evolve::Evo>,
 }
 
 impl<'a> Engine<'a> {
     pub fn new(world: World, state: BeingState, thinker: &'a dyn Thinker) -> Engine<'a> {
-        Engine { world, state, thinker, advisor: None, carry: vec![], carry_rules: vec![], limits: None, refusals: vec![], refusals_total: vec![], refused: Default::default(), last_blocks: 0, max_candidates_seen: 0, scan: Default::default(), reference_scan: discover_scan::reference_default(), lib: None }
+        Engine { world, state, thinker, advisor: None, carry: vec![], carry_rules: vec![], limits: None, refusals: vec![], refusals_total: vec![], refused: Default::default(), last_blocks: 0, max_candidates_seen: 0, scan: Default::default(), reference_scan: discover_scan::reference_default(), lib: None, evo: None }
     }
 
     pub fn with_limits(mut self, limits: Option<Limits>) -> Engine<'a> {
@@ -971,6 +973,11 @@ pub struct RunCfg {
     pub b14_ctl: Option<super::b14::ctl::B14Ctl>,
     /// Track B14: library entries from an earlier life to import as candidates (needs the library).
     pub b14_import: Vec<super::b14::library::LibEntry>,
+    /// Track E1 (creation-time, menu world with extended patterns only): evolution budget. Fixed once
+    /// created (an `e1_setup` note); None asks for nothing.
+    pub e1: Option<super::e1::ctl::E1Setup>,
+    /// Track E1: what controller.txt allows (None: no controller was given, so E1 is refused: fail closed).
+    pub e1_ctl: Option<super::e1::ctl::E1Ctl>,
 }
 
 #[derive(Debug, Clone)]
@@ -1182,6 +1189,10 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
             if want_b14.is_some() && !(chooser == Chooser::Model && extended) {
                 return Err(LogError::Invalid("the B14 rule library and curiosity need chooser model and pattern_families extended or extended2".into()));
             }
+            let want_e1 = cfg.e1.filter(|x| !x.is_off());
+            if want_e1.is_some() && !(chooser == Chooser::Model && extended) {
+                return Err(LogError::Invalid("E1 evolution needs chooser model and pattern_families extended or extended2".into()));
+            }
             let g = Genesis { world_seed: cfg.world_seed.unwrap_or(1), loop_seed: cfg.loop_seed.unwrap_or(1), budget, explore_c: c, chooser, extended: extended || ext2, ext2, rule_drift: cfg.rule_drift.unwrap_or(false), drift, adapt: adapt_mode, advice, transfer, learn_transfer };
             let (ev, id) = genesis_event(&g);
             log.append_events(&[ev])?;
@@ -1194,6 +1205,21 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
                     log.append_events(&[granted.event()])?;
                     state.b14 = Some(granted);
                 }
+            }
+            if let Some(want) = want_e1 {
+                let (granted, refs) = e1_ctl_of(cfg).grant(&want);
+                b14_refusals.extend(refs);
+                if !granted.is_off() {
+                    log.append_events(&[granted.event()])?;
+                    state.e1.setup = Some(granted);
+                }
+            }
+        }
+    }
+    if !created {
+        if let Some(want) = cfg.e1.filter(|x| !x.is_off()) {
+            if state.e1.setup.map_or(true, |s| s.is_off()) {
+                return Err(LogError::Invalid(format!("the E1 switch is fixed when the being is created; this being has {:?}, the request says {:?}", state.e1.setup, want)));
             }
         }
     }
@@ -1209,6 +1235,15 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
     let b14_now = match state.b14 {
         Some(setup) => {
             let (now, refs) = b14_ctl_of(cfg).grant(&setup);
+            b14_refusals.extend(refs);
+            now
+        }
+        None => Default::default(),
+    };
+    // E1: used in this run only if the being was created with it AND controller.txt allows it now
+    let e1_now = match state.e1.setup {
+        Some(setup) => {
+            let (now, refs) = e1_ctl_of(cfg).grant(&setup);
             b14_refusals.extend(refs);
             now
         }
@@ -1247,6 +1282,9 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
         engine.enable_library(super::b14::library::LibCfg::default(), &cfg.b14_import);
     } else if !cfg.b14_import.is_empty() {
         engine.refuse(Refusal::new(super::b14::ctl::KEY_LIBRARY, 0, cfg.b14_import.len() as u64, "library entries were offered for import but this being runs without the rule library; nothing was imported"));
+    }
+    if menu && !e1_now.is_off() {
+        engine.enable_evolution(super::e1::evolve::EvoCfg { pm: e1_now.pm, ..super::e1::evolve::DEFAULT_EVO });
     }
     let mut new_rules: Vec<Rule> = vec![];
     let mut retired: Vec<String> = vec![];
@@ -1304,6 +1342,14 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
                         new_rules.push(nr.rule);
                     }
                 }
+                // Track E1 (off unless enabled above): the pass note, then the rules it verified
+                let (e1_notes, e1_rules) = engine.evolve_pass();
+                pending.events.extend(e1_notes);
+                for nr in e1_rules {
+                    pending.events.push(nr.event);
+                    pending.revisions.push(nr.revision);
+                    new_rules.push(nr.rule);
+                }
                 for (ev, rev) in engine.housekeeping() {
                     retired.push(tag(&ev.tags.join(","), "rule_id").unwrap_or("").to_string());
                     pending.events.push(ev);
@@ -1359,6 +1405,11 @@ pub fn run_full(log: &mut VersionedLog, cfg: &RunCfg, thinker: &dyn Thinker, pol
         discover_scan::stash(std::mem::take(&mut engine.scan), &engine.state.examples);
     }
     Ok(RunSummary { steps_run: done, stopped, reward, cost, state: engine.state, version_before, version_after: log.latest_version(), created, new_rules, refusals: engine.refusals_total, retired })
+}
+
+/// Track E1: what controller.txt allows (no controller given: refused, fail closed).
+fn e1_ctl_of(cfg: &RunCfg) -> super::e1::ctl::E1Ctl {
+    cfg.e1_ctl.clone().unwrap_or_else(|| super::e1::ctl::E1Ctl { closed: Some("no controller was given to this run".into()), ..Default::default() })
 }
 
 /// Track B14: what controller.txt allows (no controller given: everything refused, fail closed).
