@@ -16,7 +16,8 @@ use crate::authorize::{self, Outcome, BEING_ACTOR};
 use crate::being::controller::{self, Controller, Origin};
 use crate::being::policy::{KillCheck, Policy};
 use crate::being::world_t::ctl;
-use crate::being::world_t::engine::{replay_t, run_t_key, RunTCfg, StateT, DEFAULT_DISCOVER_EVERY};
+use crate::being::world_t::engine::{replay_t, run_t_self, RunTCfg, StateT, DEFAULT_DISCOVER_EVERY};
+use crate::being::world_t::self_tune;
 use crate::being::world_t::learner::LearnerTCfg;
 use crate::being::world_t::world::{WTCfg, WorldT, DEFAULT_BUDGET};
 use crate::versioned::EventRow;
@@ -99,6 +100,12 @@ pub fn run_world_t_with(owner: &str, steps: u64, seed: u64, budget: Option<i64>,
             return Err(format!("controller refused the World T run: {why}"));
         }
     }
+    // Track S1: `wt_self_tune` is fixed at the genesis too (read only when the being's wt_file_key is on)
+    if let Some(why) = self_tune::refusal(&st0, self_tune::request(text.as_deref())) {
+        let why = format!("{why} (controller.txt)");
+        audit(owner, self_tune::KEY_SELF_TUNE, st0.self_tune.on as u64, !st0.self_tune.on as u64, &why);
+        return Err(format!("controller refused the World T run: {why}"));
+    }
     let open_ms = t_open.elapsed().as_millis() as u64;
     let wcfg = st0.cfg.clone().unwrap_or_else(|| WTCfg::new(seed, budget.unwrap_or(DEFAULT_BUDGET)));
     let world = WorldT::new(wcfg.clone());
@@ -114,7 +121,8 @@ pub fn run_world_t_with(owner: &str, steps: u64, seed: u64, budget: Option<i64>,
     policy.kill = Some(KillCheck(std::sync::Arc::new(move || authorize::kill_active(&owner_k))));
     let cfg = RunTCfg { world: Some(wcfg), learner: Some(LearnerTCfg::default()), discover_every: DEFAULT_DISCOVER_EVERY, ctl: Some(limits), sql: Some(ctl::sql_limits(text.as_deref())) };
     // Track W2: `wt_file_key` (default off) for a new being; an existing being keeps its genesis setting
-    let s = run_t_key(&mut log, &cfg, ctl::file_key(text.as_deref()), &policy, None, &sb).map_err(|e| e.to_string())?;
+    // Track S1: `wt_self_tune` (default off) for a new being with the file key on
+    let s = run_t_self(&mut log, &cfg, ctl::file_key(text.as_deref()), self_tune::request(text.as_deref()), &policy, None, &sb).map_err(|e| e.to_string())?;
     for r in &s.refusals {
         refused.push((r.cap.clone(), r.limit, r.requested, r.what.clone()));
     }
@@ -246,6 +254,78 @@ world_t_run
         run_world_t(o2, 10, 4, Some(800)).unwrap();
         let st = StateT::from_events(&crate::log_tools::open(o2).unwrap().open_latest().rows::<EventRow>());
         assert!(!st.learner.file_key && st.files.is_empty());
+    }
+
+    /// Track S1: `wt_self_tune` sets the self-tuned beta of a NEW being with the file key on (recorded at its
+    /// genesis); a later run asking for the other setting is refused and audited; without the file key it is not read.
+    #[test]
+    fn the_self_tune_key_is_set_at_genesis_and_a_later_change_is_refused_and_audited() {
+        let o = "wt-selftune";
+        let dir = setup(o);
+        std::fs::write(dir.join("autonomy_policy.txt"), "[L2]
+world_t_run
+").unwrap();
+        std::fs::write(dir.join("controller.txt"), "world_t_run = on
+wt_file_key = on
+wt_self_tune = on
+").unwrap();
+        assert_eq!(run_world_t(o, 30, 4, Some(800)).unwrap()["steps_run"], 30);
+        let rows = |o: &str| -> Vec<EventRow> { crate::log_tools::open(o).unwrap().open_latest().rows() };
+        let st = StateT::from_events(&rows(o));
+        assert!(st.learner.file_key && st.self_tune.on && st.self_tune.blocks.len() == 1);
+        assert!(rows(o).iter().any(|e| e.tags.contains("wt_genesis") && e.tags.contains("wt_self_tune:on")));
+        std::fs::write(dir.join("controller.txt"), "world_t_run = on
+wt_self_tune = off
+").unwrap();
+        let e = run_world_t(o, 10, 4, None).unwrap_err();
+        assert!(e.contains("wt_self_tune") && e.contains("genesis"), "{e}");
+        assert!(audit_tools(o).iter().any(|t| t.contains("wt_self_tune")), "{:?}", audit_tools(o));
+        // an invalid value makes the controller invalid: fail closed
+        std::fs::write(dir.join("controller.txt"), "world_t_run = on
+wt_self_tune = yes
+").unwrap();
+        assert!(run_world_t(o, 10, 4, None).unwrap_err().contains("fail closed"));
+        std::fs::write(dir.join("controller.txt"), "world_t_run = on
+").unwrap();
+        assert_eq!(run_world_t(o, 10, 4, None).unwrap()["steps_run"], 10);
+        assert!(StateT::from_events(&rows(o)).self_tune.on);
+        assert_eq!(status_world_t(o).unwrap()["replay_mismatches"], 0);
+        assert_eq!(crate::being::world_t::self_tune::replay(&rows(o)).1, 0);
+        // without the file key the key is not read: a plain being, and no refusal later
+        let o2 = "wt-selftune-nofile";
+        let dir = setup(o2);
+        std::fs::write(dir.join("autonomy_policy.txt"), "[L2]
+world_t_run
+").unwrap();
+        std::fs::write(dir.join("controller.txt"), "world_t_run = on
+wt_self_tune = on
+").unwrap();
+        run_world_t(o2, 10, 4, Some(800)).unwrap();
+        let st = StateT::from_events(&rows(o2));
+        assert!(!st.learner.file_key && !st.self_tune.on);
+        std::fs::write(dir.join("controller.txt"), "world_t_run = on
+wt_self_tune = off
+").unwrap();
+        assert_eq!(run_world_t(o2, 5, 4, None).unwrap()["steps_run"], 5);
+        // owner rule: storage is KORE only. The self-tune state, the checkpoints and the log of both beings live in
+        // the versioned log; no .json / .jsonl file appears anywhere in either owner directory
+        for od in [o, o2] {
+            let mut stack = vec![safety::owner_dir(od)];
+            let mut n = 0;
+            while let Some(d) = stack.pop() {
+                for e in std::fs::read_dir(&d).unwrap().flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                        continue;
+                    }
+                    n += 1;
+                    let name = p.file_name().unwrap().to_string_lossy().to_ascii_lowercase();
+                    assert!(!name.ends_with(".json") && !name.ends_with(".jsonl"), "a JSON file in the owner dir: {}", p.display());
+                }
+            }
+            assert!(n > 3, "{n} files");
+        }
     }
 
     #[test]

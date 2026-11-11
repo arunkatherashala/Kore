@@ -305,8 +305,9 @@ impl Foldable for super::state::BeingState {
     }
 }
 
-/// World T snapshot format: 1 = before Track W2; 2 = with the learner's `file_key` and the file-keyed counts.
-pub const WORLD_T_FORMAT: i64 = 2;
+/// World T snapshot format: 1 = before Track W2; 2 = with the learner's `file_key` and the file-keyed counts;
+/// 3 = with the Track S1 self-tune state (`StateT::self_tune`).
+pub const WORLD_T_FORMAT: i64 = 3;
 
 impl Foldable for super::world_t::engine::StateT {
     const KIND: &'static str = "world_t";

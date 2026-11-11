@@ -14,6 +14,7 @@ pub mod data;
 pub mod engine;
 pub mod learner;
 pub mod measure;
+pub mod self_tune;
 pub mod tools;
 pub mod world;
 #[cfg(test)]
@@ -24,3 +25,5 @@ mod tests_golden;
 mod tests_engine;
 #[cfg(test)]
 mod tests_w2;
+#[cfg(test)]
+mod tests_s1;
