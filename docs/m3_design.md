@@ -184,3 +184,21 @@ claim about other datasets.
 3. Whether the source hash is a code constant (as written: a different file needs a code change) or a controller key.
 4. Approve the two tool additions (`native-filter`, US timestamps in the sniffer) and dropping the `derived` kind.
 5. Approve report seeds 401..460.
+
+## Owner decisions (2026-11-11)
+
+Recorded before any M3 code. They replace the open points above where they differ.
+
+1. PRIMARY candidate: **B0** (the default being), as written. B1 is reported as a secondary (S4).
+2. PRIMARY threshold: paired 95% CI lower bound **> 0 AND mean >= +0.05 AND at least 36 of 60 wins**.
+3. Source hash: a **code constant**, as written (a different file needs a code change).
+4. The two tool additions (`native-filter`, US-timestamp sniffing) are approved; the `derived` kind is dropped.
+5. Report seeds **401..460**, run once. Tuning seeds **101..120** only.
+
+Airport zone ids, checked against the file itself before code (DuckDB over the copy, same handling as above). The
+file has no zone names, so the ids are inferred from TLC fare rules visible in the data: rows with Airport_fee > 0
+(the fee is charged on pickups at JFK and LaGuardia) are picked up in zone 132 (133,913 rows) and 138 (87,952), then
+70 (10,131, a zone next to LaGuardia) and a few hundred elsewhere; RatecodeID 2 (the JFK flat fare) is picked up
+mostly in 132 (71,855); RatecodeID 3 (Newark) is dropped off mostly in zone 1 (5,893). So 132 = JFK, 138 = LaGuardia,
+1 = Newark is consistent with the file but not proven by it (no names; the fare rules are indirect evidence).
+Pickups: zone 1 295, 132 145,240, 138 89,533. Timestamps are whole seconds on every row (0 with a sub-second part).
