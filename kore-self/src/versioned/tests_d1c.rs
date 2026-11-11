@@ -413,7 +413,7 @@ fn unlisted_run_and_tampered_manifest() {
     assert!(matches!(f.verify().unwrap_err(), VerifyError::ExtraSegment { .. }));
     drop(f);
     let mut l = VersionedLog::open(d.path(), OWNER).unwrap();
-    assert!(l.recover().unwrap().iter().any(|s| s.ends_with("0000000001.krun")));
+    assert!(l.recover().unwrap().iter().any(|s| s.ends_with("0000000001.kore")));
     l.verify().unwrap();
     drop(l);
     // a listing changed in the MANIFEST breaks the hash chain: no open uses it
@@ -596,4 +596,38 @@ fn reingest_of_forgotten_event_suppressed_with_runs() {
     let info = f.append_events(&[e]).unwrap();
     assert_eq!(info.suppressed, 1);
     assert!(!info.created);
+}
+
+/// Owner rule (storage is KORE only): every run file is a KORE row-group file that the existing
+/// kore-store reader decodes, and no .json / .jsonl file is created in the log directory.
+#[test]
+fn run_files_are_kore_and_no_json_files() {
+    let d = tempfile::tempdir().unwrap();
+    let mut l = v5_log(d.path());
+    let mut g = Gen::new(99);
+    for i in 0..30 {
+        g.commit(&mut l);
+        if i % 3 == 2 {
+            force(&mut l);
+        }
+    }
+    let id = g.events[2].clone();
+    l.forget_events(&[id]).unwrap();
+    force(&mut l);
+    let _ = l.maintain_runs_inner(Some(RunCrash::BeforeRename), 1, 1);
+    let dir = l.dir.clone();
+    let runs = l.index_runs();
+    drop(l);
+    assert!(!runs.is_empty());
+    for r in &runs {
+        assert!(r.file.ends_with(".kore"));
+        let bytes = fs::read(dir.join(&r.file)).unwrap();
+        let block = kore_store::rowgroups::read(&bytes, None, None).expect("a KORE row-group file");
+        assert!(block.num_rows > 0);
+        let idx = kore_store::rowgroups::index(&bytes).unwrap();
+        assert!(idx.groups.iter().all(|g| kore_store::KoreReader::from_bytes(&bytes[g.offset as usize..(g.offset + g.len) as usize]).is_ok()));
+    }
+    let files = files_of(&dir);
+    let bad: Vec<&String> = files.keys().filter(|f| f.ends_with(".json") || f.ends_with(".jsonl")).collect();
+    assert!(bad.is_empty(), "{bad:?}");
 }

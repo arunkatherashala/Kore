@@ -1510,7 +1510,6 @@ fn cmd_openfast(o: Opts) {
         "format": log.format().number(), "index_runs": log.index_runs().len(), "files_on_disk": files_on_disk, "bytes_on_disk": bytes_on_disk,
         "peak_ws_mb": { "start": m0, "after_open": m1 }, "machine_busy_share": busy_share(sys0, win::system_times()) });
     println!("{v}");
-    Out::new(&root, "openfast.jsonl").put(v);
 }
 
 /// d1c-smoke: correctness only, no timing claims. On the log under `--root` (a copy; it is changed):

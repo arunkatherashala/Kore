@@ -1,20 +1,24 @@
 //! Track D1c (design C, `docs/d1c_design.md`): on-disk index runs, so that the open of a long
 //! format-5 log reads the MANIFEST, the listed runs and the tail, not every segment.
 //!
-//! A run is an immutable file `index/<from>-<to>.krun` holding the index delta of versions
-//! `from..=to` as seven sorted tables of fixed-width records (32-byte key, u64, u32) plus a blob area
-//! per table. The complete set of current runs is listed (field `index_runs`, hashed) by the commit
-//! that wrote them; each listing names the file's sha256, its length and the MANIFEST hash of entry
-//! `to` (`chain`). Lookups binary-search a run with one positioned read of at most two 4 KB pages,
-//! after an in-memory bloom filter and fence keys; the tail since the newest run is the ordinary
-//! in-memory `Index`, overlaid on the runs.
+//! A run is an immutable KORE file `index/<from>-<to>.kore` holding the index delta of versions
+//! `from..=to`: a kore-store row-group container (`kore_store::rowgroups` layout, `KRGP` ... `KRGE`)
+//! whose groups are ordinary KORE files written by `KoreWriter` (128 rows each), with the columns
+//! `sk` (i64: table id and the first 7 key bytes), `key` (64-char hex), `a` (i64: event ordinal), and
+//! `f0`..`f3` (the original key strings and the value). Rows are sorted by (table, key); the last row is
+//! a header row (table 7: magic, layout version, `from`, `to`, the chain hash, the event count). The
+//! complete set of current runs is listed (field `index_runs`, hashed) by the commit that wrote them;
+//! each listing names the file's sha256, its length and the MANIFEST hash of entry `to` (`chain`).
+//! A lookup checks an in-memory bloom filter, finds the one group that can hold the key from the group
+//! keys kept in memory, reads that group with one positioned read and decodes it. The tail since the
+//! newest run is the ordinary in-memory `Index`, overlaid on the runs.
 //!
 //! Trust rule (verified prefix, owner decision D-1): a run is used only if its listing is in the
 //! hash chain, its `chain` equals the current hash of entry `to` (a `forget` that re-seals `to`
-//! makes it stale), and the whole file hashes to the listed sha256 at open. Every 4 KB page of a run
-//! is hashed at open and each later page read is checked against that digest. Segments of versions
-//! <= the newest used run are not all re-hashed at open: 64 of them, chosen by a PRNG seeded from
-//! the head hash, are; every read of a segment and `verify` check all of them as before.
+//! makes it stale), and the whole file hashes to the listed sha256 at open. A digest of every group
+//! is kept and each later group read is checked against it. Segments of versions <= the newest used
+//! run are not all re-hashed at open: 64 of them, chosen by a PRNG seeded from the head hash, are;
+//! every read of a segment and `verify` check all of them as before.
 //!
 //! Crash safety: a run is written to `<file>.tmp`, fsynced, renamed, the directory synced; it is
 //! used only once a later MANIFEST line lists it. An unlisted file is ignored and removed by
@@ -22,11 +26,13 @@
 
 use super::manifest::{Entry, RunRef};
 use super::*;
+use kore_core::{Column, ColumnData, DataBlock};
+use kore_store::{KoreReader, KoreWriter};
 use sha2::{Digest, Sha256};
-use std::io::{BufWriter, Read, Seek, SeekFrom};
+use std::io::{BufWriter, Read};
 
 pub const RUN_DIR: &str = "index";
-pub const RUN_MAGIC: &[u8; 8] = b"KORERUN1";
+pub const RUN_MAGIC: &str = "KORERUN1";
 /// Version of the run file layout. An unknown version is never used (full open instead).
 pub const RUN_FORMAT: u32 = 1;
 /// D-3: at most this many runs; when there are more, the two oldest are merged.
@@ -38,11 +44,14 @@ pub const EVERY_EVENTS: u64 = 100_000;
 /// D-1: old segments hashed at every fast open.
 pub const SAMPLE_SEGMENTS: usize = 64;
 
-const PAGE: usize = 4096;
-const REC: usize = 44;
-const PER_FENCE: u64 = (PAGE / REC) as u64;
+/// Rows per KORE group of a run.
+const GROUP_ROWS: usize = 128;
 const NT: usize = 7;
-const HDR: usize = 8 + 4 + 4 + 8 + 8 + 8 + 32 + NT * 32;
+const T_META: u8 = 7;
+const COLS: [&str; 7] = ["sk", "key", "a", "f0", "f1", "f2", "f3"];
+const RG_START: &[u8; 4] = b"KRGP";
+const RG_END: &[u8; 4] = b"KRGE";
+const RG_VERSION: u8 = 1;
 pub(super) const T_EV: usize = 0;
 pub(super) const T_EVO: usize = 1;
 pub(super) const T_REV: usize = 2;
@@ -53,14 +62,19 @@ pub(super) const T_OUT: usize = 6;
 /// On the same key in two runs the newer one wins (heads, revisions, predictions), else the older one
 /// (event ordinals and "first revision with this content" keep the first).
 const NEWER_WINS: [bool; NT] = [false, false, true, true, false, true, false];
-/// Every table but `T_EV` keeps the original key strings (and the value) in its blob.
+/// Every table but `T_EV` keeps the original key strings (and the value) in its fields.
 const HAS_BLOB: [bool; NT] = [false, true, true, true, true, true, true];
+/// Fields each table needs.
+const NEED: [usize; NT] = [0, 2, 3, 4, 2, 2, 1];
 
 pub fn run_file(from: u64, to: u64) -> String {
-    format!("{RUN_DIR}/{from:010}-{to:010}.krun")
+    format!("{RUN_DIR}/{from:010}-{to:010}.kore")
 }
 
+/// (key, a, encoded fields) of one record of a table.
 type Rec = ([u8; 32], u64, Vec<u8>);
+/// (table, key, a, fields) of one decoded row.
+type RunRow = (u8, [u8; 32], u64, Vec<String>);
 
 fn sha_raw(parts: &[&[u8]]) -> [u8; 32] {
     let mut h = Sha256::new();
@@ -97,12 +111,15 @@ fn dec(b: &[u8]) -> Option<Vec<String>> {
     }
     Some(out)
 }
-fn u64_at(b: &[u8], i: usize) -> u64 {
-    u64::from_le_bytes(b[i..i + 8].try_into().expect("8 bytes"))
-}
-fn page_digest(b: &[u8]) -> [u8; 16] {
+fn digest16(b: &[u8]) -> [u8; 16] {
     let d = sha_raw(&[b]);
     d[..16].try_into().expect("16")
+}
+fn sk_of(t: u8, k: &[u8; 32]) -> i64 {
+    let mut b = [0u8; 8];
+    b[0] = t;
+    b[1..8].copy_from_slice(&k[..7]);
+    i64::from_be_bytes(b)
 }
 
 fn pread(f: &fs::File, off: u64, buf: &mut [u8]) -> std::io::Result<()> {
@@ -126,6 +143,7 @@ fn pread(f: &fs::File, off: u64, buf: &mut [u8]) -> std::io::Result<()> {
     }
 }
 
+/// One bloom filter over (table, key) of all rows of a run.
 struct Bloom {
     bits: Vec<u64>,
     m: u64,
@@ -135,29 +153,29 @@ impl Bloom {
         let m = (n.saturating_mul(10)).max(64).div_ceil(64) * 64;
         Bloom { bits: vec![0; (m / 64) as usize], m }
     }
-    fn probes(&self, k: &[u8; 32]) -> impl Iterator<Item = u64> + '_ {
-        let h1 = u64::from_le_bytes(k[0..8].try_into().expect("8"));
+    fn probes(&self, t: u8, k: &[u8; 32]) -> impl Iterator<Item = u64> + '_ {
+        let h1 = u64::from_le_bytes(k[0..8].try_into().expect("8")) ^ (t as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let h2 = u64::from_le_bytes(k[8..16].try_into().expect("8")) | 1;
         (0..7u64).map(move |i| h1.wrapping_add(i.wrapping_mul(h2)) % self.m)
     }
-    fn insert(&mut self, k: &[u8; 32]) {
-        let p: Vec<u64> = self.probes(k).collect();
+    fn insert(&mut self, t: u8, k: &[u8; 32]) {
+        let p: Vec<u64> = self.probes(t, k).collect();
         for b in p {
             self.bits[(b / 64) as usize] |= 1 << (b % 64);
         }
     }
-    fn maybe(&self, k: &[u8; 32]) -> bool {
-        self.probes(k).all(|b| self.bits[(b / 64) as usize] & (1 << (b % 64)) != 0)
+    fn maybe(&self, t: u8, k: &[u8; 32]) -> bool {
+        self.probes(t, k).all(|b| self.bits[(b / 64) as usize] & (1 << (b % 64)) != 0)
     }
 }
 
-struct Tab {
-    count: u64,
-    rec_off: u64,
-    blob_off: u64,
-    blob_len: u64,
-    fence: Vec<[u8; 32]>,
-    bloom: Bloom,
+/// One KORE group of a run (from the container index; digest from the open).
+struct Group {
+    off: u64,
+    len: u64,
+    rows: u64,
+    first: (u8, [u8; 32]),
+    digest: [u8; 16],
 }
 
 /// One verified, opened run.
@@ -166,9 +184,10 @@ pub(super) struct Run {
     /// Event rows in versions `0..=to`.
     pub next_ord: u64,
     file: fs::File,
-    len: u64,
-    pages: Vec<[u8; 16]>,
-    tabs: Vec<Tab>,
+    groups: Vec<Group>,
+    /// Per table: the range of groups holding its rows.
+    tabs: [(usize, usize); NT],
+    bloom: Bloom,
 }
 
 /// The runs in use, oldest first (contiguous from version 0).
@@ -181,18 +200,16 @@ fn bad(r: &RunRef, d: impl Into<String>) -> VerifyError {
     VerifyError::SegmentUnreadable { file: r.file.clone(), detail: d.into() }
 }
 
-/// sha256 (hex), length and 4 KB page digests of a file, read once, sequentially.
-fn hash_file(path: &Path, file: &str) -> Result<(String, u64, Vec<[u8; 16]>), VerifyError> {
+/// sha256 (hex) and length of a file, read once, sequentially.
+fn hash_file(path: &Path, file: &str) -> Result<(String, u64), VerifyError> {
     let mut f = match fs::File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(VerifyError::MissingSegment { file: file.to_string() }),
         Err(e) => return Err(VerifyError::Io(format!("{file}: {e}"))),
     };
     let mut h = Sha256::new();
-    let mut pages = Vec::new();
     let mut buf = vec![0u8; 1 << 20];
     let mut len = 0u64;
-    let mut carry: Vec<u8> = Vec::with_capacity(PAGE);
     loop {
         let n = f.read(&mut buf).map_err(|e| VerifyError::Io(format!("{file}: {e}")))?;
         if n == 0 {
@@ -200,175 +217,216 @@ fn hash_file(path: &Path, file: &str) -> Result<(String, u64, Vec<[u8; 16]>), Ve
         }
         h.update(&buf[..n]);
         len += n as u64;
-        let mut s = &buf[..n];
-        while !s.is_empty() {
-            let take = (PAGE - carry.len()).min(s.len());
-            carry.extend_from_slice(&s[..take]);
-            s = &s[take..];
-            if carry.len() == PAGE {
-                pages.push(page_digest(&carry));
-                carry.clear();
-            }
-        }
-    }
-    if !carry.is_empty() {
-        pages.push(page_digest(&carry));
     }
     count_io(len);
-    Ok((hex(&h.finalize()), len, pages))
+    Ok((hex(&h.finalize()), len))
+}
+
+/// The rows of one decoded KORE group (schema checked exactly).
+fn block_rows(r: &RunRef, bytes: &[u8], rows: u64) -> Result<Vec<RunRow>, VerifyError> {
+    let b = KoreReader::from_bytes(bytes).map_err(|e| bad(r, format!("group does not decode: {e}")))?;
+    if b.num_rows as u64 != rows || b.columns.len() != COLS.len() || b.columns.iter().zip(COLS).any(|(c, n)| c.name != n) {
+        return Err(bad(r, "group schema or row count differs"));
+    }
+    let ints = |c: &Column| -> Result<Vec<Option<i64>>, VerifyError> {
+        match &c.data {
+            ColumnData::Int64(v) => Ok(v.clone()),
+            _ => Err(bad(r, format!("column {} is not i64", c.name))),
+        }
+    };
+    let (sk, aa) = (ints(&b.columns[0])?, ints(&b.columns[2])?);
+    let mut out = Vec::with_capacity(b.num_rows);
+    for i in 0..b.num_rows {
+        let key = b.columns[1].data.get_str(i).and_then(codec::hex64_to_bytes).ok_or_else(|| bad(r, "bad key"))?;
+        let s = sk[i].ok_or_else(|| bad(r, "null sk"))?;
+        let t = (s as u64 >> 56) as u8;
+        if t > T_META || sk_of(t, &key) != s {
+            return Err(bad(r, "sk does not match the key"));
+        }
+        let a = aa[i].filter(|x| *x >= 0).ok_or_else(|| bad(r, "bad a"))? as u64;
+        let mut f = vec![];
+        let mut ended = false;
+        for c in &b.columns[3..] {
+            match c.data.get_str(i) {
+                Some(x) if !ended => f.push(x.to_string()),
+                Some(_) => return Err(bad(r, "field after a null field")),
+                None => ended = true,
+            }
+        }
+        out.push((t, key, a, f));
+    }
+    Ok(out)
+}
+
+/// The container index (the `kore_store::rowgroups` footer) read from the end of the file.
+fn read_index(file: &fs::File, len: u64, r: &RunRef) -> Result<Vec<(u64, u64, u64, i64, i64)>, VerifyError> {
+    let io = |e: std::io::Error| VerifyError::Io(format!("{}: {e}", r.file));
+    if len < 13 {
+        return Err(bad(r, "too short for a KORE row-group file"));
+    }
+    let mut head = [0u8; 5];
+    pread(file, 0, &mut head).map_err(io)?;
+    let mut tail = [0u8; 8];
+    pread(file, len - 8, &mut tail).map_err(io)?;
+    if &head[..4] != RG_START || head[4] != RG_VERSION || &tail[4..] != RG_END {
+        return Err(bad(r, "not a KORE row-group file"));
+    }
+    let ilen = u32::from_le_bytes(tail[..4].try_into().expect("4")) as u64;
+    let istart = (len - 8).checked_sub(ilen).filter(|&s| s >= 5).ok_or_else(|| bad(r, "bad index length"))?;
+    let mut ix = vec![0u8; ilen as usize];
+    pread(file, istart, &mut ix).map_err(io)?;
+    count_io(ilen + 13);
+    let mut p = 0usize;
+    let mut take = |n: usize| -> Result<&[u8], VerifyError> {
+        let s = ix.get(p..p + n).ok_or_else(|| bad(r, "truncated index"))?;
+        p += n;
+        Ok(s)
+    };
+    let u32_ = |b: &[u8]| u32::from_le_bytes(b.try_into().expect("4"));
+    let u64_ = |b: &[u8]| u64::from_le_bytes(b.try_into().expect("8"));
+    let ncols = u32_(take(4)?) as usize;
+    if ncols != COLS.len() {
+        return Err(bad(r, "wrong column count"));
+    }
+    for want in COLS {
+        let l = u16::from_le_bytes(take(2)?.try_into().expect("2")) as usize;
+        if take(l)? != want.as_bytes() {
+            return Err(bad(r, "wrong column names"));
+        }
+    }
+    let ng = u32_(take(4)?) as usize;
+    let mut out = Vec::with_capacity(ng.min(1 << 20));
+    let mut at = 5u64;
+    for _ in 0..ng {
+        let (off, glen, rows) = (u64_(take(8)?), u64_(take(8)?), u64_(take(8)?));
+        let mut sk = (0i64, 0i64);
+        for c in 0..ncols {
+            let kind = take(1)?[0];
+            let (a, b) = (i64::from_le_bytes(take(8)?.try_into().expect("8")), i64::from_le_bytes(take(8)?.try_into().expect("8")));
+            let _nulls = take(8)?;
+            if c == 0 {
+                if kind != 1 {
+                    return Err(bad(r, "sk statistics missing"));
+                }
+                sk = (a, b);
+            }
+        }
+        if off != at || rows == 0 || rows > GROUP_ROWS as u64 {
+            return Err(bad(r, "groups not contiguous"));
+        }
+        at = off + glen;
+        out.push((off, glen, rows, sk.0, sk.1));
+    }
+    if at != istart || p != ix.len() || out.is_empty() {
+        return Err(bad(r, "bad container layout"));
+    }
+    Ok(out)
 }
 
 impl Run {
-    /// Open a listed run: the whole file must hash to the listing, the header must agree with it and
-    /// every table must be strictly sorted with in-range values. Builds fences and bloom filters.
+    /// Open a listed run: the whole file must hash to the listing; every group must decode, rows
+    /// strictly sorted by (table, key), the header row must agree with the listing. Keeps group keys,
+    /// group digests and a bloom filter in memory.
     pub fn load(dir: &Path, r: &RunRef) -> Result<Run, VerifyError> {
         let path = dir.join(&r.file);
-        let (sha, len, pages) = hash_file(&path, &r.file)?;
+        let (sha, len) = hash_file(&path, &r.file)?;
         if sha != r.sha256 || len != r.bytes {
             return Err(VerifyError::ChecksumMismatch { file: r.file.clone() });
         }
         let file = fs::File::open(&path).map_err(|e| VerifyError::Io(format!("{}: {e}", r.file)))?;
-        let mut run = Run { r: r.clone(), next_ord: 0, file, len, pages, tabs: vec![] };
-        if (len as usize) < HDR {
-            return Err(bad(r, "shorter than the run header"));
+        let index = read_index(&file, len, r)?;
+        let total: u64 = index.iter().map(|g| g.2).sum();
+        let mut run = Run { r: r.clone(), next_ord: 0, file, groups: Vec::with_capacity(index.len()), tabs: [(0, 0); NT], bloom: Bloom::new(total) };
+        let mut prev: Option<(u8, [u8; 32])> = None;
+        let mut meta: Option<RunRow> = None;
+        let mut starts = [usize::MAX; NT];
+        let mut ends = [0usize; NT];
+        let mut ev: Vec<u64> = vec![];
+        for (gi, &(off, glen, rows, mn, mx)) in index.iter().enumerate() {
+            let mut buf = vec![0u8; glen as usize];
+            pread(&run.file, off, &mut buf).map_err(|e| VerifyError::Io(format!("{}: {e}", r.file)))?;
+            let rws = block_rows(r, &buf, rows)?;
+            let (s0, s1) = (sk_of(rws[0].0, &rws[0].1), sk_of(rws[rws.len() - 1].0, &rws[rws.len() - 1].1));
+            if s0 != mn || s1 != mx {
+                return Err(bad(r, "group statistics differ from its rows"));
+            }
+            run.groups.push(Group { off, len: glen, rows, first: (rws[0].0, rws[0].1), digest: digest16(&buf) });
+            for row in rws {
+                let k = (row.0, row.1);
+                if prev.map_or(false, |p| p >= k) || meta.is_some() {
+                    return Err(bad(r, "rows not strictly sorted (or after the header row)"));
+                }
+                prev = Some(k);
+                if row.0 == T_META {
+                    meta = Some(row);
+                    continue;
+                }
+                let t = row.0 as usize;
+                if row.3.len() < NEED[t] || (t == T_EV && !row.3.is_empty()) {
+                    return Err(bad(r, format!("table {t}: wrong field count")));
+                }
+                if t == T_EV {
+                    ev.push(row.2);
+                }
+                starts[t] = starts[t].min(gi);
+                ends[t] = gi + 1;
+                run.bloom.insert(row.0, &row.1);
+            }
         }
-        let h = run.read_at(0, HDR)?;
-        if &h[0..8] != RUN_MAGIC {
-            return Err(bad(r, "not an index run (magic)"));
+        let Some((_, chain, next_ord, f)) = meta else { return Err(bad(r, "no header row")) };
+        if f.len() != 4 || f[0] != RUN_MAGIC {
+            return Err(bad(r, "not an index run (header row)"));
         }
-        let fmt = u32::from_le_bytes(h[8..12].try_into().expect("4"));
-        if fmt != RUN_FORMAT {
-            return Err(bad(r, format!("unknown run format {fmt}")));
+        if f[1] != RUN_FORMAT.to_string() {
+            return Err(bad(r, format!("unknown run format {}", f[1])));
         }
-        if u32::from_le_bytes(h[12..16].try_into().expect("4")) as usize != NT {
-            return Err(bad(r, "wrong table count"));
+        if f[2] != r.from.to_string() || f[3] != r.to.to_string() || hex(&chain) != r.chain {
+            return Err(bad(r, "header row does not match its listing"));
         }
-        let (from, to, next_ord) = (u64_at(&h, 16), u64_at(&h, 24), u64_at(&h, 32));
-        if from != r.from || to != r.to || hex(&h[40..72]) != r.chain {
-            return Err(bad(r, "header does not match its listing"));
+        if ev.iter().any(|&o| o >= next_ord) {
+            return Err(bad(r, "event ordinal out of range"));
         }
         run.next_ord = next_ord;
-        let mut at = HDR as u64;
         for t in 0..NT {
-            let b = 72 + t * 32;
-            let (count, rec_off, blob_off, blob_len) = (u64_at(&h, b), u64_at(&h, b + 8), u64_at(&h, b + 16), u64_at(&h, b + 24));
-            let rec_end = count.checked_mul(REC as u64).and_then(|x| x.checked_add(rec_off));
-            if rec_off != at || rec_end != Some(blob_off) || blob_off.checked_add(blob_len).map_or(true, |e| e > len) {
-                return Err(bad(r, format!("table {t}: bad layout")));
-            }
-            at = blob_off + blob_len;
-            run.tabs.push(Tab { count, rec_off, blob_off, blob_len, fence: vec![], bloom: Bloom::new(count) });
-        }
-        if at != len {
-            return Err(bad(r, "trailing bytes after the last table"));
-        }
-        // pass 2: structure, fences, bloom filters
-        for t in 0..NT {
-            let (count, rec_off, blob_len) = (run.tabs[t].count, run.tabs[t].rec_off, run.tabs[t].blob_len);
-            let mut prev: Option<[u8; 32]> = None;
-            let mut want_off = 0u64;
-            let mut fence = Vec::with_capacity((count / PER_FENCE + 1) as usize);
-            let mut bloom = Bloom::new(count);
-            let mut i = 0u64;
-            while i < count {
-                let n = (count - i).min(16_384);
-                let recs = run.read_at(rec_off + i * REC as u64, (n as usize) * REC)?;
-                for j in 0..n as usize {
-                    let rb = &recs[j * REC..(j + 1) * REC];
-                    let k: [u8; 32] = rb[..32].try_into().expect("32");
-                    let a = u64_at(rb, 32);
-                    let b = u32::from_le_bytes(rb[40..44].try_into().expect("4")) as u64;
-                    if prev.map_or(false, |p| p >= k) {
-                        return Err(bad(r, format!("table {t}: keys not strictly ascending")));
-                    }
-                    if HAS_BLOB[t] {
-                        if a != want_off || a + b > blob_len {
-                            return Err(bad(r, format!("table {t}: blob reference out of order or range")));
-                        }
-                        want_off = a + b;
-                    } else if b != 0 || a >= next_ord {
-                        return Err(bad(r, "event ordinal out of range"));
-                    }
-                    if (i + j as u64) % PER_FENCE == 0 {
-                        fence.push(k);
-                    }
-                    bloom.insert(&k);
-                    prev = Some(k);
-                }
-                i += n;
-            }
-            if HAS_BLOB[t] && want_off != blob_len {
-                return Err(bad(r, format!("table {t}: blob area not fully referenced")));
-            }
-            run.tabs[t].fence = fence;
-            run.tabs[t].bloom = bloom;
+            run.tabs[t] = if starts[t] == usize::MAX { (0, 0) } else { (starts[t], ends[t]) };
         }
         Ok(run)
     }
 
-    /// Bytes `off..off+n` of the file; every 4 KB page touched is checked against its digest from the open.
-    fn read_at(&self, off: u64, n: usize) -> Result<Vec<u8>, VerifyError> {
-        if n == 0 {
-            return Ok(vec![]);
+    /// The rows of group `gi`, checked against its digest from the open.
+    fn group(&self, gi: usize) -> Result<Vec<RunRow>, VerifyError> {
+        let g = &self.groups[gi];
+        let mut buf = vec![0u8; g.len as usize];
+        pread(&self.file, g.off, &mut buf).map_err(|e| VerifyError::Io(format!("{}: {e}", self.r.file)))?;
+        count_io(g.len);
+        if digest16(&buf) != g.digest {
+            return Err(VerifyError::ChecksumMismatch { file: self.r.file.clone() });
         }
-        let end = off + n as u64;
-        if end > self.len {
-            return Err(bad(&self.r, "read past the end"));
-        }
-        let p0 = off / PAGE as u64;
-        let p1 = (end - 1) / PAGE as u64;
-        let start = p0 * PAGE as u64;
-        let stop = ((p1 + 1) * PAGE as u64).min(self.len);
-        let mut buf = vec![0u8; (stop - start) as usize];
-        pread(&self.file, start, &mut buf).map_err(|e| VerifyError::Io(format!("{}: {e}", self.r.file)))?;
-        count_io(buf.len() as u64);
-        for (k, p) in (p0..=p1).enumerate() {
-            let s = k * PAGE;
-            let e = (s + PAGE).min(buf.len());
-            if page_digest(&buf[s..e]) != self.pages[p as usize] {
-                return Err(VerifyError::ChecksumMismatch { file: self.r.file.clone() });
-            }
-        }
-        let a = (off - start) as usize;
-        Ok(buf[a..a + n].to_vec())
+        block_rows(&self.r, &buf, g.rows)
     }
 
-    /// (a, b) of the record with this key in table `t`, if any.
-    fn get(&self, t: usize, key: &[u8; 32]) -> Result<Option<(u64, u64)>, VerifyError> {
-        let tb = &self.tabs[t];
-        if tb.count == 0 || !tb.bloom.maybe(key) {
+    /// (a, encoded fields) of the record with this key in table `t`, if any.
+    fn get(&self, t: usize, key: &[u8; 32]) -> Result<Option<(u64, Vec<u8>)>, VerifyError> {
+        let (g0, g1) = self.tabs[t];
+        if g0 == g1 || !self.bloom.maybe(t as u8, key) {
             return Ok(None);
         }
-        let idx = tb.fence.partition_point(|f| f <= key);
+        let want = (t as u8, *key);
+        let idx = self.groups[g0..g1].partition_point(|g| g.first <= want);
         if idx == 0 {
             return Ok(None);
         }
-        let i0 = (idx as u64 - 1) * PER_FENCE;
-        let n = (tb.count - i0).min(PER_FENCE) as usize;
-        let recs = self.read_at(tb.rec_off + i0 * REC as u64, n * REC)?;
-        let (mut lo, mut hi) = (0usize, n);
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            let k = &recs[mid * REC..mid * REC + 32];
-            match k.cmp(&key[..]) {
-                std::cmp::Ordering::Less => lo = mid + 1,
-                std::cmp::Ordering::Greater => hi = mid,
-                std::cmp::Ordering::Equal => {
-                    let rb = &recs[mid * REC..(mid + 1) * REC];
-                    return Ok(Some((u64_at(rb, 32), u32::from_le_bytes(rb[40..44].try_into().expect("4")) as u64)));
-                }
+        for row in self.group(g0 + idx - 1)? {
+            if (row.0, row.1) == want {
+                let f: Vec<&str> = row.3.iter().map(|s| s.as_str()).collect();
+                return Ok(Some((row.2, enc(&f))));
             }
         }
         Ok(None)
     }
 
-    fn blob(&self, t: usize, a: u64, b: u64) -> Result<Vec<String>, VerifyError> {
-        let bytes = self.read_at(self.tabs[t].blob_off + a, b as usize)?;
-        dec(&bytes).ok_or_else(|| bad(&self.r, "blob does not decode"))
-    }
-
     fn scan(&self, t: usize) -> Scan<'_> {
-        Scan { run: self, t, i: 0, recs: vec![], rec_i0: 0, blob: vec![], blob0: 0 }
+        Scan { run: self, t, g: self.tabs[t].0, rows: vec![].into_iter() }
     }
 }
 
@@ -376,45 +434,31 @@ impl Run {
 struct Scan<'a> {
     run: &'a Run,
     t: usize,
-    i: u64,
-    recs: Vec<u8>,
-    rec_i0: u64,
-    blob: Vec<u8>,
-    blob0: u64,
+    g: usize,
+    rows: std::vec::IntoIter<RunRow>,
 }
 impl<'a> Iterator for Scan<'a> {
     type Item = Result<Rec, VerifyError>;
     fn next(&mut self) -> Option<Self::Item> {
-        let tb = &self.run.tabs[self.t];
-        if self.i >= tb.count {
-            return None;
-        }
-        let r = (|| {
-            let mut local = (self.i - self.rec_i0) as usize;
-            if self.recs.is_empty() || local * REC >= self.recs.len() {
-                let n = (tb.count - self.i).min(16_384) as usize;
-                self.recs = self.run.read_at(tb.rec_off + self.i * REC as u64, n * REC)?;
-                self.rec_i0 = self.i;
-                local = 0;
-            }
-            let rb = &self.recs[local * REC..(local + 1) * REC];
-            let k: [u8; 32] = rb[..32].try_into().expect("32");
-            let a = u64_at(rb, 32);
-            let b = u32::from_le_bytes(rb[40..44].try_into().expect("4")) as u64;
-            let mut bytes = vec![];
-            if HAS_BLOB[self.t] {
-                if a < self.blob0 || a + b > self.blob0 + self.blob.len() as u64 {
-                    let end = (a + b).max(a + (4 << 20)).min(tb.blob_len);
-                    self.blob = self.run.read_at(tb.blob_off + a, (end - a) as usize)?;
-                    self.blob0 = a;
+        loop {
+            for row in self.rows.by_ref() {
+                if row.0 as usize == self.t {
+                    let f: Vec<&str> = row.3.iter().map(|s| s.as_str()).collect();
+                    return Some(Ok((row.1, row.2, enc(&f))));
                 }
-                let s = (a - self.blob0) as usize;
-                bytes = self.blob[s..s + b as usize].to_vec();
             }
-            Ok((k, if HAS_BLOB[self.t] { 0 } else { a }, bytes))
-        })();
-        self.i = if r.is_ok() { self.i + 1 } else { tb.count };
-        Some(r)
+            if self.g >= self.run.tabs[self.t].1 {
+                return None;
+            }
+            match self.run.group(self.g) {
+                Ok(r) => self.rows = r.into_iter(),
+                Err(e) => {
+                    self.g = usize::MAX - 1;
+                    return Some(Err(e));
+                }
+            }
+            self.g += 1;
+        }
     }
 }
 
@@ -455,25 +499,6 @@ impl<'a> Iterator for Merge<'a> {
     }
 }
 
-fn hdr_bytes(from: u64, to: u64, chain: &str, next_ord: u64, tabs: &[(u64, u64, u64, u64)]) -> Vec<u8> {
-    let mut h = Vec::with_capacity(HDR);
-    h.extend_from_slice(RUN_MAGIC);
-    h.extend_from_slice(&RUN_FORMAT.to_le_bytes());
-    h.extend_from_slice(&(NT as u32).to_le_bytes());
-    for x in [from, to, next_ord] {
-        h.extend_from_slice(&x.to_le_bytes());
-    }
-    h.extend_from_slice(&codec::hex64_to_bytes(chain).unwrap_or([0; 32]));
-    for t in 0..NT {
-        let x = tabs.get(t).copied().unwrap_or_default();
-        for v in [x.0, x.1, x.2, x.3] {
-            h.extend_from_slice(&v.to_le_bytes());
-        }
-    }
-    debug_assert_eq!(h.len(), HDR);
-    h
-}
-
 /// Test hook: where a run write "crashes".
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum RunCrash {
@@ -485,8 +510,86 @@ pub(crate) enum RunCrash {
     AfterCommit,
 }
 
-fn io_err(e: std::io::Error) -> LogError {
-    LogError::Io(e.to_string())
+/// Streaming writer of the row-group container: groups are KORE files from `KoreWriter::to_bytes`.
+struct GroupWriter<W: Write> {
+    w: W,
+    pos: u64,
+    rows: Vec<RunRow>,
+    index: Vec<u8>,
+    groups: u32,
+}
+impl<W: Write> GroupWriter<W> {
+    fn new(mut w: W) -> std::io::Result<Self> {
+        w.write_all(RG_START)?;
+        w.write_all(&[RG_VERSION])?;
+        Ok(GroupWriter { w, pos: 5, rows: vec![], index: vec![], groups: 0 })
+    }
+    fn push(&mut self, row: RunRow) -> std::io::Result<()> {
+        self.rows.push(row);
+        if self.rows.len() == GROUP_ROWS {
+            self.flush_group()?;
+        }
+        Ok(())
+    }
+    fn flush_group(&mut self) -> std::io::Result<()> {
+        if self.rows.is_empty() {
+            return Ok(());
+        }
+        let rows = std::mem::take(&mut self.rows);
+        let sk: Vec<Option<i64>> = rows.iter().map(|r| Some(sk_of(r.0, &r.1))).collect();
+        let mut cols = vec![
+            Column::int64("sk", sk.clone()),
+            Column::str_col("key", rows.iter().map(|r| Some(hex(&r.1))).collect()),
+            Column::int64("a", rows.iter().map(|r| Some(r.2 as i64)).collect()),
+        ];
+        for i in 0..4 {
+            cols.push(Column::str_col(COLS[3 + i], rows.iter().map(|r| r.3.get(i).cloned()).collect()));
+        }
+        let block = DataBlock::new(cols).expect("equal-length columns");
+        let bytes = KoreWriter::to_bytes(&block);
+        self.index.extend_from_slice(&self.pos.to_le_bytes());
+        self.index.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        self.index.extend_from_slice(&(rows.len() as u64).to_le_bytes());
+        for (ci, c) in block.columns.iter().enumerate() {
+            let nulls = (0..block.num_rows).filter(|&i| match &c.data {
+                ColumnData::Int64(v) => v[i].is_none(),
+                d => d.get_str(i).is_none(),
+            }).count() as u64;
+            if ci == 0 || ci == 2 {
+                let v: Vec<i64> = match &c.data {
+                    ColumnData::Int64(v) => v.iter().flatten().copied().collect(),
+                    _ => vec![],
+                };
+                let (mn, mx) = (v.iter().copied().min().unwrap_or(0), v.iter().copied().max().unwrap_or(0));
+                self.index.push(1);
+                self.index.extend_from_slice(&mn.to_le_bytes());
+                self.index.extend_from_slice(&mx.to_le_bytes());
+            } else {
+                self.index.push(0);
+                self.index.extend_from_slice(&[0u8; 16]);
+            }
+            self.index.extend_from_slice(&nulls.to_le_bytes());
+        }
+        self.w.write_all(&bytes)?;
+        self.pos += bytes.len() as u64;
+        self.groups += 1;
+        Ok(())
+    }
+    fn finish(mut self) -> std::io::Result<W> {
+        self.flush_group()?;
+        let mut ix = Vec::new();
+        ix.extend_from_slice(&(COLS.len() as u32).to_le_bytes());
+        for c in COLS {
+            ix.extend_from_slice(&(c.len() as u16).to_le_bytes());
+            ix.extend_from_slice(c.as_bytes());
+        }
+        ix.extend_from_slice(&self.groups.to_le_bytes());
+        ix.extend_from_slice(&self.index);
+        self.w.write_all(&ix)?;
+        self.w.write_all(&(ix.len() as u32).to_le_bytes())?;
+        self.w.write_all(RG_END)?;
+        Ok(self.w)
+    }
 }
 
 /// Write one run (temp + fsync + rename + directory sync). Returns its listing.
@@ -495,15 +598,8 @@ fn write_run(dir: &Path, from: u64, to: u64, chain: &str, next_ord: u64, tables:
     fs::create_dir_all(&rdir)?;
     let rel = run_file(from, to);
     let tmp = dir.join(format!("{rel}.tmp"));
-    let side = dir.join(format!("{rel}.blob.tmp"));
-    let f = fs::File::create(&tmp)?;
-    let mut w = BufWriter::with_capacity(1 << 20, f);
-    w.write_all(&[0u8; HDR])?;
-    let mut pos = HDR as u64;
-    let mut metas = vec![];
+    let mut gw = GroupWriter::new(BufWriter::with_capacity(1 << 20, fs::File::create(&tmp)?))?;
     for (t, it) in tables.into_iter().enumerate() {
-        let mut sw = BufWriter::with_capacity(1 << 20, fs::File::create(&side)?);
-        let (rec_off, mut count, mut blob_len) = (pos, 0u64, 0u64);
         let mut prev: Option<[u8; 32]> = None;
         for item in it {
             let (k, a, blob) = item?;
@@ -511,34 +607,16 @@ fn write_run(dir: &Path, from: u64, to: u64, chain: &str, next_ord: u64, tables:
                 return Err(LogError::Io(format!("internal: index run table {t} not strictly sorted")));
             }
             prev = Some(k);
-            w.write_all(&k)?;
-            if HAS_BLOB[t] {
-                w.write_all(&blob_len.to_le_bytes())?;
-                w.write_all(&(blob.len() as u32).to_le_bytes())?;
-                sw.write_all(&blob)?;
-                blob_len += blob.len() as u64;
-            } else {
-                w.write_all(&a.to_le_bytes())?;
-                w.write_all(&0u32.to_le_bytes())?;
-            }
-            count += 1;
+            let f = if HAS_BLOB[t] { dec(&blob).ok_or_else(|| LogError::Io("internal: run fields".into()))? } else { vec![] };
+            gw.push((t as u8, k, if HAS_BLOB[t] { 0 } else { a }, f))?;
         }
-        sw.flush()?;
-        drop(sw);
-        let mut sf = fs::File::open(&side)?;
-        std::io::copy(&mut sf, &mut w)?;
-        drop(sf);
-        let blob_off = rec_off + count * REC as u64;
-        metas.push((count, rec_off, blob_off, blob_len));
-        pos = blob_off + blob_len;
     }
-    let _ = fs::remove_file(&side);
-    let mut f = w.into_inner().map_err(|e| io_err(e.into_error()))?;
-    f.seek(SeekFrom::Start(0))?;
-    f.write_all(&hdr_bytes(from, to, chain, next_ord, &metas))?;
+    let chain_b = codec::hex64_to_bytes(chain).ok_or_else(|| LogError::Io("internal: chain hash".into()))?;
+    gw.push((T_META, chain_b, next_ord, vec![RUN_MAGIC.to_string(), RUN_FORMAT.to_string(), from.to_string(), to.to_string()]))?;
+    let f = gw.finish()?.into_inner().map_err(|e| LogError::Io(e.into_error().to_string()))?;
     f.sync_all()?;
     drop(f);
-    let (sha, bytes, _) = hash_file(&tmp, &rel)?;
+    let (sha, bytes) = hash_file(&tmp, &rel)?;
     if crash == Some(RunCrash::BeforeRename) {
         return Err(LogError::Io("simulated crash".into()));
     }
@@ -572,7 +650,7 @@ impl RunSet {
                 if !HAS_BLOB[t] {
                     return Ok(Some((a, vec![])));
                 }
-                let f = r.blob(t, a, b)?;
+                let f = dec(&b).ok_or_else(|| bad(&r.r, "fields do not decode"))?;
                 if f.len() >= want.len() && f.iter().zip(want).all(|(x, y)| x == y) {
                     return Ok(Some((a, f)));
                 }
@@ -597,18 +675,8 @@ impl Index {
         if t == T_EV {
             return Ok(b.find(T_EV, &k, &[])?.map(|x| x.0 as u32));
         }
-        // EVO: record a = blob offset; the ordinal is the second field of a scan only, so look it up
-        for r in &b.runs {
-            if let Some((a, len)) = r.get(T_EVO, &k)? {
-                let f = r.blob(T_EVO, a, len)?;
-                if f.first().map(|s| s.as_str()) == Some(id) {
-                    if let Some(o) = f.get(1).and_then(|s| s.parse::<u32>().ok()) {
-                        return Ok(Some(o));
-                    }
-                }
-            }
-        }
-        Ok(None)
+        // EVO: the ordinal is the second field
+        Ok(b.find(T_EVO, &k, &[id])?.and_then(|(_, f)| f.get(1).and_then(|s| s.parse::<u32>().ok())))
     }
     pub(super) fn ev_ord(&self, id: &str) -> Result<Option<u32>, VerifyError> {
         let tail = match codec::hex64_to_bytes(id) {

@@ -45,7 +45,7 @@ All tables are typed `.kore` files (KORE columnar format).
   revisions/0000000003.kore
   revision_causes/...  predictions/...  outcomes/...  schema_meta/0000000000.kore
   dicts/<sha256>.kdic           format 4 only: shared dictionary objects listed in the MANIFEST
-  index/<from>-<to>.krun        format 5 only: index runs listed in the MANIFEST (Track D1c)
+  index/<from>-<to>.kore        format 5 only: index runs (KORE row-group files) listed in the MANIFEST (Track D1c)
 ```
 
 `owner` is restricted to `[A-Za-z0-9_-]{1,64}`. Version 0 is the genesis commit
@@ -229,8 +229,10 @@ segment. Design and owner decisions: `docs/d1c_design.md`. Code: `versioned/inde
 
 * **Shape.** MANIFEST header `KORE-VLOG-MANIFEST 4` (older binaries refuse it). A commit without rows lists the
   complete current run set in the hashed entry field `index_runs` (`from`, `to`, `file`, `sha256`, `bytes`,
-  `chain` = hash of entry `to`); every older entry line is unchanged. Files: `index/<from>-<to>.krun`
-  (magic `KORERUN1`, layout version 1; seven sorted tables of 44-byte records plus a blob area each).
+  `chain` = hash of entry `to`); every older entry line is unchanged. Files: `index/<from>-<to>.kore`, KORE
+  files (owner rule: storage is KORE only): a kore-store row-group container (`rowgroups` layout) whose groups of
+  128 rows are written by `KoreWriter`; columns `sk`, `key`, `a`, `f0`..`f3`, rows sorted by (table, key), a last
+  header row (magic `KORERUN1`, layout version 1, `from`, `to`, chain hash, event count).
 * **Upgrade is explicit.** `upgrade_to_v5()` from format 1, 2 or 3 (one `schema_meta` commit, header switched in
   the same atomic replacement, earlier lines byte for byte). Format 4 logs are refused. No downgrade.
 * **Writing runs.** `maintain_index_runs()`: a new run when there is no usable run in the handle, or 2,000
@@ -239,7 +241,7 @@ segment. Design and owner decisions: `docs/d1c_design.md`. Code: `versioned/inde
   `recover()`. The being tools call it at the end of `being_run` when `fast_open = on`.
 * **Fast open.** Used only for a format-5 log; a run is used only if it is in the active listing, its `chain`
   equals the current hash of entry `to` (a `forget` that re-seals `to` makes it stale) and the whole file hashes
-  to the listed sha256 (every 4 KB page digest is kept; later page reads are checked against it). 64 segments of
+  to the listed sha256 (a digest of every KORE group is kept; later group reads are checked against it). 64 segments of
   versions <= the newest used run, chosen by a PRNG seeded from the head hash, are hashed (owner decision D-1);
   the others are checked on every read and by `verify()`, not at open. The tail after the newest run is read and
   verified as before. Any problem (no run, bad hash, unknown layout, irregular tail, sampled segment bad) = the
