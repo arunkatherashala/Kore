@@ -3589,6 +3589,43 @@ result (M3 stays separate). The PRIMARY is a replication. One world family and o
 baselines are tuned per point and B1 is not, as pre-registered. The cost numbers (e) come from re-running the same
 deterministic lives on one thread for timing and memory only. Nothing here is a claim of thinking or understanding.
 
+## Track M3: World M3, a World T-like world from one real file (NYC yellow taxi, January 2024)
+
+Design and pre-registration: `docs/m3_design.md` with the owner decisions of 2026-11-11 (candidate B0; PRIMARY: paired
+95% CI lower bound > 0 AND mean >= +0.05 AND >= 36 of 60 wins; report seeds 401..460 run once; tuning seeds 101..120
+only). Code on branch `m3-build`; `kore-self/examples/measure_m3.rs`; Windows, 8 threads. The source file is untrusted
+input kept outside every repository; its SHA-256 is re-checked before every world construction; nothing from it or
+derived from it is committed (the TSVs below hold policy, seed, reward, energy and counts only).
+
+### Cross-check of the truths (gate, before tuning)
+
+Every task a life can meet on the tuning seeds 101..120 (the task of a (step, kind) does not depend on the clock;
+steps 0..5999 x 9 kinds = 54,000 per seed, 329,470 distinct): each Rust truth was recomputed by an independent DuckDB
+1.5.6 query (`kore-self/examples/m3_crosscheck.py`, `python -I`, read-only conda env, nothing installed) over the
+rendered file read with its explicit dialect; every rendered table was also joined on `trip_id` with the Parquet file
+and every value compared; series truths were recomputed from the Parquet file. **0 disagreements** (one script bug in
+the hour bucketing was found on the first pass, in the checker, not in the world, and fixed before the full pass). The
+cross-check inputs and outputs were deleted.
+
+### Tuning (seeds 101..120, penalty 0, energy weight 1, budget 6000; committed before the report run)
+
+`docs/data/m3_tune_seeds101-120.tsv`. Mean reward per energy over 20 seeds; 6 values per tuned policy; B0 and B1 had
+their optimum (0.5) on the low edge and were extended once by 0.25 and 0.125 (both lower; 0.5 kept).
+
+| policy | chosen | tuning mean | grid (mean per value) |
+|---|---|---|---|
+| B0 (default being) | beta 0.5 | 3.1966 | 0.125: 3.1841, 0.25: 3.1883, 0.5: 3.1966, 1: 3.1928, 2: 3.1176, 4: 2.9300, 8: 2.7348, 16: 2.6608 |
+| B1 (`wt_file_key` on) | beta 0.5 | 3.2595 | 0.125: 3.2365, 0.25: 3.2500, 0.5: 3.2595, 1: 3.2259, 2: 3.0819, 4: 2.8453, 8: 2.6971, 16: 2.6535 |
+| UCB1 (template x context x plan, skip on) | c 0.003 | 2.9283 | 0.001: 2.9268, 0.003: 2.9283, 0.01: 2.9175, 0.03: 2.8999, 0.1: 2.7892, 0.3: 2.6021 |
+| LinUCB (skip on) | alpha 0.3 | 3.1772 | 0.1: 2.7520, 0.3: 3.1772, 1: 3.0407, 3: 2.6873, 10: 2.6378, 30: 2.6378 |
+| LinUCB+file (skip on) | alpha 0.3 | 3.2885 | 0.1: 2.8301, 0.3: 3.2885, 1: 2.9841, 3: 2.6369, 10: 2.6378, 30: 2.6378 |
+| random plan | - | 2.4226 | |
+| always SQL | - | 1.8865 | |
+| always cheapest | - | 2.6384 | |
+
+**Strongest baseline, named before the report run: LinUCB+file** (3.2885; B0 3.1966 on the same seeds). Tuning wall
+424 s, peak working set 656 MB, base-table load 2.4 to 7.7 s (busy machine).
+
 ## Not measured
 
 Real-life data of any kind (the free-text section above is also synthetic); the probabilities of the live ledger (`predict_make`/`predict_score` have not been run on real data; the S4 numbers above are synthetic sequences only; the older `self_ledger_snapshot` rows are not scored by any measurement); behaviour with
