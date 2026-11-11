@@ -306,6 +306,8 @@ impl Foldable for super::state::BeingState {
 }
 
 /// World T snapshot format: 1 = before Track W2; 2 = with the learner's `file_key` and the file-keyed counts.
+/// Track W2b adds no field to the payload (the `wt_file_beta` switch rides in the top bit of the serialized
+/// `beta_milli`, 0 for every other being; the table itself is in the genesis), so the format stays 2.
 pub const WORLD_T_FORMAT: i64 = 2;
 
 impl Foldable for super::world_t::engine::StateT {

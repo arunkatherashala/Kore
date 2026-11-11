@@ -16,7 +16,7 @@ use crate::authorize::{self, Outcome, BEING_ACTOR};
 use crate::being::controller::{self, Controller, Origin};
 use crate::being::policy::{KillCheck, Policy};
 use crate::being::world_t::ctl;
-use crate::being::world_t::engine::{replay_t, run_t_key, RunTCfg, StateT, DEFAULT_DISCOVER_EVERY};
+use crate::being::world_t::engine::{replay_t, run_t_keys, RunTCfg, StateT, DEFAULT_DISCOVER_EVERY};
 use crate::being::world_t::learner::LearnerTCfg;
 use crate::being::world_t::world::{WTCfg, WorldT, DEFAULT_BUDGET};
 use crate::versioned::EventRow;
@@ -99,6 +99,15 @@ pub fn run_world_t_with(owner: &str, steps: u64, seed: u64, budget: Option<i64>,
             return Err(format!("controller refused the World T run: {why}"));
         }
     }
+    // Track W2b: `wt_file_beta` (read only with `wt_file_key = on`) is fixed at the genesis too; refused and audited
+    if let (Some(_), Some(fb)) = (&st0.cfg, ctl::file_beta(text.as_deref())) {
+        if fb != st0.learner.file_beta_table {
+            let nm = |b: bool| if b { "table" } else { "fixed" };
+            let why = format!("{} = {} in controller.txt, but this World T being was created with it {} (recorded at its genesis); the setting is fixed for the being's life", ctl::KEY_FILE_BETA, nm(fb), nm(st0.learner.file_beta_table));
+            audit(owner, ctl::KEY_FILE_BETA, st0.learner.file_beta_table as u64, fb as u64, &why);
+            return Err(format!("controller refused the World T run: {why}"));
+        }
+    }
     let open_ms = t_open.elapsed().as_millis() as u64;
     let wcfg = st0.cfg.clone().unwrap_or_else(|| WTCfg::new(seed, budget.unwrap_or(DEFAULT_BUDGET)));
     let world = WorldT::new(wcfg.clone());
@@ -114,7 +123,8 @@ pub fn run_world_t_with(owner: &str, steps: u64, seed: u64, budget: Option<i64>,
     policy.kill = Some(KillCheck(std::sync::Arc::new(move || authorize::kill_active(&owner_k))));
     let cfg = RunTCfg { world: Some(wcfg), learner: Some(LearnerTCfg::default()), discover_every: DEFAULT_DISCOVER_EVERY, ctl: Some(limits), sql: Some(ctl::sql_limits(text.as_deref())) };
     // Track W2: `wt_file_key` (default off) for a new being; an existing being keeps its genesis setting
-    let s = run_t_key(&mut log, &cfg, ctl::file_key(text.as_deref()), &policy, None, &sb).map_err(|e| e.to_string())?;
+    // Track W2b: `wt_file_beta` (fixed / table, read only with the file key on) likewise
+    let s = run_t_keys(&mut log, &cfg, ctl::file_key(text.as_deref()), ctl::file_beta(text.as_deref()), &policy, None, &sb).map_err(|e| e.to_string())?;
     for r in &s.refusals {
         refused.push((r.cap.clone(), r.limit, r.requested, r.what.clone()));
     }
@@ -246,6 +256,59 @@ world_t_run
         run_world_t(o2, 10, 4, Some(800)).unwrap();
         let st = StateT::from_events(&crate::log_tools::open(o2).unwrap().open_latest().rows::<EventRow>());
         assert!(!st.learner.file_key && st.files.is_empty());
+    }
+
+    /// Track W2b: `wt_file_beta = table` (read only with `wt_file_key = on`) sets the beta table of a NEW being
+    /// (recorded at its genesis with the table); a later run asking for the other value is refused and audited.
+    #[test]
+    fn the_file_beta_is_set_at_genesis_by_the_controller_and_a_later_change_is_refused() {
+        let o = "wt-filebeta";
+        let dir = setup(o);
+        std::fs::write(dir.join("autonomy_policy.txt"), "[L2]
+world_t_run
+").unwrap();
+        std::fs::write(dir.join("controller.txt"), "world_t_run = on
+wt_file_key = on
+wt_file_beta = table
+").unwrap();
+        assert_eq!(run_world_t(o, 30, 4, Some(800)).unwrap()["steps_run"], 30);
+        let rows = || -> Vec<EventRow> { crate::log_tools::open(o).unwrap().open_latest().rows() };
+        let st = StateT::from_events(&rows());
+        assert!(st.learner.file_key && st.learner.file_beta_table);
+        assert!(rows().iter().any(|e| e.tags.contains("wt_genesis") && e.tags.contains("wt_file_beta:table") && e.tags.contains("wt_file_beta_table:")));
+        std::fs::write(dir.join("controller.txt"), "world_t_run = on
+wt_file_key = on
+wt_file_beta = fixed
+").unwrap();
+        let e = run_world_t(o, 10, 4, None).unwrap_err();
+        assert!(e.contains("wt_file_beta") && e.contains("genesis"), "{e}");
+        assert!(audit_tools(o).iter().any(|t| t.contains("wt_file_beta")), "{:?}", audit_tools(o));
+        // without the file key the value is not read: the being continues with its genesis setting
+        std::fs::write(dir.join("controller.txt"), "world_t_run = on
+wt_file_beta = fixed
+").unwrap();
+        assert_eq!(run_world_t(o, 10, 4, None).unwrap()["steps_run"], 10);
+        let st = StateT::from_events(&rows());
+        assert!(st.learner.file_beta_table && st.step == 40);
+        assert_eq!(status_world_t(o).unwrap()["replay_mismatches"], 0);
+        // a W2 being (file key on, beta fixed) asked for the table: refused and audited
+        let o2 = "wt-filebeta-fixed";
+        let dir = setup(o2);
+        std::fs::write(dir.join("autonomy_policy.txt"), "[L2]
+world_t_run
+").unwrap();
+        std::fs::write(dir.join("controller.txt"), "world_t_run = on
+wt_file_key = on
+").unwrap();
+        run_world_t(o2, 10, 4, Some(800)).unwrap();
+        std::fs::write(dir.join("controller.txt"), "world_t_run = on
+wt_file_key = on
+wt_file_beta = table
+").unwrap();
+        assert!(run_world_t(o2, 10, 4, None).unwrap_err().contains("wt_file_beta"));
+        assert!(audit_tools(o2).iter().any(|t| t.contains("wt_file_beta")));
+        let st = StateT::from_events(&crate::log_tools::open(o2).unwrap().open_latest().rows::<EventRow>());
+        assert!(st.learner.file_key && !st.learner.file_beta_table && st.step == 10);
     }
 
     #[test]

@@ -327,6 +327,12 @@ pub fn genesis_event_t(cfg: &WTCfg, l: &LearnerTCfg) -> (NewEvent, String) {
         // only when on (Track W2), so that a genesis with it off is the one written before
         if l.file_key { ", file-keyed estimate on (counts per template, file and plan; prior = the cell estimate; fixed for this being's life)" } else { "" }
     );
+    // only when on (Track W2b), so that every other genesis is the one written before
+    let text = if l.file_key && l.file_beta_table {
+        format!("{text}; beta per reward design from the Track W2b table (nearest entry in log space of wrong-answer penalty and energy weight; the table is in the tag wt_file_beta_table; fixed for this being's life)")
+    } else {
+        text
+    };
     let ev = NewEvent { source: SOURCE_T.into(), occurred_at: iso_at(0), kind: "note".into(), text, tags, redacted: false };
     let id = event_id(&ev.source, &ev.occurred_at, &ev.text);
     (ev, id)
@@ -714,6 +720,14 @@ pub fn run_t(log: &mut VersionedLog, cfg: &RunTCfg, policy: &Policy, chooser: Op
 /// `cfg.learner` is used only at creation); a run that asks for the other setting is refused with an error,
 /// never silently changed.
 pub fn run_t_key(log: &mut VersionedLog, cfg: &RunTCfg, file_key: Option<bool>, policy: &Policy, chooser: Option<&mut dyn ChooserT>, sb: &dyn Sandbox) -> Result<RunTSummary, LogError> {
+    run_t_keys(log, cfg, file_key, None, policy, chooser, sb)
+}
+
+/// As `run_t_key`, with the Track W2b controller key `wt_file_beta` (Some(true) = `table`, Some(false) = `fixed`,
+/// None: no request; the tool passes it only when `wt_file_key = on`). A new being is created with it (only
+/// together with the file key; without it the request has no effect) and it is recorded at its genesis with the
+/// whole table. An existing being keeps its genesis setting; a run asking for the other one is refused.
+pub fn run_t_keys(log: &mut VersionedLog, cfg: &RunTCfg, file_key: Option<bool>, file_beta: Option<bool>, policy: &Policy, chooser: Option<&mut dyn ChooserT>, sb: &dyn Sandbox) -> Result<RunTSummary, LogError> {
     let version_before = log.latest_version();
     // Track D1b: with checkpoints off this is exactly the old full fold of the snapshot
     let (mut state, restored) = if policy.checkpoint_every == 0 {
@@ -737,6 +751,12 @@ pub fn run_t_key(log: &mut VersionedLog, cfg: &RunTCfg, file_key: Option<bool>, 
                     return Err(LogError::Invalid(format!("this World T being was created with wt_file_key = {} (recorded at its genesis); the request says {}. The setting is fixed for the being's life", on(state.learner.file_key), on(fk))));
                 }
             }
+            if let Some(fb) = file_beta {
+                if fb != state.learner.file_beta_table {
+                    let nm = |b: bool| if b { "table" } else { "fixed" };
+                    return Err(LogError::Invalid(format!("this World T being was created with wt_file_beta = {} (recorded at its genesis); the request says {}. The setting is fixed for the being's life", nm(state.learner.file_beta_table), nm(fb))));
+                }
+            }
         }
         None => {
             let w = cfg.world.clone().ok_or_else(|| LogError::Invalid("no World T being exists yet; a world config is needed to create one".into()))?;
@@ -745,6 +765,11 @@ pub fn run_t_key(log: &mut VersionedLog, cfg: &RunTCfg, file_key: Option<bool>, 
             if let Some(fk) = file_key {
                 l.file_key = fk;
             }
+            if let Some(fb) = file_beta {
+                l.file_beta_table = fb;
+            }
+            // the beta table exists only with the file key
+            l.file_beta_table &= l.file_key;
             if l.beta_milli > 10_000 || l.prior_w_milli > 100_000 {
                 return Err(LogError::Invalid("learner constants out of range".into()));
             }

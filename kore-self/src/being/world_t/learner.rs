@@ -22,7 +22,11 @@ pub const SKIP_MIN_COST: i64 = 40;
 /// Pooled counts needed before a pool is used as the prior.
 pub const POOL_MIN: u32 = 3;
 
+/// The learner constants. Checkpoint payload layout (Track D1b, `binser`): the six fields of before Track W2b, in
+/// order (`LearnerTCfgWire`); `file_beta_table` is carried in the top bit of the serialized `beta_milli` (0 for every
+/// being without it, so every payload of World T snapshot format 2 decodes as before and the format stays 2).
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq)]
+#[serde(from = "LearnerTCfgWire", into = "LearnerTCfgWire")]
 pub struct LearnerTCfg {
     pub beta_milli: u32,
     /// Prior pseudo-count (per mille: 2000 = two pseudo-attempts).
@@ -42,12 +46,94 @@ pub struct LearnerTCfg {
     /// optimism and skip test unchanged. false (the default, and every log without the `wt_file_key` tag): the
     /// cell estimate only, exactly the being before Track W2. Recorded at genesis; fixed for the being's life.
     pub file_key: bool,
+    /// Track W2b (docs/w2b_prereg.md, B1p): with `file_key` on, the optimism `beta` is not `beta_milli` but the
+    /// entry of `W2B_BETA_TABLE` for the reward design of the task the being sees (`penalty_pm`, `cost_pm` of the
+    /// view; nearest entry in log space, `table_beta`). false (the default, and every log without the
+    /// `wt_file_beta:table` tag): `beta_milli`, exactly the being before Track W2b. Without `file_key` it is
+    /// always false. Recorded at genesis with the whole table; fixed for the being's life.
+    pub file_beta_table: bool,
+}
+
+/// Top bit of the serialized `beta_milli`: `file_beta_table` (see `LearnerTCfg`).
+const WIRE_TABLE_BIT: u32 = 1 << 31;
+
+/// The checkpoint layout of `LearnerTCfg` (the struct of Track W2, field for field).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LearnerTCfgWire {
+    beta_milli: u32,
+    prior_w_milli: u32,
+    pooled: bool,
+    skip: bool,
+    value_ucb: bool,
+    file_key: bool,
+}
+
+impl From<LearnerTCfg> for LearnerTCfgWire {
+    fn from(l: LearnerTCfg) -> Self {
+        let beta_milli = if l.file_beta_table { l.beta_milli | WIRE_TABLE_BIT } else { l.beta_milli };
+        LearnerTCfgWire { beta_milli, prior_w_milli: l.prior_w_milli, pooled: l.pooled, skip: l.skip, value_ucb: l.value_ucb, file_key: l.file_key }
+    }
+}
+
+impl From<LearnerTCfgWire> for LearnerTCfg {
+    fn from(w: LearnerTCfgWire) -> Self {
+        LearnerTCfg { beta_milli: w.beta_milli & !WIRE_TABLE_BIT, prior_w_milli: w.prior_w_milli, pooled: w.pooled, skip: w.skip, value_ucb: w.value_ucb, file_key: w.file_key, file_beta_table: w.beta_milli & WIRE_TABLE_BIT != 0 }
+    }
+}
+
+/// Track W2b: the beta per reward design (penalty_pm, cost_pm, beta_milli), one entry per point of the 6 x 5 sweep,
+/// chosen on the tuning seeds 101..120 only from the grid {0.5, 1, 2, 4, 8, 16} by the highest mean reward per
+/// energy of B1 (`file_key` on) at that point (`docs/data/w2b_tune_seeds101-120.tsv`; `examples/measure_w2b.rs`
+/// recomputes it from that file and checks it equals this constant). The controller value `table` means exactly
+/// this table; a genesis that records another one is not accepted.
+pub const W2B_BETA_TABLE: [(u32, u32, u32); 30] = [
+    (0, 100, 2000), (0, 316, 2000), (0, 1000, 2000), (0, 3162, 2000), (0, 10000, 2000),
+    (100, 100, 2000), (100, 316, 2000), (100, 1000, 2000), (100, 3162, 2000), (100, 10000, 2000),
+    (316, 100, 2000), (316, 316, 2000), (316, 1000, 2000), (316, 3162, 2000), (316, 10000, 2000),
+    (1000, 100, 2000), (1000, 316, 2000), (1000, 1000, 2000), (1000, 3162, 2000), (1000, 10000, 2000),
+    (3162, 100, 2000), (3162, 316, 2000), (3162, 1000, 2000), (3162, 3162, 2000), (3162, 10000, 2000),
+    (10000, 100, 2000), (10000, 316, 2000), (10000, 1000, 2000), (10000, 3162, 2000), (10000, 10000, 2000),
+];
+
+/// The beta (per mille) of `W2B_BETA_TABLE` for a reward design: the nearest entry in log space (squared distance
+/// of (ln penalty, ln cost); a penalty of 0 is only near a penalty of 0), ties to the higher penalty, then to the
+/// higher cost.
+pub fn table_beta(penalty_pm: u32, cost_pm: u32) -> u32 {
+    nearest_beta(&W2B_BETA_TABLE, penalty_pm, cost_pm)
+}
+
+/// `table_beta` over any table (tests use small ones); 2000 for an empty table.
+pub fn nearest_beta(table: &[(u32, u32, u32)], penalty_pm: u32, cost_pm: u32) -> u32 {
+    let ax = |a: u32, b: u32| -> f64 {
+        match (a, b) {
+            (0, 0) => 0.0,
+            (0, _) | (_, 0) => f64::INFINITY,
+            _ => ((a as f64).ln() - (b as f64).ln()).powi(2),
+        }
+    };
+    let mut best: Option<(f64, u32, u32, u32)> = None;
+    for &(p, c, b) in table.iter() {
+        let d = ax(penalty_pm, p) + ax(cost_pm.max(1), c);
+        let better = match best {
+            None => true,
+            Some((bd, bp, bc, _)) => d < bd - 1e-12 || ((d - bd).abs() <= 1e-12 && (p, c) > (bp, bc)),
+        };
+        if better {
+            best = Some((d, p, c, b));
+        }
+    }
+    best.map_or(2000, |x| x.3)
+}
+
+/// The table as one genesis tag value: `penalty/cost/beta` per entry, joined by `;`.
+pub fn table_tag() -> String {
+    W2B_BETA_TABLE.iter().map(|(p, c, b)| format!("{p}/{c}/{b}")).collect::<Vec<_>>().join(";")
 }
 
 /// Default: the constants chosen on the tuning seeds 101..120 (docs/measured.md, Track W1).
 impl Default for LearnerTCfg {
     fn default() -> Self {
-        LearnerTCfg { beta_milli: 2000, prior_w_milli: 2000, pooled: true, skip: true, value_ucb: true, file_key: false }
+        LearnerTCfg { beta_milli: 2000, prior_w_milli: 2000, pooled: true, skip: true, value_ucb: true, file_key: false, file_beta_table: false }
     }
 }
 
@@ -57,6 +143,11 @@ impl LearnerTCfg {
         // only when on: a genesis with it off is byte-identical to one written before Track W2
         if self.file_key {
             t.push("wt_file_key:on".into());
+        }
+        // Track W2b: only when on (and only with the file key), so every other genesis is the one written before
+        if self.file_key && self.file_beta_table {
+            t.push("wt_file_beta:table".into());
+            t.push(format!("wt_file_beta_table:{}", table_tag()));
         }
         t
     }
@@ -69,7 +160,23 @@ impl LearnerTCfg {
             skip: match t("wt_skip")? { "on" => true, "off" => false, _ => return None },
             value_ucb: match t("wt_ucb") { None | Some("p") => false, Some("value") => true, _ => return None },
             file_key: match t("wt_file_key") { None | Some("off") => false, Some("on") => true, _ => return None },
+            file_beta_table: match t("wt_file_beta") {
+                None | Some("fixed") => false,
+                // the table must be the one this code means by `table`, and the file key must be on
+                Some("table") if t("wt_file_key") == Some("on") && t("wt_file_beta_table") == Some(table_tag().as_str()) => true,
+                _ => return None,
+            },
         })
+    }
+
+    /// The constants used on a view: with `file_key` and `file_beta_table` on, `beta_milli` is the table's entry for
+    /// the view's reward design (Track W2b); otherwise the constants themselves.
+    pub fn for_view(&self, v: &ViewT) -> LearnerTCfg {
+        if self.file_key && self.file_beta_table {
+            LearnerTCfg { beta_milli: table_beta(v.penalty_pm, v.cost_pm), file_beta_table: false, ..*self }
+        } else {
+            *self
+        }
     }
 }
 
@@ -203,6 +310,10 @@ impl LearnerT {
     }
 
     pub fn choose(&self, st: &StateT, v: &ViewT) -> ChoiceT {
+        // Track W2b: the table's beta for this reward design; then exactly the fixed-beta learner with that beta
+        if self.cfg.file_key && self.cfg.file_beta_table {
+            return LearnerT { cfg: self.cfg.for_view(v) }.choose(st, v);
+        }
         if self.cfg.file_key {
             return self.choose_with(st, v, |p| self.estimate_file(st, v, p));
         }
