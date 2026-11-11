@@ -1478,8 +1478,21 @@ fn cmd_compare(o: Opts, other: PathBuf, from: u64) {
     let pr = |d: &versioned::Diff| d.predictions.iter().map(|p| format!("{:?}", p)).collect::<Vec<_>>();
     let oc = |d: &versioned::Diff| d.outcomes.iter().map(|p| format!("{:?}", p)).collect::<Vec<_>>();
     let cmp = |x: Vec<String>, y: Vec<String>| json!({ "a": x.len(), "b": y.len(), "identical": x == y, "first_diff": x.iter().zip(y.iter()).position(|(p, q)| p != q) });
+    // Events present in only one of the two logs (multiset difference), printed in full (except recorded_at), and the
+    // event sequences compared again without the checkpoint anchor notes (Track D1, source `being:checkpoint`).
+    fn kept(d: &versioned::Diff) -> Vec<&EventRow> { d.events.iter().filter(|e| e.source != "authorize" && e.source != PROBE_SOURCE).collect() }
+    let only = |x: &[&EventRow], y: &[&EventRow]| {
+        let mut left: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for e in y { *left.entry(row_key_e(e)).or_default() += 1; }
+        x.iter().filter(|e| { let c = left.entry(row_key_e(e)).or_default(); if *c > 0 { *c -= 1; false } else { true } })
+            .map(|e| json!({ "source": e.source, "kind": e.kind, "occurred_at": e.occurred_at, "tags": e.tags, "text": e.text })).collect::<Vec<_>>()
+    };
+    let (ka, kb) = (kept(&da), kept(&db));
+    let no_anchor = |x: &[&EventRow]| x.iter().filter(|e| e.source != "being:checkpoint").map(|e| row_key_e(e)).collect::<Vec<_>>();
     let v = json!({ "type": "compare", "from": from, "versions": [a.latest_version(), b.latest_version()],
-        "events_except_audit_and_probes": cmp(ev(&da), ev(&db)), "revisions": cmp(rv(&da), rv(&db)), "causes": cmp(ca(&da), ca(&db)), "predictions": cmp(pr(&da), pr(&db)), "outcomes": cmp(oc(&da), oc(&db)) });
+        "events_except_audit_and_probes": cmp(ev(&da), ev(&db)), "revisions": cmp(rv(&da), rv(&db)), "causes": cmp(ca(&da), ca(&db)), "predictions": cmp(pr(&da), pr(&db)), "outcomes": cmp(oc(&da), oc(&db)),
+        "events_only_in_root": only(&ka, &kb), "events_only_in_other": only(&kb, &ka),
+        "events_except_audit_probes_and_checkpoint_anchors": cmp(no_anchor(&ka), no_anchor(&kb)) });
     println!("{v}");
 }
 

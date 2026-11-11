@@ -718,6 +718,8 @@ Raw output: `docs/data/d1_timing_2026-11-10.jsonl` (one JSON object per measurem
 8 logical CPUs, shared and busy: the harness reported a machine busy share of 0.63 to 0.99 during the calls, while the
 measured process used about 2 to 2.5 cores, so most of the load came from other processes (not identified: the process
 listing command was denied). **Rough numbers.** The key 1,000,000-step timings were run twice; both runs are given.
+Free disk: about 6 to 13 GB during the first runs; before the second 1,000,000-step runs the owner freed disk space
+(free disk 93 GB), so run 2 had more free disk than run 1 (whether that changed the timings is not known).
 Logs: cut copies of the 1,000,000-step world-1 log of the long run above, at version 12,001 (299,625 steps) and the
 last version 40,064; one 5,000-step `being_run` call per timed restart; checkpoint on = `checkpoint_every = 5000`.
 
@@ -740,7 +742,7 @@ Against the targets of `docs/d1_prereg.md` (fixed before the code, not changed):
 | target | verdict | numbers |
 |---|---|---|
 | T1 new logs format 3, <= 650 B/step; format 1 >= 2,000 | **met** | 618 B/step (format 3) vs 2,581 B/step (format 1), 50,000 steps, same seeds (4.2x) |
-| T2 decisions identical | **met** | after two calls each at 1M: causes, outcomes, predictions and revisions identical (130,000 / 3,656 / 3,656 / 10,000 rows); events differ by 2 rows, the two `being:checkpoint` anchor notes of the copy with checkpoints (inferred from count and position, the rows were not printed); the format-1 vs format-3 and checkpoint-vs-full-fold tests pass; golden digests unchanged |
+| T2 decisions identical | **met** | after two calls each at 1M: causes, outcomes, predictions and revisions identical (130,000 / 3,656 / 3,656 / 10,000 rows); events differ by 2 rows, printed and checked on a repeat of the same calls (2026-11-11, `compare` now lists the rows present in only one log): both are `being:checkpoint` anchor notes of the copy with checkpoints (log versions 40,264 and 40,465, steps 1,005,000 and 1,010,000), nothing is only in the copy without; with those 2 rows left out the event sequences are identical (30,007 rows each); the format-1 vs format-3 and checkpoint-vs-full-fold tests pass; golden digests unchanged |
 | T3 fold part with checkpoint at 1M <= 1.0 s, and <= 1.5x its 300k value | **split**: <= 1.0 s met; <= 1.5x **not met** | 3.4 / 4.6 ms at 1M vs 1.6 ms at 300k (2.1x / 2.9x). The absolute values are milliseconds; without checkpoint the fold is 24.5 to 30.1 s at 1M |
 | T4 memory added by the fold with checkpoint <= 50 MB | **met** | 0 MB at 300k and at 1M (both runs) |
 | T5 whole restart with checkpoint at 1M <= 10 s and <= 300 MB (pre-registered as expected not met) | **not met**, as predicted | 72.3 / 56.2 s and about 1,575 MB. The call time dropped 20% / 26% against off (predicted 5-15%); memory stayed within 1% of off (predicted within 10%) |
