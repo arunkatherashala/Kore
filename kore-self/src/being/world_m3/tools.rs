@@ -321,7 +321,7 @@ fn sql_plan(v: &ViewT, l: &Loaded, lim: SqlLimits, e: i64, what: &str) -> ToolOu
         Err(x) => return fail(e, format!("{what}; {x}")),
     };
     let mut recs: Vec<SqlRecord> = vec![];
-    let mut run = |sql: &str, recs: &mut Vec<SqlRecord>| -> Result<DataBlock, String> {
+    let run = |sql: &str, recs: &mut Vec<SqlRecord>| -> Result<DataBlock, String> {
         let (res, rec) = guarded_sql(block.clone(), sql, lim);
         let why = rec.why.clone();
         recs.push(rec);

@@ -206,6 +206,22 @@ mod tests {
         dir
     }
 
+    /// Owner rule (storage is KORE only): nothing under the owner directory is a .json or .jsonl file.
+    fn assert_no_json(dir: &std::path::Path) {
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase();
+                    assert!(ext != "json" && ext != "jsonl", "a JSON file in the owner dir: {}", p.display());
+                }
+            }
+        }
+    }
+
     fn audit_tools(owner: &str) -> Vec<String> {
         let log = crate::log_tools::open(owner).unwrap();
         log.open_latest().rows::<EventRow>().into_iter().filter(|e| e.source == authorize::SOURCE).filter_map(|e| crate::being::state::tag(&e.tags, "tool").map(|s| s.to_string())).collect()
@@ -240,6 +256,7 @@ mod tests {
         assert!(audit_tools(o).iter().any(|t| t.contains("m3_source")), "{:?}", audit_tools(o));
         assert!(!dir.join("world_m3").join("seed_3").exists());
         assert!(!status_world_m3(o).unwrap()["exists"].as_bool().unwrap());
+        assert_no_json(&dir);
     }
 
     /// With the real source (env `KORE_M3_SOURCE` = path of a checked copy; skipped otherwise): an allowed run in a
@@ -270,5 +287,6 @@ mod tests {
         drop(log);
         assert_eq!(run_world_m3(o, 10, 99, None).unwrap()["steps_run"], 10);
         assert_eq!(status_world_m3(o).unwrap()["steps"], 70);
+        assert_no_json(&dir);
     }
 }
