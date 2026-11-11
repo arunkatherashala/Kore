@@ -15,6 +15,8 @@ pub mod advice;
 pub mod binser;
 /// Track D1b: state checkpoints (off by default; controller key `checkpoint_every`).
 pub mod ckpt;
+/// Track D1c: the `fast_open` controller key (default off).
+pub mod fast_open_ctl;
 /// Digital Life item 4: unattended-run scheduler keys (off by default; `sched_run`).
 pub mod sched_ctl;
 pub mod chooser;

@@ -70,6 +70,7 @@ pub fn migrate_to_v2(src_root: &Path, dst_root: &Path, owner: &str) -> Result<Mi
         events_at_dict: 0,
         dict_policy: DictPolicy::default(),
         clock: Box::new(now_iso),
+        open_info: OpenReport::default(),
     };
     let mut nseg = 0usize;
     for e in &src.entries {

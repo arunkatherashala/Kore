@@ -74,7 +74,31 @@ pub(crate) fn log_err(e: LogError) -> Value {
 
 pub(crate) fn open(owner: &str) -> Result<VersionedLog, Value> {
     let root = log_root(owner)?;
-    VersionedLog::open_or_create(&root, owner).map_err(log_err)
+    // Track D1c: `fast_open = on` in controller.txt (default off) opens a format-5 log through its
+    // index runs; off, or any other log format, is exactly the open as before.
+    let opts = vl::OpenOptions { fast_open: fast_open_on(owner) };
+    VersionedLog::open_or_create_opts(&root, owner, vl::now_iso, vl::DEFAULT_FORMAT, opts).map_err(log_err)
+}
+
+/// Track D1c: the owner's controller.txt sets `fast_open = on` (fail closed: anything else is off).
+pub(crate) fn fast_open_on(owner: &str) -> bool {
+    crate::being::fast_open_ctl::on_from_text(crate::being_v2_tools::load_controller_text(owner).as_deref())
+}
+
+/// Track D1c: at the end of a run, write a due index run (format 5, key on). Never fails the run;
+/// the report says what the open did and what was written.
+pub(crate) fn maintain_runs(log: &mut VersionedLog, owner: &str) -> Value {
+    if !fast_open_on(owner) {
+        return json!({ "fast_open": false });
+    }
+    let o = log.open_report().clone();
+    let open = json!({ "fast_used": o.fast_used, "fallback_reason": o.fallback_reason, "runs_used": o.runs_used, "runs_stale": o.runs_stale, "tail_versions": o.tail_versions, "sampled_segments": o.sampled_segments, "files_read": o.files_read, "bytes_read": o.bytes_read });
+    let t = std::time::Instant::now();
+    let m = match log.maintain_index_runs() {
+        Ok(r) => json!({ "skipped": r.skipped, "written": r.written.map(|x| x.file), "merged": r.merged.map(|x| x.file), "listed_at": r.listed_at, "runs": r.runs, "deleted": r.deleted, "ms": t.elapsed().as_secs_f64() * 1000.0 }),
+        Err(e) => json!({ "error": e.to_string() }),
+    };
+    json!({ "fast_open": true, "open": open, "maintain": m })
 }
 
 /// The root under which the owner's log lives (`<root>/<owner>/log`), checked as `open` checks it.

@@ -15,6 +15,9 @@ pub const HEADER_J: &str = "KORE-VLOG-MANIFEST 2";
 /// Log format 4 MANIFEST: the journal discipline of header 2, plus entries may list shared
 /// dictionary objects (`dicts`). Older binaries refuse the header, so they never misread a format-4 log.
 pub const HEADER_V4: &str = "KORE-VLOG-MANIFEST 3";
+/// Log format 5 MANIFEST (Track D1c): header 3 plus entries may list the log's on-disk index runs
+/// (`index_runs`). Older binaries refuse the header, so they never misread a format-5 log.
+pub const HEADER_V5: &str = "KORE-VLOG-MANIFEST 4";
 pub const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -65,6 +68,22 @@ pub struct Entry {
     /// Present only on the commit created by `forget`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forget: Option<ForgetRecord>,
+    /// Log format 5 (Track D1c): the complete set of index runs current after this commit (oldest
+    /// first). Absent on every other entry, so the hashed text of older entries is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub index_runs: Vec<RunRef>,
+}
+
+/// One immutable index run (Track D1c, `index_runs.rs`): the index delta of versions `from..=to`.
+/// `chain` = the MANIFEST hash of entry `to` when the run was written; `sha256` / `bytes` = of the file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RunRef {
+    pub from: u64,
+    pub to: u64,
+    pub file: String,
+    pub sha256: String,
+    pub bytes: u64,
+    pub chain: String,
 }
 
 impl Entry {
@@ -89,10 +108,14 @@ impl Entry {
             c.push_str(&format!("forget	{}	{}	{}
 ", f.removed.join(","), f.prior_head, f.resealed_from));
         }
+        for r in &self.index_runs {
+            c.push_str(&format!("run	{}	{}	{}	{}	{}	{}
+", r.from, r.to, r.file, r.sha256, r.bytes, r.chain));
+        }
         sha256_hex(&[self.prev.as_bytes(), c.as_bytes()])
     }
     pub fn new(v: u64, recorded_at: String, segments: Vec<SegRef>, prev: &str) -> Entry {
-        let mut e = Entry { v, recorded_at, segments, prev: prev.to_string(), hash: String::new(), dicts: vec![], forget: None };
+        let mut e = Entry { v, recorded_at, segments, prev: prev.to_string(), hash: String::new(), dicts: vec![], forget: None, index_runs: vec![] };
         e.hash = e.compute_hash();
         e
     }
@@ -106,6 +129,7 @@ impl Entry {
 /// Header line for a manifest level (1 = rewrite, 2 = journal, 3 = journal + dictionaries).
 pub fn header_for(level: u8) -> &'static str {
     match level {
+        4 => HEADER_V5,
         3 => HEADER_V4,
         2 => HEADER_J,
         _ => HEADER,
@@ -128,7 +152,7 @@ pub struct Parsed {
     pub entries: Vec<Entry>,
     /// Header was a journal header (`HEADER_J` or `HEADER_V4`).
     pub journal: bool,
-    /// 1 = `HEADER`, 2 = `HEADER_J`, 3 = `HEADER_V4`.
+    /// 1 = `HEADER`, 2 = `HEADER_J`, 3 = `HEADER_V4`, 4 = `HEADER_V5`.
     pub level: u8,
     /// Length of the committed prefix; bytes after it are an uncommitted partial tail (journal only).
     pub valid_len: usize,
@@ -148,6 +172,8 @@ pub fn parse_ex(raw: &[u8]) -> Result<Parsed, String> {
         2
     } else if header == HEADER_V4.as_bytes() {
         3
+    } else if header == HEADER_V5.as_bytes() {
+        4
     } else {
         return Err("manifest header missing or wrong".into());
     };
@@ -163,6 +189,9 @@ pub fn parse_ex(raw: &[u8]) -> Result<Parsed, String> {
         let e: Entry = serde_json::from_str(l).map_err(|e| format!("manifest line {}: {e}", i + 2))?;
         if level < 3 && !e.dicts.is_empty() {
             return Err(format!("manifest line {}: dictionary listing needs the format-4 header", i + 2));
+        }
+        if level < 4 && !e.index_runs.is_empty() {
+            return Err(format!("manifest line {}: index run listing needs the format-5 header", i + 2));
         }
         out.push(e);
     }

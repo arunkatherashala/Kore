@@ -204,6 +204,8 @@ impl Controller {
                 // Track D1b key (state checkpoints, default off) is read by `ckpt::every_from_text`; here it is only validated
                 _ if super::ckpt::is_key(k) => super::ckpt::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 // Scheduler keys (unattended World T chunks, default off) are read by `sched_ctl::from_text`; here they are only validated
+                // Track D1c key (fast open of a format-5 log, default off) is read by `fast_open_ctl::on_from_text`; here it is only validated
+                _ if super::fast_open_ctl::is_key(k) => super::fast_open_ctl::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 _ if super::sched_ctl::is_key(k) => super::sched_ctl::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 _ => return Err(format!("line {n}: unknown key '{k}'")),
             }
