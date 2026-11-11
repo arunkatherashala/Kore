@@ -40,11 +40,12 @@ All tables are typed `.kore` files (KORE columnar format).
 
 ```
 <root>/<owner>/log/
-  MANIFEST                      one JSON line per commit, hash-chained (header 1, 2 = journal (format 3), 3 = format 4)
+  MANIFEST                      one JSON line per commit, hash-chained (header 1, 2 = journal (format 3), 3 = format 4, 4 = format 5)
   events/0000000003.kore        only the rows added by commit 3
   revisions/0000000003.kore
   revision_causes/...  predictions/...  outcomes/...  schema_meta/0000000000.kore
   dicts/<sha256>.kdic           format 4 only: shared dictionary objects listed in the MANIFEST
+  index/<from>-<to>.krun        format 5 only: index runs listed in the MANIFEST (Track D1c)
 ```
 
 `owner` is restricted to `[A-Za-z0-9_-]{1,64}`. Version 0 is the genesis commit
@@ -218,6 +219,34 @@ Measurements: `docs/log_format4.md`.
   forgotten text (tested by scanning every file). Not covered: a forgotten text that also occurs
   inside the text of another, still stored event stays there as part of that event, and copies
   outside the log are not touched (as for every format).
+
+## Log format 5 (opt-in): index runs and the fast open (Track D1c)
+
+Format 5 is format 3 (format-2 segments, journal MANIFEST) plus **index runs**: immutable files that hold
+the open's index (event id -> ordinal, revision ids, heads, content digests, predictions, outcomes), so an
+open with `OpenOptions { fast_open: true }` reads the MANIFEST, the listed runs and the tail instead of every
+segment. Design and owner decisions: `docs/d1c_design.md`. Code: `versioned/index_runs.rs`.
+
+* **Shape.** MANIFEST header `KORE-VLOG-MANIFEST 4` (older binaries refuse it). A commit without rows lists the
+  complete current run set in the hashed entry field `index_runs` (`from`, `to`, `file`, `sha256`, `bytes`,
+  `chain` = hash of entry `to`); every older entry line is unchanged. Files: `index/<from>-<to>.krun`
+  (magic `KORERUN1`, layout version 1; seven sorted tables of 44-byte records plus a blob area each).
+* **Upgrade is explicit.** `upgrade_to_v5()` from format 1, 2 or 3 (one `schema_meta` commit, header switched in
+  the same atomic replacement, earlier lines byte for byte). Format 4 logs are refused. No downgrade.
+* **Writing runs.** `maintain_index_runs()`: a new run when there is no usable run in the handle, or 2,000
+  versions or 100,000 events have passed since the newest run; above 8 runs the two oldest are merged. Temp
+  file, fsync, rename, directory sync, then the listing commit; unlisted files are deleted afterwards and by
+  `recover()`. The being tools call it at the end of `being_run` when `fast_open = on`.
+* **Fast open.** Used only for a format-5 log; a run is used only if it is in the active listing, its `chain`
+  equals the current hash of entry `to` (a `forget` that re-seals `to` makes it stale) and the whole file hashes
+  to the listed sha256 (every 4 KB page digest is kept; later page reads are checked against it). 64 segments of
+  versions <= the newest used run, chosen by a PRNG seeded from the head hash, are hashed (owner decision D-1);
+  the others are checked on every read and by `verify()`, not at open. The tail after the newest run is read and
+  verified as before. Any problem (no run, bad hash, unknown layout, irregular tail, sampled segment bad) = the
+  full open, with the reason in `open_report().fallback_reason`.
+* **verify()** also checks every chain-valid listed run (hash, layout) and that the runs, merged, equal the index
+  rebuilt from the segments; an unlisted run file is an `ExtraSegment`.
+* **Key.** `fast_open = on` in `controller.txt` (fail closed: anything else is off). Off = the open as before.
 
 ## Round 2 changes that do not alter the on-disk shape
 
