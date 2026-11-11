@@ -711,3 +711,45 @@ $E restart --root <d1>/off/300k --chunk 5000 ; $E restart --root <d1>/on/300k --
 $E restart --root <copy> --chunk 5000 --kill-ms 100 ; $E restart --root <copy> --chunk 5000 --kill-ms 0   # KILL, fresh copies
 # (the same for 1M; M-d: $E compare --root <off copy> --other <on copy> --at <V> after one timed call each)
 ```
+
+### Track D1 results (measured 2026-11-10/11, binary built from 63316662)
+
+Raw output: `docs/data/d1_timing_2026-11-10.jsonl` (one JSON object per measurement; local paths removed). Machine:
+8 logical CPUs, shared and busy: the harness reported a machine busy share of 0.63 to 0.99 during the calls, while the
+measured process used about 2 to 2.5 cores, so most of the load came from other processes (not identified: the process
+listing command was denied). **Rough numbers.** The key 1,000,000-step timings were run twice; both runs are given.
+Logs: cut copies of the 1,000,000-step world-1 log of the long run above, at version 12,001 (299,625 steps) and the
+last version 40,064; one 5,000-step `being_run` call per timed restart; checkpoint on = `checkpoint_every = 5000`.
+
+| | 300k, off | 300k, on | 1M, off (run 1 / run 2) | 1M, on (run 1 / run 2) |
+|---|---|---|---|---|
+| fold part, in-process (full fold, or checkpoint + tail) | 3.31 s | 1.6 ms | 30.1 s / 24.5 s | 3.4 ms / 4.6 ms |
+| open, in-process (every segment read and hashed) | 12.1 s | 11.5 s | 72.7 s / 52.7 s | 65.0 s / 50.0 s |
+| whole restart call, 5,000 steps, real binary | 30.1 s | 24.7 s | 90.5 s / 75.7 s (a third call: 102.8 s) | 72.3 s / 56.2 s |
+| process peak memory | 455 MB | 521 MB | 1,570 / 1,583 MB | 1,570 / 1,580 MB |
+| memory added by the restore over the open, in-process | - | 0 MB | - | 0 MB / 0 MB |
+| KILL created 100 ms after the call is sent: time to refusal | 19.2 s | 20.3 s | 71.0 s | 74.0 s |
+| KILL present before the call: time to refusal | - | 19.5 s | - | 74.8 s |
+
+The 300k "on" copy had received one more 5,000-step call (the priming call) than the "off" copy before its timed call;
+the 300k comparison is therefore rough. At 1M the off copy got one extra call before the bit-identity check, so both
+copies had two calls.
+
+Against the targets of `docs/d1_prereg.md` (fixed before the code, not changed):
+
+| target | verdict | numbers |
+|---|---|---|
+| T1 new logs format 3, <= 650 B/step; format 1 >= 2,000 | **met** | 618 B/step (format 3) vs 2,581 B/step (format 1), 50,000 steps, same seeds (4.2x) |
+| T2 decisions identical | **met** | after two calls each at 1M: causes, outcomes, predictions and revisions identical (130,000 / 3,656 / 3,656 / 10,000 rows); events differ by 2 rows, the two `being:checkpoint` anchor notes of the copy with checkpoints (inferred from count and position, the rows were not printed); the format-1 vs format-3 and checkpoint-vs-full-fold tests pass; golden digests unchanged |
+| T3 fold part with checkpoint at 1M <= 1.0 s, and <= 1.5x its 300k value | **split**: <= 1.0 s met; <= 1.5x **not met** | 3.4 / 4.6 ms at 1M vs 1.6 ms at 300k (2.1x / 2.9x). The absolute values are milliseconds; without checkpoint the fold is 24.5 to 30.1 s at 1M |
+| T4 memory added by the fold with checkpoint <= 50 MB | **met** | 0 MB at 300k and at 1M (both runs) |
+| T5 whole restart with checkpoint at 1M <= 10 s and <= 300 MB (pre-registered as expected not met) | **not met**, as predicted | 72.3 / 56.2 s and about 1,575 MB. The call time dropped 20% / 26% against off (predicted 5-15%); memory stayed within 1% of off (predicted within 10%) |
+| T6 KILL: refused before any step; latency <= open time + 2 s | **split**: refusal met (no step ran in any KILL case); latency **not met** | 1M: 74.0 s with checkpoint against an open of 50-65 s; 300k: 20.3 s against 11.5 s. KILL is checked only after the open and the start of the call |
+
+Reading: the checkpoint removes the fold (30 s to a few ms at 1M), but a restart is still dominated by the open, which
+reads and hashes every segment file (202,065 files at 1,010,000 steps) and keeps the in-memory id index (about 1.5 GB).
+The open grew faster than the log: 12 s at 300k to 50-73 s at 1M (3.3x the steps, 4-6x the time). Superlinear growth
+was observed, not explained (candidates: file count and per-file overhead, directory size, the busy machine). So the
+whole restart and the KILL latency are still slow; the next step is D1c (fewer files by compaction, and an open that
+does not read every segment), not more work on the fold.
+
