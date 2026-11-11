@@ -51,6 +51,8 @@ mod being_tools;
 mod being_v2_tools;
 mod world_t_sandbox;
 mod world_t_tools;
+#[cfg(test)]
+mod world_t_demo;
 mod authorize;
 mod chat;
 mod chat_tools;
