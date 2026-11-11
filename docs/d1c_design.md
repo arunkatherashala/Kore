@@ -175,6 +175,17 @@ MANIFEST append and lists it in the same entry; `verify_dir` also verifies every
 * D-5. Whether pack files (A) follow as a separate track for the file count (about 202,000 files at 1M remain on disk
   under C; only the open stops touching them).
 
+## 6a. Owner decisions (2026-11-11)
+
+* D-1: accepted, with sampling. The fast open also hashes 64 randomly chosen old segments (versions <= the newest
+  usable run), chosen by a PRNG seeded from the MANIFEST head hash (reproducible for a given log state), in addition
+  to the tail. Full detection stays in every read (`read_verified`) and in `verify`.
+* D-2: format 5 with an explicit `upgrade_to_v5` is approved.
+* D-3: cadence as proposed: a new run when 2,000 versions or 100,000 events have passed since the newest run, at most
+  K = 8 runs; when there are more, the oldest are merged.
+* D-4: the KILL-present audit row is written via the fast open.
+* D-5: pack files (A) later, as a separate track; not part of D1c.
+
 ## 7. Pre-registered measurement plan (to be run later, in the D1 style)
 
 Logs: the same copies as D1: cuts of the 1,000,000-step world-1 log (`kw/longrun-data2`) at version 12,001
