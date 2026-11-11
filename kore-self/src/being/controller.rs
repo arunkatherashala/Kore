@@ -34,6 +34,7 @@
 //! evolution_budget_pm   = 20      # evolution compute at most this share (per mille) of the energy spent so far (E1, default 0, hard max 100)
 //! l2_meta_prior         = on      # World O: may a new being use the Track L2 meta-prior across families (default off)
 //! checkpoint_every      = 5000    # write a state checkpoint every N steps so a restart folds only the tail (D1b; default 0 = off; 100..=1000000)
+//! sched_run             = on      # may the unattended scheduler run World T chunks (default off; more sched_* keys in `sched_ctl`)
 //! ```
 //!
 //! The B9 keys fail closed on their own: without `experiments = on` AND a non-zero energy share AND a
@@ -202,6 +203,8 @@ impl Controller {
                 _ if super::e1::ctl::is_key(k) => super::e1::ctl::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 // Track D1b key (state checkpoints, default off) is read by `ckpt::every_from_text`; here it is only validated
                 _ if super::ckpt::is_key(k) => super::ckpt::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
+                // Scheduler keys (unattended World T chunks, default off) are read by `sched_ctl::from_text`; here they are only validated
+                _ if super::sched_ctl::is_key(k) => super::sched_ctl::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 _ => return Err(format!("line {n}: unknown key '{k}'")),
             }
             seen.push(k);

@@ -51,6 +51,7 @@ mod being_tools;
 mod being_v2_tools;
 mod world_t_sandbox;
 mod world_t_tools;
+mod world_t_sched;
 #[cfg(test)]
 mod world_t_demo;
 mod authorize;
@@ -4989,6 +4990,7 @@ fn main() {
     // kore-self <owner> api [port] → HTTP REST API (port 8080)
     // kore-self <owner> repl       → interactive SQL REPL
     // kore-self <owner> status     → print lifecycle status and exit
+    // kore-self <owner> sched [seed] [budget] → unattended World T scheduler (controller: sched_run = on)
     if cli_args.get(1).map(|a| a == "--tool-table").unwrap_or(false) {
         print!("{}", tool_table_markdown());
         return;
@@ -5012,6 +5014,26 @@ fn main() {
             println!("Lifecycle:   {} — {}", me.becoming.lifecycle_stage.name(), me.becoming.lifecycle_stage.description());
             println!("Evolutions:  {}", me.becoming.evolution_count);
             println!("{}", me.needs.status());
+        }
+        return;
+    }
+
+    // kore-self <owner> sched [seed] [budget] → unattended World T chunks through the gate (needs sched_run = on)
+    if mode == "sched" {
+        let seed: u64 = cli_args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
+        let budget: Option<i64> = cli_args.get(4).and_then(|s| s.parse().ok());
+        match world_t_sched::run_sched(&owner, seed, budget) {
+            Ok(v) => println!("{v}"),
+            Err(e) => { eprintln!("[kore-self] {e}"); std::process::exit(3); }
+        }
+        return;
+    }
+
+    // kore-self <owner> wt-status → fold and replay the World T being from the log (read-only)
+    if mode == "wt-status" {
+        match world_t_tools::status_world_t(&owner) {
+            Ok(v) => println!("{v}"),
+            Err(e) => { eprintln!("[kore-self] {e}"); std::process::exit(3); }
         }
         return;
     }
