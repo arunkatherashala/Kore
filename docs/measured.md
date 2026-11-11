@@ -3245,6 +3245,252 @@ Verdict per pre-registered criterion:
 
 What this says: the pre-registered primary is met, but only because of the B12 `form` learner the candidate is built on: `form` alone gives the same Spearman (-0.098 against -0.094) and the same reward (+0.366), and the L2 meta-prior adds nothing measurable on top of it on the report seeds (Spearman +0.005 [-0.045, +0.055], thirds +1.14 [-1.42, +3.70], reward +0.000). The tuning-seed effect of `form+l2` over `form` (Spearman -0.061 [-0.102, -0.020], thirds -4.36 [-7.42, -1.29], seeds 101..110) did not replicate on seeds 1..20. On the current learner, L2 also gives no significant change (Spearman -0.017 [-0.054, +0.020], reward +0.032 [-0.026, +0.091]). Under no condition does the last third of a world's top-tier families reach competence in fewer attempts than the first third (`form+l2` +0.06 [-4.05, +4.18]). Track L2 is negative: the meta-prior as built does not make later World O families faster to learn than `form` already does. It stays opt-in and off by default; it accepted no wrong rule.
 
+## Track N1 step 0: headroom and plateau diagnosis (synthetic worlds, author-defined; no new learner)
+
+Question: before a learned world model (N1) is built, where is the headroom? In World T (the being 0.686 below the
+reward-best oracle on the report seeds) and in the first world's B14 plateau (4.272, regret 0.085 against the oracle
+with the book, slope flat), how much of the gap would a perfect world model (true chances and energies known, the
+realized outcome not known) close, and how much is irreducible, exploration, or a limit of the policy or of the rules?
+Measurement only: a new example `kore-self/examples/measure_n1diag.rs` (modes `wt`, `fw`) with reference policies
+that live only in the example; no learner, default or test changed.
+
+```
+cargo run -p kore-self --example measure_n1diag --offline --release -- wt --seeds 101..120
+cargo run -p kore-self --example measure_n1diag --offline --release -- fw --seeds 101..120 --steps 200000 --arms lib+cur20,lib+cur20:3,base
+```
+
+Measured 2026-11-10, branch `n1-diag` from 780ca222, harness commit a84d4246, Windows, 4 threads (other agents on the
+same machine). **Tuning seeds 101..120 only; no report seed was run in this step** (the harness refuses seeds <= 100).
+95% t-intervals; paired differences on identical worlds (wins/ties/losses of 20). Wall time: `wt` 311 s, `fw` 1,446 s. `cargo test --offline -p kore-self` on this branch: 607 passed, 0 failed (507 unit + 100 integration).
+
+### World T: decomposing the gap to the reward-best oracle (penalty 0, energy weight 1, budget 6000)
+
+Known-parameter references ("KP"). Each knows, per key, the true chance that a plan's answer is right and the true
+energy (the listed energy, which is a function of the visible row count; for the column search the observed mean of
+its cell, as the being), estimated out of sample: two all-skip lives of the same world started at steps 10,000,000 and
+20,000,000 evaluate every plan on every task they meet (12,000 tasks per world, none of them a task of the measured
+life). They never see the realized result of the task in front of them. Keys: the being's own cells (template,
+context, plan); (template, context, size class, plan); (template, file, plan) (an unseen key falls back to the cell).
+Series rules: the oracle's (a perfect rule on every in-grammar exact series, as the reward-best oracle) or the being's
+own (B2 search every 10 steps on its own examples); the column-form discovery runs in every variant. Decision rule:
+the being's (highest p x reward / energy, skip below the realized rate x (E - 1) / E) or the renewal rule of the
+reward-best oracle (highest p x reward - rho x energy, skip below -rho). The in-process life loop of the harness is
+checked against `measure::run_life` (identical rate, asserted per world). Files are the generator's bytes in memory
+(the Track W1 runs wrote them to the sandbox and read them back; the bytes are the same).
+
+| policy (seeds 101..120) | reward per energy |
+|---|---|
+| being (beta 2, the tuned default) | 3.917 [3.735, 4.098] (equals the Track W1 tuning objective 3.917) |
+| LinUCB (alpha 1) | 3.756 [3.594, 3.919] |
+| KP, being's cells, own rules, being's decision rule | 4.055 [3.880, 4.229] |
+| KP, being's cells, own rules, renewal rule | 4.107 [3.941, 4.274] |
+| KP, being's cells, oracle rules, renewal rule | 4.131 [3.966, 4.297] |
+| KP, size class, oracle rules, renewal rule | 4.197 [4.034, 4.361] |
+| KP, file, own rules, being's decision rule | 4.471 [4.297, 4.645] |
+| KP, file, oracle rules, renewal rule | 4.505 [4.332, 4.677] |
+| reward-best oracle (sees every plan's realized result) | 4.549 [4.376, 4.722] |
+
+Decomposition of the gap (telescoping; each a paired difference, seeds 101..120):
+
+| part | what it is | reward per energy |
+|---|---|---|
+| total | reward-best oracle minus being | +0.632 [+0.583, +0.682] (20/0/0) |
+| (a) irreducible for a file-level model | reward-best minus KP (file, oracle rules, renewal): outcomes that vary within (template, file, plan) with the question's parameter; tasks no plan solves (1.1% [0.8%, 1.4%] of tasks) are inside it | +0.044 [+0.035, +0.054] (20/0/0) |
+| (c1) model granularity | KP file minus KP cells (oracle rules, renewal); of it size class minus cells +0.066 [+0.047, +0.085] (19/0/1), file minus size class +0.307 [+0.282, +0.333] (20/0/0) | +0.374 [+0.349, +0.399] (20/0/0) |
+| (c2) series rules | KP cells, oracle rules minus own rules (renewal) | +0.024 [+0.015, +0.032] (20/0/0) |
+| (c3) decision rule | KP cells, own rules: renewal rule minus the being's ratio rule | +0.053 [+0.026, +0.079] (17/0/3) |
+| (b) learning cost (exploration and estimation) | KP cells, own rules, being's rule minus being | +0.138 [+0.110, +0.166] (20/0/0) |
+
+The key quantity: **a perfect world model at the being's own granularity (its cells) closes +0.138 (22% of the gap); a
+perfect model that knows each file's outcomes closes +0.554 [+0.507, +0.601] (20/0/0), 88% of the gap** (KP file,
+own rules, the being's decision rule, minus being; with the renewal rule +0.565 [+0.517, +0.613]). Within a file
+almost every outcome is fixed: 93.9% of the (template, file, plan) keys are always right or always wrong. The headroom
+is which plan works on which file (the export quirks are per file), not noise.
+
+Is that headroom reachable by learning within one life? The being meets 192 files (191.6 to 192.1) in 4,202 tasks per
+life (about 22 tasks per file, spread over the templates). File-visit-gated references use the file's row only after
+the life has met that file k times before (any template), and the cell row before:
+
+| reference (own rules, being's rule) | minus being | minus KP cells |
+|---|---|---|
+| file row from the 2nd task on a file | +0.531 [+0.486, +0.576] (20/0/0) | +0.393 [+0.360, +0.426] (20/0/0) |
+| from the 4th task | +0.490 [+0.448, +0.532] (20/0/0) | +0.352 [+0.323, +0.381] (20/0/0) |
+| from the 11th task | +0.371 [+0.334, +0.408] (20/0/0) | +0.233 [+0.208, +0.258] (20/0/0) |
+
+So even if a model needed 10 earlier tasks on a file before it knew that file, +0.23 above the perfect cell model
+would remain available. A learner pays exploration on top (it must try plans on a file to learn it; these references
+do not), so these are upper bounds, not forecasts.
+
+Other measured facts: the being's reward per energy per tenth of the life 3.80 3.78 3.89 3.97 4.00 3.87 3.91 3.99 3.98
+3.98 (last minus first +0.175 [-0.267, +0.618]); right share of its answers 0.861 [0.843, 0.878], best KP 0.900
+[0.887, 0.914]; skip share being 0.116, KP file 0.141, reward-best 0.247. Per kind (pooled reward per energy, being vs
+KP cells, own rules, being's rule): colstat 2.88 vs 3.11, group 2.21 vs 2.23, lookup 2.76 vs 2.81, ts_exact 5.72 vs
+5.90, ts_noisy 8.12 vs 8.31, derived 3.80 vs 3.94, fix_row 4.41 vs 4.54, format 2.64 vs 2.61, logs 5.28 vs 5.33.
+
+### First world: the B14 plateau against oracles that know the true parameters (200,000 steps)
+
+Arms as in Track B14 (`lib+cur20` = B14 on; `lib+cur20:3` = the same with curiosity weight 3, a near-identical
+learner for the noise of comparisons; `base`), post part = steps 50k..200k, windows of 10,000. References per world
+(budget 30,000, Dinkelbach, as in B14): the renewal oracle (true success rates per domain, difficulty and strategy, and
+real energy) without rules; with the oracle book; with the oracle book plus the being's own live rules at the end of
+its life; and the expected-value rate of a renewal oracle with a PERFECT book (the discovered strategy answers every
+pattern task exactly at its listed energy, with the careful strategy's 3% execution slips). The expected-value
+computation is checked against the realized oracle: book +0.003 [-0.016, +0.022], book plus own rules +0.001
+[-0.015, +0.017]. Rule worlds (book gain >= 0.1): 105, 108, 113, 114, 116, 117, 118, 119 (8); simple worlds: 12.
+
+| quantity (seeds 101..120) | value |
+|---|---|
+| B14 on, steps 50k..200k | 4.419 [3.899, 4.939] (base 3.925 [3.462, 4.388]; B14 minus base +0.493 [+0.220, +0.767] 17/0/3) |
+| oracle with the book minus B14 (the B14 regret) | +0.108 [-0.009, +0.224] (14/0/6) |
+| oracle with the book plus the being's own rules minus B14 | +0.130 [+0.037, +0.223] (15/0/5) |
+| same, rule worlds (8) | -0.047 [-0.178, +0.083] (3/0/5) |
+| same, simple worlds (12) | +0.249 [+0.172, +0.325] (12/0/0) |
+| perfect book (expected value) minus B14 | +0.409 [+0.307, +0.511] (20/0/0); rule worlds +0.560 [+0.333, +0.786] (8/0/0), simple worlds +0.309 [+0.251, +0.367] (12/0/0) |
+| perfect book minus book plus own rules (rules still missing) | +0.278 [+0.112, +0.444] (16/4/0) |
+| slope per 100k steps, 50k..200k | -0.011 [-0.025, +0.003]; residual sd of a 10k window around the line 0.022 [0.017, 0.027] |
+| rule answers right (post part; 474,620 answers in the 15 worlds that use rules) | 0.970, = 1 - the pattern domain's 3% slip rate |
+| families covered at the end (of 14) | 11.6 [11.2, 12.0]; skip share 0.392; curiosity energy share 0.001 |
+| B14 minus B14 with curiosity weight 3 | +0.007 [+0.001, +0.014] (17/0/3), paired sd 0.013 |
+
+Verdict on the plateau: it is not a noise floor of the measurement (window noise 0.022 is small against the gaps),
+and in the rule worlds it is not exploration cost or a policy limit. (1) Where rules matter, B14 is level with an
+oracle that knows the true success rates and holds the book plus the being's own rules (-0.047 [-0.178, +0.083]): no
+model or policy headroom is measurable there, and the rule answers it gives are at the execution-slip floor (0.970 =
+1 - 3% slips). What remains there is rules that are in neither book (+0.56 to a perfect book): the rules side that
+B14, E1 and L2 worked on, plus slips, which no learner can remove. (2) In the 12 simple worlds a gap of +0.249 [+0.172,
++0.325] (12 of 12 worlds) to the known-parameter oracle remains: the first world's only headroom a world model could
+address, about 6% of its rate. A loose noise-free bound (slips removed: every non-zero chance divided by its
+strategy's non-slip share) is +0.809 above B14; slips are a property of the world, not headroom.
+
+### World-model target (proposed)
+
+World T has the most headroom a model could address (+0.554 for a perfect file-level model; first world +0.13 overall,
++0.25 in the simple worlds only). Proposed N1 target, World T:
+
+* What it models: for a task view and a plan, the distribution of the checker's outcome (right / wrong / no answer)
+  and the energy. The structure the diagnosis points at: a plan's outcome is a property of the file (its export quirks),
+  shared across the templates asked of that file, on top of the (template, context, plan) cell.
+* Inputs (all already visible to the being): template, context, size class, row count, the file's name (identity), the
+  plan, and the being's own history on that file (which plans were right or wrong on which templates). Not in scope
+  (it would change what the being may see): features computed from the file's bytes before acting.
+* Outputs: P(right), P(wrong), P(no answer) with a posterior width, and expected energy, per plan, citing the outcome
+  events they rest on (the provenance rule of the log).
+* Use by the planner: the existing World T chooser (score, optimism, skip test) with its cell estimate replaced by the
+  model's prediction; the decision rule unchanged in the primary comparison (the renewal rule is a separate, smaller
+  lever: +0.053 at cell level, +0.011 [+0.000, +0.021] at file level).
+* Simple baselines it must beat: (i) the current being; (ii) a file-keyed version of the being's own estimator (a Beta
+  cell per (template, file, plan) with the being's cell estimate as its prior; no sharing across templates): if N1
+  does not beat this, a model adds nothing over a finer table; (iii) tuned LinUCB.
+
+### Power (tuning-seed variance of paired differences, World T)
+
+Paired standard deviations on seeds 101..120: being minus flat prior 0.084, minus beta 4 0.087, minus beta 1 0.138,
+minus LinUCB 0.124, KP file minus being 0.100, KP cells minus being 0.060. For an N1 candidate against the being the
+plausible sd is 0.08 to 0.13. Report seeds needed for 80% power, paired t-test, two-sided alpha 0.05:
+
+| effect (reward per energy) | sd 0.084 | sd 0.10 | sd 0.124 |
+|---|---|---|---|
+| 0.039 (1% of the being's 3.92) | 37 | 52 | 80 |
+| 0.05 | 24 | 32 | 49 |
+| 0.10 (headroom-based: under half of the +0.23 still open after 10 tasks on a file) | 8 | 10 | 14 |
+| 0.20 | 4 | 5 | 6 |
+
+Minimum detectable effect at 80% power (sd 0.084 / 0.10 / 0.124): n = 20: 0.055 / 0.066 / 0.081; n = 40: 0.037 /
+0.044 / 0.055; n = 60: 0.030 / 0.036 / 0.045. A World T life takes about 15 s per policy, so 60 seeds are cheap.
+**Recommended: 60 report seeds (1..60), fixed before any report run and never increased**; this detects 1% at sd up
+to 0.10 and 1.2% at sd 0.124. First world, for reference: two near-identical learners differ with sd 0.013, B14 minus
+base 0.585; on the report seeds B14+E1 minus B14 had sd about 0.10.
+
+### Conclusion
+
+* World T: the being's gap to the reward-best oracle (+0.632 on the tuning seeds) is mostly model granularity (+0.374:
+  outcomes are per file, the being's cells are per template and context), then learning cost (+0.138), the decision
+  rule (+0.053), variation within a file (+0.044, irreducible for a file-level model) and series rules (+0.024). A
+  perfect model of file-level outcomes closes 88% of the gap; one that knows a file only from its 4th task on, 78%.
+  The headroom for N1 is there, in a specific place: per-file outcomes shared across templates.
+* First world: in the rule worlds the B14 plateau is a rule-coverage limit (+0.56 to a perfect book) on top of a slip
+  floor, not a model limit (level with the known-parameter oracle); a model/policy gap of +0.25 remains in the simple
+  worlds only. N1 in the first world is not recommended as the first target.
+* Recommendation: build N1 in World T, against the file-keyed table baseline, with 60 report seeds. Not measured: any
+  learner of the file-level structure (no N1 code exists), real data, the harsh-penalty points of the sweep, OOD,
+  B14+E1 against these references.
+
+### Pre-registration (approved by the owner 2026-11-10, with PRIMARY rule (b); no N1 code before Gate 0 is reported)
+
+* Candidate: N1, a learned outcome model for World T (outcome and energy per plan from template, context, size class,
+  rows and the file's identity, sharing across the templates of a file; hierarchical over cell, file and plan), used
+  by the existing chooser in place of its cell estimate. Opt-in switch, off by default; with it off the being is
+  bit-for-bit the current being (golden test).
+* Baselines: (B0) the current being (beta 2, pooled prior, skip on, `value_ucb`); (B1) the file-keyed being (the
+  being's Beta estimator per (template, file, plan), prior = its cell estimate, nothing else changed; no model, no
+  sharing across templates); (B2) LinUCB alpha 1. Constants of N1 and B1 (beta) tuned on seeds 101..120 only, 6
+  configurations each as in Track W1.
+* World: World T, penalty 0, energy weight 1, budget 6000, default files (6 per context and pool), sandbox as in W1.
+* Seeds: report seeds 1..60 (n = 60), fixed now, never increased after any report run. Basis: paired sd 0.084-0.124
+  on the tuning seeds; at sd 0.10 a mean difference of 0.04 (about 1% of 3.9) has about 85% power at n = 60.
+* GATE 0 (run first, before any N1 code; B1 is a baseline only): B1 minus B0 on seeds 1..60, mean [95% CI]
+  (W/T/L of 60). Whatever it shows, it is reported. If B1 already closes most of the KP file headroom (secondary (c)
+  computed for B1 >= 0.5), the expected conclusion is "a finer key is enough; N1 is not needed", and N1 is built only
+  if the owner still asks for it.
+* PRIMARY (the model's own value): N1 minus B1, reward per energy over the life: 95% paired CI lower bound >= +0.01
+  AND mean difference >= +0.03 AND at least 42 of 60 wins. Only the PRIMARY decides the result. (Rule (b), chosen
+  over a draft rule "lower bound > 0 and mean >= +0.04", which would pass only about half the time at a true effect
+  of +0.04. At paired sd 0.10 and n = 60 (standard error about 0.013), rule (b) passes with probability about 60% at
+  a true +0.04 and about 85% at +0.05, before the wins condition, which makes it stricter.)
+* SECONDARY (all reported, none is claimed as a win): (a) N1 minus B0; (b) N1 minus B2; (c) share of the gap to the
+  KP file reference closed, (N1 - B0) / (KP file - B0), with CI; (d) calibration: Brier score of N1's P(right) on
+  its own attempts vs the cell estimate (paired CI); (e) harsh penalties: all sweep points with penalty >= 3.16
+  (re-tuned as in W1b), N1 minus B0 and minus B1, reported per point (where the being is weakest); (f) cold start:
+  reward per energy on each file's first 3 tasks, and the out-of-distribution config (`ood = true`, never used in
+  tuning): N1 minus B0 must not be significantly worse (CI includes or is above 0), so a gain from memorizing seen
+  files is not reported as learning; (g) 0 wrong rules accepted; wrong answers per 100 tasks reported; (h) compute
+  cost: wall time per life, reported separately from the simulated energy.
+* Attribution ablation (same seeds): N1 with sharing across templates off; N1 with the file input off (cells plus
+  size class only); N1 with the renewal decision rule (reported separately, not part of the primary).
+* Headroom is an upper bound, not an expectation: the KP references are estimated from about 12,000 other tasks and
+  know true per-key rates; the file-level ceiling from each file's 11th task on is +0.371 over B0, before any
+  exploration cost a real learner pays. Expected gains are below it; the docs must not quote 0.37 as expected.
+* Stop rule: one report run of Gate 0, then (if built) one report run of N1. A PRIMARY not met is recorded as negative,
+  the code stays off by default, nothing is re-tuned on report seeds.
+* Caution: World T is the author's generator; each file is seen about 22 times per life and 93.9% of (template, file,
+  plan) outcomes are deterministic by construction. A result here is not a real-data result; milestone M3 (a world
+  built from a real dataset) stays separate.
+* Every claim: mean [95% CI] (wins/ties/losses of 60), seeds, budget, commit. A negative result is reported as such.
+
+### Gate 0 result (2026-11-10, harness at d34657b7, `measure_n1diag gate0`)
+
+Per-world data: `docs/data/n1_gate0_report_seeds1-60.tsv` (60 rows) and `docs/data/n1_gate0_tune_seeds101-120.tsv`
+(20 rows). The original raw output in a temporary scratch folder was deleted; these files come from a reproduction run
+on 2026-11-11 (same code d34657b7, same configuration and seeds; a reproduction, not a new report run). All 60 report
+rows and all 20 tuning rows are identical in every result column to the rows recorded on 2026-11-10 (only the wall
+times differ), and every summary number below matches.
+
+World T, penalty 0, energy weight 1, budget 6000, default files; B1 beta tuned on seeds 101..120 only, then one
+report run on seeds 1..60.
+
+* Tuning (seeds 101..120, B1 minus B0): beta 0.5 +0.152 [+0.083, +0.222]; 1 +0.176 [+0.120, +0.232]; **2 +0.213
+  [+0.175, +0.250] (20/0/0), chosen**; 4 +0.023 [-0.037, +0.083]; 8 -0.411; 16 -0.842.
+* Report (seeds 1..60), reward per energy: B0 3.889 [3.809, 3.968]; B1 4.109 [4.024, 4.193]; B2 (LinUCB alpha 1)
+  3.730 [3.651, 3.809]; KP file reference (true per-file rates, the being's own rules) 4.467 [4.386, 4.548].
+* **GATE 0: B1 minus B0 +0.220 [+0.193, +0.247] (60/0/0)**, paired sd 0.104. B2 minus B0 -0.159 [-0.190, -0.127]
+  (4/0/56). Caveat on B2: this LinUCB has the W1 context features only and no file feature, so it does not get the
+  file information that B1 uses; the B2 numbers are not a fair "B1 beats LinUCB" comparison. A LinUCB with a one-hot
+  file feature is a baseline of Track W2 (`docs/b1_default_prereg.md`, branch `brain-d1`). KP file minus B0 +0.579 [+0.552, +0.606]; KP file minus B1 +0.359 [+0.335, +0.382] (60/0/0).
+* Secondary (c) for B1, share of the KP-file gap closed, (B1 - B0) / (KP file - B0): **0.380**, bootstrap 95%
+  [0.342, 0.416].
+* Exploratory (not pre-registered for Gate 0; no claim is made on it): wrong answers per 100 tasks, B0 11.10, B1 7.77;
+  B1 minus B0 -3.33 [-4.02, -2.64] (fewer in 57 of 60 worlds, more in 3). It is pre-registered as a secondary of Track
+  W2 on fresh seeds 201..260.
+* Wall time per life (8 worlds in parallel; another build was running on the machine, so these are rough): B0 11.5 s,
+  B1 14.2 s, B2 11.3 s.
+
+Verdict, by the pre-registered rule: (c) = 0.38 < 0.5, so the conclusion is **"N1 has headroom over B1"**: a finer
+key alone closes about 38% of the file-level gap; about +0.36 per energy (an upper bound, see above) remains between
+B1 and the KP file reference. The PRIMARY for N1 is therefore against B1 (beta 2), as pre-registered. B1 itself is a
+large, clean gain over the current being (60 of 60 worlds) and is a candidate to become the default World T
+estimator in its own track (not done here; it would need its own pre-registration and the golden-test change).
+Limits: synthetic world (the author's generator, 93.9% deterministic keys); one budget and one penalty point; the
+harsh-penalty points of the sweep and OOD are not measured for B1.
 
 ## Not measured
 
