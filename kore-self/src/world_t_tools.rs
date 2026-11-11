@@ -26,7 +26,7 @@ use serde_json::{json, Value};
 pub const AUTH_TOOL: &str = "world_t_run";
 pub const MAX_STEPS: u64 = 5000;
 
-fn controller_text(owner: &str) -> Option<String> {
+pub(crate) fn controller_text(owner: &str) -> Option<String> {
     let p = crate::safety::owner_dir(owner).join(controller::FILE);
     let meta = std::fs::metadata(&p).ok()?;
     if meta.len() > 16 * 1024 || authorize::perm_problem(&p).is_some() {
@@ -41,6 +41,12 @@ fn audit(owner: &str, cap: &str, limit: u64, requested: u64, what: &str) {
 
 /// Run the World T being of `owner` for `steps` steps (creating it in world `seed` with `budget` energy).
 pub fn run_world_t(owner: &str, steps: u64, seed: u64, budget: Option<i64>) -> Result<Value, String> {
+    run_world_t_with(owner, steps, seed, budget, None)
+}
+
+/// Same gate; `energy_cap` (the scheduler's remaining energy budget) can only lower the controller's
+/// `max_energy_per_run`, never raise it. The result also reports `open_ms` (opening the log and folding the state).
+pub fn run_world_t_with(owner: &str, steps: u64, seed: u64, budget: Option<i64>, energy_cap: Option<i64>) -> Result<Value, String> {
     if !(1..=MAX_STEPS).contains(&steps) {
         return Err(format!("'steps' must be 1..{MAX_STEPS}"));
     }
@@ -74,6 +80,7 @@ pub fn run_world_t(owner: &str, steps: u64, seed: u64, budget: Option<i64>) -> R
     } else {
         steps
     };
+    let t_open = std::time::Instant::now();
     let mut log = crate::log_tools::open(owner).map_err(|v| v.to_string())?;
     // Track D1b: checkpoints only when controller.txt sets checkpoint_every (default off)
     let every = crate::being::ckpt::every_from_text(text.as_deref());
@@ -92,12 +99,16 @@ pub fn run_world_t(owner: &str, steps: u64, seed: u64, budget: Option<i64>) -> R
             return Err(format!("controller refused the World T run: {why}"));
         }
     }
+    let open_ms = t_open.elapsed().as_millis() as u64;
     let wcfg = st0.cfg.clone().unwrap_or_else(|| WTCfg::new(seed, budget.unwrap_or(DEFAULT_BUDGET)));
     let world = WorldT::new(wcfg.clone());
     write_pool(owner, &world)?;
     let sb = DirSandbox::new(owner, wcfg.seed);
     let mut policy = Policy::new(steps_eff);
-    policy.max_energy = Some(ctl0.max_energy_per_run);
+    policy.max_energy = Some(match energy_cap {
+        Some(c) => c.max(0).min(ctl0.max_energy_per_run),
+        None => ctl0.max_energy_per_run,
+    });
     policy.checkpoint_every = every;
     let owner_k = owner.to_string();
     policy.kill = Some(KillCheck(std::sync::Arc::new(move || authorize::kill_active(&owner_k))));
@@ -118,7 +129,7 @@ pub fn run_world_t(owner: &str, steps: u64, seed: u64, budget: Option<i64>) -> R
         "steps_run": s.steps_run, "stopped": s.stopped.as_str(), "reward": s.reward, "energy": s.cost,
         "rules_accepted_this_run": s.new_rules.len(), "right": s.state.right, "wrong": s.state.wrong, "no_answer": s.state.no_answer, "skips": s.state.skips,
         "refusals_audited": refused.iter().map(|r| json!({ "cap": r.0, "limit": r.1, "requested": r.2, "what": r.3 })).collect::<Vec<_>>(),
-        "checkpoint": crate::being::ckpt::report_json(&s.ckpt),
+        "checkpoint": crate::being::ckpt::report_json(&s.ckpt), "open_ms": open_ms,
     }))
 }
 
