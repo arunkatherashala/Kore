@@ -41,3 +41,8 @@ tpch_lineitem.csv
 
 # test fixtures are real segment files (written by the old/round-1 binaries), keep them
 !kore-self/tests/data/**/*.kore
+
+# Track M3: never commit the source or anything derived from it
+**/world_m3/source/
+**/world_m3/seed_*/
+*.parquet

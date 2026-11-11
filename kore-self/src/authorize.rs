@@ -50,7 +50,7 @@ pub const CHAT_TOOLS: [(&str, u8); 5] = [("self_sql", 1), ("self_belief_history"
 /// Tools that only the being loop itself requests (never the chat thinker): asking the configured advisor
 /// for advice (L1: it sends the visible task features to a program the owner chose; it changes nothing in the world).
 /// `world_v2_run` (L2): a World v2 run of the being, which appends to its own log (`being_v2_tools.rs`).
-pub const INTERNAL_TOOLS: [(&str, u8); 3] = [("advisor_query", 1), ("world_v2_run", 2), ("world_t_run", 2)];
+pub const INTERNAL_TOOLS: [(&str, u8); 4] = [("advisor_query", 1), ("world_v2_run", 2), ("world_t_run", 2), ("world_m3_run", 2)];
 /// The actor name the being loop uses for its own requests.
 pub const BEING_ACTOR: &str = "being";
 /// Tools only the human actor may use.
