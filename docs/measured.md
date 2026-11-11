@@ -3492,6 +3492,101 @@ estimator in its own track (not done here; it would need its own pre-registratio
 Limits: synthetic world (the author's generator, 93.9% deterministic keys); one budget and one penalty point; the
 harsh-penalty points of the sweep and OOD are not measured for B1.
 
+## Track W2: the file-keyed estimator (B1) in the World T being (synthetic data, author-defined)
+
+Pre-registration: `docs/b1_default_prereg.md` (df9ca2fa, approved by the owner). Code at commit 9feedb93 (branch
+`w2`); measured 2026-11-11, Windows, 8 threads, `kore-self/examples/measure_w2.rs`. Per-world data:
+`docs/data/w2_equivalence_seeds101-120.tsv`, `docs/data/w2_primary_seeds201-260.tsv`,
+`docs/data/w2_sweep_tune_seeds101-120.tsv`, `docs/data/w2_sweep_report_seeds201-260.tsv` (the `wall_s` column is
+timing, not a result). Files are the generator's bytes in memory (as Gate 0). Paired 95% t-intervals (t quantile for
+59 df, 2.001), (wins/ties/losses of B1).
+
+What was built: `LearnerTCfg::file_key` (controller key `wt_file_key`, fail-closed parse, default off). With it on, the
+estimate per plan is the being's Beta estimator over the (template, file, plan) counts folded from its own log, with
+the cell estimate as prior; beta 2.0 fixed; chooser, skip rule and `value_ucb` unchanged. The fold reads the file from
+a new `file:` tag on outcome events, written only when the key is on (additive; old logs fold with no file counts,
+that is B0). The setting is recorded at genesis (tag `wt_file_key:on`, written only when on); a later run asking for
+the other setting is refused (`run_t_key` returns an error; the tool also audits the refusal); `cfg.learner` of a later
+run is ignored as before. The World T checkpoint payload gains the counts: snapshot format version 2 for kind
+`world_t` (per-reader format, `Foldable::FORMAT`; the other kinds stay 1); a format-1 file is refused and the log is
+folded (test). With the key off both golden tests (`tests_golden.rs`, file unchanged) pass. Baseline "LinUCB with the
+file feature" (`Pol::LinFile`, measurement only): the W1b LinUCB plus a one-hot of the task's file; plain LinUCB still
+reproduces the Gate 0 B2 rows.
+
+### Equivalence test (tuning seeds 101..120, before any report run)
+
+20 of 20 seeds identical in every check: the in-being B1 (key on, beta 2) makes the same decision at every step as the
+Gate 0 harness B1 (`FileKeyed`, copied verbatim), with the same reward and energy; the harness reward per energy equals
+the Gate 0 tuning row `b1_beta2000` to 6 decimals on every seed (and B0 equals column `b0`); the same holds for the
+logged being in one run, with a restart in the middle of the life from the full fold, and with the restart from a
+checkpoint (the restore used it on every seed); every decision of each final log replays (0 mismatches).
+
+### PRIMARY (report seeds 201..260, penalty 0, energy weight 1, budget 6000, default files)
+
+* B0 (default being) 3.994 [3.913, 4.075]; B1 (in-being) 4.219 [4.136, 4.302].
+* **B1 minus B0: +0.225 [+0.192, +0.258] (59/0/1), paired sd 0.129.** Rule: lower >= +0.05 (yes), mean >= +0.10
+  (yes), >= 45 of 60 wins (59): **met**. This is a replication of Gate 0 (+0.220 on seeds 1..60) on fresh seeds with
+  the code in the being, not a new finding.
+* (a) Wrong answers per 100 tasks: B0 11.05, B1 7.76; B1 minus B0 -3.30 [-3.90, -2.70] (B1 fewer in 58 of 60).
+* (c) Out of distribution (`ood = true`): B0 2.773, B1 3.024; B1 minus B0 +0.251 [+0.210, +0.293] (58/0/2); not
+  significantly negative. Wrong per 100, B1 minus B0: -3.64 [-4.39, -2.89].
+* (d) Cold start, reward per energy on each file's first 3 tasks (about 574 tasks per life): B0 3.916, B1 3.911; B1
+  minus B0 -0.005 [-0.035, +0.025] (31/0/29); OOD +0.006 [-0.029, +0.041]. No measurable cold-start cost or gain.
+* (e) Cost, lives one after another on one thread: wall per life B0 1.46 s, B1 1.39 s; peak working set of the
+  process 38.3 MB (B0) and 38.0 MB (B1). File keys per life (B1): mean 514, range 392 to 655 (OOD mean 287).
+* (f) Wrong answers accepted (paid): 0 for B0 and B1, default and OOD; rules on the noisy series signatures: 0.
+* M1 (secondary): slope of reward per energy per tenth of the life, B0 -0.003, B1 +0.017; B1 minus B0 +0.020
+  [+0.015, +0.026] (50/0/10).
+
+### Sweep (b): the 6 x 5 grid of W1b, report seeds 201..260
+
+Every policy except B1 re-tuned at every point on seeds 101..120 as in W1b (B0 beta, UCB1 c, LinUCB alpha, LinUCB with
+the file feature alpha; 6 values each; tuning wall 2090 s); B1 beta fixed at 2, as pre-registered. Report wall 1530 s.
+Full per-point tables are reproducible from the TSV files; summary:
+
+* B1 minus B0 (tuned): interval above 0 at 18 of 30 points, below 0 at 8. Above 0 at every point with penalty <= 1 x
+  reward and weight >= 0.316 (+0.10 to +0.33), and at penalty 3.16 with weights 0.316 and 1.
+* **Holm (one-sided paired t, B1 minus B0 < 0, 30 points, FWER 0.05): regressions at 6 points**: penalty 1, weight
+  0.1 (-0.071 [-0.116, -0.026], 15/0/45); penalty 10 at every weight: 0.1 -1.552 [-1.682, -1.422], 0.316 -1.170
+  [-1.282, -1.058], 1 -0.997 [-1.089, -0.905], 3.16 -0.941 [-1.007, -0.876], 10 -0.670 [-0.723, -0.617] (each
+  0/0/60). Raw CI below 0 but not rejected after Holm: penalty 3.16 at weights 0.1 (-0.154 [-0.259, -0.050]) and 10
+  (-0.190 [-0.339, -0.041]). Negative mean with the CI including 0: penalty 0, 0.1 and 0.316 at weight 0.1 (-0.000,
+  -0.004, -0.012).
+* Supplementary, not pre-registered: against B0 with beta 2 at every point (the default being, not re-tuned), Holm
+  rejects at 7 points (the same 6 and penalty 3.16, weight 0.1). At penalty 10 the tuned B0 uses beta 1 or 0.5.
+* Wrong answers: where B1 regresses it answers more and more wrongly. At penalty 10, wrong per 100 B1 3.2 to 11.1 vs
+  B0 0.1 to 2.4; skip share B1 0.02 to 0.03 vs B0 0.13 to 0.89. Each new (template, file, plan) key starts from the
+  cell prior with weight 2, so every file is explored again, at 10 x reward per wrong answer.
+* LinUCB with the file feature minus plain LinUCB: above 0 at 30 of 30 points. B1 against the better LinUCB variant per
+  point (LinUCB+file at every point): above 0 at 18 points, below 0 at 5 (all of penalty 10). At penalty 0, weight 1:
+  B1 minus LinUCB+file +0.090 [+0.047, +0.132] (43/0/17), minus plain LinUCB +0.367 [+0.327, +0.408]: most of B1's
+  lead over plain LinUCB is the file information, which LinUCB can also use.
+* B1 minus always SQL: above 0 at 27 points, below 0 at penalty 10, weights 1, 3.16 and 10.
+* M4 (milestones.md: no baseline with higher reward per energy, CI above 0, and fewer wrong answers): B1 is dominated
+  at 5 points (penalty 10, every weight; by LinUCB, LinUCB+file and UCB1, and by always SQL at weights 1 to 10). The
+  tuned B0 is dominated at 14 points, nearly all by LinUCB+file (a baseline new in this track). M4 stays **not met**.
+  (The harness line "dominated at 18 / 15 points" counts (point, baseline) pairs; the point counts are 5 and 14.)
+* (f) Over the sweep: 0 wrong answers accepted (B1 and B0), 0 B1 rules on the noisy series.
+
+### Verdict against the pre-registered Stage-2 rule
+
+1. PRIMARY: met (+0.225 [+0.192, +0.258], 59/0/1).
+2. No regression over the sweep: **not met** (6 points rejected after Holm: penalty 1 at weight 0.1; penalty 10 at
+   all five weights).
+3. OOD not significantly negative: met (+0.251 [+0.210, +0.293]).
+4. Equivalence test: met (20 of 20 seeds, also across restarts from the fold and from a checkpoint).
+
+Recommendation by the rule (the default is not changed here; that would need the owner's approval anyway): **B1 stays
+opt-in** (`wt_file_key` default off). The failing points are the next problem to solve: under harsh wrong-answer
+penalties the file key re-explores each file, and the fixed beta 2 is too optimistic there (the tuned B0 uses beta 1 or
+0.5).
+
+Limits: World T is the author's synthetic generator (each file seen about 22 times per life; 93.9% of (template, file,
+plan) outcomes deterministic by construction), which is exactly what a per-file key exploits. This is not a real-data
+result (M3 stays separate). The PRIMARY is a replication. One world family and one budget. In the sweep B0 and the
+baselines are tuned per point and B1 is not, as pre-registered. The cost numbers (e) come from re-running the same
+deterministic lives on one thread for timing and memory only. Nothing here is a claim of thinking or understanding.
+
 ## Not measured
 
 Real-life data of any kind (the free-text section above is also synthetic); the probabilities of the live ledger (`predict_make`/`predict_score` have not been run on real data; the S4 numbers above are synthetic sequences only; the older `self_ledger_snapshot` rows are not scored by any measurement); behaviour with

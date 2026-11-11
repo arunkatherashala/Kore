@@ -38,6 +38,7 @@ Status words:
 - The per-world count of learnable top-tier families is not printed by `measure_l2 report`. About 190 top-tier families open per world (families 32 to about 223), but how many of them are learnable must be reported before the minimum count above is applied.
 
 ### M4
+- Track W2 (report seeds 201..260, docs/measured.md): with the file-keyed estimator B1 (opt-in, `wt_file_key`) the being is dominated at 5 of 30 points (penalty 10, every weight); the default being B0 at 14, mostly by the new baseline LinUCB with the file feature. Still not met.
 - The criterion is Pareto non-dominance, not "as few wrong answers as the best baseline". Always SQL answers nothing wrong, so matching its wrong-answer rate would make M4 impossible for any policy that attempts harder plans.
 
 ## Track N1 pre-registration template

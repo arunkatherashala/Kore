@@ -1,0 +1,22 @@
+seed	steps	harness_b1_rpe	in_being_b1_rpe	gate0_tsv_b0/b1_beta2000	tsv_equal	same_decisions_in_being	same_logged_one_run	same_logged_restart_fold	same_logged_restart_checkpoint	same_reward_and_energy_all	checkpoint_used_at_restart	replay_ok	first_differing_step	all_ok
+101	4204	4.139167	4.139167	3.807833/4.139167	true	true	true	true	true	true	true	true	None	true
+102	4755	4.319333	4.319333	4.162167/4.319333	true	true	true	true	true	true	true	true	None	true
+103	3847	4.000833	4.000833	3.852500/4.000833	true	true	true	true	true	true	true	true	None	true
+104	4789	4.748833	4.748833	4.593667/4.748833	true	true	true	true	true	true	true	true	None	true
+105	3724	3.772500	3.772500	3.665500/3.772500	true	true	true	true	true	true	true	true	None	true
+106	4302	4.188000	4.188000	3.932667/4.188000	true	true	true	true	true	true	true	true	None	true
+107	3400	3.551833	3.551833	3.395167/3.551833	true	true	true	true	true	true	true	true	None	true
+108	4518	4.593000	4.593000	4.408833/4.593000	true	true	true	true	true	true	true	true	None	true
+109	3765	3.952667	3.952667	3.610167/3.952667	true	true	true	true	true	true	true	true	None	true
+110	3722	3.676000	3.676000	3.520833/3.676000	true	true	true	true	true	true	true	true	None	true
+111	3837	3.809667	3.809667	3.639333/3.809667	true	true	true	true	true	true	true	true	None	true
+112	3581	3.778000	3.778000	3.577333/3.778000	true	true	true	true	true	true	true	true	None	true
+113	4585	4.081000	4.081000	3.957333/4.081000	true	true	true	true	true	true	true	true	None	true
+114	3972	3.967833	3.967833	3.750333/3.967833	true	true	true	true	true	true	true	true	None	true
+115	3872	3.905333	3.905333	3.787167/3.905333	true	true	true	true	true	true	true	true	None	true
+116	4076	3.849333	3.849333	3.560333/3.849333	true	true	true	true	true	true	true	true	None	true
+117	4879	5.130833	5.130833	4.820500/5.130833	true	true	true	true	true	true	true	true	None	true
+118	5063	4.645167	4.645167	4.418833/4.645167	true	true	true	true	true	true	true	true	None	true
+119	4311	4.474000	4.474000	4.102167/4.474000	true	true	true	true	true	true	true	true	None	true
+120	3987	4.006500	4.006500	3.770667/4.006500	true	true	true	true	true	true	true	true	None	true
+# equivalence: 20 of 20 tuning seeds identical in every check; wall 151 s
