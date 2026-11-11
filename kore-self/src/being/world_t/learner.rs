@@ -36,18 +36,29 @@ pub struct LearnerTCfg {
     /// this field, tag `wt_ucb` missing): the bonus is on the right-answer chance only and the penalty
     /// term is a point estimate. Identical when the penalty is 0.
     pub value_ucb: bool,
+    /// Track W2: the file-keyed estimate (B1 of Track N1 Gate 0). true: per plan, the Beta estimate over the
+    /// counts of (template, file, plan) folded from the being's own log, with the cell estimate (the
+    /// (template, context, plan) estimate above, chance right and chance wrong) as its prior; energy, chooser,
+    /// optimism and skip test unchanged. false (the default, and every log without the `wt_file_key` tag): the
+    /// cell estimate only, exactly the being before Track W2. Recorded at genesis; fixed for the being's life.
+    pub file_key: bool,
 }
 
 /// Default: the constants chosen on the tuning seeds 101..120 (docs/measured.md, Track W1).
 impl Default for LearnerTCfg {
     fn default() -> Self {
-        LearnerTCfg { beta_milli: 2000, prior_w_milli: 2000, pooled: true, skip: true, value_ucb: true }
+        LearnerTCfg { beta_milli: 2000, prior_w_milli: 2000, pooled: true, skip: true, value_ucb: true, file_key: false }
     }
 }
 
 impl LearnerTCfg {
     pub fn tags(&self) -> Vec<String> {
-        vec![format!("wt_beta_milli:{}", self.beta_milli), format!("wt_prior_w_milli:{}", self.prior_w_milli), format!("wt_prior:{}", if self.pooled { "pooled" } else { "flat" }), format!("wt_skip:{}", if self.skip { "on" } else { "off" }), format!("wt_ucb:{}", if self.value_ucb { "value" } else { "p" })]
+        let mut t = vec![format!("wt_beta_milli:{}", self.beta_milli), format!("wt_prior_w_milli:{}", self.prior_w_milli), format!("wt_prior:{}", if self.pooled { "pooled" } else { "flat" }), format!("wt_skip:{}", if self.skip { "on" } else { "off" }), format!("wt_ucb:{}", if self.value_ucb { "value" } else { "p" })];
+        // only when on: a genesis with it off is byte-identical to one written before Track W2
+        if self.file_key {
+            t.push("wt_file_key:on".into());
+        }
+        t
     }
     pub fn from_tags(tags: &str) -> Option<LearnerTCfg> {
         let t = |k| crate::being::state::tag(tags, k);
@@ -57,6 +68,7 @@ impl LearnerTCfg {
             pooled: match t("wt_prior")? { "pooled" => true, "flat" => false, _ => return None },
             skip: match t("wt_skip")? { "on" => true, "off" => false, _ => return None },
             value_ucb: match t("wt_ucb") { None | Some("p") => false, Some("value") => true, _ => return None },
+            file_key: match t("wt_file_key") { None | Some("off") => false, Some("on") => true, _ => return None },
         })
     }
 }
@@ -182,7 +194,18 @@ impl LearnerT {
         Est { plan, n: c.n, succ: c.succ, prior: m, prior_from: from, p_wrong, p, sd, energy, score: value / energy.max(1.0) }
     }
 
+    /// Track W2 (`file_key`): the Beta estimate over the (template, file, plan) counts of the state, with the
+    /// cell estimate (chance right, chance wrong) as the prior and the cell's energy.
+    pub fn estimate_file(&self, st: &StateT, v: &ViewT, plan: Plan) -> Est {
+        let ce = self.estimate(st, v, plan);
+        let fc = st.files.get(v.file.as_str()).and_then(|m| m.get(&(v.tmpl.idx() as u8, plan.idx() as u8))).copied().unwrap_or_default();
+        self.estimate_from(v, plan, fc, (ce.p, ce.p_wrong, "cell estimate"), ce.energy)
+    }
+
     pub fn choose(&self, st: &StateT, v: &ViewT) -> ChoiceT {
+        if self.cfg.file_key {
+            return self.choose_with(st, v, |p| self.estimate_file(st, v, p));
+        }
         self.choose_with(st, v, |p| self.estimate(st, v, p))
     }
 

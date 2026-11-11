@@ -65,6 +65,9 @@ pub struct OutcomeT {
     pub example: Option<(u8, Vec<i64>, i64)>,
     /// A column-rule form the search accepted on the file.
     pub form: Option<u8>,
+    /// Track W2: the task's file, logged on the outcome (tag `file:`) only by a being created with
+    /// `wt_file_key` on; None in every other log (whose fold then has no file counts: exactly the being before W2).
+    pub file: Option<String>,
 }
 
 impl OutcomeT {
@@ -86,6 +89,9 @@ impl OutcomeT {
         }
         if let Some(f) = self.form {
             t.push(format!("form:{f}"));
+        }
+        if let Some(f) = &self.file {
+            t.push(format!("file:{f}"));
         }
         t
     }
@@ -112,6 +118,7 @@ impl OutcomeT {
             event_id: e.event_id.clone(),
             example,
             form: g("form").and_then(|x| x.parse().ok()),
+            file: g("file").map(|x| x.to_string()),
         })
     }
 }
@@ -136,6 +143,8 @@ pub struct StateT {
     pub by_ctx_plan: BTreeMap<(u8, u8), Cell>,
     pub by_tmpl_plan: BTreeMap<(u8, u8), Cell>,
     pub by_plan: BTreeMap<u8, Cell>,
+    /// Track W2: file -> (template, plan) -> counts, from outcomes that carry the file (`wt_file_key` on).
+    pub files: BTreeMap<String, BTreeMap<(u8, u8), Cell>>,
     pub examples: Vec<Example>,
     seen_examples: BTreeSet<(u8, Vec<i64>, i64)>,
     pub rules: Vec<Rule>,
@@ -182,6 +191,9 @@ impl StateT {
                 self.by_ctx_plan.entry((k.1, k.2)).or_default().add(ok, bad, o.cost);
                 self.by_tmpl_plan.entry((k.0, k.2)).or_default().add(ok, bad, o.cost);
                 self.by_plan.entry(k.2).or_default().add(ok, bad, o.cost);
+                if let Some(f) = &o.file {
+                    self.files.entry(f.clone()).or_default().entry((k.0, k.2)).or_default().add(ok, bad, o.cost);
+                }
                 push_last(self.cell_recent.entry(k).or_default(), &o.event_id);
             }
             if let Some(f) = o.form {
@@ -203,6 +215,11 @@ impl StateT {
         }
         self.rules.push(r);
         true
+    }
+
+    /// Track W2: number of (template, file, plan) keys with counts.
+    pub fn file_keys(&self) -> usize {
+        self.files.values().map(|m| m.len()).sum()
     }
 
     pub fn live_rules(&self) -> usize {
@@ -305,8 +322,10 @@ pub fn genesis_event_t(cfg: &WTCfg, l: &LearnerTCfg) -> (NewEvent, String) {
     tags.extend(cfg.tags());
     tags.extend(l.tags());
     let text = format!(
-        "world T being created: seed {}, budget {} energy units, {} task kinds open at the start and one more every {} energy units, {} files per context and pool in the sandbox; learner beta {:.3}, prior weight {:.3}, {} prior, skip {}. Simulated data-work world with author-defined data, quirks and rewards",
-        cfg.seed, cfg.budget, cfg.start_kinds, cfg.intro_every, cfg.files, l.beta_milli as f64 / 1000.0, l.prior_w_milli as f64 / 1000.0, if l.pooled { "pooled" } else { "flat" }, if l.skip { "on" } else { "off" }
+        "world T being created: seed {}, budget {} energy units, {} task kinds open at the start and one more every {} energy units, {} files per context and pool in the sandbox; learner beta {:.3}, prior weight {:.3}, {} prior, skip {}{}. Simulated data-work world with author-defined data, quirks and rewards",
+        cfg.seed, cfg.budget, cfg.start_kinds, cfg.intro_every, cfg.files, l.beta_milli as f64 / 1000.0, l.prior_w_milli as f64 / 1000.0, if l.pooled { "pooled" } else { "flat" }, if l.skip { "on" } else { "off" },
+        // only when on (Track W2), so that a genesis with it off is the one written before
+        if l.file_key { ", file-keyed estimate on (counts per template, file and plan; prior = the cell estimate; fixed for this being's life)" } else { "" }
     );
     let ev = NewEvent { source: SOURCE_T.into(), occurred_at: iso_at(0), kind: "note".into(), text, tags, redacted: false };
     let id = event_id(&ev.source, &ev.occurred_at, &ev.text);
@@ -544,7 +563,8 @@ impl EngineT {
             }
         }
         let aev = NewEvent { source: SOURCE_T.into(), occurred_at: iso_at(t0), kind: "action".into(), text: atext, tags: atags, redacted: false };
-        let mut out = OutcomeT { step, tmpl: Some(v.tmpl), ctx: Some(v.ctx), plan: ch.plan, result: result.clone(), reward, cost, budget_left, clock: t1, event_id: String::new(), example, form };
+        let file_tag = self.state.learner.file_key.then(|| v.file.clone());
+        let mut out = OutcomeT { step, tmpl: Some(v.tmpl), ctx: Some(v.ctx), plan: ch.plan, result: result.clone(), reward, cost, budget_left, clock: t1, event_id: String::new(), example, form, file: file_tag };
         let mut otags = out.tags();
         if let Some(a) = &answer {
             otags.push(format!("answer:{}", a.replace(',', ";")));
@@ -685,6 +705,15 @@ pub struct RunTSummary {
 
 /// Run the World T being on its own log (or `chooser`, for references and tests), reading files from `sb`.
 pub fn run_t(log: &mut VersionedLog, cfg: &RunTCfg, policy: &Policy, chooser: Option<&mut dyn ChooserT>, sb: &dyn Sandbox) -> Result<RunTSummary, LogError> {
+    run_t_key(log, cfg, None, policy, chooser, sb)
+}
+
+/// As `run_t`, with the Track W2 controller key `wt_file_key` (None: the key is not in controller.txt).
+/// A new being is created with it (None: `cfg.learner`'s setting, off by default) and the setting is recorded
+/// at its genesis. An existing being keeps the setting of its genesis (like every learner constant,
+/// `cfg.learner` is used only at creation); a run that asks for the other setting is refused with an error,
+/// never silently changed.
+pub fn run_t_key(log: &mut VersionedLog, cfg: &RunTCfg, file_key: Option<bool>, policy: &Policy, chooser: Option<&mut dyn ChooserT>, sb: &dyn Sandbox) -> Result<RunTSummary, LogError> {
     let version_before = log.latest_version();
     // Track D1b: with checkpoints off this is exactly the old full fold of the snapshot
     let (mut state, restored) = if policy.checkpoint_every == 0 {
@@ -702,11 +731,20 @@ pub fn run_t(log: &mut VersionedLog, cfg: &RunTCfg, policy: &Policy, chooser: Op
                     return Err(LogError::Invalid(format!("this World T being already lives in world {c:?}; the request says {w:?}. A being keeps one world")));
                 }
             }
+            if let Some(fk) = file_key {
+                if fk != state.learner.file_key {
+                    let on = |b: bool| if b { "on" } else { "off" };
+                    return Err(LogError::Invalid(format!("this World T being was created with wt_file_key = {} (recorded at its genesis); the request says {}. The setting is fixed for the being's life", on(state.learner.file_key), on(fk))));
+                }
+            }
         }
         None => {
             let w = cfg.world.clone().ok_or_else(|| LogError::Invalid("no World T being exists yet; a world config is needed to create one".into()))?;
             w.validate().map_err(LogError::Invalid)?;
-            let l = cfg.learner.unwrap_or_default();
+            let mut l = cfg.learner.unwrap_or_default();
+            if let Some(fk) = file_key {
+                l.file_key = fk;
+            }
             if l.beta_milli > 10_000 || l.prior_w_milli > 100_000 {
                 return Err(LogError::Invalid("learner constants out of range".into()));
             }

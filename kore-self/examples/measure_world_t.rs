@@ -152,7 +152,7 @@ const UCB_C: [f64; 6] = [0.001, 0.003, 0.01, 0.03, 0.1, 0.3];
 const LIN_A: [f64; 6] = [0.1, 0.3, 1.0, 3.0, 10.0, 30.0];
 
 fn being_cfg(b: u32) -> LearnerTCfg {
-    LearnerTCfg { beta_milli: b, prior_w_milli: 2000, pooled: true, skip: true, value_ucb: true }
+    LearnerTCfg { beta_milli: b, prior_w_milli: 2000, pooled: true, skip: true, value_ucb: true, file_key: false }
 }
 /// The being as at abd8de1e (optimism on the right-answer chance only; same at penalty 0).
 fn being_old_cfg(b: u32) -> LearnerTCfg {

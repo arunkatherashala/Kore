@@ -16,7 +16,7 @@ use crate::authorize::{self, Outcome, BEING_ACTOR};
 use crate::being::controller::{self, Controller, Origin};
 use crate::being::policy::{KillCheck, Policy};
 use crate::being::world_t::ctl;
-use crate::being::world_t::engine::{replay_t, run_t, RunTCfg, StateT, DEFAULT_DISCOVER_EVERY};
+use crate::being::world_t::engine::{replay_t, run_t_key, RunTCfg, StateT, DEFAULT_DISCOVER_EVERY};
 use crate::being::world_t::learner::LearnerTCfg;
 use crate::being::world_t::world::{WTCfg, WorldT, DEFAULT_BUDGET};
 use crate::versioned::EventRow;
@@ -83,6 +83,15 @@ pub fn run_world_t(owner: &str, steps: u64, seed: u64, budget: Option<i64>) -> R
     } else {
         crate::being::ckpt::restore::<StateT>(&log).map_err(|e| e.to_string())?.0
     };
+    // Track W2: the file-keyed estimate is fixed at the genesis; asking an existing being for the other setting is refused and audited
+    if let (Some(_), Some(fk)) = (&st0.cfg, ctl::file_key(text.as_deref())) {
+        if fk != st0.learner.file_key {
+            let on = |b: bool| if b { "on" } else { "off" };
+            let why = format!("{} = {} in controller.txt, but this World T being was created with it {} (recorded at its genesis); the setting is fixed for the being's life", ctl::KEY_FILE_KEY, on(fk), on(st0.learner.file_key));
+            audit(owner, ctl::KEY_FILE_KEY, st0.learner.file_key as u64, fk as u64, &why);
+            return Err(format!("controller refused the World T run: {why}"));
+        }
+    }
     let wcfg = st0.cfg.clone().unwrap_or_else(|| WTCfg::new(seed, budget.unwrap_or(DEFAULT_BUDGET)));
     let world = WorldT::new(wcfg.clone());
     write_pool(owner, &world)?;
@@ -93,7 +102,8 @@ pub fn run_world_t(owner: &str, steps: u64, seed: u64, budget: Option<i64>) -> R
     let owner_k = owner.to_string();
     policy.kill = Some(KillCheck(std::sync::Arc::new(move || authorize::kill_active(&owner_k))));
     let cfg = RunTCfg { world: Some(wcfg), learner: Some(LearnerTCfg::default()), discover_every: DEFAULT_DISCOVER_EVERY, ctl: Some(limits), sql: Some(ctl::sql_limits(text.as_deref())) };
-    let s = run_t(&mut log, &cfg, &policy, None, &sb).map_err(|e| e.to_string())?;
+    // Track W2: `wt_file_key` (default off) for a new being; an existing being keeps its genesis setting
+    let s = run_t_key(&mut log, &cfg, ctl::file_key(text.as_deref()), &policy, None, &sb).map_err(|e| e.to_string())?;
     for r in &s.refusals {
         refused.push((r.cap.clone(), r.limit, r.requested, r.what.clone()));
     }
@@ -184,6 +194,47 @@ mod tests {
         let v = run_world_t(o, 10, 99, None).unwrap();
         assert_eq!(v["steps_run"], 10);
         assert_eq!(status_world_t(o).unwrap()["steps"], 50);
+    }
+
+    /// Track W2: `wt_file_key` in controller.txt sets the file-keyed estimate of a NEW being (recorded at its
+    /// genesis); a later run asking for the other setting is refused and audited; without the key it continues.
+    #[test]
+    fn the_file_key_is_set_at_genesis_by_the_controller_and_a_later_change_is_refused() {
+        let o = "wt-filekey";
+        let dir = setup(o);
+        std::fs::write(dir.join("autonomy_policy.txt"), "[L2]
+world_t_run
+").unwrap();
+        std::fs::write(dir.join("controller.txt"), "world_t_run = on
+wt_file_key = on
+").unwrap();
+        assert_eq!(run_world_t(o, 30, 4, Some(800)).unwrap()["steps_run"], 30);
+        let rows = || -> Vec<EventRow> { crate::log_tools::open(o).unwrap().open_latest().rows() };
+        assert!(StateT::from_events(&rows()).learner.file_key);
+        assert!(rows().iter().any(|e| e.tags.contains("wt_genesis") && e.tags.contains("wt_file_key:on")));
+        std::fs::write(dir.join("controller.txt"), "world_t_run = on
+wt_file_key = off
+").unwrap();
+        let e = run_world_t(o, 10, 4, None).unwrap_err();
+        assert!(e.contains("wt_file_key") && e.contains("genesis"), "{e}");
+        assert!(audit_tools(o).iter().any(|t| t.contains("wt_file_key")), "{:?}", audit_tools(o));
+        std::fs::write(dir.join("controller.txt"), "world_t_run = on
+").unwrap();
+        assert_eq!(run_world_t(o, 10, 4, None).unwrap()["steps_run"], 10);
+        let st = StateT::from_events(&rows());
+        assert!(st.learner.file_key && st.step == 40);
+        assert_eq!(status_world_t(o).unwrap()["replay_mismatches"], 0);
+        // a new being without the key: off
+        let o2 = "wt-filekey-off";
+        let dir = setup(o2);
+        std::fs::write(dir.join("autonomy_policy.txt"), "[L2]
+world_t_run
+").unwrap();
+        std::fs::write(dir.join("controller.txt"), "world_t_run = on
+").unwrap();
+        run_world_t(o2, 10, 4, Some(800)).unwrap();
+        let st = StateT::from_events(&crate::log_tools::open(o2).unwrap().open_latest().rows::<EventRow>());
+        assert!(!st.learner.file_key && st.files.is_empty());
     }
 
     #[test]

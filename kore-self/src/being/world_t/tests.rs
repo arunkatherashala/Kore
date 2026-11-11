@@ -328,8 +328,8 @@ fn the_learner_prefers_cheap_plans_that_work_and_pools_across_kinds() {
     assert_eq!(l.choose(&st, &t.view).plan, Some(Plan::NaiveNative));
     // the naive loader failed in this context on another template: the pooled prior carries it over
     for i in 0..6 {
-        st.apply(&OutcomeT { step: i, tmpl: Some(Tmpl::ColSum), ctx: Some(t.view.ctx), plan: Some(Plan::NaiveNative), result: "no_answer".into(), reward: 0, cost: 1, budget_left: 1000, clock: 30, event_id: format!("e{i}"), example: None, form: None });
-        st.apply(&OutcomeT { step: i, tmpl: Some(Tmpl::ColSum), ctx: Some(t.view.ctx), plan: Some(Plan::SniffNative), result: "correct".into(), reward: 6, cost: 2, budget_left: 1000, clock: 30, event_id: format!("f{i}"), example: None, form: None });
+        st.apply(&OutcomeT { step: i, tmpl: Some(Tmpl::ColSum), ctx: Some(t.view.ctx), plan: Some(Plan::NaiveNative), result: "no_answer".into(), reward: 0, cost: 1, budget_left: 1000, clock: 30, event_id: format!("e{i}"), example: None, form: None, file: None });
+        st.apply(&OutcomeT { step: i, tmpl: Some(Tmpl::ColSum), ctx: Some(t.view.ctx), plan: Some(Plan::SniffNative), result: "correct".into(), reward: 6, cost: 2, budget_left: 1000, clock: 30, event_id: format!("f{i}"), example: None, form: None, file: None });
     }
     let e = l.estimate(&st, &t.view, Plan::NaiveNative);
     assert_eq!(e.prior_from, "context+plan");
@@ -549,7 +549,7 @@ fn value_ucb_is_identical_without_a_penalty_explores_the_penalty_term_and_old_lo
     assert!(n.score <= t.view.reward as f64 / n.energy.max(1.0) + 1e-9);
     // after many wrong answers the bonus shrinks and the plan scores below 0 under both rules
     for i in 0..40 {
-        st.apply(&OutcomeT { step: i, tmpl: Some(Tmpl::Lookup), ctx: Some(t.view.ctx), plan: Some(Plan::NaiveNative), result: "wrong".into(), reward: -10, cost: 1, budget_left: 1000, clock: 30, event_id: format!("w{i}"), example: None, form: None });
+        st.apply(&OutcomeT { step: i, tmpl: Some(Tmpl::Lookup), ctx: Some(t.view.ctx), plan: Some(Plan::NaiveNative), result: "wrong".into(), reward: -10, cost: 1, budget_left: 1000, clock: 30, event_id: format!("w{i}"), example: None, form: None, file: None });
     }
     assert!(LearnerT { cfg: LearnerTCfg::default() }.estimate(&st, &t.view, Plan::NaiveNative).score < 0.0);
 }

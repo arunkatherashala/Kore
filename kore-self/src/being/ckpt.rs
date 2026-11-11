@@ -88,6 +88,9 @@ pub fn every_from_text(text: Option<&str>) -> u64 {
 pub trait Foldable: Serialize + DeserializeOwned + Default + Clone + std::fmt::Debug {
     /// Checkpoint kind (file name prefix and anchor tag): `[a-z0-9_]`, unique per reader.
     const KIND: &'static str;
+    /// Snapshot format version of the payload (Track W2: a reader whose payload layout changes gets a new
+    /// one, so that a file of the old layout is not used but folded around). Default: `CKPT_FORMAT` (1).
+    const FORMAT: i64 = crate::versioned::CKPT_FORMAT;
     fn fold(&mut self, e: &EventRow);
     /// Completed steps (cadence of the checkpoints).
     fn steps(&self) -> u64;
@@ -153,7 +156,7 @@ fn decode<S: Foldable>(c: &CheckpointFile) -> Result<S, String> {
 pub fn restore<S: Foldable>(log: &VersionedLog) -> Result<(S, Restored), LogError> {
     let mut rejected = vec![];
     for (_, file) in log.checkpoint_files(S::KIND) {
-        let c = match log.read_checkpoint(S::KIND, &file) {
+        let c = match log.read_checkpoint_fmt(S::KIND, &file, S::FORMAT) {
             Ok(c) => c,
             Err(e) => {
                 rejected.push(e);
@@ -211,7 +214,7 @@ pub fn write_now<S: Foldable>(log: &mut VersionedLog, st: &S) -> Result<Checkpoi
     if !back.same(st) {
         return Err("the decoded payload differs from the state; not written".into());
     }
-    let c = log.write_checkpoint(S::KIND, st.steps(), payload).map_err(|e| e.to_string())?;
+    let c = log.write_checkpoint_fmt(S::KIND, st.steps(), payload, S::FORMAT).map_err(|e| e.to_string())?;
     log.append_events(&[anchor_event(&c, st.clock_secs())]).map_err(|e| e.to_string())?;
     log.prune_checkpoints(S::KIND, KEEP);
     Ok(c)
@@ -257,7 +260,7 @@ pub struct AuditLine {
 pub fn audit<S: Foldable>(log: &VersionedLog) -> Result<Vec<AuditLine>, LogError> {
     let mut out = vec![];
     for (_, file) in log.checkpoint_files(S::KIND) {
-        let c = match log.read_checkpoint(S::KIND, &file) {
+        let c = match log.read_checkpoint_fmt(S::KIND, &file, S::FORMAT) {
             Ok(c) => c,
             Err(e) => {
                 out.push(AuditLine { file, version: None, equal_to_full_fold: None, problem: Some(e) });
@@ -302,8 +305,12 @@ impl Foldable for super::state::BeingState {
     }
 }
 
+/// World T snapshot format: 1 = before Track W2; 2 = with the learner's `file_key` and the file-keyed counts.
+pub const WORLD_T_FORMAT: i64 = 2;
+
 impl Foldable for super::world_t::engine::StateT {
     const KIND: &'static str = "world_t";
+    const FORMAT: i64 = WORLD_T_FORMAT;
     fn fold(&mut self, e: &EventRow) {
         self.fold_event(e);
     }

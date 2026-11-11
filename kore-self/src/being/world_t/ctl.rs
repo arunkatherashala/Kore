@@ -11,9 +11,12 @@ pub const KEY: &str = "world_t_run";
 pub const KEY_SQL_TIMEOUT: &str = "world_t_sql_timeout_ms";
 /// Largest result of one query in rows (default 1000, hard maximum 1000000).
 pub const KEY_SQL_ROWS: &str = "world_t_sql_max_rows";
+/// Track W2: the file-keyed estimate for a NEW World T being (on / off; default off). Recorded at the
+/// being's genesis; an existing being keeps its setting and a run asking for the other one is refused.
+pub const KEY_FILE_KEY: &str = "wt_file_key";
 
 pub fn is_key(k: &str) -> bool {
-    k == KEY || k == KEY_SQL_TIMEOUT || k == KEY_SQL_ROWS
+    k == KEY || k == KEY_SQL_TIMEOUT || k == KEY_SQL_ROWS || k == KEY_FILE_KEY
 }
 
 fn num(k: &str, v: &str, hard: u64) -> Result<u64, String> {
@@ -54,6 +57,23 @@ pub fn sql_limits(text: Option<&str>) -> SqlLimits {
     l
 }
 
+
+/// The `wt_file_key` request of a controller text: Some(on/off) when the key is set in a valid file; None
+/// when the file is missing or invalid or the key is absent (fail closed: no request, so a new being is
+/// created with it off; an invalid file also refuses the run itself, `allowed`).
+pub fn file_key(text: Option<&str>) -> Option<bool> {
+    let text = text?;
+    crate::being::controller::Controller::parse(text).ok()?;
+    for raw in text.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim() == KEY_FILE_KEY {
+                return parse_bool(v.trim());
+            }
+        }
+    }
+    None
+}
 
 fn parse_bool(v: &str) -> Option<bool> {
     match v.to_ascii_lowercase().as_str() {

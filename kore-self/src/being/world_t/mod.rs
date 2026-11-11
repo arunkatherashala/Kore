@@ -22,3 +22,5 @@ mod tests;
 mod tests_golden;
 #[cfg(test)]
 mod tests_engine;
+#[cfg(test)]
+mod tests_w2;

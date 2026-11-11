@@ -149,6 +149,8 @@ pub struct LinCfg {
 }
 
 struct LinArm {
+    /// Dimension (LIN_D; with the file feature LIN_D plus the files met so far, grown as files are met).
+    d: usize,
     ainv: Vec<f64>,
     b: Vec<f64>,
     /// Target "the answer was wrong" (same features, same design matrix).
@@ -156,12 +158,28 @@ struct LinArm {
 }
 
 impl LinArm {
-    fn new() -> LinArm {
-        let mut ainv = vec![0.0; LIN_D * LIN_D];
-        for i in 0..LIN_D {
-            ainv[i * LIN_D + i] = 1.0;
+    fn new(d: usize) -> LinArm {
+        let mut ainv = vec![0.0; d * d];
+        for i in 0..d {
+            ainv[i * d + i] = 1.0;
         }
-        LinArm { ainv, b: vec![0.0; LIN_D], bw: vec![0.0; LIN_D] }
+        LinArm { d, ainv, b: vec![0.0; d], bw: vec![0.0; d] }
+    }
+    /// One more one-hot dimension never seen so far: A = I + sum x x' has the identity in its row and column,
+    /// so A^-1 is extended by the identity (exact; the same as having had the dimension from the start).
+    fn grow(&mut self, d: usize) {
+        while self.d < d {
+            let (o, n) = (self.d, self.d + 1);
+            let mut a = vec![0.0; n * n];
+            for i in 0..o {
+                a[i * n..i * n + o].copy_from_slice(&self.ainv[i * o..(i + 1) * o]);
+            }
+            a[o * n + o] = 1.0;
+            self.ainv = a;
+            self.b.push(0.0);
+            self.bw.push(0.0);
+            self.d = n;
+        }
     }
     /// (theta . x, x' A^-1 x) for a sparse one-hot x.
     fn eval(&self, x: &[usize]) -> (f64, f64) {
@@ -169,7 +187,8 @@ impl LinArm {
         let mut var = 0.0;
         for &i in x {
             // theta_i = sum_j ainv[i][j] b[j]
-            let row = &self.ainv[i * LIN_D..(i + 1) * LIN_D];
+            let d = self.d;
+            let row = &self.ainv[i * d..(i + 1) * d];
             mean += row.iter().zip(&self.b).map(|(a, b)| a * b).sum::<f64>();
             for &j in x {
                 var += row[j];
@@ -178,26 +197,28 @@ impl LinArm {
         (mean, var.max(0.0))
     }
     fn mean_wrong(&self, x: &[usize]) -> f64 {
-        x.iter().map(|&i| self.ainv[i * LIN_D..(i + 1) * LIN_D].iter().zip(&self.bw).map(|(a, b)| a * b).sum::<f64>()).sum()
+        let d = self.d;
+        x.iter().map(|&i| self.ainv[i * d..(i + 1) * d].iter().zip(&self.bw).map(|(a, b)| a * b).sum::<f64>()).sum()
     }
     fn update(&mut self, x: &[usize], y: f64, yw: f64) {
         for &j in x {
             self.bw[j] += yw;
         }
         // Sherman-Morrison: ainv -= (ainv x)(x' ainv) / (1 + x' ainv x)
-        let mut u = vec![0.0; LIN_D];
+        let d = self.d;
+        let mut u = vec![0.0; d];
         for &j in x {
-            for i in 0..LIN_D {
-                u[i] += self.ainv[i * LIN_D + j];
+            for i in 0..d {
+                u[i] += self.ainv[i * d + j];
             }
         }
         let denom = 1.0 + x.iter().map(|&j| u[j]).sum::<f64>();
-        for i in 0..LIN_D {
+        for i in 0..d {
             if u[i] == 0.0 {
                 continue;
             }
             let ui = u[i] / denom;
-            let row = &mut self.ainv[i * LIN_D..(i + 1) * LIN_D];
+            let row = &mut self.ainv[i * d..(i + 1) * d];
             for (r, uj) in row.iter_mut().zip(&u) {
                 *r -= ui * uj;
             }
@@ -213,20 +234,45 @@ pub struct LinUcbT {
     arms: BTreeMap<u8, LinArm>,
     rew: f64,
     cost: f64,
+    /// Track W2 baseline "LinUCB with the file feature": a one-hot of the task's file (its name, as the view
+    /// shows it) appended to the features; a file gets its dimension when first met (exactly a one-hot over
+    /// all files, see `LinArm::grow`). None: the W1 features only.
+    files: Option<BTreeMap<String, usize>>,
 }
 
 impl LinUcbT {
     pub fn new(cfg: LinCfg) -> LinUcbT {
-        LinUcbT { cfg, arms: BTreeMap::new(), rew: 0.0, cost: 0.0 }
+        LinUcbT { cfg, arms: BTreeMap::new(), rew: 0.0, cost: 0.0, files: None }
+    }
+    /// LinUCB with the file feature (Track W2 baseline, measurement only).
+    pub fn with_file(cfg: LinCfg) -> LinUcbT {
+        LinUcbT { files: Some(BTreeMap::new()), ..LinUcbT::new(cfg) }
+    }
+    fn dim(&self) -> usize {
+        LIN_D + self.files.as_ref().map_or(0, |f| f.len())
+    }
+    /// The features of a view; with the file feature, the file's dimension is added (every arm grown) when new.
+    fn x(&mut self, v: &ViewT) -> Vec<usize> {
+        let mut x = feats(v).to_vec();
+        if let Some(f) = &mut self.files {
+            let n = f.len();
+            let i = *f.entry(v.file.clone()).or_insert(n);
+            let d = LIN_D + f.len();
+            for a in self.arms.values_mut() {
+                a.grow(d);
+            }
+            x.push(LIN_D + i);
+        }
+        x
     }
 }
 
 impl ChooserT for LinUcbT {
     fn name(&self) -> String {
-        format!("LinUCB (alpha {}, skip {})", self.cfg.alpha, if self.cfg.skip { "on" } else { "off" })
+        format!("LinUCB{} (alpha {}, skip {})", if self.files.is_some() { " with the file feature" } else { "" }, self.cfg.alpha, if self.cfg.skip { "on" } else { "off" })
     }
     fn choose(&mut self, _st: &StateT, v: &ViewT) -> ChoiceT {
-        let x = feats(v);
+        let x = self.x(v);
         let mut best: Option<(f64, Plan, f64)> = None;
         for p in fixed(v.tmpl) {
             let e = p.listed(v) as f64;
@@ -249,8 +295,9 @@ impl ChooserT for LinUcbT {
         self.rew += reward as f64;
         self.cost += cost as f64;
         if let Some(p) = plan {
-            let x = feats(v);
-            self.arms.entry(p.idx() as u8).or_insert_with(LinArm::new).update(&x, if reward > 0 { 1.0 } else { 0.0 }, if reward < 0 { 1.0 } else { 0.0 });
+            let x = self.x(v);
+            let d = self.dim();
+            self.arms.entry(p.idx() as u8).or_insert_with(|| LinArm::new(d)).update(&x, if reward > 0 { 1.0 } else { 0.0 }, if reward < 0 { 1.0 } else { 0.0 });
         }
     }
 }
