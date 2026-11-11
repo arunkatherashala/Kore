@@ -3351,11 +3351,11 @@ base 0.585; on the report seeds B14+E1 minus B14 had sd about 0.10.
 
 ### Gate 0 result (2026-11-10, harness at d34657b7, `measure_n1diag gate0`)
 
-Check: every summary number below was recomputed from 60 per-world rows (seeds 1..60, one row each) and matches.
-Those rows are a copy **reconstructed from the session transcript**, because the original raw output file in a
-temporary scratch folder was deleted; the reconstruction is not byte-identical to the original (72 bytes longer) and
-is not used as raw evidence. A reproduction run (same code d34657b7, same configuration, seeds 1..60; not a new report
-run) is to regenerate the per-world rows, which are then committed under `docs/data/`.
+Per-world data: `docs/data/n1_gate0_report_seeds1-60.tsv` (60 rows) and `docs/data/n1_gate0_tune_seeds101-120.tsv`
+(20 rows). The original raw output in a temporary scratch folder was deleted; these files come from a reproduction run
+on 2026-11-11 (same code d34657b7, same configuration and seeds; a reproduction, not a new report run). All 60 report
+rows and all 20 tuning rows are identical in every result column to the rows recorded on 2026-11-10 (only the wall
+times differ), and every summary number below matches.
 
 World T, penalty 0, energy weight 1, budget 6000, default files; B1 beta tuned on seeds 101..120 only, then one
 report run on seeds 1..60.

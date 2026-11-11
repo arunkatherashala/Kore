@@ -1,0 +1,72 @@
+seed	b0	b1	b2_linucb	kp_file_own_ratio	wall_b0	wall_b1	wall_b2	wall_kp	extra
+1	4.013333	4.430333	3.894000	4.775167	2.09	2.08	1.68	5.80	b0_skip=0.1288 b1_skip=0.1656 b0_right_of_answered=0.8444 b1_right_of_answered=0.8953 b0_wrong_per100=12.246 b1_wrong_per100=8.176 b1_file_keys=587
+2	4.025000	4.142667	3.961500	4.383833	2.25	2.33	2.02	8.33	b0_skip=0.1442 b1_skip=0.1614 b0_right_of_answered=0.8801 b1_right_of_answered=0.9016 b0_wrong_per100=9.408 b1_wrong_per100=7.824 b1_file_keys=525
+3	3.407500	3.666000	3.430333	4.010667	2.15	2.24	2.13	8.25	b0_skip=0.0517 b1_skip=0.0742 b0_right_of_answered=0.8499 b1_right_of_answered=0.8863 b0_wrong_per100=13.380 b1_wrong_per100=9.866 b1_file_keys=634
+4	3.978333	4.274667	3.923500	4.669833	2.68	2.34	2.20	7.15	b0_skip=0.2028 b1_skip=0.2062 b0_right_of_answered=0.8776 b1_right_of_answered=0.8943 b0_wrong_per100=8.652 b1_wrong_per100=7.855 b1_file_keys=491
+5	4.097000	4.150167	3.870000	4.600167	2.95	3.04	2.51	9.93	b0_skip=0.1394 b1_skip=0.1478 b0_right_of_answered=0.8758 b1_right_of_answered=0.9195 b0_wrong_per100=9.769 b1_wrong_per100=6.403 b1_file_keys=509
+6	4.334667	4.642000	4.190000	4.934833	2.41	2.07	1.71	5.88	b0_skip=0.1596 b1_skip=0.1829 b0_right_of_answered=0.8474 b1_right_of_answered=0.9052 b0_wrong_per100=11.827 b1_wrong_per100=7.292 b1_file_keys=486
+7	4.029000	4.342000	3.879000	4.654833	4.10	4.24	4.02	14.62	b0_skip=0.1562 b1_skip=0.1855 b0_right_of_answered=0.8054 b1_right_of_answered=0.8797 b0_wrong_per100=14.833 b1_wrong_per100=9.188 b1_file_keys=451
+8	3.833667	3.862667	3.823667	4.502667	2.06	2.02	1.91	6.60	b0_skip=0.1562 b1_skip=0.1896 b0_right_of_answered=0.8504 b1_right_of_answered=0.8701 b0_wrong_per100=11.815 b1_wrong_per100=9.931 b1_file_keys=498
+9	3.711167	3.921833	3.487000	4.316833	1.73	1.92	1.71	6.96	b0_skip=0.0685 b1_skip=0.0948 b0_right_of_answered=0.8854 b1_right_of_answered=0.9012 b0_wrong_per100=9.760 b1_wrong_per100=8.288 b1_file_keys=592
+10	3.841000	3.939500	3.719500	4.207667	3.08	3.06	2.91	10.94	b0_skip=0.1481 b1_skip=0.1315 b0_right_of_answered=0.8901 b1_right_of_answered=0.8992 b0_wrong_per100=8.575 b1_wrong_per100=8.211 b1_file_keys=580
+11	3.947000	4.155167	3.785000	4.480833	3.85	3.70	3.58	13.98	b0_skip=0.1607 b1_skip=0.1629 b0_right_of_answered=0.8730 b1_right_of_answered=0.9213 b0_wrong_per100=10.118 b1_wrong_per100=6.194 b1_file_keys=503
+12	3.581667	3.822000	3.528500	4.156167	2.49	2.38	2.01	8.98	b0_skip=0.0786 b1_skip=0.1085 b0_right_of_answered=0.8281 b1_right_of_answered=0.8959 b0_wrong_per100=14.132 b1_wrong_per100=8.457 b1_file_keys=576
+13	4.261667	4.570333	4.050000	4.882000	1.83	2.02	1.60	5.52	b0_skip=0.1736 b1_skip=0.1953 b0_right_of_answered=0.9173 b1_right_of_answered=0.9283 b0_wrong_per100=5.926 b1_wrong_per100=5.358 b1_file_keys=474
+14	3.545833	3.962333	3.576500	4.328333	1.72	1.60	1.45	5.56	b0_skip=0.0385 b1_skip=0.0525 b0_right_of_answered=0.8416 b1_right_of_answered=0.8943 b0_wrong_per100=13.688 b1_wrong_per100=9.186 b1_file_keys=569
+15	4.346333	4.560833	4.001000	4.846167	2.82	3.24	2.33	8.35	b0_skip=0.1438 b1_skip=0.2035 b0_right_of_answered=0.8251 b1_right_of_answered=0.9025 b0_wrong_per100=13.310 b1_wrong_per100=7.244 b1_file_keys=472
+16	3.890667	4.175333	3.676333	4.452667	2.63	2.82	2.42	9.62	b0_skip=0.1060 b1_skip=0.1202 b0_right_of_answered=0.9266 b1_right_of_answered=0.9338 b0_wrong_per100=5.990 b1_wrong_per100=5.364 b1_file_keys=561
+17	3.775667	4.055000	3.685667	4.408833	2.48	2.55	1.97	9.40	b0_skip=0.1443 b1_skip=0.1959 b0_right_of_answered=0.8520 b1_right_of_answered=0.8967 b0_wrong_per100=11.757 b1_wrong_per100=7.812 b1_file_keys=530
+18	3.537000	3.735833	3.362500	4.256500	2.68	2.74	2.56	9.95	b0_skip=0.1598 b1_skip=0.1016 b0_right_of_answered=0.8472 b1_right_of_answered=0.8984 b0_wrong_per100=11.999 b1_wrong_per100=8.706 b1_file_keys=516
+19	3.552500	3.816167	3.445167	4.233333	1.99	1.90	1.76	7.23	b0_skip=0.0563 b1_skip=0.0934 b0_right_of_answered=0.8561 b1_right_of_answered=0.9025 b0_wrong_per100=11.956 b1_wrong_per100=8.170 b1_file_keys=543
+20	3.586000	3.855167	3.464500	4.240167	1.49	1.67	1.39	5.97	b0_skip=0.0905 b1_skip=0.1530 b0_right_of_answered=0.8214 b1_right_of_answered=0.9113 b0_wrong_per100=14.590 b1_wrong_per100=6.864 b1_file_keys=572
+21	3.530833	3.780000	3.374333	4.214167	1.56	1.68	1.59	5.93	b0_skip=0.0522 b1_skip=0.0747 b0_right_of_answered=0.8853 b1_right_of_answered=0.9210 b0_wrong_per100=9.399 b1_wrong_per100=6.621 b1_file_keys=657
+22	4.004333	4.227333	3.910000	4.489500	2.21	2.16	1.88	7.33	b0_skip=0.1688 b1_skip=0.1922 b0_right_of_answered=0.7850 b1_right_of_answered=0.8832 b0_wrong_per100=16.327 b1_wrong_per100=8.935 b1_file_keys=455
+23	3.878833	4.080000	3.509000	4.369000	2.90	2.85	2.38	8.72	b0_skip=0.2054 b1_skip=0.2216 b0_right_of_answered=0.8680 b1_right_of_answered=0.8999 b0_wrong_per100=9.575 b1_wrong_per100=7.287 b1_file_keys=508
+24	3.846000	4.301333	3.580667	4.567500	2.05	2.23	1.93	7.49	b0_skip=0.0782 b1_skip=0.1627 b0_right_of_answered=0.7753 b1_right_of_answered=0.8818 b0_wrong_per100=19.490 b1_wrong_per100=9.442 b1_file_keys=474
+25	3.624667	3.738833	3.576333	4.032833	3.06	3.07	2.89	11.11	b0_skip=0.0798 b1_skip=0.1004 b0_right_of_answered=0.8598 b1_right_of_answered=0.9015 b0_wrong_per100=11.983 b1_wrong_per100=8.329 b1_file_keys=548
+26	4.397333	4.610667	4.110167	4.916500	2.34	2.28	1.98	6.59	b0_skip=0.0928 b1_skip=0.1409 b0_right_of_answered=0.8678 b1_right_of_answered=0.9223 b0_wrong_per100=10.826 b1_wrong_per100=6.178 b1_file_keys=515
+27	4.668833	4.899000	4.619667	5.133833	2.38	2.34	2.21	7.02	b0_skip=0.0967 b1_skip=0.1460 b0_right_of_answered=0.8593 b1_right_of_answered=0.9073 b0_wrong_per100=11.276 b1_wrong_per100=7.361 b1_file_keys=502
+28	3.727667	3.924667	3.488000	4.464833	3.54	3.62	3.17	11.72	b0_skip=0.0959 b1_skip=0.1258 b0_right_of_answered=0.8741 b1_right_of_answered=0.9048 b0_wrong_per100=10.111 b1_wrong_per100=7.634 b1_file_keys=574
+29	4.131167	4.353667	4.111500	4.636333	3.22	3.29	2.84	9.61	b0_skip=0.1124 b1_skip=0.1451 b0_right_of_answered=0.8637 b1_right_of_answered=0.9025 b0_wrong_per100=11.147 b1_wrong_per100=7.762 b1_file_keys=543
+30	4.029333	4.178167	3.609000	4.505000	3.13	3.26	2.50	10.12	b0_skip=0.1683 b1_skip=0.2042 b0_right_of_answered=0.8649 b1_right_of_answered=0.9141 b0_wrong_per100=10.310 b1_wrong_per100=6.384 b1_file_keys=540
+31	3.760667	3.952833	3.700833	4.253833	2.04	2.10	1.83	6.87	b0_skip=0.1172 b1_skip=0.1413 b0_right_of_answered=0.8840 b1_right_of_answered=0.9061 b0_wrong_per100=8.910 b1_wrong_per100=7.439 b1_file_keys=616
+32	3.951167	4.211667	3.991667	4.456333	2.06	2.09	1.89	7.14	b0_skip=0.1452 b1_skip=0.1957 b0_right_of_answered=0.8362 b1_right_of_answered=0.8804 b0_wrong_per100=12.937 b1_wrong_per100=9.027 b1_file_keys=477
+33	3.730000	3.944167	3.637833	4.282167	1.81	1.89	1.59	6.39	b0_skip=0.0825 b1_skip=0.0981 b0_right_of_answered=0.8705 b1_right_of_answered=0.9218 b0_wrong_per100=11.102 b1_wrong_per100=6.667 b1_file_keys=485
+34	4.189667	4.347833	3.875333	4.772000	4.31	4.12	3.50	12.42	b0_skip=0.2119 b1_skip=0.2866 b0_right_of_answered=0.8979 b1_right_of_answered=0.9295 b0_wrong_per100=7.010 b1_wrong_per100=4.707 b1_file_keys=408
+35	3.740333	4.061333	3.704333	4.296167	2.96	3.49	2.94	10.94	b0_skip=0.1246 b1_skip=0.1601 b0_right_of_answered=0.9409 b1_right_of_answered=0.9103 b0_wrong_per100=4.754 b1_wrong_per100=7.166 b1_file_keys=408
+36	4.515167	4.693667	4.326000	5.126667	2.89	2.94	2.35	8.59	b0_skip=0.1088 b1_skip=0.1109 b0_right_of_answered=0.8731 b1_right_of_answered=0.8956 b0_wrong_per100=10.386 b1_wrong_per100=8.589 b1_file_keys=531
+37	3.756333	3.798333	3.676000	4.180833	3.26	3.74	3.10	11.71	b0_skip=0.0736 b1_skip=0.1231 b0_right_of_answered=0.9205 b1_right_of_answered=0.9070 b0_wrong_per100=6.470 b1_wrong_per100=7.484 b1_file_keys=581
+38	4.665000	4.887000	4.323667	5.294333	2.54	2.48	1.99	7.48	b0_skip=0.1862 b1_skip=0.1869 b0_right_of_answered=0.8557 b1_right_of_answered=0.8873 b0_wrong_per100=10.437 b1_wrong_per100=8.711 b1_file_keys=412
+39	3.798667	3.943500	3.721833	4.336500	3.12	3.34	2.60	8.21	b0_skip=0.1223 b1_skip=0.1290 b0_right_of_answered=0.8958 b1_right_of_answered=0.9143 b0_wrong_per100=8.253 b1_wrong_per100=6.977 b1_file_keys=580
+40	3.831333	4.032000	3.828667	4.344500	3.32	2.94	2.78	8.36	b0_skip=0.1362 b1_skip=0.1548 b0_right_of_answered=0.8484 b1_right_of_answered=0.8820 b0_wrong_per100=12.175 b1_wrong_per100=9.383 b1_file_keys=562
+41	4.060333	4.293667	4.059833	4.756167	2.71	2.75	2.56	7.76	b0_skip=0.1115 b1_skip=0.1691 b0_right_of_answered=0.8356 b1_right_of_answered=0.8937 b0_wrong_per100=13.736 b1_wrong_per100=8.384 b1_file_keys=541
+42	3.953167	4.353333	3.489000	4.691667	2.27	2.11	1.77	7.09	b0_skip=0.1499 b1_skip=0.1684 b0_right_of_answered=0.8712 b1_right_of_answered=0.9015 b0_wrong_per100=9.816 b1_wrong_per100=7.741 b1_file_keys=464
+43	3.839667	3.913000	3.575500	4.271000	3.11	3.17	2.35	7.77	b0_skip=0.1295 b1_skip=0.1389 b0_right_of_answered=0.8634 b1_right_of_answered=0.9006 b0_wrong_per100=11.237 b1_wrong_per100=8.203 b1_file_keys=476
+44	3.774333	3.869667	3.677000	4.301333	2.63	2.32	1.86	6.16	b0_skip=0.1512 b1_skip=0.1597 b0_right_of_answered=0.8754 b1_right_of_answered=0.9255 b0_wrong_per100=9.343 b1_wrong_per100=5.772 b1_file_keys=611
+45	3.932167	4.336833	3.659333	4.532000	3.75	3.24	2.65	6.76	b0_skip=0.1342 b1_skip=0.1813 b0_right_of_answered=0.8144 b1_right_of_answered=0.9099 b0_wrong_per100=14.977 b1_wrong_per100=7.069 b1_file_keys=403
+46	4.395833	4.642000	4.219167	5.086500	2.86	2.85	2.34	8.48	b0_skip=0.1579 b1_skip=0.1891 b0_right_of_answered=0.8772 b1_right_of_answered=0.9072 b0_wrong_per100=9.513 b1_wrong_per100=7.084 b1_file_keys=481
+47	3.360500	3.498000	3.132667	3.874167	1.82	1.98	1.91	7.93	b0_skip=0.0426 b1_skip=0.0457 b0_right_of_answered=0.8896 b1_right_of_answered=0.9082 b0_wrong_per100=9.571 b1_wrong_per100=7.985 b1_file_keys=611
+48	4.124000	4.241833	3.952833	4.592167	2.05	2.45	1.66	7.14	b0_skip=0.1370 b1_skip=0.2354 b0_right_of_answered=0.8498 b1_right_of_answered=0.9029 b0_wrong_per100=11.693 b1_wrong_per100=6.912 b1_file_keys=441
+49	3.566500	3.660333	3.161167	4.122833	3.25	3.30	3.03	12.63	b0_skip=0.0857 b1_skip=0.0785 b0_right_of_answered=0.8942 b1_right_of_answered=0.8997 b0_wrong_per100=8.599 b1_wrong_per100=8.395 b1_file_keys=612
+50	3.487333	3.736500	3.318167	4.122000	2.31	2.38	1.97	7.29	b0_skip=0.0950 b1_skip=0.1304 b0_right_of_answered=0.8340 b1_right_of_answered=0.8678 b0_wrong_per100=13.695 b1_wrong_per100=10.749 b1_file_keys=623
+51	3.278167	3.547500	3.187667	3.818500	2.79	3.12	2.81	11.18	b0_skip=0.0605 b1_skip=0.0730 b0_right_of_answered=0.7772 b1_right_of_answered=0.9091 b0_wrong_per100=19.572 b1_wrong_per100=7.876 b1_file_keys=568
+52	4.081333	4.231000	4.025333	4.594833	2.99	2.80	2.59	8.81	b0_skip=0.2212 b1_skip=0.2478 b0_right_of_answered=0.8914 b1_right_of_answered=0.9206 b0_wrong_per100=7.460 b1_wrong_per100=5.562 b1_file_keys=446
+53	4.053000	4.095333	3.845167	4.728667	2.24	2.13	2.03	7.14	b0_skip=0.1337 b1_skip=0.1326 b0_right_of_answered=0.8653 b1_right_of_answered=0.8992 b0_wrong_per100=10.570 b1_wrong_per100=8.092 b1_file_keys=553
+54	3.894333	4.353167	3.818667	4.625833	2.70	2.97	2.37	7.77	b0_skip=0.1351 b1_skip=0.1837 b0_right_of_answered=0.7964 b1_right_of_answered=0.8767 b0_wrong_per100=16.359 b1_wrong_per100=9.528 b1_file_keys=488
+55	3.760833	3.821667	3.572000	4.129833	3.06	3.16	2.71	10.57	b0_skip=0.1199 b1_skip=0.1158 b0_right_of_answered=0.8778 b1_right_of_answered=0.9052 b0_wrong_per100=9.985 b1_wrong_per100=7.895 b1_file_keys=489
+56	3.523000	3.853833	3.572833	4.270167	2.26	2.49	2.14	7.77	b0_skip=0.1799 b1_skip=0.1145 b0_right_of_answered=0.9040 b1_right_of_answered=0.8985 b0_wrong_per100=6.932 b1_wrong_per100=8.170 b1_file_keys=587
+57	4.174000	4.490167	3.906000	4.742667	2.57	2.40	2.05	6.99	b0_skip=0.1404 b1_skip=0.1930 b0_right_of_answered=0.7690 b1_right_of_answered=0.8882 b0_wrong_per100=18.367 b1_wrong_per100=8.547 b1_file_keys=437
+58	3.500500	3.600000	3.210667	4.102833	3.05	2.82	2.54	11.10	b0_skip=0.0914 b1_skip=0.1215 b0_right_of_answered=0.8913 b1_right_of_answered=0.9093 b0_wrong_per100=8.387 b1_wrong_per100=7.161 b1_file_keys=600
+59	3.800167	4.036833	3.577167	4.433000	1.98	2.34	1.66	6.54	b0_skip=0.0743 b1_skip=0.0898 b0_right_of_answered=0.8856 b1_right_of_answered=0.9094 b0_wrong_per100=9.494 b1_wrong_per100=7.591 b1_file_keys=628
+60	3.691500	3.892833	3.405333	4.226500	2.64	2.61	2.05	7.69	b0_skip=0.1148 b1_skip=0.0988 b0_right_of_answered=0.8757 b1_right_of_answered=0.8947 b0_wrong_per100=9.941 b1_wrong_per100=8.813 b1_file_keys=590
+# B0: 3.889 [3.809, 3.968]
+# B1: 4.109 [4.024, 4.193]
+# B2 LinUCB alpha 1: 3.730 [3.651, 3.809]
+# KP file, own rules, being's rule: 4.467 [4.386, 4.548]
+# GATE 0: B1 minus B0: +0.220 [+0.193, +0.247] (60/0/0), paired sd 0.104
+# B2 minus B0: -0.159 [-0.190, -0.127] (4/0/56), paired sd 0.122
+# KP file minus B0: +0.579 [+0.552, +0.606] (60/0/0), paired sd 0.104
+# KP file minus B1: +0.359 [+0.335, +0.382] (60/0/0), paired sd 0.092
+# (c) share of the KP-file gap closed by B1, (B1 - B0) / (KP file - B0): 0.380; bootstrap 95% [0.342, 0.416]; delta method [0.342, 0.418]
+# wall time per life (s, mean of 60, 8 worlds in parallel): B0 2.62, B1 2.65, B2 2.28, KP file (incl. its two parameter passes) 8.46; total 125 s
+# B1 beta 2.0 (fixed on the tuning seeds)
