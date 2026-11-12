@@ -211,7 +211,8 @@ fn the_setting_is_fixed_at_genesis_and_a_later_run_cannot_change_it() {
 
 #[test]
 fn an_old_format_world_t_checkpoint_is_not_used_and_the_log_is_folded() {
-    assert_eq!(<StateT as Foldable>::FORMAT, 2);
+    // Track S1 raised the World T format to 3 (self-tune state in the payload); a format-1 file is refused as before
+    assert_eq!(<StateT as Foldable>::FORMAT, 3);
     assert_eq!(<crate::being::state::BeingState as Foldable>::FORMAT, crate::versioned::CKPT_FORMAT);
     let c = WTCfg::new(12, 1500);
     let w = WorldT::new(c.clone());
@@ -227,8 +228,8 @@ fn an_old_format_world_t_checkpoint_is_not_used_and_the_log_is_folded() {
     let full: StateT = ckpt::full_fold(&log).unwrap();
     let files = log.checkpoint_files("world_t");
     assert_eq!(files.len(), 1);
-    // the new file is format 2: the format-1 reader refuses it, the World T reader uses it
-    assert!(log.read_checkpoint("world_t", &files[0].1).unwrap_err().contains("unknown snapshot format version 2"));
+    // the new file is format 3: the format-1 reader refuses it, the World T reader uses it
+    assert!(log.read_checkpoint("world_t", &files[0].1).unwrap_err().contains("unknown snapshot format version 3"));
     let (st, r) = ckpt::restore::<StateT>(&log).unwrap();
     assert!(r.from_version.is_some() && st == full);
     // a checkpoint written in the old format 1 (what the code before Track W2 wrote), anchored like a real one:

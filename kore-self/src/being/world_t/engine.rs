@@ -153,6 +153,8 @@ pub struct StateT {
     pub kinds_open: Vec<Kind>,
     pub recent: Vec<String>,
     pub cell_recent: BTreeMap<(u8, u8, u8), Vec<String>>,
+    /// Track S1: the self-tuned beta (off and empty unless the genesis has `wt_self_tune:on`).
+    pub self_tune: super::self_tune::SelfTune,
 }
 
 fn push_last(v: &mut Vec<String>, id: &str) {
@@ -207,6 +209,9 @@ impl StateT {
             }
         }
         push_last(&mut self.recent, &o.event_id);
+        if self.self_tune.on {
+            self.self_tune.add_outcome(o.step, o.reward, o.cost, &o.event_id);
+        }
     }
 
     pub fn apply_rule(&mut self, r: Rule) -> bool {
@@ -240,9 +245,14 @@ impl StateT {
         }
         let has = |t: &str| e.tags.split(',').any(|x| x == t);
         if e.kind == "note" && has("wt_genesis") && self.cfg.is_none() {
-            if let (Some(c), Some(l)) = (WTCfg::from_tags(&e.tags), LearnerTCfg::from_tags(&e.tags)) {
+            if let (Some(c), Some(l), Some(stn)) = (WTCfg::from_tags(&e.tags), LearnerTCfg::from_tags(&e.tags), super::self_tune::genesis_setting(&e.tags)) {
                 self.start(c, l, e.event_id.clone());
+                if stn {
+                    self.self_tune = super::self_tune::SelfTune::on();
+                }
             }
+        } else if self.self_tune.on && has("self_tune") {
+            super::self_tune::fold_event(self, e);
         } else if e.kind == "note" && has("wt_kind") {
             if let Some(k) = tag(&e.tags, "kind").and_then(|x| KINDS.iter().copied().find(|k| k.name() == x)) {
                 if !self.kinds_open.contains(&k) {
@@ -714,6 +724,14 @@ pub fn run_t(log: &mut VersionedLog, cfg: &RunTCfg, policy: &Policy, chooser: Op
 /// `cfg.learner` is used only at creation); a run that asks for the other setting is refused with an error,
 /// never silently changed.
 pub fn run_t_key(log: &mut VersionedLog, cfg: &RunTCfg, file_key: Option<bool>, policy: &Policy, chooser: Option<&mut dyn ChooserT>, sb: &dyn Sandbox) -> Result<RunTSummary, LogError> {
+    run_t_self(log, cfg, file_key, None, policy, chooser, sb)
+}
+
+/// As `run_t_key`, with the Track S1 controller key `wt_self_tune` (None: not in controller.txt). It is read only
+/// when the being's `wt_file_key` is on (at creation: the effective setting; later: the genesis setting). A new
+/// being is created with it (default off; recorded at the genesis); an existing being keeps its genesis setting and
+/// a run asking for the other one is refused with an error.
+pub fn run_t_self(log: &mut VersionedLog, cfg: &RunTCfg, file_key: Option<bool>, self_tune: Option<bool>, policy: &Policy, chooser: Option<&mut dyn ChooserT>, sb: &dyn Sandbox) -> Result<RunTSummary, LogError> {
     let version_before = log.latest_version();
     // Track D1b: with checkpoints off this is exactly the old full fold of the snapshot
     let (mut state, restored) = if policy.checkpoint_every == 0 {
@@ -737,6 +755,9 @@ pub fn run_t_key(log: &mut VersionedLog, cfg: &RunTCfg, file_key: Option<bool>, 
                     return Err(LogError::Invalid(format!("this World T being was created with wt_file_key = {} (recorded at its genesis); the request says {}. The setting is fixed for the being's life", on(state.learner.file_key), on(fk))));
                 }
             }
+            if let Some(why) = super::self_tune::refusal(&state, self_tune) {
+                return Err(LogError::Invalid(why));
+            }
         }
         None => {
             let w = cfg.world.clone().ok_or_else(|| LogError::Invalid("no World T being exists yet; a world config is needed to create one".into()))?;
@@ -748,15 +769,24 @@ pub fn run_t_key(log: &mut VersionedLog, cfg: &RunTCfg, file_key: Option<bool>, 
             if l.beta_milli > 10_000 || l.prior_w_milli > 100_000 {
                 return Err(LogError::Invalid("learner constants out of range".into()));
             }
-            let (ev, id) = genesis_event_t(&w, &l);
+            let (mut ev, mut id) = genesis_event_t(&w, &l);
+            let st_on = l.file_key && self_tune == Some(true);
+            if st_on {
+                (ev, id) = super::self_tune::mark_genesis(ev);
+            }
             log.append_events(&[ev])?;
             state.start(w, l, id);
+            if st_on {
+                state.self_tune = super::self_tune::SelfTune::on();
+            }
             created = true;
         }
     }
     let mut own = LearnerT { cfg: state.learner };
+    let mut tuned = super::self_tune::SelfTunedT;
     let chooser: &mut dyn ChooserT = match chooser {
         Some(c) => c,
+        None if state.self_tune.on => &mut tuned,
         None => &mut own,
     };
     let mut engine = EngineT::new(state, cfg.ctl.clone());
@@ -776,6 +806,11 @@ pub fn run_t_key(log: &mut VersionedLog, cfg: &RunTCfg, file_key: Option<bool>, 
                 }
             }
             break;
+        }
+        // Track S1: the pick of a new block's beta (None for every being that is not self-tuned)
+        if let Some(b) = super::self_tune::before_step(&mut engine.state) {
+            pending.events.extend(b.events);
+            pending.revisions.extend(b.revisions);
         }
         match engine.step(chooser, sb) {
             Ok(out) => {
@@ -833,7 +868,7 @@ pub fn replay_t(rows: &[EventRow]) -> (u64, u64) {
             }
             if let Some(w) = &world {
                 let v = w.task(st.step, st.clock).view;
-                let got = LearnerT { cfg: st.learner }.choose(&st, &v).label();
+                let got = LearnerT { cfg: st.learner_now() }.choose(&st, &v).label();
                 n += 1;
                 if Some(got.as_str()) != tag(&e.tags, "action") {
                     bad += 1;

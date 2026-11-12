@@ -196,6 +196,8 @@ impl Controller {
                 // Track L2 key (the meta-prior across families, default off) is read by `l2::ctl`; here it is only validated
                 _ if super::l2::ctl::is_key(k) => super::l2::ctl::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 // Track W1 key (World T runs, default off) is read by `world_t::ctl`; here it is only validated
+                // Track S1 key (self-tuned beta, default off) is read by `world_t::self_tune`; here it is only validated
+                _ if super::world_t::self_tune::is_key(k) => super::world_t::self_tune::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 _ if super::world_t::ctl::is_key(k) => super::world_t::ctl::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
                 // Track B14 keys (rule library, curiosity budget; default off) are read by `b14::ctl`; here they are only validated
                 _ if super::b14::ctl::is_key(k) => super::b14::ctl::validate_key(k, v).map_err(|e| format!("line {n}: {e}"))?,
