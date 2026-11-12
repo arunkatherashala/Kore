@@ -3838,7 +3838,10 @@ file, plan) keys, of which **77,105 (96.5%) have the same outcome on every task 
 construction: 93.9%). The sniffing plans (`sniff+native`, `sniff+sql`, `native-filter`, `fix-typecheck`,
 `fmt-sniff`) are right on 100% of attempts for every table template, except `sniff+sql` on `grp_top3` (74.6%: KORE SQL
 sorts each ORDER BY key with an unstable sort, so the smallest-id tie rule is not honoured on real ties; engine limit,
-kept). The naive plans are right on 25% (`an_total_mismatch`) to 80% (`an_out_day`) of attempts; `fix-fieldcount`
+kept). (Fixed after this report run by a80d3e86, merged into `dev` 2026-11-12: ORDER BY is one stable multi-key sort, so
+later keys are honoured on ties; independent DuckDB 1.5.6 oracle: 2,366 cases, 0 disagreements after the fix (1,596
+before). Known limit: a single-key sort on blocks estimated above 256 MB still uses the old external sort, ties
+unordered. The M3 numbers above are from the engine before the fix; runs after it are compared only on fresh seeds.) The naive plans are right on 25% (`an_total_mismatch`) to 80% (`an_out_day`) of attempts; `fix-fieldcount`
 44%, `fmt-extension` 70%. Series: no plan is reliable (right share 9% to 21% within +-5%), and almost no (series,
 plan) key is determined. So the real values matter little for which table plan is right: the rendering quirks
 (author-written) decide it, per file, which is what the file one-hot of LinUCB+file captures.
