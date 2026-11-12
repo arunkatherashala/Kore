@@ -207,46 +207,59 @@ fn partition_key(block: &DataBlock, cols: &[String], row: usize) -> String {
     .join("\x00")
 }
 
+/// Total order on doubles: NaN after every number, NaNs equal (a sort comparator must be a total order).
+fn cmp_f64(a: f64, b: f64) -> std::cmp::Ordering {
+    match a.partial_cmp(&b) {
+        Some(o) => o,
+        None => a.is_nan().cmp(&b.is_nan()),
+    }
+}
+
 fn sort_indices(block: &DataBlock, indices: &mut Vec<usize>, order_by: &[WinOrder]) {
     use rayon::slice::ParallelSliceMut;
 
     let m = indices.len();
     if m <= 1 || order_by.is_empty() { return; }
 
+    // Both paths are STABLE sorts: rows equal on every key keep their order (before: unstable, so ROW_NUMBER on
+    // full ties was arbitrary). A NULL sorts as the smallest value (Float64 / Int64 / Bool) or as "" (text).
+
     // ── Fast path: single numeric order-by column ─────────────────────────────
     // Schwartzian transform: pre-extract keys → parallel sort → write back.
     // Eliminates random column access per comparison; LLVM vectorizes extraction.
+    // Text columns go to the fallback (before: they got key 0.0 here and were left unsorted).
     if order_by.len() == 1 {
         let ord = &order_by[0];
-        if let Some(col) = col_lookup(block, &ord.col) {
+        if let Some(col) = col_lookup(block, &ord.col)
+            .filter(|c| !matches!(c.data, ColumnData::Str(_) | ColumnData::StrDict { .. })) {
             let mut keyed: Vec<(f64, usize)> = indices.iter().map(|&i| {
                 let k = match &col.data {
                     ColumnData::Float64(v) => v.get(i).and_then(|x| *x).unwrap_or(f64::NEG_INFINITY),
                     ColumnData::Int64(v)   => v.get(i).and_then(|x| *x).unwrap_or(i64::MIN) as f64,
                     ColumnData::Bool(v)    => v.get(i).and_then(|x| *x).unwrap_or(false) as i32 as f64,
-                    ColumnData::Str(_)        => 0.0,  // handled in fallback
-                    ColumnData::StrDict { .. } => 0.0,  // handled in fallback
+                    ColumnData::Str(_) | ColumnData::StrDict { .. } => unreachable!("text is sorted in the fallback"),
                 };
                 (k, i)
             }).collect();
 
-            // Rayon parallel sort — uses all 8 cores
+            // Rayon parallel stable sort — uses all 8 cores
             if ord.desc {
-                keyed.par_sort_unstable_by(|a, b|
-                    b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                keyed.par_sort_by(|a, b| cmp_f64(b.0, a.0));
             } else {
-                keyed.par_sort_unstable_by(|a, b|
-                    a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                keyed.par_sort_by(|a, b| cmp_f64(a.0, b.0));
             }
             for (j, (_, idx)) in keyed.into_iter().enumerate() { indices[j] = idx; }
             return;
         }
     }
 
-    // ── Fallback: multi-column or String ORDER BY (sequential) ────────────────
-    indices.sort_unstable_by(|&a, &b| {
-        for ord in order_by {
-            if let Some(col) = col_lookup(block, &ord.col) {
+    // ── Fallback: multi-column or String ORDER BY (sequential, stable) ────────
+    let cols: Vec<(&WinOrder, &Column)> = order_by.iter()
+        .filter_map(|ord| col_lookup(block, &ord.col).map(|c| (ord, c)))
+        .collect();
+    indices.sort_by(|&a, &b| {
+        for &(ord, col) in &cols {
+            {
                 let cmp = match &col.data {
                     ColumnData::Int64(v) => {
                         let va = v.get(a).and_then(|x| *x).unwrap_or(i64::MIN);
@@ -254,9 +267,9 @@ fn sort_indices(block: &DataBlock, indices: &mut Vec<usize>, order_by: &[WinOrde
                         va.cmp(&vb)
                     }
                     ColumnData::Float64(v) => {
-                        let va = v.get(a).and_then(|x| *x).unwrap_or(f64::NAN);
-                        let vb = v.get(b).and_then(|x| *x).unwrap_or(f64::NAN);
-                        va.partial_cmp(&vb).unwrap_or(std::cmp::Ordering::Equal)
+                        let va = v.get(a).and_then(|x| *x).unwrap_or(f64::NEG_INFINITY);
+                        let vb = v.get(b).and_then(|x| *x).unwrap_or(f64::NEG_INFINITY);
+                        cmp_f64(va, vb)
                     }
                     ColumnData::Str(v) => {
                         let sa = v.get(a).and_then(|x| x.as_deref()).unwrap_or("");
