@@ -585,7 +585,7 @@ const PENALTY: [u32; 6] = [0, 100, 316, 1000, 3162, 10000];
 const COST: [u32; 5] = [100, 316, 1000, 3162, 10000];
 
 fn being_cfg(b: u32) -> LearnerTCfg {
-    LearnerTCfg { beta_milli: b, prior_w_milli: 2000, pooled: true, skip: true, value_ucb: true, file_key: false }
+    LearnerTCfg { beta_milli: b, prior_w_milli: 2000, pooled: true, skip: true, value_ucb: true, file_key: false, file_beta_table: false }
 }
 fn ucb_cfg(c: f64) -> UcbCfg {
     UcbCfg { c, per_ctx: true, skip: true }

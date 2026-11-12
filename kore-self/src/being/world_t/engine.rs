@@ -337,6 +337,12 @@ pub fn genesis_event_t(cfg: &WTCfg, l: &LearnerTCfg) -> (NewEvent, String) {
         // only when on (Track W2), so that a genesis with it off is the one written before
         if l.file_key { ", file-keyed estimate on (counts per template, file and plan; prior = the cell estimate; fixed for this being's life)" } else { "" }
     );
+    // only when on (Track W2b), so that every other genesis is the one written before
+    let text = if l.file_key && l.file_beta_table {
+        format!("{text}; beta per reward design from the Track W2b table (nearest entry in log space of wrong-answer penalty and energy weight; the table is in the tag wt_file_beta_table; fixed for this being's life)")
+    } else {
+        text
+    };
     let ev = NewEvent { source: SOURCE_T.into(), occurred_at: iso_at(0), kind: "note".into(), text, tags, redacted: false };
     let id = event_id(&ev.source, &ev.occurred_at, &ev.text);
     (ev, id)
@@ -724,7 +730,7 @@ pub fn run_t(log: &mut VersionedLog, cfg: &RunTCfg, policy: &Policy, chooser: Op
 /// `cfg.learner` is used only at creation); a run that asks for the other setting is refused with an error,
 /// never silently changed.
 pub fn run_t_key(log: &mut VersionedLog, cfg: &RunTCfg, file_key: Option<bool>, policy: &Policy, chooser: Option<&mut dyn ChooserT>, sb: &dyn Sandbox) -> Result<RunTSummary, LogError> {
-    run_t_self(log, cfg, file_key, None, policy, chooser, sb)
+    run_t_opts(log, cfg, file_key, None, None, policy, chooser, sb)
 }
 
 /// As `run_t_key`, with the Track S1 controller key `wt_self_tune` (None: not in controller.txt). It is read only
@@ -732,6 +738,23 @@ pub fn run_t_key(log: &mut VersionedLog, cfg: &RunTCfg, file_key: Option<bool>, 
 /// being is created with it (default off; recorded at the genesis); an existing being keeps its genesis setting and
 /// a run asking for the other one is refused with an error.
 pub fn run_t_self(log: &mut VersionedLog, cfg: &RunTCfg, file_key: Option<bool>, self_tune: Option<bool>, policy: &Policy, chooser: Option<&mut dyn ChooserT>, sb: &dyn Sandbox) -> Result<RunTSummary, LogError> {
+    run_t_opts(log, cfg, file_key, None, self_tune, policy, chooser, sb)
+}
+
+/// As `run_t_key`, with the Track W2b controller key `wt_file_beta` (Some(true) = `table`, Some(false) = `fixed`,
+/// None: no request; the tool passes it only when `wt_file_key = on`). A new being is created with it (only
+/// together with the file key; without it the request has no effect) and it is recorded at its genesis with the
+/// whole table. An existing being keeps its genesis setting; a run asking for the other one is refused.
+pub fn run_t_keys(log: &mut VersionedLog, cfg: &RunTCfg, file_key: Option<bool>, file_beta: Option<bool>, policy: &Policy, chooser: Option<&mut dyn ChooserT>, sb: &dyn Sandbox) -> Result<RunTSummary, LogError> {
+    run_t_opts(log, cfg, file_key, file_beta, None, policy, chooser, sb)
+}
+
+/// All three genesis keys of a World T being: `wt_file_key` (W2), `wt_file_beta` (W2b) and `wt_self_tune` (S1).
+/// `wt_file_beta = table` together with `wt_self_tune = on` is not defined by either pre-registration (S1 tunes
+/// the fixed-grid beta of B1, W2b replaces that beta by its table): a new being asking for both is refused (fail
+/// closed), and a genesis carrying both is not a valid genesis (`self_tune::genesis_setting`).
+#[allow(clippy::too_many_arguments)]
+pub fn run_t_opts(log: &mut VersionedLog, cfg: &RunTCfg, file_key: Option<bool>, file_beta: Option<bool>, self_tune: Option<bool>, policy: &Policy, chooser: Option<&mut dyn ChooserT>, sb: &dyn Sandbox) -> Result<RunTSummary, LogError> {
     let version_before = log.latest_version();
     // Track D1b: with checkpoints off this is exactly the old full fold of the snapshot
     let (mut state, restored) = if policy.checkpoint_every == 0 {
@@ -758,6 +781,12 @@ pub fn run_t_self(log: &mut VersionedLog, cfg: &RunTCfg, file_key: Option<bool>,
             if let Some(why) = super::self_tune::refusal(&state, self_tune) {
                 return Err(LogError::Invalid(why));
             }
+            if let Some(fb) = file_beta {
+                if fb != state.learner.file_beta_table {
+                    let nm = |b: bool| if b { "table" } else { "fixed" };
+                    return Err(LogError::Invalid(format!("this World T being was created with wt_file_beta = {} (recorded at its genesis); the request says {}. The setting is fixed for the being's life", nm(state.learner.file_beta_table), nm(fb))));
+                }
+            }
         }
         None => {
             let w = cfg.world.clone().ok_or_else(|| LogError::Invalid("no World T being exists yet; a world config is needed to create one".into()))?;
@@ -766,11 +795,19 @@ pub fn run_t_self(log: &mut VersionedLog, cfg: &RunTCfg, file_key: Option<bool>,
             if let Some(fk) = file_key {
                 l.file_key = fk;
             }
+            if let Some(fb) = file_beta {
+                l.file_beta_table = fb;
+            }
+            // the beta table exists only with the file key
+            l.file_beta_table &= l.file_key;
             if l.beta_milli > 10_000 || l.prior_w_milli > 100_000 {
                 return Err(LogError::Invalid("learner constants out of range".into()));
             }
             let (mut ev, mut id) = genesis_event_t(&w, &l);
             let st_on = l.file_key && self_tune == Some(true);
+            if st_on && l.file_beta_table {
+                return Err(LogError::Invalid(super::self_tune::COMBO_REFUSAL.into()));
+            }
             if st_on {
                 (ev, id) = super::self_tune::mark_genesis(ev);
             }

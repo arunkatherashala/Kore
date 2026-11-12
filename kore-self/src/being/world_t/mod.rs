@@ -27,3 +27,5 @@ mod tests_engine;
 mod tests_w2;
 #[cfg(test)]
 mod tests_s1;
+#[cfg(test)]
+mod tests_w2b;

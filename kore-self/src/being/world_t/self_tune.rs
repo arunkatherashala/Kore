@@ -120,12 +120,18 @@ impl SelfTune {
     }
 }
 
+/// Why a new being asking for both `wt_self_tune = on` and `wt_file_beta = table` is refused: the combination is
+/// not defined by either pre-registration (S1: the base is B1, beta 2 from the fixed grid; W2b: the beta comes from
+/// its table), so it fails closed.
+pub const COMBO_REFUSAL: &str = "wt_self_tune = on together with wt_file_beta = table is not defined (Track S1 tunes the fixed-grid beta of B1; Track W2b takes beta from its table); a new being with both is refused (fail closed)";
+
 /// The `wt_self_tune` setting of a genesis: Some(false) without the tag (or `off`), Some(true) with `on` and the
-/// file key on, None (not a valid genesis: fail closed) for any other value or `on` without the file key.
+/// file key on (and not the W2b table: that combination is not defined), None (not a valid genesis: fail closed)
+/// for any other value, `on` without the file key, or `on` with `wt_file_beta:table`.
 pub fn genesis_setting(tags: &str) -> Option<bool> {
     match tag(tags, KEY_SELF_TUNE) {
         None | Some("off") => Some(false),
-        Some("on") if tag(tags, "wt_file_key") == Some("on") => Some(true),
+        Some("on") if tag(tags, "wt_file_key") == Some("on") && tag(tags, "wt_file_beta") != Some("table") => Some(true),
         _ => None,
     }
 }

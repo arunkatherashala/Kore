@@ -15,8 +15,21 @@ pub const KEY_SQL_ROWS: &str = "world_t_sql_max_rows";
 /// being's genesis; an existing being keeps its setting and a run asking for the other one is refused.
 pub const KEY_FILE_KEY: &str = "wt_file_key";
 
+/// Track W2b: the optimism beta of the file-keyed estimate for a NEW World T being: `fixed` (the default: beta 2,
+/// the B1 of Track W2) or `table` (B1p: per reward design from the W2b table). Read only when `wt_file_key = on`.
+/// Recorded at genesis; an existing being keeps its setting and a run asking for the other one is refused.
+pub const KEY_FILE_BETA: &str = "wt_file_beta";
+
 pub fn is_key(k: &str) -> bool {
-    k == KEY || k == KEY_SQL_TIMEOUT || k == KEY_SQL_ROWS || k == KEY_FILE_KEY
+    k == KEY || k == KEY_SQL_TIMEOUT || k == KEY_SQL_ROWS || k == KEY_FILE_KEY || k == KEY_FILE_BETA
+}
+
+fn parse_file_beta(v: &str) -> Option<bool> {
+    match v.to_ascii_lowercase().as_str() {
+        "fixed" => Some(false),
+        "table" => Some(true),
+        _ => None,
+    }
 }
 
 fn num(k: &str, v: &str, hard: u64) -> Result<u64, String> {
@@ -31,6 +44,7 @@ pub fn validate_key(k: &str, v: &str) -> Result<(), String> {
     match k {
         KEY_SQL_TIMEOUT => num(k, v, HARD_SQL_TIMEOUT_MS).map(|_| ()),
         KEY_SQL_ROWS => num(k, v, HARD_SQL_MAX_ROWS as u64).map(|_| ()),
+        KEY_FILE_BETA => parse_file_beta(v).map(|_| ()).ok_or_else(|| format!("'{k}' needs fixed or table")),
         _ => parse_bool(v).map(|_| ()).ok_or_else(|| format!("'{k}' needs on or off")),
     }
 }
@@ -69,6 +83,23 @@ pub fn file_key(text: Option<&str>) -> Option<bool> {
         if let Some((k, v)) = line.split_once('=') {
             if k.trim() == KEY_FILE_KEY {
                 return parse_bool(v.trim());
+            }
+        }
+    }
+    None
+}
+
+/// The `wt_file_beta` request of a controller text (Some(true) = table, Some(false) = fixed): only when the file is
+/// valid and sets `wt_file_key = on`; None otherwise (no request; a new being then gets the default, fixed).
+pub fn file_beta(text: Option<&str>) -> Option<bool> {
+    if file_key(text) != Some(true) {
+        return None;
+    }
+    for raw in text?.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim() == KEY_FILE_BETA {
+                return parse_file_beta(v.trim());
             }
         }
     }

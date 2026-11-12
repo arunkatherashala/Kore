@@ -39,6 +39,7 @@ Status words:
 
 ### M4
 - Track W2 (report seeds 201..260, docs/measured.md): with the file-keyed estimator B1 (opt-in, `wt_file_key`) the being is dominated at 5 of 30 points (penalty 10, every weight); the default being B0 at 14, mostly by the new baseline LinUCB with the file feature. Still not met.
+- Track W2b (report seeds 261..320, docs/measured.md): B1 with the beta tuned per reward design (B1p, opt-in `wt_file_beta = table`) is dominated at 1 of 30 points (penalty 10 x reward, weight 3.16, by LinUCB with the file feature: more reward per energy and 1.01 vs 2.99 wrong per 100); W2's B1 with beta 2 at 5, the tuned default B0 at 12 on the same seeds. Still not met. B1p met all four Stage-2 conditions (0 regressions over the sweep); the default is unchanged until the owner decides.
 - The criterion is Pareto non-dominance, not "as few wrong answers as the best baseline". Always SQL answers nothing wrong, so matching its wrong-answer rate would make M4 impossible for any policy that attempts harder plans.
 
 ## Track N1 pre-registration template
