@@ -175,6 +175,17 @@ MANIFEST append and lists it in the same entry; `verify_dir` also verifies every
 * D-5. Whether pack files (A) follow as a separate track for the file count (about 202,000 files at 1M remain on disk
   under C; only the open stops touching them).
 
+## 6a. Owner decisions (2026-11-11)
+
+* D-1: accepted, with sampling. The fast open also hashes 64 randomly chosen old segments (versions <= the newest
+  usable run), chosen by a PRNG seeded from the MANIFEST head hash (reproducible for a given log state), in addition
+  to the tail. Full detection stays in every read (`read_verified`) and in `verify`.
+* D-2: format 5 with an explicit `upgrade_to_v5` is approved.
+* D-3: cadence as proposed: a new run when 2,000 versions or 100,000 events have passed since the newest run, at most
+  K = 8 runs; when there are more, the oldest are merged.
+* D-4: the KILL-present audit row is written via the fast open.
+* D-5: pack files (A) later, as a separate track; not part of D1c.
+
 ## 7. Pre-registered measurement plan (to be run later, in the D1 style)
 
 Logs: the same copies as D1: cuts of the 1,000,000-step world-1 log (`kw/longrun-data2`) at version 12,001
@@ -216,3 +227,33 @@ as not met. A target is met only by its named measurement; nothing is extrapolat
   results equal the full open; the forgotten ids stay refused on re-ingest.
 * Key and format: key missing, unparseable, `off`, other values = full open; key on with formats 1-4 = full open;
   existing format 1-4 fixtures and golden digests unchanged; a level-4 header is refused by the old-level parse.
+
+## 9. Implementation (2026-11-11, branch `d1c-build`)
+
+Built as design C with the owner decisions of section 6a. Code: `kore-self/src/versioned/index_runs.rs` (runs,
+overlay, fast open, `maintain_index_runs`, `upgrade_to_v5`), `versioned/mod.rs` (format 5, `OpenOptions`,
+`open_with`, `open_report`, io counters), `being/fast_open_ctl.rs` (key), `log_tools.rs` (`open` honours the key;
+`maintain_runs` at the end of `being_run`). Tests: `versioned/tests_d1c.rs`. Harness: `longrun_being d1c-prep`,
+`openfast`, `d1c-smoke`. Timing script (not run): `scripts/d1c_timing.sh`.
+
+Deviations from the text above, and limits:
+
+* Run files are KORE files (owner rule: storage is KORE only): `index/<from>-<to>.kore`, a kore-store row-group
+  container whose 128-row groups are written by `KoreWriter`; not fixed-width binary tables. A lookup decodes one
+  group (bloom filter and group keys in memory first).
+* The open hashes every listed run file in full (sequential read of all run bytes) and decodes every group once
+  to check order and build the bloom filter. So the open reads O(index bytes) in a few files, not only "run
+  headers"; memory kept is the bloom filter (about 10 bits per index entry) plus about 50 bytes per 128-row group.
+  Whether this meets O1/O2 is for the measurement.
+* The run set is listed by an extra commit without rows (one more version per run write).
+* `upgrade_to_v5` refuses format-4 logs; format 5 writes format-2 segments.
+* After `forget`, runs whose `to` is at or after the re-sealed version are stale (ignored); the chain-valid prefix
+  is still used; `forget` itself still ends with a full reload, and the next `maintain_index_runs` rewrites the set.
+* The MANIFEST stays the existing JSON-lines journal (the `index_runs` field is a new hashed field in it).
+
+Functional smoke (correctness only, no timing; `d1c-smoke --steps 50000 --chunk 5000`, in-process log of 50,000
+steps, then 2 in-process calls and 2 calls through the real binary with `fast_open = on`): upgrade + first run
+(`0000000000-0000002002.kore`); every check equal between full and fast open (180,648 events looked up, 0
+mismatches, latest content equal); the fast open was used each time (64 sampled segments; files read by the open
+2,545 fast against 12,045 full at 2,413 versions); KILL present: refused, one audit row written; `verify` Ok;
+no `.json`/`.jsonl` file in the data root.

@@ -179,7 +179,7 @@ impl VersionedLog {
         let mut set: BTreeSet<String> = BTreeSet::new();
         let mut already = 0usize;
         for id in ids {
-            if self.index.ev_has(id) {
+            if self.index.ev_has(id)? {
                 set.insert(id.clone());
             } else if self.index.forgotten.contains(&forget_hash(id)) {
                 already += 1;

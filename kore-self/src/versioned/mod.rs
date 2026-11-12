@@ -16,6 +16,8 @@ pub mod checkpoint;
 pub mod codec;
 pub mod forget;
 pub mod hz;
+pub mod index_runs;
+pub use index_runs::{OpenOptions, OpenReport, RunsReport};
 pub mod manifest;
 pub mod model;
 pub mod sql;
@@ -34,6 +36,8 @@ mod tests_v2;
 mod tests_restart;
 #[cfg(test)]
 mod tests_v4;
+#[cfg(test)]
+mod tests_d1c;
 
 use kore_store::{DictSet, SharedDict};
 use manifest::{Entry, SegRef, ZERO_HASH};
@@ -67,6 +71,11 @@ pub const FORMAT_V3: i64 = 3;
 /// older binaries refuse. Reached only by creating a log with `LogFormat::V4` or by the explicit
 /// `upgrade_to_v4`; never silently.
 pub const FORMAT_V4: i64 = 4;
+/// Log format 5 (Track D1c): format 3 segments and journal, plus on-disk index runs listed in the
+/// MANIFEST (header `KORE-VLOG-MANIFEST 4`, which older binaries refuse), so that an open with
+/// `OpenOptions::fast_open` reads the runs and the tail instead of every segment. Reached only by the
+/// explicit `upgrade_to_v5` (from 1, 2 or 3); never silently. See `index_runs.rs`.
+pub const FORMAT_V5: i64 = 5;
 /// Track D1a: the format of a log created by `open_or_create` / `open_or_create_with_clock`
 /// (format 3: format-2 segments and the journal MANIFEST, 611 B/step against 2,582 for format 1 in
 /// `docs/longrun.md`). Applies only when the log is created; an existing log keeps its format and is
@@ -79,6 +88,7 @@ pub enum LogFormat {
     V2,
     V3,
     V4,
+    V5,
 }
 impl LogFormat {
     pub fn number(self) -> i64 {
@@ -87,25 +97,29 @@ impl LogFormat {
             LogFormat::V2 => FORMAT_V2,
             LogFormat::V3 => FORMAT_V3,
             LogFormat::V4 => FORMAT_V4,
+            LogFormat::V5 => FORMAT_V5,
         }
     }
     fn enc(self) -> Option<u8> {
         match self {
             LogFormat::V1 => None,
-            LogFormat::V2 | LogFormat::V3 => Some(2),
+            LogFormat::V2 | LogFormat::V3 | LogFormat::V5 => Some(2),
             LogFormat::V4 => Some(v4log::ENC_V4),
         }
     }
     /// MANIFEST header level this format writes (see `manifest::header_for`).
     fn manifest_level(self) -> u8 {
         match self {
+            LogFormat::V5 => 4,
             LogFormat::V4 => 3,
             LogFormat::V3 => 2,
             _ => 1,
         }
     }
     fn from_number(n: i64) -> LogFormat {
-        if n >= FORMAT_V4 {
+        if n >= FORMAT_V5 {
+            LogFormat::V5
+        } else if n >= FORMAT_V4 {
             LogFormat::V4
         } else if n >= FORMAT_V3 {
             LogFormat::V3
@@ -301,25 +315,19 @@ struct Index {
     outcomes: HashSet<String>,
     /// `forget_hash` of every event id removed by `forget`.
     forgotten: HashSet<String>,
+    /// Track D1c: index runs under this (tail) index; None = every entry is in the maps above.
+    base: Option<Arc<index_runs::RunSet>>,
 }
 
 enum Undo {
     Event(IdKey),
+    /// `prev_head`: the head in the tail maps before (not the runs; Track D1c), restored by rollback.
     Rev { rev_id: String, hk: (String, String), prev_head: Option<(String, String)>, digest: String, added_content: bool },
     Pred(String),
     Outcome(String),
 }
 
 impl Index {
-    fn ev_has(&self, id: &str) -> bool {
-        self.ev_ord(id).is_some()
-    }
-    fn ev_ord(&self, id: &str) -> Option<u32> {
-        match codec::hex64_to_bytes(id) {
-            Some(b) => self.events.get(&b).copied(),
-            None => self.events_odd.get(id).copied(),
-        }
-    }
     /// Register the next event row. Returns false (and keeps the first ordinal) if the id exists.
     fn ev_add(&mut self, k: IdKey) -> bool {
         let ord = self.next_ord;
@@ -459,6 +467,20 @@ pub struct VersionedLog {
     events_at_dict: u64,
     dict_policy: DictPolicy,
     clock: Box<dyn Fn() -> String + Send>,
+    /// How this handle was opened (Track D1c).
+    open_info: OpenReport,
+}
+
+/// Track D1c counters: files and bytes read by log code in this process (the measurement uses them).
+static IO_FILES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static IO_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+fn count_io(bytes: u64) {
+    IO_FILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    IO_BYTES.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+/// (file reads, bytes read) by log code in this process so far (Track D1c measurement counters).
+pub fn io_counters() -> (u64, u64) {
+    (IO_FILES.load(std::sync::atomic::Ordering::Relaxed), IO_BYTES.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 fn valid_owner(owner: &str) -> bool {
@@ -486,6 +508,7 @@ fn read_verified(dir: &Path, seg: &SegRef) -> Result<Vec<u8>, VerifyError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(VerifyError::MissingSegment { file: seg.file.clone() }),
         Err(e) => return Err(VerifyError::Io(format!("{}: {e}", seg.file))),
     };
+    count_io(bytes.len() as u64);
     if sha256_hex(&[&bytes]) != seg.sha256 {
         return Err(VerifyError::ChecksumMismatch { file: seg.file.clone() });
     }
@@ -550,7 +573,10 @@ fn load_ids(dir: &Path, seg: &SegRef) -> Result<Vec<IdKey>, VerifyError> {
 
 fn read_manifest_raw(dir: &Path) -> Result<Vec<u8>, VerifyError> {
     match fs::read(dir.join("MANIFEST")) {
-        Ok(r) => Ok(r),
+        Ok(r) => {
+            count_io(r.len() as u64);
+            Ok(r)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(VerifyError::ManifestMissing),
         Err(e) => Err(VerifyError::Io(e.to_string())),
     }
@@ -580,7 +606,8 @@ fn check_chain(entries: &[Entry]) -> Result<(), VerifyError> {
         }
         prev = e.hash.clone();
     }
-    v4log::check_listings(entries)
+    v4log::check_listings(entries)?;
+    index_runs::check_run_listings(entries)
 }
 
 /// List `<table>/<file>` entries on disk that are not in `entries`.
@@ -598,6 +625,7 @@ fn stray_files(dir: &Path, entries: &[Entry]) -> Vec<String> {
         }
     }
     out.extend(stray_dicts(dir, entries));
+    out.extend(index_runs::stray_runs(dir, entries));
     out.sort();
     out
 }
@@ -649,6 +677,8 @@ pub fn verify_dir(dir: &Path) -> Result<(), VerifyError> {
     for r in results {
         r?;
     }
+    // Track D1c: every listed run that matches the chain verifies and equals the rebuilt index
+    index_runs::verify_runs(dir, &entries)?;
     if let Some(f) = stray_files(dir, &entries).into_iter().next() {
         return Err(VerifyError::ExtraSegment { file: f });
     }
@@ -863,6 +893,12 @@ impl VersionedLog {
     /// created here. An existing log keeps the format it has (upgrade is explicit:
     /// `upgrade_to_v2`).
     pub fn open_or_create_with_format(root: &Path, owner: &str, clock: impl Fn() -> String + Send + 'static, format: LogFormat) -> Result<VersionedLog, LogError> {
+        Self::open_or_create_opts(root, owner, clock, format, OpenOptions::default())
+    }
+
+    /// `open_or_create_with_format` with open options (Track D1c: `fast_open`). With the default
+    /// options this is exactly `open_or_create_with_format`.
+    pub fn open_or_create_opts(root: &Path, owner: &str, clock: impl Fn() -> String + Send + 'static, format: LogFormat, opts: OpenOptions) -> Result<VersionedLog, LogError> {
         if !valid_owner(owner) {
             return inv("owner must be 1-64 chars of [A-Za-z0-9_-]");
         }
@@ -888,6 +924,7 @@ impl VersionedLog {
                 events_at_dict: 0,
                 dict_policy: DictPolicy::default(),
                 clock: Box::new(clock),
+                open_info: OpenReport::default(),
             };
             log.recover()?;
             let now = (log.clock)();
@@ -895,7 +932,7 @@ impl VersionedLog {
             log.write_commit(vec![(Table::SchemaMeta, vec![meta.to_cells()])], now, format, None)?;
             return Ok(log);
         }
-        let mut log = Self::open_existing(dir)?;
+        let mut log = Self::open_existing_with(dir, opts)?;
         log.clock = Box::new(clock);
         Ok(log)
     }
@@ -908,7 +945,22 @@ impl VersionedLog {
         Self::open_existing(root.join(owner).join("log"))
     }
 
+    /// `open` with options (Track D1c). `fast_open` on a format-5 log with listed index runs reads the
+    /// MANIFEST, the runs and the tail; on any problem it does the full open (same result) and says why
+    /// in `open_report().fallback_reason`. On formats 1-4 it is the full open.
+    pub fn open_with(root: &Path, owner: &str, opts: OpenOptions) -> Result<VersionedLog, LogError> {
+        if !valid_owner(owner) {
+            return inv("owner must be 1-64 chars of [A-Za-z0-9_-]");
+        }
+        Self::open_existing_with(root.join(owner).join("log"), opts)
+    }
+
     fn open_existing(dir: PathBuf) -> Result<VersionedLog, LogError> {
+        Self::open_existing_with(dir, OpenOptions::default())
+    }
+
+    fn open_existing_with(dir: PathBuf, opts: OpenOptions) -> Result<VersionedLog, LogError> {
+        let io0 = io_counters();
         // Finish (or discard) a forget that was interrupted by a crash.
         recover_pending(&dir)?;
         let full = read_manifest_raw(&dir)?;
@@ -921,11 +973,32 @@ impl VersionedLog {
         if entries.is_empty() {
             return Err(VerifyError::ManifestCorrupt("no entries".into()).into());
         }
-        let st = load_state(&dir, &entries)?;
+        let mut info = OpenReport { fast_requested: opts.fast_open, ..Default::default() };
+        let fast = if opts.fast_open {
+            match index_runs::fast_state(&dir, &entries, level) {
+                Ok((st, rep)) => {
+                    info = OpenReport { fast_requested: true, ..rep };
+                    Some(st)
+                }
+                Err(why) => {
+                    info.fallback_reason = Some(why);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let st = match fast {
+            Some(st) => st,
+            None => load_state(&dir, &entries)?,
+        };
         let (cur_dict, events_at_dict) = v4log::current(&entries, &st.dicts);
+        let io1 = io_counters();
+        info.files_read = io1.0 - io0.0;
+        info.bytes_read = io1.1 - io0.1;
         Ok(VersionedLog {
             dir, entries, manifest_raw: raw, journal, level, torn, head: Mutex::new(st.head), index: st.index, ev_segs: st.ev_segs, format: st.format,
-            dicts: st.dicts, cur_dict, events_at_dict, dict_policy: DictPolicy::default(), clock: Box::new(now_iso),
+            dicts: st.dicts, cur_dict, events_at_dict, dict_policy: DictPolicy::default(), clock: Box::new(now_iso), open_info: info,
         })
     }
 
@@ -993,8 +1066,9 @@ impl VersionedLog {
     }
 
     /// True if an event with this id is stored (latest version).
+    /// Panics only if an index run (format 5, fast open) became unreadable after the open.
     pub fn has_event(&self, id: &str) -> bool {
-        self.index.ev_has(id)
+        self.index.ev_has(id).unwrap_or_else(|e| panic!("index run changed on disk after open: {e}"))
     }
 
     /// Number of event rows in the latest version.
@@ -1006,7 +1080,7 @@ impl VersionedLog {
     /// index: at most one segment is read (and its checksum verified) when the
     /// snapshot is not already in memory; no scan over all events.
     pub fn get_event(&self, id: &str) -> Result<Option<EventRow>, LogError> {
-        let ord = match self.index.ev_ord(id) {
+        let ord = match self.index.ev_ord(id)? {
             Some(o) => o,
             None => return Ok(None),
         };
@@ -1283,7 +1357,7 @@ impl VersionedLog {
     /// segments, versions and hashes are untouched (a mixed-encoding log). Old
     /// binaries cannot read the new segments. Returns false if already format 2.
     pub fn upgrade_to_v2(&mut self) -> Result<bool, LogError> {
-        if self.format == LogFormat::V2 || self.format == LogFormat::V4 {
+        if self.format == LogFormat::V2 || self.format == LogFormat::V4 || self.format == LogFormat::V5 {
             return Ok(false);
         }
         self.check_manifest_unchanged()?;
@@ -1305,7 +1379,7 @@ impl VersionedLog {
     /// chain and every old version hash are unchanged). Later commits append. Segments written from
     /// here on use the format 2 encoding. Old binaries cannot read the result. False if already 3.
     pub fn upgrade_to_v3(&mut self) -> Result<bool, LogError> {
-        if self.format == LogFormat::V3 || self.format == LogFormat::V4 {
+        if self.format == LogFormat::V3 || self.format == LogFormat::V4 || self.format == LogFormat::V5 {
             return Ok(false);
         }
         self.check_manifest_unchanged()?;
@@ -1393,7 +1467,7 @@ impl VersionedLog {
             }
             let key = IdKey::from_str(&id);
             event_ids.push(id.clone());
-            if ix.ev_add(key.clone()) {
+            if ix.ev_add_o(key.clone())? {
                 undo.push(Undo::Event(key));
                 ev.push(build_event_row(e, occurred_at, id, now).to_cells());
             } else {
@@ -1404,14 +1478,14 @@ impl VersionedLog {
         for r in &batch.revisions {
             let (row, causes, digest) = validate_revision(r, ix, now)?;
             rev_ids.push(row.rev_id.clone());
-            if ix.revs.contains_key(&row.rev_id) {
+            if ix.rev_has(&row.rev_id)? {
                 continue;
             }
             let hk = (row.entity_type.clone(), row.key.clone());
+            let added_content = ix.content_get(&digest)?.is_none();
             let prev_head = ix.heads.get(&hk).cloned();
             ix.revs.insert(row.rev_id.clone(), hk.clone());
             ix.heads.insert(hk.clone(), (row.rev_id.clone(), digest.clone()));
-            let added_content = !ix.content_ids.contains_key(&digest);
             if added_content {
                 ix.content_ids.insert(digest.clone(), row.rev_id.clone());
             }
@@ -1424,7 +1498,7 @@ impl VersionedLog {
         for p in &batch.predictions {
             let row = validate_prediction(p, ix)?;
             pred_ids.push(row.pred_id.clone());
-            if !ix.preds.contains_key(&row.pred_id) {
+            if !ix.pred_has(&row.pred_id)? {
                 ix.preds.insert(row.pred_id.clone(), p.options.clone());
                 undo.push(Undo::Pred(row.pred_id.clone()));
                 pr.push(row.to_cells());
@@ -1432,7 +1506,7 @@ impl VersionedLog {
         }
         for o in &batch.outcomes {
             let row = validate_outcome(o, ix)?;
-            if ix.outcomes.insert(row.pred_id.clone()) {
+            if !ix.outcome_has(&row.pred_id)? && ix.outcomes.insert(row.pred_id.clone()) {
                 undo.push(Undo::Outcome(row.pred_id.clone()));
                 oc.push(row.to_cells());
             }
@@ -1449,6 +1523,15 @@ impl VersionedLog {
     /// rename). The commit exists only once the rename succeeds. The new MANIFEST
     /// is the previous bytes plus one line; nothing is re-parsed or re-rendered.
     fn write_commit(&mut self, new: Vec<(Table, Vec<Vec<Cell>>)>, recorded_at: String, fmt: LogFormat, forget: Option<manifest::ForgetRecord>) -> Result<(), LogError> {
+        self.write_commit_ex(new, recorded_at, fmt, forget, vec![])
+    }
+
+    /// Track D1c: a commit without rows that lists the current index run set (format 5).
+    fn write_commit_runs(&mut self, recorded_at: String, runs: Vec<manifest::RunRef>) -> Result<(), LogError> {
+        self.write_commit_ex(vec![], recorded_at, LogFormat::V5, None, runs)
+    }
+
+    fn write_commit_ex(&mut self, new: Vec<(Table, Vec<Vec<Cell>>)>, recorded_at: String, fmt: LogFormat, forget: Option<manifest::ForgetRecord>, runs: Vec<manifest::RunRef>) -> Result<(), LogError> {
         let v = self.entries.len() as u64;
         if v == 0 {
             self.recover()?;
@@ -1485,9 +1568,10 @@ impl VersionedLog {
         }
         let prev = self.entries.last().map(|e| e.hash.clone()).unwrap_or_else(|| ZERO_HASH.to_string());
         let mut entry = Entry::new(v, recorded_at, segs, &prev);
-        if forget.is_some() || !dict_refs.is_empty() {
+        if forget.is_some() || !dict_refs.is_empty() || !runs.is_empty() {
             entry.forget = forget;
             entry.dicts = dict_refs;
+            entry.index_runs = runs;
             entry.reseal(&prev);
         }
         let line = serde_json::to_string(&entry).expect("entry serialises");
@@ -1639,27 +1723,27 @@ fn validate_revision(r: &NewRevision, ix: &Index, now: &str) -> Result<(Revision
         return inv("rule-authored revisions require at least one cited event (caused_by)");
     }
     for c in &causes {
-        if !ix.ev_has(c) {
+        if !ix.ev_has(c)? {
             return Err(LogError::NotFound(format!("caused_by event {c}")));
         }
     }
     let k = (r.entity_type.clone(), r.key.clone());
     let supersedes = match &r.supersedes {
         Some(s) => {
-            match ix.revs.get(s) {
+            match ix.rev_get(s)? {
                 None => return Err(LogError::NotFound(format!("superseded revision {s}"))),
-                Some(t) if *t != k => return inv("superseded revision has a different entity_type/key"),
+                Some(t) if t != k => return inv("superseded revision has a different entity_type/key"),
                 _ => {}
             }
             Some(s.clone())
         }
-        None => ix.heads.get(&k).map(|h| h.0.clone()),
+        None => ix.head_get(&k)?.map(|h| h.0),
     };
     let conf = format!("{:?}", r.confidence);
     let digest = revision_content(&r.entity_type, &r.key, &r.stance, &conf, &r.rationale, &valid_from, &r.author, &causes);
     if r.supersedes.is_none() {
-        if let Some((head_id, head_digest)) = ix.heads.get(&k) {
-            if *head_digest == digest {
+        if let Some((head_id, head_digest)) = ix.head_get(&k)? {
+            if head_digest == digest {
                 let row = RevisionRow {
                     rev_id: head_id.clone(), entity_type: r.entity_type.clone(), key: r.key.clone(), stance: r.stance.clone(),
                     confidence: r.confidence, rationale: r.rationale.clone(), supersedes: None, valid_from, author: r.author.clone(),
@@ -1670,7 +1754,7 @@ fn validate_revision(r: &NewRevision, ix: &Index, now: &str) -> Result<(Revision
         }
         // Format 2: identical content anywhere in the log is a no-op (replays are idempotent).
         if ix.content_idem {
-            if let Some(existing) = ix.content_ids.get(&digest) {
+            if let Some(existing) = ix.content_get(&digest)? {
                 let row = RevisionRow {
                     rev_id: existing.clone(), entity_type: r.entity_type.clone(), key: r.key.clone(), stance: r.stance.clone(),
                     confidence: r.confidence, rationale: r.rationale.clone(), supersedes: None, valid_from, author: r.author.clone(),
@@ -1697,7 +1781,7 @@ fn validate_revision(r: &NewRevision, ix: &Index, now: &str) -> Result<(Revision
 
 fn validate_prediction(p: &NewPrediction, ix: &Index) -> Result<PredictionRow, LogError> {
     for c in &p.features_cite {
-        if !ix.ev_has(c) {
+        if !ix.ev_has(c)? {
             return Err(LogError::NotFound(format!("features_cite event {c}")));
         }
     }
@@ -1746,17 +1830,17 @@ fn build_prediction(p: &NewPrediction) -> Result<PredictionRow, LogError> {
 }
 
 fn validate_outcome(o: &NewOutcome, ix: &Index) -> Result<OutcomeRow, LogError> {
-    let opts = ix.preds.get(&o.pred_id).ok_or_else(|| LogError::NotFound(format!("prediction {}", o.pred_id)))?;
+    let opts = ix.pred_get(&o.pred_id)?.ok_or_else(|| LogError::NotFound(format!("prediction {}", o.pred_id)))?;
     let resolved_at = normalize_ts(&o.resolved_at).map_err(LogError::Invalid)?;
     if !opts.contains(&o.actual) {
         return inv("actual must be one of the prediction's options");
     }
     if let Some(e) = &o.outcome_event_id {
-        if !ix.ev_has(e) {
+        if !ix.ev_has(e)? {
             return Err(LogError::NotFound(format!("outcome_event_id {e}")));
         }
     }
-    if ix.outcomes.contains(&o.pred_id) {
+    if ix.outcome_has(&o.pred_id)? {
         return Err(LogError::Conflict(format!("prediction {} already has an outcome", o.pred_id)));
     }
     Ok(OutcomeRow { pred_id: o.pred_id.clone(), resolved_at, actual: o.actual.clone(), outcome_event_id: o.outcome_event_id.clone() })

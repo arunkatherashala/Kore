@@ -244,11 +244,14 @@ fn run(args: &Value, owner: &str) -> Result<Value, Value> {
         refused.push(("kill_switch".into(), 0, s.steps_run, format!("the KILL file stopped the run after {} steps", s.steps_run)));
     }
     audit_refusals_in(&mut log, owner, &refused);
+    // Track D1c: a due index run is written at the end of the run (fast_open = on, format 5 only)
+    let index_runs = crate::log_tools::maintain_runs(&mut log, owner);
     drop(log);
     refused_pre.extend(refused);
     let refused = refused_pre;
     let mut out = s.to_json();
     out["checkpoint"] = crate::being::ckpt::report_json(&s.ckpt);
+    out["index_runs"] = index_runs;
     out["controller"] = json!({
         "origin": "controller.txt", "max_live_rules": ctl.max_live_rules, "max_building_blocks": ctl.max_building_blocks, "max_search_candidates": ctl.max_search_candidates,
         "max_steps_per_run": ctl.max_steps_per_run, "max_energy_per_run": ctl.max_energy_per_run, "composition_allowed": ctl.composition, "pruning_allowed": ctl.pruning, "transfer_allowed": ctl.transfer, "max_transfer_links": ctl.max_transfer_links,

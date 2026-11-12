@@ -309,6 +309,9 @@ impl VersionedLog {
         if self.format == LogFormat::V4 {
             return Ok(false);
         }
+        if self.format == LogFormat::V5 {
+            return inv("a format-5 log cannot be changed to format 4");
+        }
         self.check_manifest_unchanged()?;
         let last_at = self.entries.last().map(|e| e.recorded_at.clone()).unwrap_or_default();
         let mut now = (self.clock)();

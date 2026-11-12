@@ -261,7 +261,16 @@ pruning               = on
 
 /// The controller.txt the harness writes: `CONTROLLER`, plus `checkpoint_every = N` when the environment
 /// variable `LONGRUN_CKPT_EVERY` is set (Track D1b measurements; unset = no checkpoints, as before).
+/// Track D1c: plus `fast_open = on` when `LONGRUN_FAST_OPEN=1` (unset = the key is absent = off).
 fn controller_file_text() -> String {
+    let mut t = controller_text_d1b();
+    if std::env::var("LONGRUN_FAST_OPEN").map_or(false, |v| v.trim() == "1") {
+        t.push_str("fast_open = on\n");
+    }
+    t
+}
+
+fn controller_text_d1b() -> String {
     match std::env::var("LONGRUN_CKPT_EVERY") {
         Ok(n) if !n.trim().is_empty() => format!("{CONTROLLER}checkpoint_every = {}
 ", n.trim()),
@@ -286,10 +295,12 @@ struct Opts {
     max_hours: f64,
     heavy_every: u64,
     kill_ms: Option<u64>,
+    /// Track D1c: `openfast` opens with `fast_open` on (1) or off (0).
+    fast: u8,
 }
 
 fn parse_opts(args: &[String]) -> Opts {
-    let mut o = Opts { root: PathBuf::new(), steps: 20_000, chunk: 5000, calls_per_proc: 2, checkpoint_every: 10_000, window: 10_000, format: 3, world: 1, budget: 3000, kill_at: None, min_free_gb: 12.0, replay_n: 300, max_hours: 1e9, heavy_every: 5, kill_ms: None };
+    let mut o = Opts { root: PathBuf::new(), steps: 20_000, chunk: 5000, calls_per_proc: 2, checkpoint_every: 10_000, window: 10_000, format: 3, world: 1, budget: 3000, kill_at: None, min_free_gb: 12.0, replay_n: 300, max_hours: 1e9, heavy_every: 5, kill_ms: None, fast: 1 };
     let mut i = 0;
     while i < args.len() {
         let v = args.get(i + 1).cloned().unwrap_or_default();
@@ -309,6 +320,7 @@ fn parse_opts(args: &[String]) -> Opts {
             "--max-hours" => o.max_hours = v.parse().unwrap(),
             "--heavy-every" => o.heavy_every = v.parse().unwrap(),
             "--kill-ms" => o.kill_ms = Some(v.parse().unwrap()),
+            "--fast" => o.fast = v.parse().unwrap(),
             other => panic!("unknown option {other}"),
         }
         i += 2;
@@ -1454,11 +1466,138 @@ fn cmd_restart(o: Opts) {
     let (peak, cpu) = srv.stop();
     let _ = std::fs::remove_file(root.join(OWNER).join("KILL"));
     let r: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-    let v = json!({ "type": "restart", "binary": binary().display().to_string(), "chunk": o.chunk, "is_error": is_err, "steps_run": r["steps_run"], "steps_total": r["total_steps"], "stopped": r["stopped"],
+    let v = json!({ "type": "restart", "index_runs": r["index_runs"], "binary": binary().display().to_string(), "chunk": o.chunk, "is_error": is_err, "steps_run": r["steps_run"], "steps_total": r["total_steps"], "stopped": r["stopped"],
         "text": if r.is_null() { text.chars().take(300).collect::<String>() } else { String::new() },
         "start_ms": start_ms, "call_secs": secs, "kill_ms": o.kill_ms, "kill_lag_ms": kill_lag_ms, "peak_ws_mb": peak as f64 / 1e6, "cpu_secs": cpu, "machine_busy_share": busy_share(sys0, win::system_times()), "mem_avail_gb": gb(win::memory().1) });
     println!("{v}");
     Out::new(&root, "restart.jsonl").put(v);
+}
+
+// ─── Track D1c: format-5 preparation and the in-process open (docs/d1c_design.md section 7) ─────
+
+fn disk_guard(o: &Opts, dir: &Path) {
+    let free = win::free_bytes(dir) as f64 / 1e9;
+    assert!(free >= o.min_free_gb, "disk guard: {free:.1} GB free, below {} GB, at {}", o.min_free_gb, dir.display());
+}
+
+/// d1c-prep: make the copy under `--root` the "on" variant: explicit `upgrade_to_v5`, and controller.txt
+/// rewritten (`LONGRUN_FAST_OPEN=1` adds `fast_open = on`, `LONGRUN_CKPT_EVERY` as for `cut`). No run is
+/// written here; the first (untimed, priming) `being_run` call with the key on writes the first run.
+fn cmd_d1c_prep(o: Opts) {
+    let root = std::fs::canonicalize(&o.root).unwrap();
+    disk_guard(&o, &root);
+    let mut log = VersionedLog::open(&root, OWNER).unwrap();
+    let up = log.upgrade_to_v5().unwrap();
+    std::fs::write(root.join(OWNER).join("controller.txt"), controller_file_text()).unwrap();
+    println!("{}", json!({ "type": "d1c_prep", "upgraded": up, "latest": log.latest_version(), "format": log.format().number(), "controller": controller_file_text() }));
+}
+
+/// openfast: one in-process open of the log under `--root` with `fast_open` on (`--fast 1`, default) or
+/// off (`--fast 0`): time, peak working set, files and bytes read, what the open used (O1, O3, O8).
+fn cmd_openfast(o: Opts) {
+    let root = std::fs::canonicalize(&o.root).unwrap();
+    let sys0 = win::system_times();
+    let m0 = win::self_peak_ws() as f64 / 1e6;
+    let t = Instant::now();
+    let log = VersionedLog::open_with(&root, OWNER, versioned::OpenOptions { fast_open: o.fast == 1 }).unwrap();
+    let open_ms = ms(t);
+    let m1 = win::self_peak_ws() as f64 / 1e6;
+    let r = log.open_report().clone();
+    let dir = root.join(OWNER).join("log");
+    let (bytes_on_disk, files_on_disk) = dir_stats(&dir);
+    let v = json!({ "type": "openfast", "fast": o.fast, "open_ms": open_ms, "fast_used": r.fast_used, "fallback_reason": r.fallback_reason, "runs_used": r.runs_used, "runs_stale": r.runs_stale,
+        "tail_versions": r.tail_versions, "sampled_segments": r.sampled_segments, "files_read": r.files_read, "bytes_read": r.bytes_read, "versions": log.latest_version() + 1, "events": log.event_count(),
+        "format": log.format().number(), "index_runs": log.index_runs().len(), "files_on_disk": files_on_disk, "bytes_on_disk": bytes_on_disk,
+        "peak_ws_mb": { "start": m0, "after_open": m1 }, "machine_busy_share": busy_share(sys0, win::system_times()) });
+    println!("{v}");
+}
+
+/// d1c-smoke: correctness only, no timing claims. On the log under `--root` (a copy; it is changed):
+/// (created first with `--steps` steps if there is none) upgrade to format 5, write the first run, compare a full and a fast open (every stored event looked
+/// up, latest content), then `--steps` more steps in calls of `--chunk` in-process, each call on a
+/// fast-opened handle with a run maintained at its end (D-3 cadence), then compare again and `verify`.
+fn cmd_d1c_smoke(o: Opts) {
+    std::fs::create_dir_all(&o.root).unwrap();
+    let root = std::fs::canonicalize(&o.root).unwrap();
+    disk_guard(&o, &root);
+    let fast = versioned::OpenOptions { fast_open: true };
+    // no log yet: create a format-3 log of `--steps` steps in-process first (calls of `--chunk`)
+    let mut created = 0u64;
+    if !root.join(OWNER).join("log").join("MANIFEST").exists() {
+        let mut log = VersionedLog::open_or_create_with_format(&root, OWNER, versioned::now_iso, LogFormat::V3).unwrap();
+        while created < o.steps {
+            let (cfg, policy) = cfg_in_process(&o, o.chunk.min(o.steps - created));
+            let s = run_full(&mut log, &cfg, &ScriptedThinker, &policy, None, None).unwrap();
+            created += s.steps_run;
+            if s.steps_run == 0 {
+                break;
+            }
+        }
+    }
+    let extra = 2 * o.chunk;
+    let mut log = VersionedLog::open(&root, OWNER).unwrap();
+    let upgraded = log.upgrade_to_v5().unwrap();
+    let first = log.maintain_index_runs().unwrap();
+    drop(log);
+    let check = |label: &str| -> Value {
+        let full = VersionedLog::open(&root, OWNER).unwrap();
+        let fo = VersionedLog::open_with(&root, OWNER, fast).unwrap();
+        let rows: Vec<EventRow> = full.open_latest().rows();
+        let mut mismatch = 0usize;
+        for e in &rows {
+            if !fo.has_event(&e.event_id) || fo.get_event(&e.event_id).unwrap().as_ref() != Some(e) {
+                mismatch += 1;
+            }
+        }
+        let a = full.open_latest().content_hash();
+        let b = fo.open_latest().content_hash();
+        let r = fo.open_report().clone();
+        json!({ "label": label, "versions": full.latest_version() + 1, "events": rows.len(), "fast_used": r.fast_used, "fallback_reason": r.fallback_reason, "runs_used": r.runs_used, "tail_versions": r.tail_versions,
+            "files_read_fast_open": r.files_read, "files_read_full_open": full.open_report().files_read, "event_lookup_mismatches": mismatch, "latest_content_equal": a == b, "event_count_equal": full.event_count() == fo.event_count() })
+    };
+    let c0 = check("after upgrade and first run");
+    let mut done = 0u64;
+    let mut calls = vec![];
+    while done < extra {
+        let n = o.chunk.min(extra - done);
+        let mut log = VersionedLog::open_with(&root, OWNER, fast).unwrap();
+        let used = log.open_report().fast_used;
+        let (cfg, policy) = cfg_in_process(&o, n);
+        let s = run_full(&mut log, &cfg, &ScriptedThinker, &policy, None, None).unwrap();
+        let m = log.maintain_index_runs().unwrap();
+        calls.push(json!({ "steps_run": s.steps_run, "fast_used": used, "run_written": m.written.map(|r| r.file), "merged": m.merged.is_some(), "runs": m.runs }));
+        done += s.steps_run;
+        if s.steps_run == 0 {
+            break;
+        }
+    }
+    let c1 = check("after the calls");
+    // the real binary with fast_open = on: one being_run call (fast open, run maintained at its end), then
+    // the KILL file present (D-4: the refusal's audit row is written through the fast open)
+    let ctl = root.join(OWNER).join("controller.txt");
+    let old_ctl = std::fs::read(&ctl).ok();
+    std::fs::write(&ctl, format!("{CONTROLLER}fast_open = on
+")).unwrap();
+    let audit = |l: &VersionedLog| -> usize { let n: Vec<EventRow> = l.open_latest().rows(); n.iter().filter(|e| e.source == "authorize").count() };
+    let a0 = audit(&VersionedLog::open(&root, OWNER).unwrap());
+    let mut srv = Server::start(&root);
+    let (e1, t1) = srv.call("being_run", run_args(&o, 200));
+    std::fs::write(root.join(OWNER).join("KILL"), "stop
+").unwrap();
+    let (e2, t2) = srv.call("being_run", run_args(&o, 200));
+    let _ = srv.stop();
+    let _ = std::fs::remove_file(root.join(OWNER).join("KILL"));
+    match old_ctl {
+        Some(b) => std::fs::write(&ctl, b).unwrap(),
+        None => { let _ = std::fs::remove_file(&ctl); }
+    }
+    let r1: Value = serde_json::from_str(&t1).unwrap_or(Value::Null);
+    let a1 = audit(&VersionedLog::open(&root, OWNER).unwrap());
+    let binary = json!({ "run_is_error": e1, "steps_run": r1["steps_run"], "index_runs": r1["index_runs"], "kill_is_error": e2, "kill_text": t2.chars().take(160).collect::<String>(), "authorize_rows_added": a1 - a0 });
+    let c2 = check("after the binary calls");
+    let verify = VersionedLog::open(&root, OWNER).unwrap().verify().map_err(|e| e.to_string());
+    let v = json!({ "type": "d1c_smoke", "steps_created": created, "steps_after": done, "upgraded": upgraded, "first_run": first.written.map(|r| r.file), "check_before": c0, "calls": calls, "check_after": c1, "binary": binary, "check_after_binary": c2, "verify": format!("{verify:?}") });
+    println!("{}", serde_json::to_string_pretty(&v).unwrap());
 }
 
 fn row_key_e(e: &EventRow) -> String {
@@ -1560,6 +1699,9 @@ fn main() {
         "digest" => cmd_digest(parse_opts(&args[1..])),
         "rulecheck" => cmd_rulecheck(parse_opts(&args[1..])),
         "restart" => cmd_restart(parse_opts(&args[1..])),
+        "d1c-prep" => cmd_d1c_prep(parse_opts(&args[1..])),
+        "openfast" => cmd_openfast(parse_opts(&args[1..])),
+        "d1c-smoke" => cmd_d1c_smoke(parse_opts(&args[1..])),
         "cut" | "compare" => {
             let flag = if cmd == "cut" { "--src" } else { "--other" };
             let i = args.iter().position(|a| a == flag).unwrap_or_else(|| panic!("{flag} <root>"));
