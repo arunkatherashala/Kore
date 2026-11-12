@@ -66,6 +66,15 @@ impl ColumnData {
         }
     }
 
+    /// Plain text values of a dictionary column (empty for other kinds).
+    pub fn dict_to_str_vec(&self) -> Vec<Option<String>> {
+        match self {
+            Self::StrDict { codes, dict } => codes.iter().map(|&c| if c == u8::MAX { None } else { dict.get(c as usize).cloned() }).collect(),
+            Self::Str(v) => v.clone(),
+            _ => Vec::new(),
+        }
+    }
+
     pub fn empty_like(&self) -> Self {
         match self {
             Self::Int64(_)       => Self::Int64(vec![]),
@@ -87,10 +96,24 @@ impl ColumnData {
             (Self::Bool(v),    Value::Null)     => { v.push(None); Ok(()) }
             (Self::Str(v),     Value::Str(s))   => { v.push(Some(s.clone())); Ok(()) }
             (Self::Str(v),     Value::Null)     => { v.push(None); Ok(()) }
-            (Self::StrDict { codes, dict }, Value::Str(s)) => {
-                let code = dict.iter().position(|d| d == s)
-                    .unwrap_or_else(|| { dict.push(s.clone()); dict.len() - 1 }) as u8;
-                codes.push(code); Ok(())
+            (this @ Self::StrDict { .. }, Value::Str(s)) => {
+                // codes are u8 and 255 is NULL: a 256th distinct value cannot be coded, the column becomes plain text
+                let known = match &*this { Self::StrDict { dict, .. } => dict.iter().position(|d| d == s), _ => None };
+                match known {
+                    Some(code) => { if let Self::StrDict { codes, .. } = this { codes.push(code as u8); } }
+                    None => {
+                        let full = matches!(&*this, Self::StrDict { dict, .. } if dict.len() >= u8::MAX as usize);
+                        if full {
+                            let mut v = this.dict_to_str_vec();
+                            v.push(Some(s.clone()));
+                            *this = Self::Str(v);
+                        } else if let Self::StrDict { codes, dict } = this {
+                            dict.push(s.clone());
+                            codes.push((dict.len() - 1) as u8);
+                        }
+                    }
+                }
+                Ok(())
             }
             (Self::StrDict { codes, .. }, Value::Null) => { codes.push(u8::MAX); Ok(()) }
             (col, val) => Err(KoreError::TypeMismatch {
@@ -123,17 +146,21 @@ pub enum Value {
     Float(f64),
     Bool(bool),
     Str(String),
+    Array(Vec<Value>),
+    Map(Vec<(Value, Value)>),
     Null,
 }
 
 impl Value {
     pub fn type_name(&self) -> &'static str {
         match self {
-            Value::Int(_)   => "Int64",
-            Value::Float(_) => "Float64",
-            Value::Bool(_)  => "Bool",
-            Value::Str(_)   => "Str",
-            Value::Null     => "Null",
+            Value::Int(_)     => "Int64",
+            Value::Float(_)   => "Float64",
+            Value::Bool(_)    => "Bool",
+            Value::Str(_)     => "Str",
+            Value::Array(_)   => "Array",
+            Value::Map(_)     => "Map",
+            Value::Null       => "Null",
         }
     }
 
@@ -162,6 +189,8 @@ impl From<&Value> for JoinKey {
             Value::Int(i)  => JoinKey::Int(*i),
             Value::Bool(b) => JoinKey::Bool(*b),
             Value::Str(s)  => JoinKey::Str(s.clone()),
+            Value::Array(a) => JoinKey::Str(format!("{:?}", a)),
+            Value::Map(m)   => JoinKey::Str(format!("{:?}", m)),
             _              => JoinKey::Null,
         }
     }
@@ -290,7 +319,7 @@ impl DataBlock {
         // Cache-friendly Schwartzian transform: co-locate key+index so the
         // sort comparator accesses a single contiguous (key, idx) array instead
         // of two separate arrays with scattered random accesses.
-        // Parallel sort: use Rayon par_sort_unstable_by for 8× speedup on 6M+ rows
+        // Parallel sort: use Rayon par_sort_by for 8× speedup on 6M+ rows
         let indices: Vec<usize> = match data {
             ColumnData::Float64(v) => {
                 let mut pairs: Vec<(f64, usize)> = v.par_iter()
@@ -298,9 +327,9 @@ impl DataBlock {
                     .map(|(i, opt)| (opt.unwrap_or(f64::MAX), i))
                     .collect();
                 if ascending {
-                    pairs.par_sort_unstable_by(|(a,_),(b,_)| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+                    pairs.par_sort_by(|(a,_),(b,_)| a.partial_cmp(b).unwrap_or(Ordering::Equal));
                 } else {
-                    pairs.par_sort_unstable_by(|(a,_),(b,_)| b.partial_cmp(a).unwrap_or(Ordering::Equal));
+                    pairs.par_sort_by(|(a,_),(b,_)| b.partial_cmp(a).unwrap_or(Ordering::Equal));
                 }
                 pairs.into_iter().map(|(_,i)| i).collect()
             }
@@ -310,9 +339,9 @@ impl DataBlock {
                     .map(|(i, opt)| (opt.unwrap_or(i64::MIN), i))
                     .collect();
                 if ascending {
-                    pairs.par_sort_unstable_by_key(|&(k,_)| k);
+                    pairs.par_sort_by_key(|&(k,_)| k);
                 } else {
-                    pairs.par_sort_unstable_by(|(a,_),(b,_)| b.cmp(a));
+                    pairs.par_sort_by(|(a,_),(b,_)| b.cmp(a));
                 }
                 pairs.into_iter().map(|(_,i)| i).collect()
             }
@@ -321,13 +350,13 @@ impl DataBlock {
                     .enumerate()
                     .map(|(i, opt)| (opt.map_or(0, |b| b as u8), i))
                     .collect();
-                if ascending { pairs.sort_unstable_by_key(|&(k,_)| k); }
-                else          { pairs.sort_unstable_by(|(a,_),(b,_)| b.cmp(a)); }
+                if ascending { pairs.sort_by_key(|&(k,_)| k); }
+                else          { pairs.sort_by(|(a,_),(b,_)| b.cmp(a)); }
                 pairs.into_iter().map(|(_,i)| i).collect()
             }
             ColumnData::Str(v) => {
                 let mut indices: Vec<usize> = (0..self.num_rows).collect();
-                indices.sort_unstable_by(|&a, &b| {
+                indices.par_sort_by(|&a, &b| {
                     let sa = v[a].as_deref().unwrap_or("");
                     let sb = v[b].as_deref().unwrap_or("");
                     if ascending { sa.cmp(sb) } else { sb.cmp(sa) }
@@ -336,7 +365,7 @@ impl DataBlock {
             }
             ColumnData::StrDict { codes, dict } => {
                 let mut indices: Vec<usize> = (0..self.num_rows).collect();
-                indices.sort_unstable_by(|&a, &b| {
+                indices.par_sort_by(|&a, &b| {
                     let ca = codes[a]; let cb = codes[b];
                     let sa = if ca == u8::MAX { "" } else { dict.get(ca as usize).map(|s| s.as_str()).unwrap_or("") };
                     let sb = if cb == u8::MAX { "" } else { dict.get(cb as usize).map(|s| s.as_str()).unwrap_or("") };
@@ -360,18 +389,15 @@ impl DataBlock {
                 DataType::Int64   => ColumnData::Int64(vec![]),
                 DataType::Float64 => ColumnData::Float64(vec![]),
                 DataType::Bool    => ColumnData::Bool(vec![]),
-                DataType::Str     => {
-                    // Check if first block has StrDict — preserve variant
-                    let first_col = blocks[0].columns.iter().find(|(c)| c.data.dtype() == DataType::Str);
-                    if let Some(c) = first_col {
-                        if let ColumnData::StrDict { dict, .. } = &c.data {
-                            return ColumnData::StrDict { codes: vec![], dict: dict.clone() };
-                        }
-                    }
-                    ColumnData::Str(vec![])
-                }
+                DataType::Str     => ColumnData::Str(vec![]),
             })
             .collect();
+        // a dictionary column of the first block stays a dictionary column (its own dictionary, column by column)
+        for (i, c) in blocks[0].columns.iter().enumerate() {
+            if let ColumnData::StrDict { dict, .. } = &c.data {
+                acc[i] = ColumnData::StrDict { codes: vec![], dict: dict.clone() };
+            }
+        }
         let mut total = 0usize;
         for block in &blocks {
             if block.columns.len() != schema.len() {
@@ -380,6 +406,16 @@ impl DataBlock {
                 ));
             }
             for (i, col) in block.columns.iter().enumerate() {
+                // representations that cannot be merged code-wise fall back to plain text: a dictionary meeting plain
+                // text (a join output gathers dictionary columns as text), or two dictionaries with more than 255
+                // distinct values together (codes are u8, 255 = NULL)
+                let to_text = match (&acc[i], &col.data) {
+                    (ColumnData::StrDict { .. }, ColumnData::Str(_)) => true,
+                    (ColumnData::StrDict { dict: dd, .. }, ColumnData::StrDict { dict: sd, .. }) if dd != sd =>
+                        dd.len() + sd.iter().filter(|x| !dd.contains(x)).count() > u8::MAX as usize,
+                    _ => false,
+                };
+                if to_text { acc[i] = ColumnData::Str(acc[i].dict_to_str_vec()); }
                 match (&mut acc[i], &col.data) {
                     (ColumnData::Int64(d),   ColumnData::Int64(s))   => d.extend_from_slice(s),
                     (ColumnData::Float64(d), ColumnData::Float64(s)) => d.extend_from_slice(s),
@@ -391,7 +427,7 @@ impl DataBlock {
                             dc.extend_from_slice(sc);
                         } else {
                             // Remap codes to shared dict
-                            let base = dd.len();
+                            let _base = dd.len();
                             for s in sd.iter() {
                                 if !dd.contains(s) { dd.push(s.clone()); }
                             }
@@ -442,6 +478,7 @@ impl DataBlock {
     }
 }
 
+#[allow(dead_code)]
 fn compare_values(a: &Value, b: &Value) -> Ordering {
     match (a, b) {
         (Value::Int(x),   Value::Int(y))   => x.cmp(y),

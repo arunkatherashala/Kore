@@ -288,6 +288,313 @@ impl Catalog {
         v.sort_by_key(|&(_, r)| r);
         v
     }
+
+    /// Re-analyze a table only if it has never been analyzed or if the given
+    /// block has significantly more rows than the stored metadata (>20% growth).
+    /// Returns `true` if stats were refreshed.
+    pub fn analyze_if_stale(&mut self, table_name: &str, block: &DataBlock) -> bool {
+        match self.tables.get(table_name) {
+            None => {
+                self.analyze(table_name, block);
+                true
+            }
+            Some(meta) => {
+                let growth = block.num_rows as f64 / meta.row_count.max(1) as f64;
+                if growth > 1.2 || growth < 0.8 {
+                    self.analyze(table_name, block);
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Check whether a table has been analyzed.
+    pub fn has_stats(&self, table: &str) -> bool {
+        self.tables.contains_key(table)
+    }
+
+    /// List all table names that have been analyzed.
+    pub fn analyzed_tables(&self) -> Vec<&str> {
+        self.tables.keys().map(|s| s.as_str()).collect()
+    }
+}
+
+// ─── CatalogProvider trait & supporting types ────────────────────────────────
+
+use kore_core::KoreError;
+
+pub trait CatalogProvider: Send + Sync {
+    fn name(&self) -> &str;
+    fn list_tables(&self) -> Vec<String>;
+    fn get_table(&self, name: &str) -> Option<TableInfo>;
+    fn create_table(&mut self, name: &str, schema: Vec<ColumnInfo>) -> Result<(), KoreError>;
+    fn drop_table(&mut self, name: &str) -> Result<(), KoreError>;
+    fn table_exists(&self, name: &str) -> bool;
+}
+
+#[derive(Debug, Clone)]
+pub struct TableInfo {
+    pub name: String,
+    pub columns: Vec<ColumnInfo>,
+    pub row_count: usize,
+    pub size_bytes: usize,
+    pub partitions: Vec<PartitionInfo>,
+    pub format: TableFormat,
+    pub location: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ColumnInfo {
+    pub name: String,
+    pub data_type: ColumnType,
+    pub nullable: bool,
+    pub stats: Option<ColStats>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ColumnType {
+    Int64,
+    Float64,
+    Utf8,
+    Boolean,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TableFormat {
+    Kore,
+    Delta,
+    Iceberg,
+    Parquet,
+    Csv,
+}
+
+#[derive(Debug, Clone)]
+pub struct PartitionInfo {
+    pub id: usize,
+    pub values: HashMap<String, String>,
+    pub row_count: usize,
+    pub size_bytes: usize,
+    pub path: String,
+}
+
+// ─── InMemoryCatalog ─────────────────────────────────────────────────────────
+
+pub struct InMemoryCatalog {
+    catalog_name: String,
+    inner: Catalog,
+    schemas: HashMap<String, Vec<ColumnInfo>>,
+    partitions: HashMap<String, Vec<PartitionInfo>>,
+}
+
+impl InMemoryCatalog {
+    pub fn new(name: &str) -> Self {
+        Self {
+            catalog_name: name.to_string(),
+            inner: Catalog::new(),
+            schemas: HashMap::new(),
+            partitions: HashMap::new(),
+        }
+    }
+
+    pub fn inner(&self) -> &Catalog {
+        &self.inner
+    }
+
+    pub fn inner_mut(&mut self) -> &mut Catalog {
+        &mut self.inner
+    }
+
+    pub fn set_partitions(&mut self, table: &str, partitions: Vec<PartitionInfo>) {
+        self.partitions.insert(table.to_string(), partitions);
+    }
+}
+
+impl CatalogProvider for InMemoryCatalog {
+    fn name(&self) -> &str {
+        &self.catalog_name
+    }
+
+    fn list_tables(&self) -> Vec<String> {
+        self.schemas.keys().cloned().collect()
+    }
+
+    fn get_table(&self, name: &str) -> Option<TableInfo> {
+        let columns = self.schemas.get(name)?;
+        let meta = self.inner.get(name);
+        let (row_count, size_bytes) = meta
+            .map(|m| (m.row_count, m.size_bytes))
+            .unwrap_or((0, 0));
+        let partitions = self.partitions.get(name).cloned().unwrap_or_default();
+        Some(TableInfo {
+            name: name.to_string(),
+            columns: columns.clone(),
+            row_count,
+            size_bytes,
+            partitions,
+            format: TableFormat::Kore,
+            location: None,
+        })
+    }
+
+    fn create_table(&mut self, name: &str, schema: Vec<ColumnInfo>) -> Result<(), KoreError> {
+        if self.schemas.contains_key(name) {
+            return Err(KoreError::InvalidArgument(format!(
+                "table '{}' already exists",
+                name
+            )));
+        }
+        self.schemas.insert(name.to_string(), schema);
+        Ok(())
+    }
+
+    fn drop_table(&mut self, name: &str) -> Result<(), KoreError> {
+        if self.schemas.remove(name).is_none() {
+            return Err(KoreError::InvalidArgument(format!(
+                "table '{}' not found",
+                name
+            )));
+        }
+        self.partitions.remove(name);
+        Ok(())
+    }
+
+    fn table_exists(&self, name: &str) -> bool {
+        self.schemas.contains_key(name)
+    }
+}
+
+// ─── HiveMetastoreClient (stub) ─────────────────────────────────────────────
+
+pub struct HiveMetastoreClient {
+    metastore_uri: String,
+}
+
+impl HiveMetastoreClient {
+    pub fn new(metastore_uri: &str) -> Self {
+        Self {
+            metastore_uri: metastore_uri.to_string(),
+        }
+    }
+
+    pub fn uri(&self) -> &str {
+        &self.metastore_uri
+    }
+}
+
+impl CatalogProvider for HiveMetastoreClient {
+    fn name(&self) -> &str {
+        "hive"
+    }
+
+    fn list_tables(&self) -> Vec<String> {
+        vec![]
+    }
+
+    fn get_table(&self, _name: &str) -> Option<TableInfo> {
+        None
+    }
+
+    fn create_table(&mut self, _name: &str, _schema: Vec<ColumnInfo>) -> Result<(), KoreError> {
+        Err(KoreError::InvalidArgument(
+            "Hive metastore not connected".into(),
+        ))
+    }
+
+    fn drop_table(&mut self, _name: &str) -> Result<(), KoreError> {
+        Err(KoreError::InvalidArgument(
+            "Hive metastore not connected".into(),
+        ))
+    }
+
+    fn table_exists(&self, _name: &str) -> bool {
+        false
+    }
+}
+
+// ─── Partition pruning ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct PartitionFilter {
+    pub column: String,
+    pub op: FilterOp,
+    pub value: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum FilterOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    In(Vec<String>),
+}
+
+fn partition_matches(partition: &PartitionInfo, filter: &PartitionFilter) -> bool {
+    let Some(pval) = partition.values.get(&filter.column) else {
+        return true;
+    };
+    match &filter.op {
+        FilterOp::Eq => pval == &filter.value,
+        FilterOp::Ne => pval != &filter.value,
+        FilterOp::Lt => pval.as_str() < filter.value.as_str(),
+        FilterOp::Le => pval.as_str() <= filter.value.as_str(),
+        FilterOp::Gt => pval.as_str() > filter.value.as_str(),
+        FilterOp::Ge => pval.as_str() >= filter.value.as_str(),
+        FilterOp::In(set) => set.iter().any(|v| v == pval),
+    }
+}
+
+pub fn prune_partitions<'a>(
+    partitions: &'a [PartitionInfo],
+    filters: &[PartitionFilter],
+) -> Vec<&'a PartitionInfo> {
+    partitions
+        .iter()
+        .filter(|p| filters.iter().all(|f| partition_matches(p, f)))
+        .collect()
+}
+
+// ─── UnifiedCatalog ─────────────────────────────────────────────────────────
+
+pub struct UnifiedCatalog {
+    providers: HashMap<String, Box<dyn CatalogProvider>>,
+}
+
+impl UnifiedCatalog {
+    pub fn new() -> Self {
+        Self {
+            providers: HashMap::new(),
+        }
+    }
+
+    pub fn register_provider(&mut self, name: &str, provider: Box<dyn CatalogProvider>) {
+        self.providers.insert(name.to_string(), provider);
+    }
+
+    pub fn list_all_tables(&self) -> Vec<(String, String)> {
+        self.providers
+            .iter()
+            .flat_map(|(pname, prov)| {
+                prov.list_tables()
+                    .into_iter()
+                    .map(move |t| (pname.clone(), t))
+            })
+            .collect()
+    }
+
+    pub fn get_table(&self, provider: &str, table: &str) -> Option<TableInfo> {
+        self.providers.get(provider)?.get_table(table)
+    }
+}
+
+impl Default for UnifiedCatalog {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -372,5 +679,334 @@ mod tests {
         };
         cat.analyze("dim", &small);
         assert!(cat.should_broadcast("dim", 10 * 1024 * 1024));
+    }
+
+    // ─── InMemoryCatalog tests ───────────────────────────────────────────
+
+    fn sample_schema() -> Vec<ColumnInfo> {
+        vec![
+            ColumnInfo { name: "id".into(), data_type: ColumnType::Int64, nullable: false, stats: None },
+            ColumnInfo { name: "name".into(), data_type: ColumnType::Utf8, nullable: true, stats: None },
+            ColumnInfo { name: "score".into(), data_type: ColumnType::Float64, nullable: true, stats: None },
+        ]
+    }
+
+    #[test]
+    fn test_in_memory_catalog_create_and_list() {
+        let mut cat = InMemoryCatalog::new("test_catalog");
+        assert_eq!(cat.name(), "test_catalog");
+        assert!(cat.list_tables().is_empty());
+
+        cat.create_table("users", sample_schema()).unwrap();
+        assert!(cat.table_exists("users"));
+        assert!(!cat.table_exists("orders"));
+
+        let tables = cat.list_tables();
+        assert_eq!(tables.len(), 1);
+        assert!(tables.contains(&"users".to_string()));
+    }
+
+    #[test]
+    fn test_in_memory_catalog_get_table() {
+        let mut cat = InMemoryCatalog::new("mem");
+        cat.create_table("events", sample_schema()).unwrap();
+
+        let info = cat.get_table("events").unwrap();
+        assert_eq!(info.name, "events");
+        assert_eq!(info.columns.len(), 3);
+        assert_eq!(info.format, TableFormat::Kore);
+        assert!(info.location.is_none());
+        assert!(info.partitions.is_empty());
+    }
+
+    #[test]
+    fn test_in_memory_catalog_get_nonexistent() {
+        let cat = InMemoryCatalog::new("mem");
+        assert!(cat.get_table("missing").is_none());
+    }
+
+    #[test]
+    fn test_in_memory_catalog_duplicate_create() {
+        let mut cat = InMemoryCatalog::new("mem");
+        cat.create_table("t1", sample_schema()).unwrap();
+        let err = cat.create_table("t1", sample_schema());
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_in_memory_catalog_drop() {
+        let mut cat = InMemoryCatalog::new("mem");
+        cat.create_table("t1", sample_schema()).unwrap();
+        cat.create_table("t2", sample_schema()).unwrap();
+        assert_eq!(cat.list_tables().len(), 2);
+
+        cat.drop_table("t1").unwrap();
+        assert!(!cat.table_exists("t1"));
+        assert!(cat.table_exists("t2"));
+    }
+
+    #[test]
+    fn test_in_memory_catalog_drop_nonexistent() {
+        let mut cat = InMemoryCatalog::new("mem");
+        let err = cat.drop_table("nope");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_in_memory_catalog_with_partitions() {
+        let mut cat = InMemoryCatalog::new("mem");
+        cat.create_table("logs", sample_schema()).unwrap();
+        let parts = vec![
+            PartitionInfo {
+                id: 0,
+                values: HashMap::from([("date".into(), "2025-01-01".into())]),
+                row_count: 1000,
+                size_bytes: 8000,
+                path: "/data/logs/date=2025-01-01".into(),
+            },
+            PartitionInfo {
+                id: 1,
+                values: HashMap::from([("date".into(), "2025-01-02".into())]),
+                row_count: 1500,
+                size_bytes: 12000,
+                path: "/data/logs/date=2025-01-02".into(),
+            },
+        ];
+        cat.set_partitions("logs", parts);
+
+        let info = cat.get_table("logs").unwrap();
+        assert_eq!(info.partitions.len(), 2);
+        assert_eq!(info.partitions[0].path, "/data/logs/date=2025-01-01");
+    }
+
+    // ─── HiveMetastoreClient tests ───────────────────────────────────────
+
+    #[test]
+    fn test_hive_client_stub() {
+        let mut hive = HiveMetastoreClient::new("thrift://metastore:9083");
+        assert_eq!(hive.name(), "hive");
+        assert_eq!(hive.uri(), "thrift://metastore:9083");
+        assert!(hive.list_tables().is_empty());
+        assert!(!hive.table_exists("anything"));
+        assert!(hive.get_table("anything").is_none());
+        assert!(hive.create_table("t", vec![]).is_err());
+        assert!(hive.drop_table("t").is_err());
+    }
+
+    // ─── Partition pruning tests ─────────────────────────────────────────
+
+    fn sample_partitions() -> Vec<PartitionInfo> {
+        vec![
+            PartitionInfo {
+                id: 0,
+                values: HashMap::from([("region".into(), "US".into()), ("year".into(), "2024".into())]),
+                row_count: 1000, size_bytes: 8000,
+                path: "/data/region=US/year=2024".into(),
+            },
+            PartitionInfo {
+                id: 1,
+                values: HashMap::from([("region".into(), "EU".into()), ("year".into(), "2024".into())]),
+                row_count: 800, size_bytes: 6400,
+                path: "/data/region=EU/year=2024".into(),
+            },
+            PartitionInfo {
+                id: 2,
+                values: HashMap::from([("region".into(), "US".into()), ("year".into(), "2025".into())]),
+                row_count: 1200, size_bytes: 9600,
+                path: "/data/region=US/year=2025".into(),
+            },
+            PartitionInfo {
+                id: 3,
+                values: HashMap::from([("region".into(), "EU".into()), ("year".into(), "2025".into())]),
+                row_count: 900, size_bytes: 7200,
+                path: "/data/region=EU/year=2025".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn test_prune_eq() {
+        let parts = sample_partitions();
+        let filters = vec![PartitionFilter {
+            column: "region".into(), op: FilterOp::Eq, value: "US".into(),
+        }];
+        let result = prune_partitions(&parts, &filters);
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|p| p.values["region"] == "US"));
+    }
+
+    #[test]
+    fn test_prune_ne() {
+        let parts = sample_partitions();
+        let filters = vec![PartitionFilter {
+            column: "region".into(), op: FilterOp::Ne, value: "US".into(),
+        }];
+        let result = prune_partitions(&parts, &filters);
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|p| p.values["region"] == "EU"));
+    }
+
+    #[test]
+    fn test_prune_gt() {
+        let parts = sample_partitions();
+        let filters = vec![PartitionFilter {
+            column: "year".into(), op: FilterOp::Gt, value: "2024".into(),
+        }];
+        let result = prune_partitions(&parts, &filters);
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|p| p.values["year"] == "2025"));
+    }
+
+    #[test]
+    fn test_prune_le() {
+        let parts = sample_partitions();
+        let filters = vec![PartitionFilter {
+            column: "year".into(), op: FilterOp::Le, value: "2024".into(),
+        }];
+        let result = prune_partitions(&parts, &filters);
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|p| p.values["year"] == "2024"));
+    }
+
+    #[test]
+    fn test_prune_lt() {
+        let parts = sample_partitions();
+        let filters = vec![PartitionFilter {
+            column: "year".into(), op: FilterOp::Lt, value: "2025".into(),
+        }];
+        let result = prune_partitions(&parts, &filters);
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|p| p.values["year"] == "2024"));
+    }
+
+    #[test]
+    fn test_prune_ge() {
+        let parts = sample_partitions();
+        let filters = vec![PartitionFilter {
+            column: "year".into(), op: FilterOp::Ge, value: "2025".into(),
+        }];
+        let result = prune_partitions(&parts, &filters);
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|p| p.values["year"] == "2025"));
+    }
+
+    #[test]
+    fn test_prune_in() {
+        let parts = sample_partitions();
+        let filters = vec![PartitionFilter {
+            column: "region".into(),
+            op: FilterOp::In(vec!["US".into(), "APAC".into()]),
+            value: String::new(),
+        }];
+        let result = prune_partitions(&parts, &filters);
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|p| p.values["region"] == "US"));
+    }
+
+    #[test]
+    fn test_prune_multiple_filters() {
+        let parts = sample_partitions();
+        let filters = vec![
+            PartitionFilter { column: "region".into(), op: FilterOp::Eq, value: "US".into() },
+            PartitionFilter { column: "year".into(), op: FilterOp::Eq, value: "2025".into() },
+        ];
+        let result = prune_partitions(&parts, &filters);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, 2);
+    }
+
+    #[test]
+    fn test_prune_no_filters_returns_all() {
+        let parts = sample_partitions();
+        let result = prune_partitions(&parts, &[]);
+        assert_eq!(result.len(), 4);
+    }
+
+    #[test]
+    fn test_prune_unknown_column_passes_all() {
+        let parts = sample_partitions();
+        let filters = vec![PartitionFilter {
+            column: "nonexistent".into(), op: FilterOp::Eq, value: "x".into(),
+        }];
+        let result = prune_partitions(&parts, &filters);
+        assert_eq!(result.len(), 4);
+    }
+
+    #[test]
+    fn test_prune_no_match() {
+        let parts = sample_partitions();
+        let filters = vec![PartitionFilter {
+            column: "region".into(), op: FilterOp::Eq, value: "APAC".into(),
+        }];
+        let result = prune_partitions(&parts, &filters);
+        assert!(result.is_empty());
+    }
+
+    // ─── UnifiedCatalog tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_unified_catalog_register_and_list() {
+        let mut unified = UnifiedCatalog::new();
+
+        let mut mem1 = InMemoryCatalog::new("warehouse");
+        mem1.create_table("orders", sample_schema()).unwrap();
+        mem1.create_table("customers", sample_schema()).unwrap();
+
+        let mut mem2 = InMemoryCatalog::new("staging");
+        mem2.create_table("raw_events", sample_schema()).unwrap();
+
+        unified.register_provider("warehouse", Box::new(mem1));
+        unified.register_provider("staging", Box::new(mem2));
+
+        let all = unified.list_all_tables();
+        assert_eq!(all.len(), 3);
+
+        let warehouse_tables: Vec<_> = all.iter()
+            .filter(|(p, _)| p == "warehouse")
+            .map(|(_, t)| t.clone())
+            .collect();
+        assert_eq!(warehouse_tables.len(), 2);
+        assert!(warehouse_tables.contains(&"orders".to_string()));
+        assert!(warehouse_tables.contains(&"customers".to_string()));
+
+        let staging_tables: Vec<_> = all.iter()
+            .filter(|(p, _)| p == "staging")
+            .map(|(_, t)| t.clone())
+            .collect();
+        assert_eq!(staging_tables.len(), 1);
+        assert!(staging_tables.contains(&"raw_events".to_string()));
+    }
+
+    #[test]
+    fn test_unified_catalog_get_table() {
+        let mut unified = UnifiedCatalog::new();
+        let mut mem = InMemoryCatalog::new("main");
+        mem.create_table("users", sample_schema()).unwrap();
+        unified.register_provider("main", Box::new(mem));
+
+        let info = unified.get_table("main", "users").unwrap();
+        assert_eq!(info.name, "users");
+        assert_eq!(info.columns.len(), 3);
+
+        assert!(unified.get_table("main", "nonexistent").is_none());
+        assert!(unified.get_table("other_provider", "users").is_none());
+    }
+
+    #[test]
+    fn test_unified_catalog_with_hive_stub() {
+        let mut unified = UnifiedCatalog::new();
+        let hive = HiveMetastoreClient::new("thrift://host:9083");
+        unified.register_provider("hive", Box::new(hive));
+
+        let all = unified.list_all_tables();
+        assert!(all.is_empty());
+        assert!(unified.get_table("hive", "any_table").is_none());
+    }
+
+    #[test]
+    fn test_unified_catalog_empty() {
+        let unified = UnifiedCatalog::new();
+        assert!(unified.list_all_tables().is_empty());
+        assert!(unified.get_table("any", "table").is_none());
     }
 }

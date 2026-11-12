@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::io;
 
-use kore_core::{Column, ColumnData, DataBlock, Value};
+use kore_core::{Column, DataBlock, Value};
 use kore_sql::KqlContext;
 use serde_json::{json, Value as JValue};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -324,6 +324,8 @@ fn block_to_json_rows(block: &DataBlock) -> JValue {
                     .map(JValue::Number).unwrap_or(JValue::Null),
                 Value::Bool(b)  => JValue::Bool(b),
                 Value::Str(s)   => JValue::String(s),
+                Value::Array(_) => JValue::Array(vec![]),
+                Value::Map(_)   => JValue::Object(serde_json::Map::new()),
                 Value::Null     => JValue::Null,
             };
             obj.insert(col.name.clone(), v);
@@ -427,7 +429,7 @@ mod tests {
 
     #[tokio::test]
     async fn distribute_select_star() {
-        let (mut coord, _handles) = ClusterNode::start_local_cluster(2, 15020);
+        let (coord, _handles) = ClusterNode::start_local_cluster(2, 15020);
         tokio::time::sleep(Duration::from_millis(80)).await;
 
         let table = make_table(100);

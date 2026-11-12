@@ -58,6 +58,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aho-corasick"
+version = "1.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "alloc-no-stdlib"
 version = "2.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1138,7 +1147,7 @@ dependencies = [
 
 [[package]]
 name = "kore-catalog"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "serde",
@@ -1202,7 +1211,7 @@ dependencies = [
 
 [[package]]
 name = "kore-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "rayon",
  "serde",
@@ -1212,9 +1221,10 @@ dependencies = [
 
 [[package]]
 name = "kore-delta"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
+ "kore-parquet",
  "serde",
  "serde_json",
 ]
@@ -1261,7 +1271,7 @@ dependencies = [
 
 [[package]]
 name = "kore-dml"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-delta",
@@ -1283,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "kore-ffi"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-io",
@@ -1320,7 +1330,7 @@ dependencies = [
 
 [[package]]
 name = "kore-io"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-store",
@@ -1340,7 +1350,7 @@ dependencies = [
 
 [[package]]
 name = "kore-join"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "rayon",
@@ -1350,9 +1360,10 @@ dependencies = [
 
 [[package]]
 name = "kore-kafka"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
+ "kore-stream",
  "serde_json",
  "tokio",
 ]
@@ -1426,7 +1437,7 @@ dependencies = [
 
 [[package]]
 name = "kore-node"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-sql",
@@ -1447,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "kore-optimize"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-sql",
@@ -1464,7 +1475,7 @@ dependencies = [
 
 [[package]]
 name = "kore-parquet"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -1494,9 +1505,10 @@ dependencies = [
 
 [[package]]
 name = "kore-python"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
+ "kore-parquet",
  "kore-sql",
  "libc",
  "serde_json",
@@ -1577,7 +1589,7 @@ dependencies = [
 
 [[package]]
 name = "kore-spill"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
  "kore-store",
@@ -1586,8 +1598,9 @@ dependencies = [
 
 [[package]]
 name = "kore-sql"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
+ "kore-catalog",
  "kore-core",
  "kore-delta",
  "kore-io",
@@ -1595,8 +1608,10 @@ dependencies = [
  "kore-parquet",
  "kore-spill",
  "kore-store",
+ "kore-vectorized",
  "kore-window",
  "rayon",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1672,10 +1687,9 @@ dependencies = [
 
 [[package]]
 name = "kore-vectorized"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "kore-core",
- "kore-sql",
  "rayon",
 ]
 
@@ -2153,6 +2167,35 @@ checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags 2.13.0",
 ]
+
+[[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-automata"
+version = "0.4.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-syntax"
+version = "0.8.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "renderdoc-sys"

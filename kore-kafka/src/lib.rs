@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use kore_core::{Column, ColumnData, DataBlock, Value};
-use serde_json::{json, Value as JValue};
+use kore_core::{Column, DataBlock, Value};
+use serde_json::Value as JValue;
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -53,6 +53,7 @@ impl StreamBatch {
 // ─── Consumer ─────────────────────────────────────────────────────────────────
 
 pub struct KafkaConsumer {
+    #[allow(dead_code)]
     config:     KafkaConfig,
     topics:     Vec<String>,
     // simulated: track next offset per (topic, partition)
@@ -161,6 +162,8 @@ fn datablock_to_ndjson(block: &DataBlock) -> String {
                     .map(JValue::Number).unwrap_or(JValue::Null),
                 Value::Bool(b)  => JValue::Bool(b),
                 Value::Str(s)   => JValue::String(s),
+                Value::Array(a) => JValue::Array(a.into_iter().map(|_| JValue::Null).collect()),
+                Value::Map(_)   => JValue::Object(serde_json::Map::new()),
                 Value::Null     => JValue::Null,
             };
             obj.insert(col.name.clone(), v);
@@ -310,6 +313,7 @@ pub fn tumbling_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kore_stream::{Source, Sink};
 
     fn make_consumer() -> KafkaConsumer {
         KafkaConsumer::new(KafkaConfig::local(), vec!["events".into()])
@@ -373,5 +377,73 @@ mod tests {
         wm.update(100_000_000);
         wm.update(200_000_000);
         assert_eq!(wm.watermark(), 200_000_000 - 5 * 1_000_000);
+    }
+
+    #[test]
+    fn kafka_source_trait() {
+        let consumer = make_consumer();
+        let mut source = KafkaStreamSource::new(consumer, 100);
+        let batch = source.next_batch().expect("should produce a batch");
+        assert_eq!(batch.num_rows, 1_000);
+    }
+
+    #[test]
+    fn kafka_sink_trait() {
+        let producer = KafkaProducer::new(KafkaConfig::local());
+        let mut sink = KafkaStreamSink::new(producer, "output".into());
+        let block = DataBlock {
+            num_rows: 2,
+            columns: vec![
+                Column { name: "x".into(), data: kore_core::ColumnData::Int64(vec![Some(1), Some(2)]) },
+            ],
+        };
+        sink.write_batch(&block).expect("should write");
+    }
+}
+
+// ─── kore-stream Source/Sink implementations ──────────────────────────────────
+
+/// Adapts a `KafkaConsumer` into a `kore_stream::Source` for structured streaming.
+pub struct KafkaStreamSource {
+    consumer:   KafkaConsumer,
+    timeout_ms: u64,
+}
+
+impl KafkaStreamSource {
+    pub fn new(consumer: KafkaConsumer, timeout_ms: u64) -> Self {
+        Self { consumer, timeout_ms }
+    }
+}
+
+impl kore_stream::Source for KafkaStreamSource {
+    fn next_batch(&mut self) -> Result<DataBlock, kore_core::KoreError> {
+        let batches = self.consumer.poll_batch(self.timeout_ms);
+        if batches.is_empty() {
+            return Ok(DataBlock { num_rows: 0, columns: vec![] });
+        }
+        let blocks: Vec<DataBlock> = batches.into_iter().map(|b| b.data).collect();
+        DataBlock::concat(blocks)
+    }
+
+    fn commit(&mut self, _offset: u64) {}
+}
+
+/// Adapts a `KafkaProducer` into a `kore_stream::Sink` for structured streaming.
+pub struct KafkaStreamSink {
+    producer: KafkaProducer,
+    topic:    String,
+}
+
+impl KafkaStreamSink {
+    pub fn new(producer: KafkaProducer, topic: String) -> Self {
+        Self { producer, topic }
+    }
+}
+
+impl kore_stream::Sink for KafkaStreamSink {
+    fn write_batch(&mut self, batch: &DataBlock) -> Result<(), kore_core::KoreError> {
+        self.producer.send(&self.topic, batch)
+            .map(|_| ())
+            .map_err(|e| kore_core::KoreError::InvalidArgument(e))
     }
 }

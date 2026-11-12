@@ -386,6 +386,9 @@ pub unsafe extern "C" fn kore_session_query(
     match kore_sql::query(sql_str, &(*sess).ctx) {
         Ok(block)  => {
             let json = block_to_json_stripped(&block);
+            drop(block);
+            // moves the buffer into the CString (no second copy); fails only on an interior NUL, which
+            // serde_json never emits (it escapes control characters)
             CString::new(json).map(|cs| cs.into_raw()).unwrap_or(std::ptr::null_mut())
         }
         Err(e) => { set_error(format!("{e}")); std::ptr::null_mut() }
@@ -416,6 +419,43 @@ unsafe fn ptr_to_str<'a>(p: *const c_char) -> Option<&'a str> {
     CStr::from_ptr(p).to_str().ok()
 }
 
+/// Split one CSV record. Fields may be double-quoted (commas inside, `""` for a quote); unquoted
+/// fields are trimmed. Records do not span lines.
+fn split_csv<'a>(line: &'a str, out: &mut Vec<std::borrow::Cow<'a, str>>) {
+    use std::borrow::Cow;
+    out.clear();
+    let b = line.as_bytes();
+    let mut i = 0;
+    loop {
+        if i < b.len() && b[i] == b'"' {
+            let mut j = i + 1;
+            let mut escaped = false;
+            loop {
+                match b[j.min(b.len())..].iter().position(|&c| c == b'"') {
+                    None => { j = b.len(); break; }
+                    Some(p) => {
+                        j += p;
+                        if j + 1 < b.len() && b[j + 1] == b'"' { escaped = true; j += 2; continue; }
+                        break;
+                    }
+                }
+            }
+            let inner = &line[i + 1..j.min(b.len())];
+            out.push(if escaped { Cow::Owned(inner.replace("\"\"", "\"")) } else { Cow::Borrowed(inner) });
+            let mut k = (j + 1).min(b.len());
+            while k < b.len() && b[k] != b',' { k += 1; }
+            i = k;
+        } else {
+            let end = b[i.min(b.len())..].iter().position(|&c| c == b',').map_or(b.len(), |p| i + p);
+            out.push(Cow::Borrowed(line[i.min(b.len())..end].trim()));
+            i = end;
+        }
+        if i >= b.len() { break; }
+        i += 1;
+        if i == b.len() { out.push(Cow::Borrowed("")); break; }
+    }
+}
+
 fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(), String> {
     use std::io::{BufRead, BufReader};
     use std::collections::HashMap;
@@ -426,40 +466,50 @@ fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(
 
     let mut hdr = String::new();
     r1.read_line(&mut hdr).map_err(|e| e.to_string())?;
-    let headers: Vec<String> = hdr.trim_end().split(',')
-        .map(|h| h.trim().trim_matches('"').to_string()).collect();
+    // A header cell `name::str` declares a text column (no numeric inference: zip codes, ids with leading zeros).
+    let mut force_str: Vec<bool> = Vec::new();
+    let headers: Vec<String> = {
+        let mut f = Vec::new();
+        split_csv(hdr.trim_end(), &mut f);
+        f.iter().map(|h| match h.strip_suffix("::str") {
+            Some(n) => { force_str.push(true); n.to_string() }
+            None => { force_str.push(false); h.to_string() }
+        }).collect()
+    };
     let nc = headers.len();
 
     const SAMPLE: usize = 2_000;
     // For each column: track if all non-empty values parse as i64, f64, and cardinality.
     let mut all_i64:   Vec<bool> = vec![true; nc];
     let mut all_f64:   Vec<bool> = vec![true; nc];
-    let mut seen:      Vec<HashMap<[u8; 16], ()>> = (0..nc).map(|_| HashMap::new()).collect();
+    let mut seen:      Vec<std::collections::HashSet<u64>> = (0..nc).map(|_| Default::default()).collect();
     let mut seen_many: Vec<bool> = vec![false; nc];  // >255 unique
     let mut any_val:   Vec<bool> = vec![false; nc];
     let mut nsampled = 0usize;
 
+    let hdr_bytes = hdr.len();
+    let mut sample_bytes = 0usize;
+    let mut sample_eof = false;
     let mut line = String::new();
     while nsampled < SAMPLE {
         line.clear();
-        if r1.read_line(&mut line).map_err(|e| e.to_string())? == 0 { break; }
+        if r1.read_line(&mut line).map_err(|e| e.to_string())? == 0 { sample_eof = true; break; }
+        sample_bytes += line.len();
         let trimmed = line.trim_end();
         if trimmed.is_empty() { continue; }
-        let vals: Vec<&str> = trimmed.splitn(nc, ',').collect();
+        let mut vals = Vec::with_capacity(nc);
+        split_csv(trimmed, &mut vals);
         for i in 0..nc {
-            let v = vals.get(i).map(|s| s.trim().trim_matches('"')).unwrap_or("");
+            let v: &str = vals.get(i).map(|s| s.as_ref()).unwrap_or("");
             if v.is_empty() { continue; }
             any_val[i] = true;
             if all_i64[i] && v.parse::<i64>().is_err() { all_i64[i] = false; }
             if all_f64[i] && v.parse::<f64>().is_err() { all_f64[i] = false; }
             if !seen_many[i] {
-                // cheap 16-byte key from first 16 bytes of value
-                let mut key = [0u8; 16];
-                let b = v.as_bytes();
-                let n = b.len().min(16);
-                key[..n].copy_from_slice(&b[..n]);
-                key[15] = b.len() as u8;
-                seen[i].insert(key, ());
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                v.hash(&mut h);
+                seen[i].insert(h.finish());
                 if seen[i].len() > 255 { seen_many[i] = true; }
             }
         }
@@ -468,10 +518,10 @@ fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(
 
     #[derive(Clone, PartialEq)]
     enum CT { Int64, Float64, StrDict, Str }
-    let col_types: Vec<CT> = (0..nc).map(|i| {
+    let mut col_types: Vec<CT> = (0..nc).map(|i| {
         if !any_val[i]       { return CT::Str; }
-        if all_i64[i]        { return CT::Int64; }
-        if all_f64[i]        { return CT::Float64; }
+        if !force_str[i] && all_i64[i] { return CT::Int64; }
+        if !force_str[i] && all_f64[i] { return CT::Float64; }
         if !seen_many[i]     { return CT::StrDict; }
         CT::Str
     }).collect();
@@ -483,7 +533,16 @@ fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(
     let mut skip = String::new();
     r2.read_line(&mut skip).map_err(|e| e.to_string())?;   // skip header
 
-    let cap = 1_100_000usize;
+    // Size every column once from the file length and the sampled line length. A fixed small capacity
+    // that doubles on demand leaves up to 2x slack per column (and copies the column on each growth).
+    let cap = if sample_eof || nsampled == 0 {
+        nsampled
+    } else {
+        let file_len = std::fs::metadata(path).map(|m| m.len() as usize).unwrap_or(0);
+        let avg = (sample_bytes as f64 / nsampled as f64).max(1.0);
+        let est = (file_len.saturating_sub(hdr_bytes) as f64 / avg * 1.03) as usize;
+        est.max(nsampled) + 1024
+    };
     let mut i64_cols:  Vec<Vec<Option<i64>>>    = (0..nc).map(|i| if col_types[i]==CT::Int64   { Vec::with_capacity(cap) } else { vec![] }).collect();
     let mut f64_cols:  Vec<Vec<Option<f64>>>    = (0..nc).map(|i| if col_types[i]==CT::Float64 { Vec::with_capacity(cap) } else { vec![] }).collect();
     let mut str_cols:  Vec<Vec<Option<String>>> = (0..nc).map(|i| if col_types[i]==CT::Str     { Vec::with_capacity(cap) } else { vec![] }).collect();
@@ -500,9 +559,10 @@ fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(
         let trimmed = line2.trim_end();
         if trimmed.is_empty() { continue; }
         nr += 1;
-        let vals: Vec<&str> = trimmed.splitn(nc, ',').collect();
+        let mut vals = Vec::with_capacity(nc);
+        split_csv(trimmed, &mut vals);
         for i in 0..nc {
-            let v = vals.get(i).map(|s| s.trim().trim_matches('"')).unwrap_or("");
+            let v: &str = vals.get(i).map(|s| s.as_ref()).unwrap_or("");
             match col_types[i] {
                 CT::Int64   => i64_cols[i].push(if v.is_empty() { None } else { v.parse().ok() }),
                 CT::Float64 => f64_cols[i].push(if v.is_empty() { None } else { v.parse().ok() }),
@@ -518,8 +578,17 @@ fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(
                         sd_dict[i].push(v.to_string());
                         sd_codes[i].push(code);
                     } else {
-                        // cardinality overflowed sample estimate — treat as plain Str
-                        sd_codes[i].push(0);
+                        // more distinct values than the sample suggested: this column is plain text after all.
+                        // Rebuild what was read so far as strings and carry on in Str mode (never reuse a code).
+                        let mut all: Vec<Option<String>> = sd_codes[i].iter()
+                            .map(|&c| if c == u8::MAX { None } else { Some(sd_dict[i][c as usize].clone()) })
+                            .collect();
+                        all.push(Some(v.to_string()));
+                        str_cols[i] = all;
+                        sd_codes[i] = Vec::new();
+                        sd_dict[i].clear();
+                        sd_map[i].clear();
+                        col_types[i] = CT::Str;
                     }
                 }
             }
@@ -530,13 +599,14 @@ fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(
     let mut columns = vec![];
     for (i, name) in headers.iter().enumerate() {
         let data = match col_types[i] {
-            CT::Int64   => ColumnData::Int64(std::mem::take(&mut i64_cols[i])),
-            CT::Float64 => ColumnData::Float64(std::mem::take(&mut f64_cols[i])),
-            CT::Str     => ColumnData::Str(std::mem::take(&mut str_cols[i])),
-            CT::StrDict => ColumnData::StrDict {
-                codes: std::mem::take(&mut sd_codes[i]),
-                dict:  std::mem::take(&mut sd_dict[i]),
-            },
+            CT::Int64   => { let mut v = std::mem::take(&mut i64_cols[i]); v.shrink_to_fit(); ColumnData::Int64(v) }
+            CT::Float64 => { let mut v = std::mem::take(&mut f64_cols[i]); v.shrink_to_fit(); ColumnData::Float64(v) }
+            CT::Str     => { let mut v = std::mem::take(&mut str_cols[i]); v.shrink_to_fit(); ColumnData::Str(v) }
+            CT::StrDict => {
+                let mut codes = std::mem::take(&mut sd_codes[i]);
+                codes.shrink_to_fit();
+                ColumnData::StrDict { codes, dict: std::mem::take(&mut sd_dict[i]) }
+            }
         };
         columns.push(Column { name: name.clone(), data });
     }
@@ -544,7 +614,67 @@ fn load_csv_into(ctx: &mut KqlContext, table_name: &str, path: &str) -> Result<(
     Ok(())
 }
 
-fn block_to_json_stripped(block: &DataBlock) -> String {
+/// Stream the rows straight into one buffer (no per-row serde_json maps). Keys are written in sorted
+/// order, exactly what the map-based path produced. Falls back to that path if stripped names collide.
+fn block_to_json_stripped(block: &DataBlock) -> Vec<u8> {
+    let mut keys: Vec<(String, usize)> = block.columns.iter().enumerate()
+        .map(|(i, col)| (col.name.rfind('.').map(|p| &col.name[p+1..]).unwrap_or(&col.name).to_string(), i))
+        .collect();
+    keys.sort();
+    if keys.windows(2).any(|w| w[0].0 == w[1].0) {
+        return block_to_json_via_map(block).into_bytes();
+    }
+    let key_json: Vec<Vec<u8>> = keys.iter().map(|(k, _)| {
+        let mut b = serde_json::to_vec(k).unwrap_or_else(|_| b"\"\"".to_vec());
+        b.push(b':');
+        b
+    }).collect();
+    let mut out: Vec<u8> = Vec::with_capacity(64 + block.num_rows * 16 * keys.len().max(1));
+    out.push(b'[');
+    for r in 0..block.num_rows {
+        if r > 0 { out.push(b','); }
+        out.push(b'{');
+        for (n, (_, ci)) in keys.iter().enumerate() {
+            if n > 0 { out.push(b','); }
+            out.extend_from_slice(&key_json[n]);
+            write_cell(&mut out, &block.columns[*ci].data, r);
+        }
+        out.push(b'}');
+    }
+    out.push(b']');
+    out
+}
+
+#[inline]
+fn write_json_str(out: &mut Vec<u8>, s: &str) {
+    // serde_json escapes only quote, backslash and bytes below 0x20; a string without them is written verbatim
+    if s.bytes().all(|b| b >= 0x20 && b != b'"' && b != b'\\') {
+        out.reserve(s.len() + 2);
+        out.push(b'"');
+        out.extend_from_slice(s.as_bytes());
+        out.push(b'"');
+    } else {
+        let _ = serde_json::to_writer(&mut *out, s);
+    }
+}
+
+/// One cell, written straight from the typed column (no `Value` / `String` clone). Same bytes as the
+/// `get_value` based writer: a missing slot is `null`, non-finite floats are `null` (serde_json).
+#[inline]
+fn write_cell(out: &mut Vec<u8>, data: &ColumnData, r: usize) {
+    match data {
+        ColumnData::Int64(v) => match v.get(r) { Some(Some(i)) => { let _ = serde_json::to_writer(&mut *out, i); } _ => out.extend_from_slice(b"null") },
+        ColumnData::Float64(v) => match v.get(r) { Some(Some(f)) => { let _ = serde_json::to_writer(&mut *out, f); } _ => out.extend_from_slice(b"null") },
+        ColumnData::Bool(v) => match v.get(r) { Some(Some(true)) => out.extend_from_slice(b"true"), Some(Some(false)) => out.extend_from_slice(b"false"), _ => out.extend_from_slice(b"null") },
+        ColumnData::Str(v) => match v.get(r) { Some(Some(s)) => write_json_str(out, s), _ => out.extend_from_slice(b"null") },
+        ColumnData::StrDict { codes, dict } => {
+            let c = codes.get(r).copied().unwrap_or(u8::MAX);
+            match if c == u8::MAX { None } else { dict.get(c as usize) } { Some(s) => write_json_str(out, s), None => out.extend_from_slice(b"null") }
+        }
+    }
+}
+
+fn block_to_json_via_map(block: &DataBlock) -> String {
     let mut rows = vec![];
     for r in 0..block.num_rows {
         let mut obj = serde_json::Map::new();
@@ -556,6 +686,8 @@ fn block_to_json_stripped(block: &DataBlock) -> String {
                 kore_core::Value::Float(f) => serde_json::json!(f),
                 kore_core::Value::Bool(b)  => serde_json::json!(b),
                 kore_core::Value::Str(s)   => serde_json::json!(s),
+                kore_core::Value::Array(_) => serde_json::json!([]),
+                kore_core::Value::Map(_)   => serde_json::json!({}),
                 kore_core::Value::Null     => serde_json::Value::Null,
             };
             obj.insert(key, jv);
@@ -565,3 +697,81 @@ fn block_to_json_stripped(block: &DataBlock) -> String {
     serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
 }
 
+#[cfg(test)]
+mod csv_loader_tests {
+    use super::*;
+
+    #[test]
+    fn csv_loader_never_replaces_values_and_handles_quoting() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!("kore_csv_loader_{}.csv", std::process::id()));
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "id,name,grp,note").unwrap();
+            for i in 1..=3000 {
+                // names share a 16-byte prefix; grp looks low-cardinality for 2500 rows, then explodes
+                let grp = if i <= 2500 { format!("g{}", i % 5) } else { format!("late-{i}") };
+                let note = match i % 3 { 0 => "\"a, b\"".to_string(), 1 => "\"say \"\"hi\"\"\"".to_string(), _ => String::new() };
+                writeln!(f, "{i},\"Customer#{i:09}\",{grp},{note}").unwrap();
+            }
+        }
+        let mut ctx = KqlContext::new();
+        load_csv_into(&mut ctx, "t", path.to_str().unwrap()).unwrap();
+        let text = |sql: &str| -> Option<String> {
+            let b = ctx.query(sql).unwrap();
+            match &b.columns[0].data {
+                ColumnData::Str(v) => v[0].clone(),
+                ColumnData::StrDict { codes, dict } => dict.get(codes[0] as usize).cloned(),
+                other => panic!("unexpected column type {other:?}"),
+            }
+        };
+        assert_eq!(text("select name from t where id = 1").as_deref(), Some("Customer#000000001"));
+        assert_eq!(text("select name from t where id = 2999").as_deref(), Some("Customer#000002999"));
+        let distinct = ctx.query("select count(distinct name) as d from t").unwrap();
+        // COUNT is a whole number (BIGINT in Spark); older builds returned it as DOUBLE
+        assert!(matches!(&distinct.columns[0].data, ColumnData::Int64(v) if v[0] == Some(3000))
+                || matches!(&distinct.columns[0].data, ColumnData::Float64(v) if v[0] == Some(3000.0)),
+                "all 3000 names must stay distinct");
+        assert_eq!(text("select grp from t where id = 2999").as_deref(), Some("late-2999"));
+        assert_eq!(text("select grp from t where id = 7").as_deref(), Some("g2"));
+        assert_eq!(text("select note from t where id = 3").as_deref(), Some("a, b"));
+        assert_eq!(text("select note from t where id = 4").as_deref(), Some("say \"hi\""));
+        std::fs::remove_file(path).ok();
+    }
+}
+
+
+#[cfg(test)]
+mod json_tests {
+    use super::*;
+
+    #[test]
+    fn typed_json_writer_matches_value_based_writer_byte_for_byte() {
+        let floats = [0.0, -0.0, 1.0, -1.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX, f64::MIN_POSITIVE,
+                      5e-324, 1e21, 1e-7, 123456789.123456789, 0.1 + 0.2, 1e300, -1e-300];
+        let mut fv: Vec<Option<f64>> = floats.iter().map(|&f| Some(f)).collect();
+        // pseudo random bit patterns (includes subnormals, NaNs, infinities)
+        let mut x: u64 = 0x9E3779B97F4A7C15;
+        for _ in 0..2000 { x ^= x << 13; x ^= x >> 7; x ^= x << 17; fv.push(Some(f64::from_bits(x))); }
+        fv.push(None);
+        let n = fv.len();
+        let strs = ["", "plain", "quo\"te", "back\\slash", "trail\\", "tab\tnl\ncr\r", "\u{0}\u{1}\u{1f}", "del\u{7f}", "caf\u{e9} \u{4e2d}\u{6587} \u{1F600}",
+                    "</script>", "\u{2028}\u{2029}", "a'b"];
+        let sv: Vec<Option<String>> = (0..n).map(|i| if i % 9 == 0 { None } else { Some(strs[i % strs.len()].to_string()) }).collect();
+        let dict: Vec<String> = strs.iter().map(|s| s.to_string()).collect();
+        let codes: Vec<u8> = (0..n).map(|i| if i % 7 == 0 { u8::MAX } else { (i % strs.len()) as u8 }).collect();
+        let iv: Vec<Option<i64>> = (0..n).map(|i| match i % 6 { 0 => None, 1 => Some(i64::MIN), 2 => Some(i64::MAX), 3 => Some(0), 4 => Some(-(i as i64)), _ => Some(i as i64) }).collect();
+        let bv: Vec<Option<bool>> = (0..n).map(|i| match i % 3 { 0 => None, 1 => Some(true), _ => Some(false) }).collect();
+        let block = DataBlock::new(vec![
+            Column { name: "t.f".into(), data: ColumnData::Float64(fv) },
+            Column { name: "s".into(), data: ColumnData::Str(sv) },
+            Column { name: "d".into(), data: ColumnData::StrDict { codes, dict } },
+            Column { name: "i".into(), data: ColumnData::Int64(iv) },
+            Column { name: "b".into(), data: ColumnData::Bool(bv) },
+        ]).unwrap();
+        let new = block_to_json_stripped(&block);
+        let old = block_to_json_via_map(&block).into_bytes();
+        // the map based writer sorts keys too (serde_json::Map is a BTreeMap)
+        assert_eq!(String::from_utf8(new).unwrap(), String::from_utf8(old).unwrap());
+    }
+}

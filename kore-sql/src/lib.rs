@@ -15,15 +15,44 @@ pub mod ast;
 pub mod lexer;
 pub mod parser;
 pub mod executor;
+pub mod rewrite;
+pub mod ast_walk;
+pub mod general;
+pub mod aggs;
+pub mod rollup;
+pub mod desugar;
+pub mod hashes;
+pub mod arrays;
+pub mod structs;
+pub mod tz;
+pub mod explain;
+pub mod testing;
+pub(crate) mod sipset;
+pub(crate) mod semicte;
+pub(crate) mod dateaccel;
+pub mod vecexpr;
+pub(crate) mod exprkey;
+pub mod fusedagg;
+pub mod window;
+pub mod scalar;
+pub mod datetime;
+pub mod vec_path;
+pub mod spill;
+pub mod dml;
+pub mod maps;
+pub mod hof;
+pub(crate) mod bind;
+pub(crate) mod spill_ops;
 
 pub use ast::*;
-pub use executor::{KqlContext, execute, execute_query};
+pub use executor::{KqlContext, ExprVal, execute, execute_query};
 pub use parser::{parse, parse_query};
 
 use kore_core::KoreError;
 
 /// One-shot: parse + execute SQL against a context.
 pub fn query(sql: &str, ctx: &KqlContext) -> Result<kore_core::DataBlock, KoreError> {
-    let stmt = parse(sql)?;
-    executor::execute_select(&stmt, ctx)
+    // Same entry point as every other caller, so WITH clauses, UNION/INTERSECT/EXCEPT and the
+    // vectorized fast path are not silently skipped.
+    ctx.query(sql)
 }

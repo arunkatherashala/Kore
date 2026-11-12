@@ -1,0 +1,34 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "kore-fileformat"
+version = "1.8.0"
+description = "KORE Binary Format - High-performance columnar compression (PyO3 native module)"
+readme = "../README.md"
+requires-python = ">=3.9"
+authors = [
+  { name = "Sai Arun Kumar Ktherashala", email = "arunkatherashala@gmail.com" }
+]
+keywords = ["compression", "binary-format", "performance", "serialization", "data-compression", "columnar"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: MIT License",
+]
+
+[project.urls]
+Homepage = "https://github.com/arunkatherashala/Kore"
+Repository = "https://github.com/arunkatherashala/Kore"
+Issues = "https://github.com/arunkatherashala/Kore/issues"
+
+[tool.maturin]
+module-name = "kore_fileformat"
+features = ["pyo3/extension-module"]
