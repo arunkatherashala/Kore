@@ -29,6 +29,7 @@ be burstier, messier and phrased differently.
 | W1 World T, data work in a sandbox (synthetic): being minus tuned LinUCB / UCB1 / always SQL, reward per energy, default reward design; 6 x 5 reward-design sweep; OOD | 20 worlds per point, budget 6000 | random plan, always SQL, UCB1 and LinUCB, each tuned on seeds 101..120 with 6 configurations per grid point; reward-best oracle (sees every plan's true result) | +0.127 [+0.084, +0.171] / +0.496 [+0.416, +0.575] / +2.259; 0.686 below the reward-best oracle; sweep: being ahead (interval above 0) at 22 / 24 / 25 of 30 points, behind LinUCB and UCB1 from a wrong-answer penalty of 3.16 x reward, behind always SQL at 3 points of penalty 10 x; series rules and column search precision 1.000 before the checker (6,257 and 881 answers); 0 wrong accepted; later kinds not faster (Spearman -0.005 [-0.118, +0.109]); OOD +0.516 over LinUCB, mostly from skipping (Track W1). Fair-baseline note (Track W2, seeds 201..260, penalty 0, weight 1): this LinUCB has no file feature; LinUCB with a one-hot of the task's file is above the default being by +0.135 [+0.096, +0.175] (49 of 60), and B1 (`wt_file_key`) minus LinUCB+file is +0.090 [+0.047, +0.132] (plain LinUCB +0.367). | 2026-11-08 | world-t |
 | W1b World T over-skipping fix (`value_ucb`, synthetic): being minus tuned LinUCB / UCB1 / always SQL on the 6 x 5 sweep, before (abd8de1e) and after | 20 worlds per point, budget 6000 | same as W1, all re-tuned on seeds 101..120; old being re-tuned separately | penalty 0 unchanged (headline +0.127 [+0.084, +0.171], new minus old +0.000, 0/0/20); points ahead (interval above 0) 22 / 24 / 25 -> 25 / 30 / 29 of 30; still behind LinUCB at penalty 10 x, weights 1 and 3.16 (-0.104, -0.108; before -0.775, -0.488) and always SQL at penalty 10 x, weight 10 (-0.087); pre-registered criterion not met (Track W1b). Fair-baseline note (Track W2, seeds 201..260, penalty 0, weight 1): this LinUCB has no file feature; LinUCB with a one-hot of the task's file is above the default being by +0.135 [+0.096, +0.175] (49 of 60), and B1 (`wt_file_key`) minus LinUCB+file is +0.090 [+0.047, +0.132] (plain LinUCB +0.367). | 2026-11-08 | wt-overskip |
 | W2 file-keyed estimator B1 in the World T being (opt-in `wt_file_key`, synthetic): B1 minus B0 / minus LinUCB with the file feature / minus plain LinUCB, reward per energy, penalty 0, weight 1; 6 x 5 sweep with Holm | 60 worlds (report seeds 201..260), budget 6000 | B0 (default being), LinUCB, LinUCB + one-hot file feature, UCB1, always SQL, each tuned on seeds 101..120 per point | +0.225 [+0.192, +0.258] (59/0/1) / **+0.090 [+0.047, +0.132] (43/0/17)** / +0.367 [+0.327, +0.408]; the default being B0 minus LinUCB+file -0.135 [-0.175, -0.096]; 6 regressions after Holm (penalty 1 x weight 0.1, penalty 10 x all weights), so B1 stays opt-in; M4 not met (Track W2) | 2026-11-11 | 9feedb93 |
+| W2b B1 with a penalty-aware beta (B1p, opt-in `wt_file_key = on` + `wt_file_beta = table`, synthetic): B1p minus B0, reward per energy, penalty 0, weight 1; 6 x 5 sweep with Holm | 60 worlds (report seeds 261..320), budget 6000 | B0 (default being), LinUCB, LinUCB + file feature, UCB1, always SQL, and B1p's beta, each tuned on seeds 101..120 per point (6 configurations) | PRIMARY +0.227 [+0.192, +0.262] (59/0/1), a replication (the table picks beta 2 there, B1p = W2's B1); sweep: B1p minus B0 interval above 0 at 30 of 30 points, **0 regressions after Holm** (W2's B1 on the same seeds: 6); OOD +0.231 [+0.197, +0.265]; Stage-2 rule 1 to 4 met, default not changed (needs the owner's approval); M4 not met (dominated at 1 point, penalty 10 x weight 3.16, by LinUCB+file) (Track W2b) | 2026-11-11 | ef39bfb6 |
 | B14 rule library and always-on curiosity, first world long run (synthetic) | 20 worlds x 200,000 steps; transfer 20 worlds x 30,000; short lives 20 worlds | B14 off (the long run's being); tuning seeds 101..120 | steps 50k-200k B14 on minus off +0.491 [+0.287, +0.695] (18/0/2), rule worlds +0.655 (14/0/0), simple +0.109 [-0.076, +0.293]; slope 50k-200k -0.013 [-0.030, +0.003] per 100k (plateau level raised, slope not); curiosity cost on simple worlds +2.5% [-1.9%, +6.8%] (n = 6, 1% criterion not met); library import transfer +475 [-128, +1,078] steps saved per family (7/10/3); budget 600 +0.037 [-0.037, +0.112], 3000 +0.149 [+0.004, +0.293] (Track B14) | 2026-11-08 | a062a62a |
 | L2 learning to learn, World O (synthetic): `form+l2` (B12 `form` plus the L2 meta-prior) top-tier Spearman of family order vs attempts to competence; reward per energy vs `current`; attribution `form+l2` minus `form` | 20 worlds, life 1,200,000, pre-registered (commit 19125b17) | `current`; `form` (B12) | Spearman -0.094 [-0.164, -0.023] (15 of 20 negative): met; reward +0.366 [+0.275, +0.457] (20/0/0): met; but `form+l2` minus `form`: Spearman +0.005 [-0.045, +0.055] (11/0/9), last-third minus first-third attempts +1.14 [-1.42, +3.70] (10/0/10), reward +0.000 [-0.006, +0.007]: the meta-prior adds nothing measurable; last-third minus first-third for `form+l2` +0.06 [-4.05, +4.18]: not met; 0 wrong of 7,501 rules; World T not feasible; World v2 and vs-world v2 unchanged (Track L2) | 2026-11-09 | 19125b17 |
 
@@ -3588,6 +3589,123 @@ plan) outcomes deterministic by construction), which is exactly what a per-file 
 result (M3 stays separate). The PRIMARY is a replication. One world family and one budget. In the sweep B0 and the
 baselines are tuned per point and B1 is not, as pre-registered. The cost numbers (e) come from re-running the same
 deterministic lives on one thread for timing and memory only. Nothing here is a claim of thinking or understanding.
+
+## Track W2b: B1 with a penalty-aware beta (B1p) in the World T being (synthetic data, author-defined)
+
+Pre-registration: `docs/w2b_prereg.md` (approved by the owner as written, not changed). Code at commit ef39bfb6 (branch
+`w2b`, base eaa5fa13); measured 2026-11-11, Windows, 8 threads, `kore-self/examples/measure_w2b.rs`. Per-world data:
+`docs/data/w2b_tune_seeds101-120.tsv` (committed at 70d4f102, before any report run),
+`docs/data/w2b_equivalence_seeds101-120.tsv`, `docs/data/w2b_primary_seeds261-320.tsv`,
+`docs/data/w2b_sweep_report_seeds261-320.tsv` (the `wall_s` column is timing, not a result). Paired 95% t-intervals (t
+quantile for 59 df, 2.001), (wins/ties/losses of B1p).
+
+What was built: controller key `wt_file_beta` (`fixed`, the default, = W2's B1 with beta 2; or `table`; fail-closed
+parse; read only when `wt_file_key = on`). With `table` the optimism beta of the file-keyed estimate is the entry of
+`learner::W2B_BETA_TABLE` for the reward design of the task the being sees (`penalty_pm`, `cost_pm` of the view), nearest
+entry in log space of (penalty, energy weight), ties to the higher penalty (then the higher weight; a penalty of 0 is only
+near a penalty of 0); everything else is W2's B1 (the learner runs as the fixed-beta learner with that beta). The setting
+is recorded at genesis with the whole table (tags `wt_file_beta:table`, `wt_file_beta_table:...`; a genesis recording
+another table is not accepted); a later run asking for the other value is refused (`run_t_keys` error; the tool also
+audits it). Key absent: both golden tests pass, `tests_golden.rs` unchanged. Checkpoint: no new payload field (the switch
+is the top bit of the serialized `beta_milli`, 0 for every other being, so payloads are byte-identical without it); the
+World T snapshot format stays 2 (test). No new runtime file; storage is the versioned log and its checkpoints.
+
+### Tuning (seeds 101..120 only)
+
+All five policies at all 30 points, 6 configurations each, rule "highest mean reward per energy" (wall 4543 s). Check: the
+B0, UCB1, LinUCB and LinUCB+file rows equal the W2 tuning file (14400 of 14400), the B1 rows at penalty 0, weight 1 equal
+the Gate 0 tuning file (120 of 120). The B1p table (beta; rows penalty x reward, columns energy weight 0.1 / 0.316 / 1 /
+3.16 / 10):
+
+| penalty | 0.1 | 0.316 | 1 | 3.16 | 10 |
+|---|---|---|---|---|---|
+| 0 | 0.5* | 0.5* | 2 | 1 | 1 |
+| 0.1 | 0.5* | 1 | 2 | 1 | 1 |
+| 0.316 | 0.5* | 1 | 2 | 1 | 2 |
+| 1 | 1 | 1 | 1 | 1 | 0.5* |
+| 3.16 | 1 | 1 | 1 | 1 | 1 |
+| 10 | 1 | 1 | 1 | 1 | 0.5* |
+
+(* = edge of the grid.) Beta 2 at 4 of 30 points (weight 1 at penalty 0 to 0.316, and penalty 0.316 at weight 10); never
+above 2. The tuned B0 betas are W2's (1 or 0.5 at penalty 10).
+
+### Equivalence tests (seeds 101..120, before any report run)
+
+1. At the 4 points where the table picks 2, B1p is W2's B1 (in-being, beta 2) step for step, same reward and energy: 80
+   of 80 (point, seed) lives.
+2. At every point, B1p equals the Gate 0 harness B1 (`FileKeyed`, verbatim copy) with the table's beta: same decision
+   at every step, same reward and energy, in the measurement loop, as a logged being in one run, with a restart in mid-life
+   from the full fold and from a checkpoint (used at every restart); every logged decision replays (0 mismatches); the
+   genesis folds back to the table; and B1p's reward per energy equals the tuning file's B1 row with that beta (6
+   decimals): 600 of 600 (point, seed) pairs (wall 13891 s).
+
+### PRIMARY (report seeds 261..320, penalty 0, energy weight 1, budget 6000, default files)
+
+The table picks beta 2 here, so this is a second replication of W2, not a new finding: B1p equals W2's B1 in 60 of 60
+worlds (default and OOD).
+
+* B0 3.920 [3.842, 3.998]; B1p 4.147 [4.058, 4.237].
+* **B1p minus B0: +0.227 [+0.192, +0.262] (59/0/1), paired sd 0.135.** Rule: lower >= +0.05 (yes), mean >= +0.10 (yes),
+  >= 45 of 60 wins (59): **met**.
+* (a) Wrong answers per 100 tasks: B0 11.22, B1p 7.65; B1p minus B0 -3.57 [-4.25, -2.88] (B1p fewer in 57 of 60). Right
+  share of answers 0.858 / 0.903; skip share 0.130 / 0.150.
+* (c) OOD (`ood = true`): B0 2.644, B1p 2.875; B1p minus B0 +0.231 [+0.197, +0.265] (58/0/2); not significantly negative.
+  Wrong per 100, B1p minus B0: -3.22 [-3.86, -2.58].
+* (f) Wrong answers accepted (paid): 0 for B0 and B1p, default and OOD; rules on the noisy series signatures: 0 (397 and
+  395 rules accepted in total). File keys per life (B1p): mean 531, range 431 to 650.
+* (f) Cost: wall per life, lives run again one after another on one thread (same results), B0 7.17 s, B1p 7.10 s; in
+  the parallel part B0 39.4 s, B1p 55.3 s; peak working set of the process 1000.8 MB. These timings are **not comparable
+  with W2** (1.46 / 1.39 s, 38 MB): other jobs were running on the machine during this run, and the peak working set here
+  is of a process that also ran 360 lives on 8 threads, while W2 measured it in a separate one-thread process. They show no
+  cost difference between B1p and B0; they do not measure the absolute cost.
+
+### Sweep (b), (d), (e): the 6 x 5 grid, report seeds 261..320
+
+Every policy tuned per point on seeds 101..120 (B1p by its table). Report wall 2352 s.
+
+* **B1p minus B0: interval above 0 at 30 of 30 points** (+0.098 to +0.580); no point with a negative mean.
+* **Holm (one-sided paired t, B1p minus B0 < 0, 30 points, FWER 0.05): 0 regressions.** Smallest gains: penalty 0.316,
+  weight 0.1 +0.098 [+0.051, +0.145] (48/0/12); penalty 10, weight 3.16 +0.118 [+0.065, +0.170] (44/0/16); penalty 0,
+  weight 3.16 +0.120 [+0.085, +0.154]. At penalty 10: +0.191, +0.331, +0.268, +0.118, +0.135 at weights 0.1 to 10.
+* B1p against the better LinUCB variant per point (LinUCB+file at every point): above 0 at 28 points, **below 0 at 1**
+  (penalty 10, weight 3.16: -0.113 [-0.183, -0.044], 16/0/44); at penalty 10, weight 10: -0.033 [-0.106, +0.039]. At
+  penalty 0, weight 1: +0.073 [+0.036, +0.111] (40/0/20) (W2 on seeds 201..260: +0.090).
+* B1p minus UCB1: above 0 at 30 of 30. B1p minus always SQL: above 0 at 30 of 30 (smallest at penalty 10, weight 10:
+  +0.039 [+0.020, +0.058]; weight 3.16: +0.337).
+* (a) Wrong answers per 100, B1p minus B0: fewer at 21 points (interval below 0), more at 6 (penalty 3.16 at weights 0.1
+  +0.35 and 1 +0.20; penalty 10 at weights 0.1 to 3.16, +0.28 to +0.47), interval including 0 at 3 (penalty 3.16 at 3.16
+  and 10; penalty 10 at 10, +0.002). At penalty 10 and weights 0.1 to 3.16 B1p is wrong 1.1 to 3.0 times per 100 tasks (W2's B1 on these seeds 3.2
+  to 11.2, B0 0.1 to 2.5, LinUCB 0.3 to 2.7) and skips 8% to 15% of the tasks at weights 0.1 to 3.16 and 81% at weight 10
+  (W2's B1: 2% to 3%). Full table: harness output, reproducible from the TSV.
+* (d) W2's B1 (beta 2) on the same seeds: B1 minus B0 has **6 regressions after Holm, the same 6 points as in W2**
+  (penalty 1 at weight 0.1, -0.067; penalty 10 at all weights, -0.68 to -1.51, each 0/0/60); 10 points with a negative
+  mean (also penalty 0.1, 0.316 and 3.16 at weight 0.1, and penalty 3.16 at weight 10). B1p minus B1: +0.82 to +1.70 at
+  penalty 10, +0.28 to +0.73 at penalty 3.16, 0 at the 4 beta-2 points, interval above 0 at 24 points, including 0 at 2
+  (penalty 0 at weight 3.16, penalty 0.1 at weight 10). So the W2 regressions came from the beta fixed at 2, not from the file key:
+  with the same tuning budget as B0 they are gone on these seeds.
+* (e) M4 (no baseline with higher reward per energy, CI above 0, and fewer wrong answers): **B1p dominated at 1 point**
+  (penalty 10, weight 3.16, by LinUCB+file: +0.113 [+0.044, +0.183] and 1.01 vs 2.99 wrong per 100). W2's B1 dominated at
+  5 points (penalty 10, all weights), the tuned B0 at 12 points (by LinUCB+file at 11, LinUCB at 2, always SQL at penalty 10,
+  weight 10). M4 stays **not met**.
+* (f) Over the sweep: 0 wrong answers accepted (B1p, B1, B0), 0 rules on the noisy series.
+
+### Verdict against the pre-registered Stage-2 rule
+
+1. PRIMARY: met (+0.227 [+0.192, +0.262], 59/0/1; a replication, beta 2 at this point).
+2. No regression over the sweep: **met** (0 points rejected after Holm; no point with a negative mean).
+3. OOD not significantly negative: met (+0.231 [+0.197, +0.265]).
+4. Equivalence tests: met (test 1 80 of 80, test 2 600 of 600).
+
+All four hold. By the pre-registered rule B1p (`wt_file_key = on`, `wt_file_beta = table`) may become the World T default
+**only with the owner's approval**; the default is not changed here (both keys stay off / `fixed`). Points with a negative
+mean B1p minus B0: none. Remaining problem: at penalty 10, weight 3.16 LinUCB with the file feature dominates B1p (M4).
+
+Limits: World T is the author's synthetic generator (93.9% of (template, file, plan) outcomes deterministic), so this is
+not a real-data result (M3 stays separate). The table works because World T tells the being the reward design
+(`penalty_pm`, `cost_pm` in every task view); elsewhere that may not be known. The table is tuning (30 x 6 configurations
+on seeds 101..120, the same budget as B0), not learning by the being; one beta per point, 4 points at the grid's lower
+edge (0.5). One world family, one budget, one set of report seeds. The cost numbers are distorted by other load on the
+machine (see (f)). Nothing here is a claim of thinking or understanding.
 
 ## Not measured
 
