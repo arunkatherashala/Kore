@@ -3690,6 +3690,34 @@ Every policy tuned per point on seeds 101..120 (B1p by its table). Report wall 2
   weight 10). M4 stays **not met**.
 * (f) Over the sweep: 0 wrong answers accepted (B1p, B1, B0), 0 rules on the noisy series.
 
+### Fair baseline: B1p minus LinUCB with the file feature over the sweep (added 2026-11-12, no new runs)
+
+Computed after the merge into `dev` from the committed per-world file `docs/data/w2b_sweep_report_seeds261-320.tsv`
+alone (report seeds 261..320, n = 60 per point), with the harness's own statistics (`measure_w2b fair`: paired 95%
+t-interval, t quantile for 59 df = 2.001; wins/ties/losses of B1p). No run was repeated and no constant changed. An
+independent recomputation (the owner's awk, and a separate Python script) gave the same numbers to 3 decimals.
+
+* **Main point (penalty 0, weight 1): +0.073 [+0.036, +0.111] (40/0/20).** For comparison, W2's number at this point was
+  **+0.090 [+0.047, +0.132]** (43/0/17), but that is B1 (beta 2) minus LinUCB+file on the other seeds 201..260; at this
+  point the table picks beta 2, so the two differ by seeds only.
+* **Interval above 0 at 28 of 30 points**, below 0 at 1, including 0 at 1.
+* Penalty 10, weight 3.16: **-0.113 [-0.183, -0.044] (16/0/44)**: LinUCB+file is ahead (the M4 point above).
+* Penalty 10, weight 10: -0.033 [-0.106, +0.039] (41/0/19): not distinguishable from 0 (more wins than losses, but a
+  negative mean).
+* Weakest of the 28: penalty 10, weight 1: +0.066 [+0.002, +0.130] (36/0/24).
+
+| penalty, weight | 0.1 | 0.316 | 1 | 3.16 | 10 |
+|---|---|---|---|---|---|
+| 0 | +0.303 [+0.260, +0.347] 60/0/0 | +0.119 [+0.077, +0.160] 48/0/12 | +0.073 [+0.036, +0.111] 40/0/20 | +0.186 [+0.135, +0.237] 51/0/9 | +0.315 [+0.272, +0.358] 60/0/0 |
+| 0.1 | +0.332 [+0.283, +0.380] 59/0/1 | +0.163 [+0.117, +0.208] 52/0/8 | +0.104 [+0.065, +0.144] 45/0/15 | +0.211 [+0.151, +0.271] 51/0/9 | +0.282 [+0.228, +0.336] 54/0/6 |
+| 0.316 | +0.255 [+0.194, +0.317] 55/0/5 | +0.159 [+0.113, +0.206] 50/0/10 | +0.110 [+0.068, +0.152] 43/0/17 | +0.192 [+0.134, +0.249] 49/0/11 | +0.181 [+0.124, +0.237] 52/0/8 |
+| 1 | +0.388 [+0.310, +0.467] 55/0/5 | +0.245 [+0.176, +0.313] 48/0/12 | +0.264 [+0.197, +0.331] 53/0/7 | +0.382 [+0.308, +0.456] 55/0/5 | +0.420 [+0.296, +0.544] 48/0/12 |
+| 3.16 | +0.536 [+0.443, +0.628] 57/0/3 | +0.515 [+0.442, +0.588] 57/0/3 | +0.393 [+0.317, +0.469] 53/0/7 | +0.558 [+0.450, +0.666] 56/0/4 | +0.522 [+0.322, +0.722] 42/0/18 |
+| 10 | +0.127 [+0.028, +0.226] 34/0/26 | +0.156 [+0.070, +0.241] 38/0/22 | +0.066 [+0.002, +0.130] 36/0/24 | **-0.113 [-0.183, -0.044] 16/0/44** | -0.033 [-0.106, +0.039] 41/0/19 |
+
+(Penalty in units of the reward, weight = energy weight. LinUCB+file is tuned per point on seeds 101..120 with 6
+alphas, as is B1p's beta; 30 points, no multiplicity correction here.)
+
 ### Verdict against the pre-registered Stage-2 rule
 
 1. PRIMARY: met (+0.227 [+0.192, +0.262], 59/0/1; a replication, beta 2 at this point).
