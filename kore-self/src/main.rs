@@ -18,6 +18,7 @@
 mod identity;
 mod consciousness;
 mod persistence;
+mod kore_rows;
 mod dream;
 mod shadow;
 mod predictive;

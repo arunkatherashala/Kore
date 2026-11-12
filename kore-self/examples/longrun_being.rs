@@ -22,6 +22,8 @@
 mod versioned;
 #[path = "../src/being/mod.rs"]
 mod being;
+#[path = "../src/kore_rows.rs"]
+mod kore_rows;
 
 use being::controller::Controller;
 use being::measure::{run_menu_ext, truth_in, OracleMenu, Truth};
@@ -1470,7 +1472,25 @@ fn cmd_restart(o: Opts) {
         "text": if r.is_null() { text.chars().take(300).collect::<String>() } else { String::new() },
         "start_ms": start_ms, "call_secs": secs, "kill_ms": o.kill_ms, "kill_lag_ms": kill_lag_ms, "peak_ws_mb": peak as f64 / 1e6, "cpu_secs": cpu, "machine_busy_share": busy_share(sys0, win::system_times()), "mem_avail_gb": gb(win::memory().1) });
     println!("{v}");
-    Out::new(&root, "restart.jsonl").put(v);
+    // owner rule: storage is KORE only (the D1 harness appended these rows to restart.jsonl)
+    kore_rows::append(&root.join(RESTART_FILE), v).unwrap();
+}
+
+/// The restart rows of `restart` (one per call) are kept in this KORE file under `--root` (`kore_rows` layout).
+const RESTART_FILE: &str = "restart.kore";
+
+/// restart-rows: the rows `restart` stored in `<root>/restart.kore`, one JSON object per line on stdout (type
+/// `restart_stored`, with the row number), then a count line. Reads only.
+fn cmd_restart_rows(o: Opts) {
+    let root = std::fs::canonicalize(&o.root).unwrap();
+    let rows = kore_rows::read(&root.join(RESTART_FILE)).unwrap();
+    for (i, r) in rows.iter().enumerate() {
+        let mut r = r.clone();
+        r["type"] = json!("restart_stored");
+        r["row"] = json!(i);
+        println!("{r}");
+    }
+    println!("{}", json!({ "type": "restart_rows", "file": RESTART_FILE, "rows": rows.len() }));
 }
 
 // ─── Track D1c: format-5 preparation and the in-process open (docs/d1c_design.md section 7) ─────
@@ -1699,6 +1719,7 @@ fn main() {
         "digest" => cmd_digest(parse_opts(&args[1..])),
         "rulecheck" => cmd_rulecheck(parse_opts(&args[1..])),
         "restart" => cmd_restart(parse_opts(&args[1..])),
+        "restart-rows" => cmd_restart_rows(parse_opts(&args[1..])),
         "d1c-prep" => cmd_d1c_prep(parse_opts(&args[1..])),
         "openfast" => cmd_openfast(parse_opts(&args[1..])),
         "d1c-smoke" => cmd_d1c_smoke(parse_opts(&args[1..])),

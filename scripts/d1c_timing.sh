@@ -2,7 +2,8 @@
 # Track D1c timing (targets O1-O8, docs/d1c_design.md section 7). NOT run by the implementation.
 # Run only on a quiet machine: no other build or test. Results are printed to stdout, one JSON
 # object per line (the script writes no result file; capture stdout). Restart rows carry
-# machine_busy_share (rough if > 0.3).
+# machine_busy_share (rough if > 0.3). The harness keeps the restart rows in <cut>/restart.kore
+# (KORE, not .jsonl); `restart-rows` prints them back (type restart_stored) before a cut is removed.
 #
 #   SRC=C:/Users/skathera/kw/longrun-data2 WORK=C:/Users/skathera/kw/d1c-timing bash scripts/d1c_timing.sh > d1c_timing.out
 #
@@ -54,6 +55,9 @@ for AT in $CUTS; do
       "$H" restart --root "$R" --chunk "$CHUNK" --kill-ms 0
       "$H" restart --root "$R" --chunk "$CHUNK" --kill-ms 100
     done
+    # every restart row of this cut and variant, as stored by the harness in $R/restart.kore (KORE file,
+    # owner rule: storage is KORE only), before the copies are removed; ends with a restart_rows count line
+    "$H" restart-rows --root "$R"
   done
   # O7: rows appended after the cut, off vs on (audit rows, probes and checkpoint anchors listed separately)
   "$H" compare --root "$WORK/cut_${AT}_off" --other "$WORK/cut_${AT}_on" --at "$AT"
