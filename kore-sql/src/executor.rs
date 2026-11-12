@@ -6316,6 +6316,16 @@ fn sort_col_name(block: &DataBlock, col: &str) -> Option<String> {
         .map(|c| c.name.clone())
 }
 
+/// Sort order of two doubles as SQL compares them: -0.0 = 0.0 (a tie, so a stable sort keeps input order), NaN
+/// after every number, NaNs equal. (Digital Life engine sync: `f64::total_cmp` put -0.0 before 0.0; the DuckDB
+/// ORDER BY oracle of kore-sql/tests/oracle_duckdb found it in 12 of 2,366 cases.)
+fn sql_cmp_f64(a: f64, b: f64) -> std::cmp::Ordering {
+    match a.partial_cmp(&b) {
+        Some(o) => o,
+        None => a.is_nan().cmp(&b.is_nan()),
+    }
+}
+
 fn sort_block_nulls(block: DataBlock, col: &str, desc: bool, nulls_first: Option<bool>) -> Result<DataBlock, KoreError> {
     // NULLS FIRST/LAST: default is NULLs last for ASC, NULLs first for DESC
     let nf = nulls_first.unwrap_or(desc);
@@ -6350,7 +6360,7 @@ fn sort_block_nulls(block: DataBlock, col: &str, desc: bool, nulls_first: Option
             let cmp_cells = |a: usize, b: usize| -> std::cmp::Ordering {
                 match &col_data.data {
                     ColumnData::Int64(v) => v[a].cmp(&v[b]),
-                    ColumnData::Float64(v) => v[a].unwrap_or(0.0).total_cmp(&v[b].unwrap_or(0.0)),
+                    ColumnData::Float64(v) => sql_cmp_f64(v[a].unwrap_or(0.0), v[b].unwrap_or(0.0)),
                     ColumnData::Bool(v) => v[a].cmp(&v[b]),
                     ColumnData::Str(v) => v[a].cmp(&v[b]),
                     ColumnData::StrDict { codes, dict } => dict[codes[a] as usize].cmp(&dict[codes[b] as usize]),
@@ -6407,7 +6417,7 @@ fn top_n_indices_ex(block: &DataBlock, keys: &[(usize, bool, Option<bool>)], k: 
             ColumnData::Float64(v) => {
                 if v.iter().any(|x| matches!(x, Some(f) if f.is_nan())) { return None; }
                 let n = v.iter().any(|x| x.is_none());
-                // the NULL-aware sort compares floats with total_cmp, the plain one with partial_cmp
+                // the NULL-aware sort compares floats with sql_cmp_f64, the plain one with partial_cmp
                 (K::F(v, n), n)
             }
             ColumnData::Str(v) => { let n = v.iter().any(|x| x.is_none()); (K::S(v), n) }
@@ -6439,7 +6449,7 @@ fn top_n_indices_ex(block: &DataBlock, keys: &[(usize, bool, Option<bool>)], k: 
             }
             let o = match kc {
                 K::I(v) => v[a].cmp(&v[b]),
-                K::F(v, total) => if *total { v[a].unwrap_or(0.0).total_cmp(&v[b].unwrap_or(0.0)) } else { v[a].partial_cmp(&v[b]).unwrap_or(Ordering::Equal) },
+                K::F(v, total) => if *total { sql_cmp_f64(v[a].unwrap_or(0.0), v[b].unwrap_or(0.0)) } else { v[a].partial_cmp(&v[b]).unwrap_or(Ordering::Equal) },
                 K::S(v) => v[a].as_deref().cmp(&v[b].as_deref()),
                 K::B(v) => v[a].cmp(&v[b]),
                 K::D(c, d) => d[c[a] as usize].cmp(&d[c[b] as usize]),
