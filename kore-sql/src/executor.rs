@@ -853,12 +853,18 @@ pub fn execute_select(stmt: &SelectStmt, ctx: &KqlContext) -> Result<DataBlock, 
         result = project(result, &stmt.projections)?;
     }
 
-    // 6. ORDER BY — resolve column names, also checking SELECT aliases
-    for item in stmt.order_by.iter().rev() {
-        let col_raw = resolve_col_name(&item.col, "");
-        let col = find_order_col_in_result(&col_raw, &result, &stmt.projections)
-            .unwrap_or(col_raw);
-        result = sort_block_nulls(result, &col, item.desc, item.nulls_first)?;
+    // 6. ORDER BY — resolve column names, also checking SELECT aliases, then ONE stable sort that compares all
+    // keys lexicographically. (Before: one unstable sort per key, last key first, so a later key was not honoured
+    // on ties of an earlier key — World M3 `ORDER BY n DESC, id ASC LIMIT 3`.)
+    if has_order {
+        let mut keys: Vec<SortKey> = Vec::with_capacity(stmt.order_by.len());
+        for item in &stmt.order_by {
+            let col_raw = resolve_col_name(&item.col, "");
+            let col = find_order_col_in_result(&col_raw, &result, &stmt.projections)
+                .unwrap_or(col_raw);
+            keys.push(SortKey { col, desc: item.desc, nulls_first: item.nulls_first });
+        }
+        result = sort_block_keys(result, &keys)?;
     }
 
     // 7. LIMIT + OFFSET
@@ -2342,25 +2348,21 @@ fn to_f64(v: &ExprVal) -> Option<f64> {
 
 // ─── Sort ─────────────────────────────────────────────────────────────────────
 
-fn sort_block(block: DataBlock, col: &str, desc: bool) -> Result<DataBlock, KoreError> {
-    sort_block_nulls(block, col, desc, None)
-}
+/// One ORDER BY key: a column name as written (resolved against the block by `resolve_sort_col`).
+struct SortKey { col: String, desc: bool, nulls_first: Option<bool> }
 
-fn sort_block_nulls(block: DataBlock, col: &str, desc: bool, nulls_first: Option<bool>) -> Result<DataBlock, KoreError> {
-    // NULLS FIRST/LAST: default is NULLs last for ASC, NULLs first for DESC
-    let nf = nulls_first.unwrap_or(desc);
-
-    // Find the column name (handles qualified names)
+/// Find the block column an ORDER BY name refers to (handles qualified names).
+fn resolve_sort_col(block: &DataBlock, col: &str) -> Result<usize, KoreError> {
     let col_short  = col.rsplit('.').next().unwrap_or(col);
     let col_prefix = if col.contains('.') { col.split('.').next() } else { None };
-    let col_name = block.columns.iter()
-        .find(|c| c.name == col || {
+    block.columns.iter()
+        .position(|c| c.name == col || {
             let cn = c.name.len(); let m = col.len();
             cn > m && c.name.as_bytes()[cn - m - 1] == b'.' && &c.name[cn - m..] == col
         })
         .or_else(|| {
             if let Some(pfx) = col_prefix {
-                block.columns.iter().find(|c| {
+                block.columns.iter().position(|c| {
                     let starts = c.name.starts_with(&format!("{pfx}."));
                     let ends   = c.name.rsplit('.').next().map_or(false, |s| s == col_short);
                     starts && ends
@@ -2368,55 +2370,110 @@ fn sort_block_nulls(block: DataBlock, col: &str, desc: bool, nulls_first: Option
             } else { None }
         })
         .or_else(|| {
-            let matches: Vec<_> = block.columns.iter()
-                .filter(|c| c.name.rsplit('.').next().unwrap_or(&c.name) == col_short)
+            let matches: Vec<usize> = block.columns.iter().enumerate()
+                .filter(|(_, c)| c.name.rsplit('.').next().unwrap_or(&c.name) == col_short)
+                .map(|(i, _)| i)
                 .collect();
             if matches.len() == 1 { Some(matches[0]) } else { None }
         })
-        .map(|c| c.name.clone())
-        .ok_or_else(|| KoreError::InvalidArgument(format!("ORDER BY column not found: {col}")))?;
+        .ok_or_else(|| KoreError::InvalidArgument(format!("ORDER BY column not found: {col}")))
+}
 
-    // If NULLS FIRST/LAST is non-default, do a custom sort with null sentinels
-    if nulls_first.is_some() {
-        // Build sort keys: (is_null, value) with null sentinel controlled by nf
-        let n = block.num_rows;
-        let col_data = block.columns.iter().find(|c| c.name == col_name).unwrap();
-        let mut indices: Vec<usize> = (0..n).collect();
-        let keys: Vec<(bool, f64)> = (0..n).map(|i| {
-            match &col_data.data {
-                ColumnData::Int64(v)   => match v.get(i).and_then(|x| *x) { Some(x) => (false, x as f64), None => (true, 0.0) },
-                ColumnData::Float64(v) => match v.get(i).and_then(|x| *x) { Some(x) => (false, x), None => (true, 0.0) },
-                ColumnData::Str(v)     => match v.get(i).and_then(|x| x.as_deref()) {
-                    Some(s) => (false, s.as_bytes().first().copied().unwrap_or(0) as f64),
-                    None    => (true, 0.0)
-                },
-                _ => (true, 0.0),
-            }
-        }).collect();
-        indices.sort_by(|&a, &b| {
-            let (an, av) = keys[a]; let (bn, bv) = keys[b];
-            match (an, bn) {
-                (true, false) => if nf { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater },
-                (false, true) => if nf { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Less },
-                _ => if desc { bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal) }
-                     else    { av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal) },
-            }
-        });
-        return Ok(block.select_rows(&indices));
+/// Total order on doubles for sorting: NaN after every number, NaNs equal (a sort comparator must be a total order).
+fn cmp_f64(a: f64, b: f64) -> std::cmp::Ordering {
+    match a.partial_cmp(&b) {
+        Some(o) => o,
+        None => a.is_nan().cmp(&b.is_nan()),
     }
+}
 
-    let estimated = kore_spill::SpillManager::estimate_bytes(&block);
-    if estimated > 256 * 1024 * 1024 {
-        let tmp = std::env::temp_dir().join("kore_sort");
-        let ext = if desc {
-            kore_spill::ExternalSort::new(&col_name, tmp).descending()
-        } else {
-            kore_spill::ExternalSort::new(&col_name, tmp)
+/// Compare rows `a` and `b` of one column for ORDER BY.
+///
+/// No NULLS clause (`nulls_first == None`): the existing per-type placement of this engine is kept (an Int64 NULL
+/// sorts as i64::MIN, a Float64 NULL as f64::MAX, a text NULL as "", a Bool NULL as false), so single-key results
+/// are what they were. With NULLS FIRST / LAST the NULLs go first / last whatever the direction, and the values are
+/// compared in full (before: through f64, and text by its first byte only).
+fn cmp_rows_key(data: &ColumnData, a: usize, b: usize, desc: bool, nulls_first: Option<bool>) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let dir = |o: Ordering| if desc { o.reverse() } else { o };
+    fn dict_str<'a>(codes: &[u8], dict: &'a [String], i: usize) -> Option<&'a str> {
+        let c = codes.get(i).copied().unwrap_or(u8::MAX);
+        if c == u8::MAX { None } else { dict.get(c as usize).map(|s| s.as_str()) }
+    }
+    if let Some(nf) = nulls_first {
+        let is_null = |i: usize| match data {
+            ColumnData::Int64(v)   => v.get(i).map_or(true, |x| x.is_none()),
+            ColumnData::Float64(v) => v.get(i).map_or(true, |x| x.is_none()),
+            ColumnData::Bool(v)    => v.get(i).map_or(true, |x| x.is_none()),
+            ColumnData::Str(v)     => v.get(i).map_or(true, |x| x.is_none()),
+            ColumnData::StrDict { codes, dict } => dict_str(codes, dict, i).is_none(),
         };
-        return ext.sort(vec![block]);
+        match (is_null(a), is_null(b)) {
+            (true, true)  => return Ordering::Equal,
+            (true, false) => return if nf { Ordering::Less } else { Ordering::Greater },
+            (false, true) => return if nf { Ordering::Greater } else { Ordering::Less },
+            (false, false) => {}
+        }
+    }
+    dir(match data {
+        ColumnData::Int64(v) => {
+            let k = |i: usize| v.get(i).and_then(|x| *x).unwrap_or(i64::MIN);
+            k(a).cmp(&k(b))
+        }
+        ColumnData::Float64(v) => {
+            let k = |i: usize| v.get(i).and_then(|x| *x).unwrap_or(f64::MAX);
+            cmp_f64(k(a), k(b))
+        }
+        ColumnData::Bool(v) => {
+            let k = |i: usize| v.get(i).and_then(|x| *x).unwrap_or(false);
+            k(a).cmp(&k(b))
+        }
+        ColumnData::Str(v) => {
+            let k = |i: usize| v.get(i).and_then(|x| x.as_deref()).unwrap_or("");
+            k(a).cmp(k(b))
+        }
+        ColumnData::StrDict { codes, dict } => {
+            dict_str(codes, dict, a).unwrap_or("").cmp(dict_str(codes, dict, b).unwrap_or(""))
+        }
+    })
+}
+
+/// ORDER BY: one stable sort of the row indices with all keys compared lexicographically (rows equal on every key
+/// keep their input order).
+fn sort_block_keys(block: DataBlock, keys: &[SortKey]) -> Result<DataBlock, KoreError> {
+    use rayon::slice::ParallelSliceMut;
+    if keys.is_empty() { return Ok(block); }
+    let cols: Vec<usize> = keys.iter().map(|k| resolve_sort_col(&block, &k.col)).collect::<Result<_, _>>()?;
+    if block.num_rows <= 1 { return Ok(block); }
+
+    // A single key over a very large block keeps the external (spilling) sort it had; that sort does not promise
+    // an order for rows with equal keys.
+    if keys.len() == 1 && keys[0].nulls_first.is_none() {
+        let estimated = kore_spill::SpillManager::estimate_bytes(&block);
+        if estimated > 256 * 1024 * 1024 {
+            let col_name = block.columns[cols[0]].name.clone();
+            let tmp = std::env::temp_dir().join("kore_sort");
+            let ext = if keys[0].desc {
+                kore_spill::ExternalSort::new(&col_name, tmp).descending()
+            } else {
+                kore_spill::ExternalSort::new(&col_name, tmp)
+            };
+            return ext.sort(vec![block]);
+        }
     }
 
-    block.sort_by(&col_name, !desc)
+    let datas: Vec<&ColumnData> = cols.iter().map(|&i| &block.columns[i].data).collect();
+    let cmp = |a: &usize, b: &usize| {
+        for (k, d) in keys.iter().zip(&datas) {
+            let o = cmp_rows_key(d, *a, *b, k.desc, k.nulls_first);
+            if o != std::cmp::Ordering::Equal { return o; }
+        }
+        std::cmp::Ordering::Equal
+    };
+    let mut indices: Vec<usize> = (0..block.num_rows).collect();
+    // both are stable sorts
+    if indices.len() >= 1 << 16 { indices.par_sort_by(cmp); } else { indices.sort_by(cmp); }
+    Ok(block.select_rows(&indices))
 }
 
 // ─── Limit ────────────────────────────────────────────────────────────────────
