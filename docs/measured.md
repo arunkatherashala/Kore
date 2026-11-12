@@ -31,6 +31,7 @@ be burstier, messier and phrased differently.
 | W2 file-keyed estimator B1 in the World T being (opt-in `wt_file_key`, synthetic): B1 minus B0 / minus LinUCB with the file feature / minus plain LinUCB, reward per energy, penalty 0, weight 1; 6 x 5 sweep with Holm | 60 worlds (report seeds 201..260), budget 6000 | B0 (default being), LinUCB, LinUCB + one-hot file feature, UCB1, always SQL, each tuned on seeds 101..120 per point | +0.225 [+0.192, +0.258] (59/0/1) / **+0.090 [+0.047, +0.132] (43/0/17)** / +0.367 [+0.327, +0.408]; the default being B0 minus LinUCB+file -0.135 [-0.175, -0.096]; 6 regressions after Holm (penalty 1 x weight 0.1, penalty 10 x all weights), so B1 stays opt-in; M4 not met (Track W2) | 2026-11-11 | 9feedb93 |
 | W2b B1 with a penalty-aware beta (B1p, opt-in `wt_file_key = on` + `wt_file_beta = table`, synthetic): B1p minus B0, reward per energy, penalty 0, weight 1; 6 x 5 sweep with Holm | 60 worlds (report seeds 261..320), budget 6000 | B0 (default being), LinUCB, LinUCB + file feature, UCB1, always SQL, and B1p's beta, each tuned on seeds 101..120 per point (6 configurations) | PRIMARY +0.227 [+0.192, +0.262] (59/0/1), a replication (the table picks beta 2 there, B1p = W2's B1); sweep: B1p minus B0 interval above 0 at 30 of 30 points, **0 regressions after Holm** (W2's B1 on the same seeds: 6); OOD +0.231 [+0.197, +0.265]; Stage-2 rule 1 to 4 met, default not changed (needs the owner's approval); M4 not met (dominated at 1 point, penalty 10 x weight 3.16, by LinUCB+file) (Track W2b) | 2026-11-11 | ef39bfb6 |
 | M3 World M3 from one real file (NYC yellow taxi, January 2024; author-written templates, slices and quirks): default being (B0) minus the strongest tuned baseline, reward per energy, penalty 0, weight 1 | 60 worlds (report seeds 401..460, run once), budget 6000 | random, always SQL, always cheapest, UCB1, LinUCB, LinUCB+file, each tuned on seeds 101..120 (6 configurations); reward-best oracle | **-0.129 [-0.145, -0.113] (1/0/59) against LinUCB+file: PRIMARY not met, M3 not met**; minus LinUCB +0.008 [-0.005, +0.021], UCB1 +0.271, always cheapest +0.563, random +0.777, always SQL +1.350 (each 60/0/0); B1 minus B0 +0.093 [+0.078, +0.109]; truths cross-checked by DuckDB on 329,470 tuning-seed tasks, 0 disagreements; 96.5% of (template, file, plan) outcomes determined; S6 sweep: below LinUCB+file at 9 of 9 points; 0 wrong paid (Track M3) | 2026-11-11 | m3-build |
+| S1 self-tuned beta in the World T being (opt-in `wt_self_tune`, synthetic): S1 minus B1 (beta 2), reward per energy, penalty 10 x reward, weight 1; guard at penalty 0; OOD; 6 x 5 sweep with Holm | 60 worlds (report seeds 321..380, run once), budget 6000 | B1 (beta 2), B1 with every grid beta (hindsight), B0, LinUCB, LinUCB+file (W2 tuning), B1p (W2b table) | **PRIMARY -1.263 [-1.441, -1.085] (3/0/57): not met**; guard -0.111 [-0.141, -0.081] (9/0/51): fails; OOD -0.269 [-0.315, -0.223]; sweep: below B1 (beta 2) at 30 of 30 points (30 Holm regressions), 14 Holm regressions against B0, below B1p at 30 of 30, below the best fixed beta in hindsight at 30 of 30; 0 wrong accepted; negative result, default unchanged (Track S1). Run on the engine before the ORDER BY sort fix (a80d3e86). | 2026-11-12 | a4d99c84 |
 | B14 rule library and always-on curiosity, first world long run (synthetic) | 20 worlds x 200,000 steps; transfer 20 worlds x 30,000; short lives 20 worlds | B14 off (the long run's being); tuning seeds 101..120 | steps 50k-200k B14 on minus off +0.491 [+0.287, +0.695] (18/0/2), rule worlds +0.655 (14/0/0), simple +0.109 [-0.076, +0.293]; slope 50k-200k -0.013 [-0.030, +0.003] per 100k (plateau level raised, slope not); curiosity cost on simple worlds +2.5% [-1.9%, +6.8%] (n = 6, 1% criterion not met); library import transfer +475 [-128, +1,078] steps saved per family (7/10/3); budget 600 +0.037 [-0.037, +0.112], 3000 +0.149 [+0.004, +0.293] (Track B14) | 2026-11-08 | a062a62a |
 | L2 learning to learn, World O (synthetic): `form+l2` (B12 `form` plus the L2 meta-prior) top-tier Spearman of family order vs attempts to competence; reward per energy vs `current`; attribution `form+l2` minus `form` | 20 worlds, life 1,200,000, pre-registered (commit 19125b17) | `current`; `form` (B12) | Spearman -0.094 [-0.164, -0.023] (15 of 20 negative): met; reward +0.366 [+0.275, +0.457] (20/0/0): met; but `form+l2` minus `form`: Spearman +0.005 [-0.045, +0.055] (11/0/9), last-third minus first-third attempts +1.14 [-1.42, +3.70] (10/0/10), reward +0.000 [-0.006, +0.007]: the meta-prior adds nothing measurable; last-third minus first-third for `form+l2` +0.06 [-4.05, +4.18]: not met; 0 wrong of 7,501 rules; World T not feasible; World v2 and vs-world v2 unchanged (Track L2) | 2026-11-09 | 19125b17 |
 
@@ -3851,6 +3852,146 @@ below LinUCB+file. Limits: one month of one city's records, one file; tuning and
 month; the airport zone ids are inferred, not read from a zone list; the injected malformed line is synthetic; the
 templates, slices, quirks, rewards and energies are author-written. This is a measurement of plan choice on this
 world, not a claim of thinking or understanding, and not a claim about other datasets.
+
+## Track S1: the being tunes its own beta during its life (synthetic data, author-defined)
+
+Pre-registration: `docs/s1_self_tune_prereg.md` (approved as written, not changed). Code at commit a4d99c84 on `dev`
+(S1 merged with W2b, D1c and M3; the S1 code is the one of branch `s1`, f3eb514c); measured 2026-11-12, Windows, 8
+threads, `kore-self/examples/measure_s1.rs`; each report command run **once** on the pre-registered report seeds
+321..380 (n = 60). Per-world data: `docs/data/s1_equivalence_seeds101-120.tsv` (before any report run),
+`docs/data/s1_primary_seeds321-380.tsv`, `docs/data/s1_sweep_seeds321-380.tsv` (the `wall_s` column is timing, not a
+result); B1p input: `docs/data/w2b_beta_table.tsv` (generated from `learner::W2B_BETA_TABLE` by `measure_w2b
+beta-table`, committed before the run). Paired 95% t-intervals (t quantile for 59 df, 2.001), (wins/ties/losses of
+S1).
+
+Engine: **S1 report run on engine before the ORDER BY sort fix (commit a4d99c84); the fix (a80d3e86) changes World T/M3
+`sniff+sql` answers on ties, so runs after the fix are compared only on fresh seeds.**
+
+What was built (branch `s1`): controller key `wt_self_tune` (`on` / `off`, default off, fail-closed, read only with
+`wt_file_key = on`, recorded at genesis as `wt_self_tune:on`, fixed for the life); base B1 of W2 (file key on, prior
+weight 2, beta 2 at the start); blocks of 200 steps; the first 6 blocks play 2, 4, 8, 16, 0.5, 1; then UCB1 with c = 0.1
+over the grid {0.5, 1, 2, 4, 8, 16}; promotion after >= 3 blocks and more than one pooled standard error above the
+incumbent; after a promotion 3 of 4 blocks use the incumbent. Every pick is a `decision` revision citing the outcome
+events it used; every promotion a `rule` revision under `being/worldt/self_tune/beta`. The self-tune state is folded
+from the log and is in the World T checkpoint (snapshot format 3; a format-2 file is refused and the log folded, tested
+also for a W2b table being after the merge). `wt_self_tune = on` together with `wt_file_beta = table` is defined by
+neither pre-registration and is refused (fail closed) since the merge. Key absent: both golden tests pass with their
+files unchanged.
+
+Implementation choices made before the report run (where the pre-registration leaves room; made by the S1
+implementation and not changed after any report number was seen):
+
+1. UCB arm value = the arm's summed reward over its summed energy across its blocks (not a mean of per-block ratios).
+2. The promotion test uses the mean of the per-block reward-per-energy values of each beta (pooled sd of the two sets of
+   block values x sqrt(1/n_a + 1/n_inc)).
+3. UCB bonus c x sqrt(2 ln N / n_a) (N = blocks played, n_a = blocks with that beta); ties go to the lower beta.
+4. If several betas qualify for promotion, the one with the highest mean is promoted (ties: the lower beta).
+5. The initial incumbent (beta 2) is written as the first `rule` revision of `being/worldt/self_tune/beta` at block 0,
+   citing the genesis, so the key's history lists every incumbent.
+
+### Equivalence and safety tests (before any report run)
+
+Tests 1 and 2 on tuning seeds 101..120 (`measure_s1 equiv`): **20 of 20 seeds identical in every check** (every block's
+decisions equal B1 with that block's beta from the same state; the logged being in one run, with a fold restart and with
+a checkpoint restart in the middle of block 7; `replay_t` and `self_tune::replay` 0 mismatches). Test 3 (KILL in the
+middle of a block) and the format-2 refusal are unit tests (`tests_s1.rs`); full suite green on the code the report ran
+(kore-self 702/0, kore-store 63/0).
+
+### PRIMARY, guard, OOD, cost, wrong accepted (report seeds 321..380, one run, wall 354 s)
+
+* Penalty 10 x reward, weight 1: S1 0.097 [-0.101, 0.295], B1 (beta 2) 1.360 [1.263, 1.458] reward per energy.
+* **PRIMARY: S1 minus B1 (beta 2) -1.263 [-1.441, -1.085] (3/0/57), paired sd 0.689. Rule: lower bound > 0 (no), >= 36
+  of 60 wins (3): NOT MET.**
+* **Guard (penalty 0, weight 1): S1 minus B1 -0.111 [-0.141, -0.081] (9/0/51): the interval is entirely below 0, the
+  guard FAILS.** (S1 4.052, B1 4.163.)
+* **(d) OOD (`ood = true`, penalty 0, weight 1): S1 minus B1 -0.269 [-0.315, -0.223] (4/1/55): significantly negative.**
+* Wrong answers per 100, S1 minus B1: harsh +2.37 [+1.90, +2.83] (S1 more in 55 of 60), main +1.62 [+1.20, +2.04], OOD
+  +3.19 [+2.72, +3.66]. Skip share S1 / B1: harsh 0.095 / 0.036, main 0.146 / 0.159, OOD 0.312 / 0.372.
+* (c) Choices. Harsh: 15.6 blocks per life; block share 0.5 0.565, 1 0.179, each of 2 / 4 / 8 / 16 0.064 (the forced
+  blocks); final incumbent 0.5 in 49 worlds, 1 in 11; 1.00 promotions per life. Main: 21.4 blocks; share 0.5 0.386, 1
+  0.343, 2 0.112, 4 0.062, 8 0.050, 16 0.047; final incumbent 0.5 26, 1 24, 2 10; 0.85 promotions. OOD: final incumbent
+  0.5 22, 1 26, 2 10, 4 2; 0.88 promotions.
+* (e) Cost (`measure_s1 cost`, 60 lives one after another on one thread, penalty 0, weight 1): wall per life S1 1.644 s
+  (1.010 to 3.103), B1 1.689 s; peak working set 38.2 MB. Extra revisions per life: harsh 17.6 (16 to 20), main 23.2 (18
+  to 27), OOD 19.9 (8 to 29); extra cause links per life: harsh 14,510, main 33,044 (15,824 to 57,026), OOD 24,736.
+* (f) Wrong answers accepted (paid): 0 for S1 and B1 at all three points; rules on noisy series 0.
+
+### Sweep (a), (b), (c): the 6 x 5 grid, report seeds 321..380 (one run, wall 2724 s)
+
+B0, LinUCB and LinUCB+file tuned per point from W2's committed tuning table (seeds 101..120, W2's rule); B1p from the
+W2b table; B1 with every grid beta run as the hindsight reference.
+
+* **S1 minus B1 (beta 2): interval below 0 at 30 of 30 points; Holm (one-sided, FWER 0.05): 30 regressions.**
+* **S1 minus B0 (tuned): Holm: 14 regressions** (every weight-0.1 point, all of penalty 3.16 and of penalty 10); interval
+  above 0 at 7 points, below 0 at 16.
+* S1 minus B1p: interval below 0 at 30 of 30 points (-0.111 to -3.176).
+* S1 minus the better LinUCB variant: above 0 at 3 points (penalty 0 at weights 3.16 and 10, penalty 0.1 at weight 10),
+  below 0 at 18.
+* (b) S1 minus B1 with the best fixed beta for that world in hindsight: below 0 at 30 of 30. The share of the possible
+  gain over B1 that S1 finds is negative at every point (-0.66 to -2.32): S1 ends below the beta-2 being it starts
+  from, everywhere.
+* (c) S1 settles mostly on beta 0.5 or 1; at penalty 3.16 and 10 with weight 10 the lives are short (5.2 to 5.4
+  blocks), no promotion happens and the incumbent stays 2 in 60 of 60 worlds. Promotions over the sweep: 1,622, of
+  which 516 to a beta whose fixed-beta life in that world had lower reward per energy than the replaced incumbent's.
+* Wrong answers per 100: S1 has more than B1 (beta 2) at every point; at penalty 3.16 and 10 with weight 10 S1 is wrong
+  23.0 and 23.1 times per 100 tasks (B1 9.8 and 10.7, B1p 3.8 and 0.1).
+* (f) Over the sweep: 0 wrong answers accepted, 0 rules on noisy series.
+
+| penalty | weight | S1 minus B1 (beta 2) | S1 minus B0 (tuned) | S1 minus B1p | S1 minus better LinUCB | S1 minus best fixed beta in hindsight |
+|---|---|---|---|---|---|---|
+| 0.000 | 0.100 | -0.131 [-0.148, -0.114] (1/0/59) | -0.125 [-0.167, -0.083] (12/0/48) | -0.297 [-0.319, -0.276] (0/0/60) | -0.026 [-0.072, +0.019] (28/0/32) (LinUCB+file) | -0.305 [-0.326, -0.283] (0/0/60) |
+| 0.000 | 0.316 | -0.067 [-0.097, -0.037] (15/0/45) | +0.096 [+0.061, +0.132] (45/0/15) | -0.111 [-0.148, -0.074] (9/0/51) | -0.033 [-0.073, +0.008] (20/0/40) (LinUCB+file) | -0.165 [-0.195, -0.135] (6/0/54) |
+| 0.000 | 1.000 | -0.111 [-0.141, -0.081] (9/0/51) | +0.111 [+0.071, +0.151] (50/0/10) | -0.111 [-0.141, -0.081] (9/0/51) | -0.043 [-0.084, -0.002] (23/0/37) (LinUCB+file) | -0.165 [-0.195, -0.135] (4/0/56) |
+| 0.000 | 3.162 | -0.136 [-0.159, -0.113] (6/0/54) | +0.009 [-0.035, +0.053] (27/0/33) | -0.135 [-0.173, -0.097] (7/0/53) | +0.051 [+0.002, +0.101] (31/0/29) (LinUCB+file) | -0.197 [-0.221, -0.172] (1/0/59) |
+| 0.000 | 10.000 | -0.112 [-0.138, -0.086] (6/0/54) | -0.025 [-0.068, +0.018] (22/0/38) | -0.166 [-0.195, -0.136] (2/0/58) | +0.139 [+0.085, +0.192] (46/0/14) (LinUCB+file) | -0.181 [-0.209, -0.153] (0/0/60) |
+| 0.100 | 0.100 | -0.147 [-0.167, -0.128] (1/0/59) | -0.166 [-0.205, -0.128] (10/0/50) | -0.326 [-0.347, -0.304] (0/0/60) | -0.020 [-0.070, +0.029] (25/0/35) (LinUCB+file) | -0.332 [-0.352, -0.311] (0/0/60) |
+| 0.100 | 0.316 | -0.073 [-0.104, -0.042] (16/0/44) | +0.108 [+0.065, +0.151] (45/0/15) | -0.156 [-0.195, -0.117] (9/0/51) | -0.019 [-0.065, +0.027] (24/0/36) (LinUCB+file) | -0.183 [-0.217, -0.150] (8/0/52) |
+| 0.100 | 1.000 | -0.112 [-0.144, -0.081] (12/1/47) | +0.132 [+0.091, +0.172] (46/0/14) | -0.112 [-0.144, -0.081] (12/1/47) | -0.019 [-0.060, +0.022] (22/1/37) (LinUCB+file) | -0.181 [-0.215, -0.147] (3/0/57) |
+| 0.100 | 3.162 | -0.125 [-0.159, -0.091] (7/0/53) | +0.002 [-0.041, +0.045] (29/0/31) | -0.162 [-0.204, -0.120] (9/0/51) | +0.051 [-0.001, +0.103] (34/0/26) (LinUCB+file) | -0.217 [-0.248, -0.187] (3/0/57) |
+| 0.100 | 10.000 | -0.113 [-0.140, -0.087] (7/0/53) | -0.002 [-0.037, +0.033] (29/0/31) | -0.147 [-0.183, -0.110] (7/0/53) | +0.154 [+0.093, +0.215] (44/0/16) (LinUCB+file) | -0.184 [-0.219, -0.149] (3/0/57) |
+| 0.316 | 0.100 | -0.175 [-0.197, -0.152] (1/0/59) | -0.195 [-0.245, -0.146] (6/0/54) | -0.276 [-0.339, -0.213] (6/0/54) | -0.091 [-0.138, -0.043] (17/0/43) (LinUCB+file) | -0.354 [-0.382, -0.326] (0/0/60) |
+| 0.316 | 0.316 | -0.099 [-0.135, -0.064] (13/0/47) | +0.102 [+0.047, +0.157] (42/0/18) | -0.163 [-0.217, -0.109] (9/0/51) | -0.067 [-0.120, -0.014] (20/0/40) (LinUCB+file) | -0.218 [-0.258, -0.178] (5/0/55) |
+| 0.316 | 1.000 | -0.135 [-0.174, -0.095] (11/0/49) | +0.164 [+0.111, +0.216] (48/0/12) | -0.135 [-0.174, -0.095] (11/0/49) | -0.019 [-0.069, +0.031] (28/0/32) (LinUCB+file) | -0.197 [-0.234, -0.160] (2/0/58) |
+| 0.316 | 3.162 | -0.159 [-0.209, -0.110] (10/0/50) | +0.054 [-0.007, +0.115] (34/0/26) | -0.191 [-0.253, -0.130] (10/0/50) | -0.033 [-0.094, +0.027] (27/0/33) (LinUCB+file) | -0.281 [-0.330, -0.232] (2/0/58) |
+| 0.316 | 10.000 | -0.139 [-0.193, -0.084] (8/0/52) | +0.063 [+0.004, +0.122] (36/0/24) | -0.139 [-0.193, -0.084] (8/0/52) | +0.061 [-0.011, +0.132] (37/0/23) (LinUCB+file) | -0.245 [-0.318, -0.172] (3/0/57) |
+| 1.000 | 0.100 | -0.254 [-0.316, -0.191] (4/0/56) | -0.332 [-0.399, -0.265] (6/0/54) | -0.481 [-0.542, -0.420] (2/0/58) | -0.208 [-0.283, -0.133] (13/0/47) (LinUCB+file) | -0.507 [-0.563, -0.450] (2/0/58) |
+| 1.000 | 0.316 | -0.220 [-0.279, -0.161] (6/0/54) | -0.021 [-0.090, +0.048] (27/0/33) | -0.350 [-0.414, -0.286] (6/0/54) | -0.135 [-0.199, -0.071] (14/0/46) (LinUCB+file) | -0.381 [-0.434, -0.328] (3/0/57) |
+| 1.000 | 1.000 | -0.258 [-0.311, -0.206] (3/0/57) | +0.023 [-0.038, +0.084] (32/0/28) | -0.314 [-0.379, -0.248] (5/0/55) | -0.073 [-0.139, -0.007] (21/0/39) (LinUCB+file) | -0.383 [-0.437, -0.328] (1/0/59) |
+| 1.000 | 3.162 | -0.422 [-0.525, -0.319] (8/0/52) | -0.125 [-0.231, -0.019] (23/0/37) | -0.570 [-0.682, -0.458] (4/0/56) | -0.262 [-0.350, -0.173] (13/0/47) (LinUCB+file) | -0.675 [-0.781, -0.569] (1/0/59) |
+| 1.000 | 10.000 | -0.463 [-0.611, -0.314] (9/0/51) | -0.240 [-0.432, -0.048] (26/0/34) | -0.668 [-0.871, -0.465] (12/0/48) | -0.345 [-0.494, -0.195] (16/0/44) (LinUCB+file) | -0.840 [-1.015, -0.665] (1/0/59) |
+| 3.162 | 0.100 | -0.574 [-0.661, -0.487] (3/0/57) | -0.785 [-0.893, -0.677] (1/0/59) | -1.044 [-1.129, -0.958] (0/0/60) | -0.579 [-0.701, -0.458] (8/0/52) (LinUCB+file) | -1.065 [-1.145, -0.986] (0/0/60) |
+| 3.162 | 0.316 | -0.557 [-0.640, -0.474] (3/0/57) | -0.446 [-0.533, -0.359] (6/0/54) | -0.856 [-0.939, -0.772] (0/0/60) | -0.446 [-0.555, -0.338] (10/0/50) (LinUCB+file) | -0.868 [-0.949, -0.787] (0/0/60) |
+| 3.162 | 1.000 | -0.553 [-0.634, -0.472] (1/0/59) | -0.471 [-0.561, -0.382] (7/0/53) | -0.875 [-0.960, -0.790] (0/0/60) | -0.502 [-0.590, -0.415] (2/0/58) (LinUCB+file) | -0.898 [-0.982, -0.813] (0/0/60) |
+| 3.162 | 3.162 | -0.887 [-0.993, -0.781] (0/0/60) | -0.956 [-1.079, -0.834] (2/0/58) | -1.476 [-1.610, -1.342] (0/0/60) | -0.981 [-1.093, -0.869] (2/0/58) (LinUCB+file) | -1.552 [-1.683, -1.422] (0/0/60) |
+| 3.162 | 10.000 | -1.031 [-1.211, -0.850] (0/0/60) | -1.387 [-1.540, -1.233] (0/0/60) | -1.781 [-1.991, -1.571] (0/0/60) | -1.352 [-1.478, -1.226] (0/0/60) (LinUCB+file) | -2.062 [-2.238, -1.885] (0/0/60) |
+| 10.000 | 0.100 | -1.532 [-1.780, -1.283] (3/0/57) | -3.056 [-3.289, -2.824] (0/0/60) | -3.176 [-3.432, -2.920] (0/0/60) | -3.145 [-3.392, -2.898] (0/0/60) (LinUCB+file) | -3.176 [-3.432, -2.920] (0/0/60) |
+| 10.000 | 0.316 | -1.516 [-1.707, -1.325] (3/0/57) | -2.579 [-2.772, -2.386] (0/0/60) | -2.894 [-3.090, -2.698] (0/0/60) | -2.764 [-2.954, -2.575] (0/0/60) (LinUCB+file) | -2.894 [-3.090, -2.698] (0/0/60) |
+| 10.000 | 1.000 | -1.263 [-1.441, -1.085] (3/0/57) | -2.282 [-2.475, -2.089] (0/0/60) | -2.486 [-2.683, -2.288] (0/0/60) | -2.495 [-2.678, -2.312] (0/0/60) (LinUCB+file) | -2.486 [-2.683, -2.288] (0/0/60) |
+| 10.000 | 3.162 | -1.378 [-1.534, -1.222] (1/0/59) | -2.325 [-2.488, -2.163] (0/0/60) | -2.364 [-2.529, -2.200] (0/0/60) | -2.511 [-2.662, -2.359] (0/0/60) (LinUCB+file) | -2.374 [-2.539, -2.210] (0/0/60) |
+| 10.000 | 10.000 | -1.790 [-1.873, -1.706] (0/0/60) | -2.438 [-2.545, -2.330] (0/0/60) | -2.556 [-2.655, -2.456] (0/0/60) | -2.571 [-2.670, -2.471] (0/0/60) (LinUCB) | -2.561 [-2.659, -2.462] (0/0/60) |
+
+(Penalty in units of the reward, weight = energy weight. Full harness output, including wrong per 100, skip share and
+choices per point: reproducible from the TSV.)
+
+Reading of the numbers (not a tested claim): the six forced blocks (1,200 steps, betas 4, 8 and 16 among them) are a
+large part of a life of 1,000 to 6,000 steps, and at a high wrong-answer penalty one block with beta 8 or 16 costs more
+than later blocks recover; block-to-block noise in reward per energy is large against the differences between betas,
+so about a third of the promotions go to a beta that is worse in that world.
+
+### Verdict against the pre-registered decision rule
+
+1. PRIMARY met and guard holds: **no** (PRIMARY -1.263 [-1.441, -1.085], 3/0/57; guard fails, -0.111 [-0.141, -0.081]).
+2. No Holm-rejected regression of S1 minus B0 over the sweep: **no** (14).
+3. OOD not significantly negative: **no** (-0.269 [-0.315, -0.223]).
+4. Equivalence and safety tests: yes (20 of 20; unit tests pass).
+
+**Rule 1 fails: the result is recorded as negative.** S1 stays opt-in (`wt_self_tune` off by default); no constant is
+changed on the report seeds; a next candidate needs its own pre-registration. The default is not changed here (the
+owner decides).
+
+Limits: one synthetic world family (World T, the author's generator), one budget, one set of report seeds; the
+implementation choices above are one reading of the pre-registration; the machine was shared with other jobs during
+the runs (timings rough). Nothing here is a claim of thinking or understanding.
 
 ## Not measured
 
