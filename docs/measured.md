@@ -3663,6 +3663,27 @@ Mean reward per energy: B0 3.205 [3.168, 3.242]; B1 3.299; LinUCB+file 3.334 [3.
 * S9: rules accepted by B0 over the 60 report lives: 0 (the real hourly and daily counts follow no rule of the B2
   grammar; `ts-rule` was never offered); wrong answers paid: 0 (default and OOD).
 
+### S6: reward-design sweep (one run; every policy re-tuned per point on 101..120; report seeds 401..460)
+
+`docs/data/m3_sweep_report_seeds401-460.tsv` (B0 and the point's strongest baseline per seed). Penalty for a wrong
+answer {0, 1, 10} x reward, energy weight {0.316, 1, 3.16}; one-sided paired t "B0 - best >= 0", Holm over 9 points.
+The strongest baseline is LinUCB+file at every point.
+
+| penalty x reward | energy weight | B0 beta | B0 - LinUCB+file [95% CI] (W/T/L) | Holm regression |
+|---|---|---|---|---|
+| 0 | 0.316 | 1 | -0.109 [-0.126, -0.092] (2/0/58) | yes |
+| 0 | 1 | 0.5 | -0.129 [-0.145, -0.113] (1/0/59) | yes |
+| 0 | 3.16 | 0.5 | -0.046 [-0.061, -0.032] (15/0/45) | yes |
+| 1 | 0.316 | 1 | -0.188 [-0.202, -0.174] (0/0/60) | yes |
+| 1 | 1 | 0.5 | -0.160 [-0.183, -0.137] (3/0/57) | yes |
+| 1 | 3.16 | 0.5 | -0.115 [-0.145, -0.085] (8/0/52) | yes |
+| 10 | 0.316 | 1 | -0.522 [-0.586, -0.457] (0/0/60) | yes |
+| 10 | 1 | 1 | -0.532 [-0.593, -0.471] (0/0/60) | yes |
+| 10 | 3.16 | 1 | -0.541 [-0.603, -0.480] (0/0/60) | yes |
+
+**Regressions at all 9 points.** The default point reproduces the PRIMARY exactly (same seeds, same tuning). Wall
+time about 4.8 h on a machine shared with the full test suite and other builds.
+
 ### S5: how deterministic the real world is (tuning seeds, descriptive)
 
 Distinct tasks of steps 0..499 x every kind on seeds 101..120, every fixed plan run on every task: 79,882 (template,
