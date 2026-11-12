@@ -51,6 +51,7 @@ mod being_tools;
 mod being_v2_tools;
 mod world_t_sandbox;
 mod world_t_tools;
+mod world_m3_tools;
 mod world_t_sched;
 #[cfg(test)]
 mod world_t_demo;

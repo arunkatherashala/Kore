@@ -143,6 +143,66 @@ impl ParquetWriter {
     }
 }
 
+
+// ── Capped, batch-wise reading (World M3; additive: `read` above is unchanged) ──
+
+/// Row count and (column name, Arrow type) list of a Parquet file, from its footer only (no data read).
+pub fn meta(path: impl AsRef<Path>) -> Result<(i64, Vec<(String, String)>), ParquetError> {
+    let file = File::open(path.as_ref())?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let rows = builder.metadata().file_metadata().num_rows();
+    let fields = builder.schema().fields().iter().map(|f| (f.name().clone(), format!("{:?}", f.data_type()))).collect();
+    Ok((rows, fields))
+}
+
+/// Read a Parquet file batch by batch (at most `batch` rows each), handing every batch to `f` as a DataBlock,
+/// and stop with an error before decoding past `max_rows` rows (the footer's row count is checked first).
+/// Unlike `read`, timestamp columns are kept: they become Int64 in the column's own unit (see `meta` for the
+/// unit). Returns the number of rows read.
+pub fn read_batches(path: impl AsRef<Path>, max_rows: usize, batch: usize, mut f: impl FnMut(DataBlock) -> Result<(), String>) -> Result<usize, String> {
+    let file = File::open(path.as_ref()).map_err(|e| format!("open: {e}"))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| format!("parquet: {e}"))?;
+    let rows = builder.metadata().file_metadata().num_rows();
+    if rows < 0 || rows as u64 > max_rows as u64 {
+        return Err(format!("the file says {rows} rows; at most {max_rows} may be read"));
+    }
+    let schema = builder.schema().clone();
+    let reader = builder.with_batch_size(batch.max(1)).build().map_err(|e| format!("parquet: {e}"))?;
+    let mut seen = 0usize;
+    for b in reader {
+        let b = b.map_err(|e| format!("arrow: {e}"))?;
+        seen += b.num_rows();
+        if seen > max_rows {
+            return Err(format!("more than {max_rows} rows decoded"));
+        }
+        let n = b.num_rows();
+        let mut columns = Vec::with_capacity(schema.fields().len());
+        for (ci, field) in schema.fields().iter().enumerate() {
+            let data = match field.data_type() {
+                ArrowType::Timestamp(unit, _) => {
+                    use arrow_array::{TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray};
+                    use arrow_schema::TimeUnit;
+                    let a = b.column(ci);
+                    let mut out: Vec<Option<i64>> = Vec::with_capacity(n);
+                    macro_rules! ts { ($t:ty) => {{ let a = a.as_any().downcast_ref::<$t>().ok_or("timestamp column of an unexpected array type")?; for i in 0..a.len() { out.push(if a.is_null(i) { None } else { Some(a.value(i)) }); } }}; }
+                    match unit {
+                        TimeUnit::Second => ts!(TimestampSecondArray),
+                        TimeUnit::Millisecond => ts!(TimestampMillisecondArray),
+                        TimeUnit::Microsecond => ts!(TimestampMicrosecondArray),
+                        TimeUnit::Nanosecond => ts!(TimestampNanosecondArray),
+                    }
+                    ColumnData::Int64(out)
+                }
+                ArrowType::Int64 | ArrowType::Int32 | ArrowType::Float64 | ArrowType::Float32 | ArrowType::Utf8 | ArrowType::LargeUtf8 => build_kore_column(std::slice::from_ref(&b), ci, field.data_type(), n),
+                t => return Err(format!("column {} has an unsupported type {t:?}", field.name())),
+            };
+            columns.push(Column { name: field.name().clone(), data });
+        }
+        f(DataBlock { columns, num_rows: n })?;
+    }
+    Ok(seen)
+}
+
 // â”€â”€ Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[cfg(test)]

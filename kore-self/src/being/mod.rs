@@ -53,6 +53,8 @@ pub mod world_o;
 pub mod l2;
 /// World T, data work in a sandbox (opt-in: separate files and log source; see docs/world_t.md).
 pub mod world_t;
+// Track M3: World M3 (real taxi data, opt-in, default off; its own source being:worldm3)
+pub mod world_m3;
 /// Track B14: rule library and always-on curiosity (opt-in; see b14/mod.rs).
 pub mod b14;
 /// Track E1: evolutionary search over the rule DSL (opt-in; see e1/mod.rs).

@@ -30,6 +30,7 @@ be burstier, messier and phrased differently.
 | W1b World T over-skipping fix (`value_ucb`, synthetic): being minus tuned LinUCB / UCB1 / always SQL on the 6 x 5 sweep, before (abd8de1e) and after | 20 worlds per point, budget 6000 | same as W1, all re-tuned on seeds 101..120; old being re-tuned separately | penalty 0 unchanged (headline +0.127 [+0.084, +0.171], new minus old +0.000, 0/0/20); points ahead (interval above 0) 22 / 24 / 25 -> 25 / 30 / 29 of 30; still behind LinUCB at penalty 10 x, weights 1 and 3.16 (-0.104, -0.108; before -0.775, -0.488) and always SQL at penalty 10 x, weight 10 (-0.087); pre-registered criterion not met (Track W1b). Fair-baseline note (Track W2, seeds 201..260, penalty 0, weight 1): this LinUCB has no file feature; LinUCB with a one-hot of the task's file is above the default being by +0.135 [+0.096, +0.175] (49 of 60), and B1 (`wt_file_key`) minus LinUCB+file is +0.090 [+0.047, +0.132] (plain LinUCB +0.367). | 2026-11-08 | wt-overskip |
 | W2 file-keyed estimator B1 in the World T being (opt-in `wt_file_key`, synthetic): B1 minus B0 / minus LinUCB with the file feature / minus plain LinUCB, reward per energy, penalty 0, weight 1; 6 x 5 sweep with Holm | 60 worlds (report seeds 201..260), budget 6000 | B0 (default being), LinUCB, LinUCB + one-hot file feature, UCB1, always SQL, each tuned on seeds 101..120 per point | +0.225 [+0.192, +0.258] (59/0/1) / **+0.090 [+0.047, +0.132] (43/0/17)** / +0.367 [+0.327, +0.408]; the default being B0 minus LinUCB+file -0.135 [-0.175, -0.096]; 6 regressions after Holm (penalty 1 x weight 0.1, penalty 10 x all weights), so B1 stays opt-in; M4 not met (Track W2) | 2026-11-11 | 9feedb93 |
 | W2b B1 with a penalty-aware beta (B1p, opt-in `wt_file_key = on` + `wt_file_beta = table`, synthetic): B1p minus B0, reward per energy, penalty 0, weight 1; 6 x 5 sweep with Holm | 60 worlds (report seeds 261..320), budget 6000 | B0 (default being), LinUCB, LinUCB + file feature, UCB1, always SQL, and B1p's beta, each tuned on seeds 101..120 per point (6 configurations) | PRIMARY +0.227 [+0.192, +0.262] (59/0/1), a replication (the table picks beta 2 there, B1p = W2's B1); sweep: B1p minus B0 interval above 0 at 30 of 30 points, **0 regressions after Holm** (W2's B1 on the same seeds: 6); OOD +0.231 [+0.197, +0.265]; Stage-2 rule 1 to 4 met, default not changed (needs the owner's approval); M4 not met (dominated at 1 point, penalty 10 x weight 3.16, by LinUCB+file) (Track W2b) | 2026-11-11 | ef39bfb6 |
+| M3 World M3 from one real file (NYC yellow taxi, January 2024; author-written templates, slices and quirks): default being (B0) minus the strongest tuned baseline, reward per energy, penalty 0, weight 1 | 60 worlds (report seeds 401..460, run once), budget 6000 | random, always SQL, always cheapest, UCB1, LinUCB, LinUCB+file, each tuned on seeds 101..120 (6 configurations); reward-best oracle | **-0.129 [-0.145, -0.113] (1/0/59) against LinUCB+file: PRIMARY not met, M3 not met**; minus LinUCB +0.008 [-0.005, +0.021], UCB1 +0.271, always cheapest +0.563, random +0.777, always SQL +1.350 (each 60/0/0); B1 minus B0 +0.093 [+0.078, +0.109]; truths cross-checked by DuckDB on 329,470 tuning-seed tasks, 0 disagreements; 96.5% of (template, file, plan) outcomes determined; S6 sweep: below LinUCB+file at 9 of 9 points; 0 wrong paid (Track M3) | 2026-11-11 | m3-build |
 | B14 rule library and always-on curiosity, first world long run (synthetic) | 20 worlds x 200,000 steps; transfer 20 worlds x 30,000; short lives 20 worlds | B14 off (the long run's being); tuning seeds 101..120 | steps 50k-200k B14 on minus off +0.491 [+0.287, +0.695] (18/0/2), rule worlds +0.655 (14/0/0), simple +0.109 [-0.076, +0.293]; slope 50k-200k -0.013 [-0.030, +0.003] per 100k (plateau level raised, slope not); curiosity cost on simple worlds +2.5% [-1.9%, +6.8%] (n = 6, 1% criterion not met); library import transfer +475 [-128, +1,078] steps saved per family (7/10/3); budget 600 +0.037 [-0.037, +0.112], 3000 +0.149 [+0.004, +0.293] (Track B14) | 2026-11-08 | a062a62a |
 | L2 learning to learn, World O (synthetic): `form+l2` (B12 `form` plus the L2 meta-prior) top-tier Spearman of family order vs attempts to competence; reward per energy vs `current`; attribution `form+l2` minus `form` | 20 worlds, life 1,200,000, pre-registered (commit 19125b17) | `current`; `form` (B12) | Spearman -0.094 [-0.164, -0.023] (15 of 20 negative): met; reward +0.366 [+0.275, +0.457] (20/0/0): met; but `form+l2` minus `form`: Spearman +0.005 [-0.045, +0.055] (11/0/9), last-third minus first-third attempts +1.14 [-1.42, +3.70] (10/0/10), reward +0.000 [-0.006, +0.007]: the meta-prior adds nothing measurable; last-third minus first-third for `form+l2` +0.06 [-4.05, +4.18]: not met; 0 wrong of 7,501 rules; World T not feasible; World v2 and vs-world v2 unchanged (Track L2) | 2026-11-09 | 19125b17 |
 
@@ -3706,6 +3707,122 @@ not a real-data result (M3 stays separate). The table works because World T tell
 on seeds 101..120, the same budget as B0), not learning by the being; one beta per point, 4 points at the grid's lower
 edge (0.5). One world family, one budget, one set of report seeds. The cost numbers are distorted by other load on the
 machine (see (f)). Nothing here is a claim of thinking or understanding.
+
+## Track M3: World M3, a World T-like world from one real file (NYC yellow taxi, January 2024)
+
+Design and pre-registration: `docs/m3_design.md` with the owner decisions of 2026-11-11 (candidate B0; PRIMARY: paired
+95% CI lower bound > 0 AND mean >= +0.05 AND >= 36 of 60 wins; report seeds 401..460 run once; tuning seeds 101..120
+only). Code on branch `m3-build`; `kore-self/examples/measure_m3.rs`; Windows, 8 threads. The source file is untrusted
+input kept outside every repository; its SHA-256 is re-checked before every world construction; nothing from it or
+derived from it is committed (the TSVs below hold policy, seed, reward, energy and counts only).
+
+### Cross-check of the truths (gate, before tuning)
+
+Every task a life can meet on the tuning seeds 101..120 (the task of a (step, kind) does not depend on the clock;
+steps 0..5999 x 9 kinds = 54,000 per seed, 329,470 distinct): each Rust truth was recomputed by an independent DuckDB
+1.5.6 query (`kore-self/examples/m3_crosscheck.py`, `python -I`, read-only conda env, nothing installed) over the
+rendered file read with its explicit dialect; every rendered table was also joined on `trip_id` with the Parquet file
+and every value compared; series truths were recomputed from the Parquet file. **0 disagreements** (one script bug in
+the hour bucketing was found on the first pass, in the checker, not in the world, and fixed before the full pass). The
+cross-check inputs and outputs were deleted.
+
+### Tuning (seeds 101..120, penalty 0, energy weight 1, budget 6000; committed before the report run)
+
+`docs/data/m3_tune_seeds101-120.tsv`. Mean reward per energy over 20 seeds; 6 values per tuned policy; B0 and B1 had
+their optimum (0.5) on the low edge and were extended once by 0.25 and 0.125 (both lower; 0.5 kept).
+
+| policy | chosen | tuning mean | grid (mean per value) |
+|---|---|---|---|
+| B0 (default being) | beta 0.5 | 3.1966 | 0.125: 3.1841, 0.25: 3.1883, 0.5: 3.1966, 1: 3.1928, 2: 3.1176, 4: 2.9300, 8: 2.7348, 16: 2.6608 |
+| B1 (`wt_file_key` on) | beta 0.5 | 3.2595 | 0.125: 3.2365, 0.25: 3.2500, 0.5: 3.2595, 1: 3.2259, 2: 3.0819, 4: 2.8453, 8: 2.6971, 16: 2.6535 |
+| UCB1 (template x context x plan, skip on) | c 0.003 | 2.9283 | 0.001: 2.9268, 0.003: 2.9283, 0.01: 2.9175, 0.03: 2.8999, 0.1: 2.7892, 0.3: 2.6021 |
+| LinUCB (skip on) | alpha 0.3 | 3.1772 | 0.1: 2.7520, 0.3: 3.1772, 1: 3.0407, 3: 2.6873, 10: 2.6378, 30: 2.6378 |
+| LinUCB+file (skip on) | alpha 0.3 | 3.2885 | 0.1: 2.8301, 0.3: 3.2885, 1: 2.9841, 3: 2.6369, 10: 2.6378, 30: 2.6378 |
+| random plan | - | 2.4226 | |
+| always SQL | - | 1.8865 | |
+| always cheapest | - | 2.6384 | |
+
+**Strongest baseline, named before the report run: LinUCB+file** (3.2885; B0 3.1966 on the same seeds). Tuning wall
+424 s, peak working set 656 MB, base-table load 2.4 to 7.7 s (busy machine).
+
+### Report run (seeds 401..460, n = 60, run once; penalty 0, energy weight 1, budget 6000)
+
+Per-world data: `docs/data/m3_report_seeds401-460.tsv`, `docs/data/m3_ood_seeds401-460.tsv` (policy, seed, reward,
+energy, counts). Paired 95% t-intervals (t, 59 df), (wins/ties/losses of the first policy).
+
+Mean reward per energy: B0 3.205 [3.168, 3.242]; B1 3.299; LinUCB+file 3.334 [3.295, 3.373]; LinUCB 3.197; UCB1
+2.934; always cheapest 2.642; random 2.429; always SQL 1.855; reward-best oracle (sees every plan's true result)
+3.761.
+
+| comparison | B0 minus baseline [95% CI] (W/T/L) | one-sided Holm (S1) |
+|---|---|---|
+| **PRIMARY: B0 - LinUCB+file** (strongest, named before the run) | **-0.129 [-0.145, -0.113] (1/0/59)** | not rejected |
+| B0 - LinUCB | +0.008 [-0.005, +0.021] (36/0/24) | not rejected (p = 0.11) |
+| B0 - UCB1 | +0.271 [+0.252, +0.290] (60/0/0) | rejected |
+| B0 - always cheapest | +0.563 [+0.530, +0.596] (60/0/0) | rejected |
+| B0 - random | +0.777 [+0.753, +0.801] (60/0/0) | rejected |
+| B0 - always SQL | +1.350 [+1.312, +1.388] (60/0/0) | rejected |
+
+* **PRIMARY not met** (threshold: lower bound > 0 AND mean >= +0.05 AND >= 36 of 60 wins; B0 is below LinUCB+file on
+  59 of 60 worlds). **S1 does not hold** (2 of 6 not rejected). **M3 is not met.**
+* S2 (pooled over the 60 worlds; wrong answers per 100 tasks / coverage / skip share): B0 12.48 / 0.813 / 0.115; B1
+  11.31 / 0.821 / 0.120; LinUCB+file 11.76 / 0.838 / 0.100; LinUCB 12.60 / 0.820 / 0.105; UCB1 12.17 / 0.922 / 0.029;
+  random 14.20 / 0.886 / 0; always cheapest 19.40 / 0.785 / 0; always SQL 1.48 / 0.629 / 0.371; oracle 0 / 0.805 /
+  0.195. Skip-off variants: B0 3.116 (13.36 / 0.925), UCB1 2.903, LinUCB 3.115; B0 minus B0 skip-off +0.089 [+0.073,
+  +0.104] (57/0/3).
+* S3: B0 closes a negative share of the gap from the strongest baseline to the reward-best oracle: -0.32 (per-world
+  mean; pooled -0.30). B0 is behind the strongest baseline, not between it and the oracle.
+* S4: B1 minus B0 +0.093 [+0.078, +0.109] (59/0/1): the file key helps on real slices too; B1 minus LinUCB+file
+  -0.036 [-0.050, -0.021] (15/0/45): B1 is also below LinUCB+file (in World T, W2, B1 was above it).
+* S7 (OOD, `ood = true`, never tuned): B0 minus random +0.487, always SQL +0.675, always cheapest +0.445, UCB1 +0.338
+  (each 60/0/0); minus LinUCB -0.020 [-0.035, -0.005] (25/0/35); minus LinUCB+file -0.112 [-0.147, -0.078] (12/0/48).
+* S8: report lives 567 s wall for 720 lives on 8 threads (OOD lives extra); peak working set 629 MB (target < 1 GB);
+  base-table load (hash, caps, decode) 2.4 to 12.5 s depending on machine load.
+* S9: rules accepted by B0 over the 60 report lives: 0 (the real hourly and daily counts follow no rule of the B2
+  grammar; `ts-rule` was never offered); wrong answers paid: 0 (default and OOD).
+
+### S6: reward-design sweep (one run; every policy re-tuned per point on 101..120; report seeds 401..460)
+
+`docs/data/m3_sweep_report_seeds401-460.tsv` (B0 and the point's strongest baseline per seed). Penalty for a wrong
+answer {0, 1, 10} x reward, energy weight {0.316, 1, 3.16}; one-sided paired t "B0 - best >= 0", Holm over 9 points.
+The strongest baseline is LinUCB+file at every point.
+
+| penalty x reward | energy weight | B0 beta | B0 - LinUCB+file [95% CI] (W/T/L) | Holm regression |
+|---|---|---|---|---|
+| 0 | 0.316 | 1 | -0.109 [-0.126, -0.092] (2/0/58) | yes |
+| 0 | 1 | 0.5 | -0.129 [-0.145, -0.113] (1/0/59) | yes |
+| 0 | 3.16 | 0.5 | -0.046 [-0.061, -0.032] (15/0/45) | yes |
+| 1 | 0.316 | 1 | -0.188 [-0.202, -0.174] (0/0/60) | yes |
+| 1 | 1 | 0.5 | -0.160 [-0.183, -0.137] (3/0/57) | yes |
+| 1 | 3.16 | 0.5 | -0.115 [-0.145, -0.085] (8/0/52) | yes |
+| 10 | 0.316 | 1 | -0.522 [-0.586, -0.457] (0/0/60) | yes |
+| 10 | 1 | 1 | -0.532 [-0.593, -0.471] (0/0/60) | yes |
+| 10 | 3.16 | 1 | -0.541 [-0.603, -0.480] (0/0/60) | yes |
+
+**Regressions at all 9 points.** The default point reproduces the PRIMARY exactly (same seeds, same tuning). Wall
+time about 4.8 h on a machine shared with the full test suite and other builds.
+
+### S5: how deterministic the real world is (tuning seeds, descriptive)
+
+Distinct tasks of steps 0..499 x every kind on seeds 101..120, every fixed plan run on every task: 79,882 (template,
+file, plan) keys, of which **77,105 (96.5%) have the same outcome on every task of the key** (World T by
+construction: 93.9%). The sniffing plans (`sniff+native`, `sniff+sql`, `native-filter`, `fix-typecheck`,
+`fmt-sniff`) are right on 100% of attempts for every table template, except `sniff+sql` on `grp_top3` (74.6%: KORE SQL
+sorts each ORDER BY key with an unstable sort, so the smallest-id tie rule is not honoured on real ties; engine limit,
+kept). The naive plans are right on 25% (`an_total_mismatch`) to 80% (`an_out_day`) of attempts; `fix-fieldcount`
+44%, `fmt-extension` 70%. Series: no plan is reliable (right share 9% to 21% within +-5%), and almost no (series,
+plan) key is determined. So the real values matter little for which table plan is right: the rendering quirks
+(author-written) decide it, per file, which is what the file one-hot of LinUCB+file captures.
+
+### Reading (negative result)
+
+On this world the default being does not beat the strongest tuned baseline: LinUCB with a one-hot of the file is
+ahead by 0.129 reward per energy on 59 of 60 worlds, and plain LinUCB ties it. The being still beats UCB1, random,
+always SQL and always cheapest on every world. The file-keyed being (B1, opt-in) gains +0.093 over B0 but stays 0.036
+below LinUCB+file. Limits: one month of one city's records, one file; tuning and report worlds draw from the same
+month; the airport zone ids are inferred, not read from a zone list; the injected malformed line is synthetic; the
+templates, slices, quirks, rewards and energies are author-written. This is a measurement of plan choice on this
+world, not a claim of thinking or understanding, and not a claim about other datasets.
 
 ## Not measured
 
