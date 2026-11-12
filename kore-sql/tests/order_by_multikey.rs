@@ -6,9 +6,12 @@
 //!
 //! The reference is a deterministic Rust model (rusqlite is not available offline in this workspace): rows are sorted
 //! with `Vec::sort_by` (stable) and a lexicographic comparator with this engine's NULL placement:
-//! - no NULLS clause: Int64 NULL sorts as i64::MIN, Float64 NULL as f64::MAX, text NULL as "" (the existing
-//!   per-type behaviour of this copy, kept);
+//! - no NULLS clause: NULL is the smallest value of every type (first ascending, last descending, as Spark);
 //! - NULLS FIRST / NULLS LAST: NULLs go first / last whatever the direction.
+//!
+//! Engine sync (master-kore-engine 236ae86c): the old copy placed NULL per type without a NULLS clause (Int64 as
+//! i64::MIN, Float64 as f64::MAX, text as ""); master's engine has the SQL / Spark default above, so the reference
+//! follows it. The engine side of this test is master's ORDER BY, unchanged.
 
 use kore_core::{Column, ColumnData, DataBlock};
 use kore_sql::KqlContext;
@@ -155,7 +158,8 @@ enum V { I(Option<i64>), F(Option<f64>), S(Option<String>) }
 /// The reference comparison of one key, with this engine's NULL placement (see the module doc).
 fn ref_cmp(a: &V, b: &V, desc: bool, nulls: Option<bool>) -> Ordering {
     let dir = |o: Ordering| if desc { o.reverse() } else { o };
-    if let Some(nf) = nulls {
+    // no NULLS clause: NULL is the smallest value (NULLS FIRST ascending, NULLS LAST descending)
+    if let Some(nf) = nulls.or(Some(!desc)) {
         let (an, bn) = match (a, b) {
             (V::I(x), V::I(y)) => (x.is_none(), y.is_none()),
             (V::F(x), V::F(y)) => (x.is_none(), y.is_none()),

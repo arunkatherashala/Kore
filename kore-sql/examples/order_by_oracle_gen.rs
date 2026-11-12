@@ -15,8 +15,10 @@
 //!
 //! The DuckDB SQL differs from KORE's only in the ORDER BY: `, id ASC` is appended (`id` is the input row number, so
 //! this is "rows equal on every key keep their input order", the stability KORE promises; DuckDB's sort is not
-//! stable), and in group `rand_orderby` a key without a NULLS clause is rewritten to model KORE's kept legacy NULL
-//! placement (Int64 NULL as i64::MIN, Float64 NULL as f64::MAX, text NULL as ""), which no NULLS clause expresses.
+//! stable), and in group `rand_orderby` a key without a NULLS clause gets KORE's default NULL placement spelled out
+//! for DuckDB: NULL is the smallest value of every type (`ASC NULLS FIRST`, `DESC NULLS LAST`, as Spark; DuckDB's
+//! own default is NULLS LAST). Engine sync (master-kore-engine 236ae86c): before, this modelled the old copy's
+//! legacy placement (Int64 NULL as i64::MIN, Float64 NULL as f64::MAX, text NULL as ""), which master does not have.
 //!
 //! Case groups: `rand_orderby` (1,200 queries, seeds 1..60) and `rand_grouptop3` (200 tables, seeds 1..200) are the
 //! randomized cases of `tests/order_by_multikey.rs` with the same random streams (the ORDER BY queries select every
@@ -154,15 +156,11 @@ fn rand_orderby(o: &mut Out) {
             let kore = keys.iter().map(|&(k, desc, nl)| format!("{}{}{}", COLS[k], dir_s(desc), nulls_s(nl))).collect::<Vec<_>>().join(", ");
             let duck = keys.iter().map(|&(k, desc, nl)| match nl {
                 Some(_) => format!("{}{}{}", COLS[k], dir_s(desc), nulls_s(nl)),
-                // KORE's legacy NULL placement without a NULLS clause
-                None => format!("{}{} NULLS LAST", match COLS[k] {
-                    "i" | "j" => format!("COALESCE({}, CAST(-9223372036854775808 AS HUGEINT))", COLS[k]),
-                    "f" => "COALESCE(f, 1.7976931348623157e308)".to_string(),
-                    c => format!("COALESCE({c}, '')"),
-                }, dir_s(desc)),
+                // KORE's default NULL placement without a NULLS clause: NULL is the smallest value
+                None => format!("{}{}{}", COLS[k], dir_s(desc), nulls_s(Some(!desc))),
             }).collect::<Vec<_>>().join(", ");
-            let legacy = if keys.iter().any(|k| k.2.is_none()) { "rand_orderby_legacy" } else { "rand_orderby" };
-            o.query(legacy, &format!("SELECT id, i, j, f, s, d FROM t ORDER BY {kore}{lim}"),
+            let group = if keys.iter().any(|k| k.2.is_none()) { "rand_orderby_default" } else { "rand_orderby" };
+            o.query(group,&format!("SELECT id, i, j, f, s, d FROM t ORDER BY {kore}{lim}"),
                 &format!("SELECT id, i, j, f, s, d FROM t ORDER BY {duck}, id ASC{lim}"));
         }
     }
