@@ -241,6 +241,8 @@ pub fn block_to_rows(block: &DataBlock) -> Vec<Vec<String>> {
             Value::Float(f)  => format!("{f:.4}"),
             Value::Bool(b)   => b.to_string(),
             Value::Str(s)    => s,
+            // arrays and maps (new in master's kore-core) never come out of a DataBlock column
+            v @ (Value::Array(_) | Value::Map(_)) => format!("{v:?}"),
         }).collect()
     }).collect()
 }
@@ -320,6 +322,7 @@ impl ValueDisplay for Value {
             Value::Float(f)  => format!("{f:.4}"),
             Value::Bool(b)   => b.to_string(),
             Value::Str(s)    => s.clone(),
+            v @ (Value::Array(_) | Value::Map(_)) => format!("{v:?}"),
         }
     }
     fn type_name(&self) -> &str {
@@ -329,6 +332,8 @@ impl ValueDisplay for Value {
             Value::Float(_)=> "float",
             Value::Bool(_) => "bool",
             Value::Str(_)  => "str",
+            Value::Array(_) => "array",
+            Value::Map(_)   => "map",
         }
     }
 }

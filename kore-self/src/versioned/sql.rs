@@ -202,6 +202,8 @@ pub fn block_strings(b: &DataBlock) -> Vec<Vec<String>> {
                     Value::Float(f) => format!("{f}"),
                     Value::Bool(x) => x.to_string(),
                     Value::Str(s) => s,
+                    // arrays and maps (new in master's kore-core) never come out of a DataBlock column
+                    v @ (Value::Array(_) | Value::Map(_)) => format!("{v:?}"),
                 })
                 .collect()
         })
