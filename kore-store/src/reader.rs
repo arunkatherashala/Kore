@@ -39,6 +39,16 @@ impl KoreReader {
         if crate::v4::is_v4(data) {
             return crate::v4::read(data, wanted, &crate::dict::DictSet::new());
         }
+        if crate::v4::is_v5(data) {
+            return crate::v4::read(data, wanted, &crate::dict::DictSet::new());
+        }
+        if crate::rules::is_v6(data) {
+            return crate::rules::read(data, wanted, &crate::dict::DictSet::new());
+        }
+        if crate::keyindex::is_key_index(data) {
+            return Err(KoreError::InvalidArgument(
+                "this is a KORE key index object (.kidx), not a data file; open it with KeyIndex::from_bytes".into()));
+        }
         // Check for encryption marker
         if data.len() >= 4 && &data[0..4] == b"KENC" {
             return Err(KoreError::InvalidArgument(
@@ -68,7 +78,35 @@ impl KoreReader {
         if crate::v4::is_v4(data) {
             return crate::v4::read(data, wanted, dicts);
         }
+        if crate::v4::is_v5(data) {
+            return crate::v4::read(data, wanted, dicts);
+        }
+        if crate::rules::is_v6(data) {
+            return crate::rules::read(data, wanted, dicts);
+        }
         Self::from_bytes_columns_opt(data, wanted)
+    }
+
+    /// Rows `rows` of `columns` (all if None). Version-4/5 files are decoded row-level
+    /// (`v4::read_rows`: the requested columns are verified and decompressed, only the requested rows
+    /// are materialised); every other kind of file is read as by `from_bytes_columns_with_dicts` and then
+    /// cut to `rows`. Same values as reading everything and keeping `rows`; same errors.
+    pub fn from_bytes_rows_with_dicts(data: &[u8], columns: Option<&[&str]>, rows: std::ops::Range<usize>, dicts: &crate::dict::DictSet) -> Result<DataBlock, KoreError> {
+        if crate::versioned::is_version_log(data) {
+            let latest = crate::versioned::select_raw(data, u64::MAX)?;
+            return Self::from_bytes_rows_with_dicts(latest, columns, rows, dicts);
+        }
+        if crate::v4::is_compact(data) {
+            return crate::v4::read_rows(data, columns, rows, dicts);
+        }
+        if crate::rules::is_v6(data) {
+            return crate::rules::read_rows(data, columns, rows, dicts);
+        }
+        let b = Self::from_bytes_columns_with_dicts_opt(data, columns, dicts)?;
+        if rows.start > rows.end || rows.end > b.num_rows {
+            return Err(KoreError::InvalidArgument(format!("rows {}..{} out of range: the file has {} rows", rows.start, rows.end, b.num_rows)));
+        }
+        Ok(slice_rows(b, rows))
     }
 
     /// Parse an encrypted .kore file.
@@ -579,3 +617,14 @@ mod tests {
     }
 }
 
+/// Rows `r` of every column of `b` (`r` within bounds).
+pub(crate) fn slice_rows(b: DataBlock, r: std::ops::Range<usize>) -> DataBlock {
+    let cut = |d: ColumnData| match d {
+        ColumnData::Int64(v) => ColumnData::Int64(v[r.clone()].to_vec()),
+        ColumnData::Float64(v) => ColumnData::Float64(v[r.clone()].to_vec()),
+        ColumnData::Bool(v) => ColumnData::Bool(v[r.clone()].to_vec()),
+        ColumnData::Str(v) => ColumnData::Str(v[r.clone()].to_vec()),
+        ColumnData::StrDict { codes, dict } => ColumnData::StrDict { codes: codes[r.clone()].to_vec(), dict },
+    };
+    DataBlock { num_rows: r.end - r.start, columns: b.columns.into_iter().map(|c| Column { name: c.name, data: cut(c.data) }).collect() }
+}

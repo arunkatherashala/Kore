@@ -216,6 +216,19 @@ impl KoreWriter {
         crate::v4::write(block, opts)
     }
 
+    /// Several version-4 files at once, encoded concurrently. Each output is byte-identical to
+    /// `to_bytes_compact` of that block alone (only faster in total, e.g. for a bulk rewrite).
+    pub fn to_bytes_compact_many(items: &[(&DataBlock, &crate::CompactOptions)]) -> Result<Vec<Vec<u8>>, kore_core::KoreError> {
+        crate::v4::write_many(items)
+    }
+
+    /// Rule mode (opt-in, `CompactOptions::with_rules()`): columns that follow a rule are stored as the rule
+    /// plus residuals (version-5 file). If no rule beats the version-4 payload of any column, the output is
+    /// the version-4 file, byte for byte. See `rules` and docs/kore_rule_mode.md.
+    pub fn to_bytes_rules(block: &DataBlock, opts: &crate::RuleOptions) -> Result<Vec<u8>, kore_core::KoreError> {
+        crate::rules::write(block, opts)
+    }
+
     /// Write a version-3 file to `path`.
     pub fn write_file_with(path: &std::path::Path, block: &DataBlock, opts: &crate::WriteOptions) -> Result<(), kore_core::KoreError> {
         let bytes = Self::to_bytes_with(block, opts)?;

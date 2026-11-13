@@ -19,7 +19,7 @@
 //! decode to the same values as its source in repetition 0.
 
 use kore_core::{Column, ColumnData, DataBlock};
-use kore_store::{CompactOptions, DictSet, KoreReader, KoreWriter, SharedDict};
+use kore_store::{CompactOptions, DictSet, KeyIndex, KeyIndexBuilder, KoreReader, KoreWriter, SharedDict, Verify};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -166,6 +166,9 @@ fn main() {
     };
     let mut w_def = vec![];
     let mut w_v4 = vec![];
+    let (mut w_v4_batch, mut w_def_batch) = (vec![], vec![]);
+    let mut w_v4_fast: [Vec<f64>; 2] = [vec![], vec![]];
+    let mut fast_bytes = [0u64; 2];
     let mut identical = 0usize;
     let mut v4_bytes: Vec<Vec<u8>> = vec![];
     let mut dict = mk_dict();
@@ -190,8 +193,48 @@ fn main() {
             b
         }).collect();
         w_v4.push(t.elapsed().as_secs_f64());
-        let _ = std::fs::remove_dir_all(&dd);
-        let _ = std::fs::remove_dir_all(&dv);
+        // batch API: all segments encoded concurrently, then written (same bytes)
+        let db = wdir("v4batch", rep);
+        std::fs::create_dir_all(db.join("dicts")).unwrap();
+        let t = Instant::now();
+        let d2 = mk_dict();
+        std::fs::write(db.join("dicts").join(d2.file_name()), d2.to_bytes()).unwrap();
+        let opts: Vec<CompactOptions> = segs.iter().map(|s| opts_for(&d2, &s.table)).collect();
+        let items: Vec<(&DataBlock, &CompactOptions)> = segs.iter().zip(&opts).map(|(s, o)| (&s.block, o)).collect();
+        let outb = KoreWriter::to_bytes_compact_many(&items).unwrap();
+        for (s, b) in segs.iter().zip(&outb) { std::fs::write(db.join(&s.table).join(&s.file), b).unwrap(); }
+        w_v4_batch.push(t.elapsed().as_secs_f64());
+        assert!(outb == outv, "batch writer output differs");
+        // explicit faster settings (different bytes): CompactOptions::fast(), and fast() with level 3 for
+        // large payloads; one timed write each per repetition, sizes from rep 0
+        let mut fast_dirs = vec![];
+        for (k, large) in [level, 3].into_iter().enumerate() {
+            let df = wdir(&format!("v4fast{k}"), rep);
+            std::fs::create_dir_all(df.join("dicts")).unwrap();
+            let t = Instant::now();
+            let d3 = mk_dict();
+            std::fs::write(df.join("dicts").join(d3.file_name()), d3.to_bytes()).unwrap();
+            let outf: Vec<Vec<u8>> = segs.iter().map(|s| {
+                let o = if s.table == "events" { CompactOptions::fast().with_zstd_level(large).with_dict("text", d3.clone()) } else { CompactOptions::fast().with_zstd_level(large) };
+                let b = KoreWriter::to_bytes_compact(&s.block, &o).unwrap();
+                std::fs::write(df.join(&s.table).join(&s.file), &b).unwrap();
+                b
+            }).collect();
+            w_v4_fast[k].push(t.elapsed().as_secs_f64());
+            if rep == 0 {
+                let ds = DictSet::new().with(d3.clone());
+                for (s, b) in segs.iter().zip(&outf) { assert!(same(&KoreReader::from_bytes_with_dicts(b, &ds).unwrap(), &s.block)); }
+                fast_bytes[k] = outf.iter().map(|b| b.len() as u64).sum();
+            }
+            fast_dirs.push(df);
+        }
+        // default writer, segments encoded concurrently (the fair reference for the batch row)
+        let dq = wdir("defbatch", rep);
+        let t = Instant::now();
+        let outd: Vec<Vec<u8>> = { use rayon::prelude::*; segs.par_iter().map(|s| KoreWriter::to_bytes(&s.block)).collect() };
+        for (s, b) in segs.iter().zip(&outd) { std::fs::write(dq.join(&s.table).join(&s.file), b).unwrap(); }
+        w_def_batch.push(t.elapsed().as_secs_f64());
+        for x in [&dd, &dv, &db, &dq].into_iter().chain(&fast_dirs) { let _ = std::fs::remove_dir_all(x); }
         if rep == 0 {
             let ds = DictSet::new().with(d.clone());
             for (s, b) in segs.iter().zip(&outv) {
@@ -203,7 +246,8 @@ fn main() {
         } else {
             assert!(outv == v4_bytes, "v4 output not deterministic");
         }
-        eprintln!("[store] write rep {rep}: default {:.3}s v4 {:.3}s", w_def[rep], w_v4[rep]);
+        eprintln!("[store] write rep {rep}: default {:.3}s v4 {:.3}s v4-batch {:.3}s v4-fast {:.3}s v4-fast-l3 {:.3}s default-batch {:.3}s",
+            w_def[rep], w_v4[rep], w_v4_batch[rep], w_v4_fast[0][rep], w_v4_fast[1][rep], w_def_batch[rep]);
     }
 
     // ---- lay out the v4 copy on disk
@@ -296,6 +340,74 @@ fn main() {
         assert_eq!(b, want_lk);
         eprintln!("[store] read rep {rep}: full {:.3}/{:.3} proj {:.3}/{:.3} lookup {:.4}/{:.4}", f_def[rep], f_v4[rep], p_def[rep], p_v4[rep], l_def[rep], l_v4[rep]);
     }
+    let ratio_f = |a: &[f64], b: &[f64]| -> Value { stats(&a.iter().zip(b).map(|(x, y)| y / x).collect::<Vec<_>>()) };
+    // ---- key index (opt-in KIDX object over events.event_id): build, size, lookups
+    let idx_dir = work.join("v4_index");
+    let def_idx_dir = work.join("def_index");
+    let build_index = |bytes_of: &dyn Fn(usize) -> Vec<u8>| -> KeyIndex {
+        let mut b = KeyIndexBuilder::new("event_id");
+        for (i, s) in segs.iter().enumerate().filter(|(_, s)| s.table == "events") {
+            let ColumnData::Str(v) = &s.block.columns[0].data else { panic!("materialized") };
+            b.add_file_keys(&format!("events/{}", s.file), &bytes_of(i), v.iter().map(|x| x.as_deref())).unwrap();
+        }
+        b.build().unwrap()
+    };
+    let mut i_build = vec![];
+    let mut idx_v4 = None;
+    for _ in 0..reps {
+        let t = Instant::now();
+        let ix = build_index(&|i| v4_bytes[i].clone());
+        std::fs::create_dir_all(&idx_dir).unwrap();
+        std::fs::write(idx_dir.join(ix.file_name()), ix.to_bytes()).unwrap();
+        i_build.push(t.elapsed().as_secs_f64());
+        idx_v4 = Some(ix);
+    }
+    let idx_v4 = idx_v4.unwrap();
+    let idx_path = idx_dir.join(idx_v4.file_name());
+    let idx_def = build_index(&|i| segs[i].bytes.clone());
+    std::fs::create_dir_all(&def_idx_dir).unwrap();
+    std::fs::write(def_idx_dir.join(idx_def.file_name()), idx_def.to_bytes()).unwrap();
+    let ds_v4 = DictSet::load_dir(&dicts_dir).unwrap();
+    let lookup_idx = |idx: &KeyIndex, root: &Path, ds: &DictSet, id: &str, verify: Verify, reads: &mut usize| -> usize {
+        let hits = idx.lookup(id, &["text"], ds, verify, |f| { *reads += 1; std::fs::read(root.join(&f.name)).map_err(|e| kore_core::KoreError::InvalidArgument(e.to_string())) }).unwrap();
+        hits.iter().map(|h| h.values.columns[0].data.get_str(0).unwrap().len()).sum()
+    };
+    let missing: Vec<String> = (0..lookups.max(1) * 5).map(|k| format!("{:016x}{:048x}", 0xfeed_f00d_u64.wrapping_mul(k as u64 + 1), k)).collect();
+    let (mut li_v4, mut li_v4_len, mut li_def, mut li_open, mut li_miss, mut i_load) = (vec![], vec![], vec![], vec![], vec![], vec![]);
+    let mut miss_reads = 0usize;
+    // warm-up
+    let mut r0 = 0;
+    assert_eq!(lk.iter().map(|&i| lookup_idx(&idx_v4, &v4dir, &ds_v4, &ids_all[i], Verify::Sha256, &mut r0)).sum::<usize>(), want_lk);
+    for rep in 0..reps {
+        let mut reads = 0;
+        let t = Instant::now(); let a: usize = lk.iter().map(|&i| lookup_idx(&idx_v4, &v4dir, &ds_v4, &ids_all[i], Verify::Sha256, &mut reads)).sum(); li_v4.push(t.elapsed().as_secs_f64() / lookups as f64);
+        let t = Instant::now(); let b: usize = lk.iter().map(|&i| lookup_idx(&idx_v4, &v4dir, &ds_v4, &ids_all[i], Verify::Length, &mut reads)).sum(); li_v4_len.push(t.elapsed().as_secs_f64() / lookups as f64);
+        let t = Instant::now(); let c: usize = lk.iter().map(|&i| lookup_idx(&idx_def, &log, &DictSet::new(), &ids_all[i], Verify::Sha256, &mut reads)).sum(); li_def.push(t.elapsed().as_secs_f64() / lookups as f64);
+        // "open": every operation loads (reads + verifies) the index object and the dictionaries from disk
+        let t = Instant::now(); let d: usize = lk.iter().map(|&i| {
+            let ix = KeyIndex::read_file(&idx_path).unwrap();
+            let ds = DictSet::load_dir(&dicts_dir).unwrap();
+            lookup_idx(&ix, &v4dir, &ds, &ids_all[i], Verify::Sha256, &mut reads)
+        }).sum(); li_open.push(t.elapsed().as_secs_f64() / lookups as f64);
+        let mut mr = 0;
+        let t = Instant::now(); let m: usize = missing.iter().map(|k| lookup_idx(&idx_v4, &v4dir, &ds_v4, k, Verify::Sha256, &mut mr)).sum(); li_miss.push(t.elapsed().as_secs_f64() / missing.len() as f64);
+        miss_reads = mr;
+        let t = Instant::now(); let _ = KeyIndex::read_file(&idx_path).unwrap(); i_load.push(t.elapsed().as_secs_f64());
+        assert_eq!((a, b, c, d, m), (want_lk, want_lk, want_lk, want_lk, 0));
+        eprintln!("[store] index rep {rep}: lookup v4 {:.1}us (len-only {:.1}us), default+index {:.1}us, open+lookup {:.1}us, missing {:.1}us ({mr} file reads / {}), index load {:.2}ms",
+            li_v4[rep] * 1e6, li_v4_len[rep] * 1e6, li_def[rep] * 1e6, li_open[rep] * 1e6, li_miss[rep] * 1e6, missing.len(), i_load[rep] * 1e3);
+    }
+    let index_res = json!({
+        "column": "events.event_id", "keys": idx_v4.num_keys(), "files": idx_v4.files().len(),
+        "v4_index_bytes": idx_v4.to_bytes().len(), "default_index_bytes": idx_def.to_bytes().len(), "id": idx_v4.id_hex(),
+        "build_s": stats(&i_build), "load_verify_s": stats(&i_load),
+        "lookup_v4_sha256_per_op_s": stats(&li_v4), "lookup_v4_length_only_per_op_s": stats(&li_v4_len),
+        "lookup_default_files_per_op_s": stats(&li_def), "lookup_open_index_each_op_s": stats(&li_open),
+        "lookup_missing_per_op_s": stats(&li_miss), "missing_keys": missing.len(), "missing_file_reads": miss_reads,
+        "paired_ratio_indexed_over_scan_v4": ratio_f(&l_v4, &li_v4),
+    });
+    let _ = std::fs::remove_dir_all(&def_idx_dir);
+
     // optional: the same v4 files at a higher zstd level (size and one timed write only; reads are not
     // repeated because the decoder work is the same kind)
     let mut max_level = json!(null);
@@ -335,6 +447,13 @@ fn main() {
         "paired_ratio_v4_over_default": {"write": ratio(&w_def, &w_v4), "full_read": ratio(&f_def, &f_v4),
             "projection": ratio(&p_def, &p_v4), "lookup": ratio(&l_def, &l_v4)},
         "v4_max_level": max_level,
+        "v4_batch_writer": {"write_s": stats(&w_v4_batch), "paired_ratio_over_default": ratio(&w_def, &w_v4_batch), "paired_ratio_over_v4": ratio(&w_v4, &w_v4_batch)},
+        "default_batch_writer": {"write_s": stats(&w_def_batch), "paired_ratio_v4_batch_over_default_batch": ratio(&w_def_batch, &w_v4_batch)},
+        "v4_fast": {"size_bytes": dir_size(&v4dir) - v4_bytes.iter().map(|b| b.len() as u64).sum::<u64>() + fast_bytes[0],
+            "write_s": stats(&w_v4_fast[0]), "paired_ratio_over_default": ratio(&w_def, &w_v4_fast[0]), "paired_ratio_over_v4": ratio(&w_v4, &w_v4_fast[0])},
+        "v4_fast_level3": {"size_bytes": dir_size(&v4dir) - v4_bytes.iter().map(|b| b.len() as u64).sum::<u64>() + fast_bytes[1],
+            "write_s": stats(&w_v4_fast[1]), "paired_ratio_over_default": ratio(&w_def, &w_v4_fast[1]), "paired_ratio_over_v4": ratio(&w_v4, &w_v4_fast[1])},
+        "key_index": index_res,
         "projection_result": pr, "lookup_check": want_lk,
     });
     std::fs::write(&out, serde_json::to_string_pretty(&res).unwrap()).unwrap();

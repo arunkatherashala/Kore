@@ -560,6 +560,218 @@ pub fn decode_transform(d: &[u8], dtype: crate::DType, t: Transform, n: usize) -
     }
 }
 
+// ── transforms: decode a row range ───────────────────────────────────────────
+
+/// First and last epoch second that `fmt_ts` can format (0000-01-01T00:00:00Z, 9999-12-31T23:59:59Z).
+pub(crate) fn ts_min() -> i64 { days_from_civil(0, 1, 1) * 86_400 }
+pub(crate) fn ts_max() -> i64 { days_from_civil(9999, 12, 31) * 86_400 + 86_399 }
+
+/// Number of non-null rows before row `i`.
+fn nonnull_before(bm: Option<&[u8]>, i: usize) -> usize {
+    match bm {
+        None => i,
+        Some(b) => {
+            let full: usize = b[..i / 8].iter().map(|x| x.count_ones() as usize).sum();
+            let part = if i % 8 == 0 { 0 } else { (b[i / 8] & ((1u8 << (i % 8)) - 1)).count_ones() as usize };
+            i - full - part
+        }
+    }
+}
+
+/// Rows `lo..hi` of a payload produced by `encode_transform`, without materialising the other rows.
+///
+/// Contract (tested against `decode_transform` on valid and on mutated payloads): the whole payload is
+/// validated exactly as `decode_transform` validates it, so this returns `Ok` if and only if
+/// `decode_transform(d, dtype, t, n)` returns `Ok`, and then the values are rows `lo..hi` of that result.
+/// Only the work that allocates (the strings of the other rows) is skipped. Needs `lo <= hi <= n`.
+pub fn decode_transform_rows(d: &[u8], dtype: crate::DType, t: Transform, n: usize, lo: usize, hi: usize) -> Result<ColumnData, KoreError> {
+    use crate::DType;
+    if lo > hi || hi > n { return Err(bad(format!("rows {lo}..{hi} out of range for {n} rows"))); }
+    let mut pos = 0usize;
+    let inside = |i: usize| i >= lo && i < hi;
+    match (dtype, t) {
+        (DType::I64, Transform::Plain) => {
+            let (bm, nn) = get_nulls(d, &mut pos, n)?;
+            let need = nn.checked_mul(8).ok_or_else(|| bad("overflow"))?;
+            if d.len() - pos != need { return Err(bad("i64 payload length mismatch")); }
+            let mut k = nonnull_before(bm, lo);
+            let mut out = Vec::with_capacity(hi - lo);
+            for i in lo..hi {
+                if is_null(bm, i) { out.push(None); continue; }
+                out.push(Some(i64::from_le_bytes(d[pos + 8 * k..pos + 8 * k + 8].try_into().unwrap())));
+                k += 1;
+            }
+            Ok(ColumnData::Int64(out))
+        }
+        (DType::I64, Transform::Delta | Transform::Varint) => {
+            let (bm, _) = get_nulls(d, &mut pos, n)?;
+            let mut out = Vec::with_capacity(hi - lo);
+            let mut prev = 0i64;
+            for i in 0..n {
+                if is_null(bm, i) { if inside(i) { out.push(None); } continue; }
+                let x = if t == Transform::Varint { unzz(get_varint(d, &mut pos)?) } else { prev = prev.wrapping_add(unzz(get_varint(d, &mut pos)?)); prev };
+                if inside(i) { out.push(Some(x)); }
+            }
+            expect_end(d, pos)?;
+            Ok(ColumnData::Int64(out))
+        }
+        (DType::F64, Transform::Plain) => {
+            let (bm, nn) = get_nulls(d, &mut pos, n)?;
+            if d.len() - pos != nn.checked_mul(8).ok_or_else(|| bad("overflow"))? { return Err(bad("f64 payload length mismatch")); }
+            let mut k = nonnull_before(bm, lo);
+            let mut out = Vec::with_capacity(hi - lo);
+            for i in lo..hi {
+                if is_null(bm, i) { out.push(None); continue; }
+                out.push(Some(f64::from_bits(u64::from_le_bytes(d[pos + 8 * k..pos + 8 * k + 8].try_into().unwrap()))));
+                k += 1;
+            }
+            Ok(ColumnData::Float64(out))
+        }
+        (DType::Bool, Transform::Plain) => {
+            let (bm, _) = get_nulls(d, &mut pos, n)?;
+            if d.len() - pos != n.div_ceil(8) { return Err(bad("bool payload length mismatch")); }
+            let bits = &d[pos..];
+            Ok(ColumnData::Bool((lo..hi).map(|i| if is_null(bm, i) { None } else { Some(bits[i / 8] >> (i % 8) & 1 == 1) }).collect()))
+        }
+        (DType::StrDict, Transform::Plain) => {
+            // legacy layout (not chosen by the version-3/4 writers for Str columns): decoded whole, then cut
+            let (codes, dict) = crate::compress::decode_strdict(d, n);
+            if codes.len() != n { return Err(bad("str_dict payload malformed")); }
+            Ok(ColumnData::StrDict { codes: codes[lo..hi].to_vec(), dict })
+        }
+        (DType::Str, Transform::Plain) => {
+            let (bm, nn) = get_nulls(d, &mut pos, n)?;
+            let mut lens = Vec::with_capacity(nn);
+            let mut total = 0usize;
+            for _ in 0..nn {
+                let l = usize::try_from(get_varint(d, &mut pos)?).map_err(|_| bad("length overflow"))?;
+                total = total.checked_add(l).ok_or_else(|| bad("length overflow"))?;
+                lens.push(l);
+            }
+            if d.len() - pos != total { return Err(bad("string bytes length mismatch")); }
+            // every value is valid UTF-8 <=> the concatenation is valid UTF-8 and every value starts on a
+            // character boundary of it
+            let body = std::str::from_utf8(&d[pos..]).map_err(|_| bad("invalid UTF-8 in string column"))?;
+            let first = nonnull_before(bm, lo);
+            let (mut off, mut start) = (0usize, 0usize);
+            for (k, l) in lens.iter().enumerate() {
+                if k == first { start = off; }
+                if !body.is_char_boundary(off) { return Err(bad("invalid UTF-8 in string column")); }
+                off += l;
+            }
+            if first >= lens.len() { start = off; }
+            let mut out = Vec::with_capacity(hi - lo);
+            let (mut k, mut off) = (first, start);
+            for i in lo..hi {
+                if is_null(bm, i) { out.push(None); continue; }
+                out.push(Some(body[off..off + lens[k]].to_string()));
+                off += lens[k];
+                k += 1;
+            }
+            Ok(ColumnData::Str(out))
+        }
+        (DType::Str, Transform::Dict) => {
+            let count = usize::try_from(get_varint(d, &mut pos)?).map_err(|_| bad("overflow"))?;
+            if count > d.len() { return Err(bad("implausible dictionary size")); }
+            let mut lens = Vec::with_capacity(count);
+            let mut total = 0usize;
+            for _ in 0..count {
+                let l = usize::try_from(get_varint(d, &mut pos)?).map_err(|_| bad("overflow"))?;
+                total = total.checked_add(l).ok_or_else(|| bad("overflow"))?;
+                lens.push(l);
+            }
+            pos.checked_add(total).filter(|&e| e <= d.len()).ok_or_else(|| bad("truncated dictionary"))?;
+            let mut dict: Vec<&str> = Vec::with_capacity(count);
+            for l in lens {
+                dict.push(std::str::from_utf8(&d[pos..pos + l]).map_err(|_| bad("invalid UTF-8 in dictionary"))?);
+                pos += l;
+            }
+            let width = *d.get(pos).ok_or_else(|| bad("truncated dictionary"))? as usize;
+            pos += 1;
+            if !matches!(width, 1 | 2 | 4) { return Err(bad("bad code width")); }
+            if d.len() - pos != n.checked_mul(width).ok_or_else(|| bad("overflow"))? { return Err(bad("dictionary codes length mismatch")); }
+            let codes = &d[pos..];
+            let code = |i: usize| { let mut b = [0u8; 4]; b[..width].copy_from_slice(&codes[i * width..(i + 1) * width]); u32::from_le_bytes(b) as usize };
+            // every code is range-checked (as by the full decoder); only the range is materialised
+            if (0..n).any(|i| code(i) > dict.len()) { return Err(bad("dictionary code out of range")); }
+            Ok(ColumnData::Str((lo..hi).map(|i| match code(i) { 0 => None, c => Some(dict[c - 1].to_string()) }).collect()))
+        }
+        (DType::Str, Transform::HexFixed) => {
+            let (bm, nn) = get_nulls(d, &mut pos, n)?;
+            let w = u16::from_le_bytes(d.get(pos..pos + 2).ok_or_else(|| bad("truncated"))?.try_into().unwrap()) as usize;
+            pos += 2;
+            if w % 2 != 0 || (w == 0 && nn > 0) { return Err(bad("bad hex width")); }
+            if d.len() - pos != nn.checked_mul(w / 2).ok_or_else(|| bad("overflow"))? { return Err(bad("hex payload length mismatch")); }
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut k = nonnull_before(bm, lo);
+            let mut out = Vec::with_capacity(hi - lo);
+            for i in lo..hi {
+                if is_null(bm, i) { out.push(None); continue; }
+                let at = pos + k * (w / 2);
+                let mut s = String::with_capacity(w);
+                for &b in &d[at..at + w / 2] { s.push(HEX[(b >> 4) as usize] as char); s.push(HEX[(b & 15) as usize] as char); }
+                out.push(Some(s));
+                k += 1;
+            }
+            Ok(ColumnData::Str(out))
+        }
+        (DType::Str, Transform::TsText) => {
+            let (bm, _) = get_nulls(d, &mut pos, n)?;
+            let (min, max) = (ts_min(), ts_max());
+            let mut out = Vec::with_capacity(hi - lo);
+            let mut prev = 0i64;
+            for i in 0..n {
+                if is_null(bm, i) { if inside(i) { out.push(None); } continue; }
+                prev = prev.wrapping_add(unzz(get_varint(d, &mut pos)?));
+                // exactly the values `fmt_ts` formats (tested at both ends)
+                if prev < min || prev > max { return Err(bad("timestamp out of range")); }
+                if inside(i) { out.push(Some(fmt_ts(prev).ok_or_else(|| bad("timestamp out of range"))?)); }
+            }
+            expect_end(d, pos)?;
+            Ok(ColumnData::Str(out))
+        }
+        (DType::Str, Transform::Tokens) => {
+            let (bm, _) = get_nulls(d, &mut pos, n)?;
+            let count = usize::try_from(get_varint(d, &mut pos)?).map_err(|_| bad("overflow"))?;
+            if count > d.len() { return Err(bad("implausible token dictionary size")); }
+            let mut lens = Vec::with_capacity(count);
+            let mut total = 0usize;
+            for _ in 0..count {
+                let l = usize::try_from(get_varint(d, &mut pos)?).map_err(|_| bad("overflow"))?;
+                total = total.checked_add(l).ok_or_else(|| bad("overflow"))?;
+                lens.push(l);
+            }
+            if pos.checked_add(total).map_or(true, |e| e > d.len()) { return Err(bad("truncated token dictionary")); }
+            let mut dict: Vec<&str> = Vec::with_capacity(count);
+            for l in lens {
+                dict.push(std::str::from_utf8(&d[pos..pos + l]).map_err(|_| bad("invalid UTF-8 in token dictionary"))?);
+                pos += l;
+            }
+            let mut out = Vec::with_capacity(hi - lo);
+            for i in 0..n {
+                if is_null(bm, i) { if inside(i) { out.push(None); } continue; }
+                let keep = inside(i);
+                let k = usize::try_from(get_varint(d, &mut pos)?).map_err(|_| bad("overflow"))?;
+                if k > d.len() - pos { return Err(bad("implausible token count")); }
+                let mut s = String::new();
+                let mut one_empty = false;
+                for j in 0..k {
+                    let c = usize::try_from(get_varint(d, &mut pos)?).map_err(|_| bad("overflow"))?;
+                    let tok = dict.get(c).ok_or_else(|| bad("token code out of range"))?;
+                    one_empty = tok.is_empty();
+                    if keep { if j > 0 { s.push(','); } s.push_str(tok); }
+                }
+                // one empty token would decode to "", which is the zero-token encoding
+                if k == 1 && one_empty { return Err(bad("non-canonical token list")); }
+                if keep { out.push(Some(s)); }
+            }
+            expect_end(d, pos)?;
+            Ok(ColumnData::Str(out))
+        }
+        _ => Err(bad(format!("transform {t:?} is not valid for {dtype:?} columns"))),
+    }
+}
+
 // ── stages ───────────────────────────────────────────────────────────────────
 
 /// Apply a concrete stage. Stage payload: `varint(raw_len) | body`; `None` stores the bytes unframed.
@@ -661,6 +873,21 @@ mod tests {
         }
         let mut p = 0; assert!(get_varint(&[0xff; 11], &mut p).is_err());
         for v in [i64::MIN, -1, 0, 1, i64::MAX] { assert_eq!(unzz(zz(v)), v); }
+    }
+
+    #[test]
+    fn ts_range_is_exactly_what_fmt_ts_formats() {
+        let (lo, hi) = (ts_min(), ts_max());
+        assert_eq!(fmt_ts(lo).as_deref(), Some("0000-01-01T00:00:00Z"));
+        assert_eq!(fmt_ts(hi).as_deref(), Some("9999-12-31T23:59:59Z"));
+        assert_eq!(fmt_ts(lo - 1), None);
+        assert_eq!(fmt_ts(hi + 1), None);
+        for x in [i64::MIN, i64::MIN + 1, i64::MIN / 2, -1 << 40, 1 << 40, i64::MAX / 2, i64::MAX - 1, i64::MAX] {
+            assert_eq!(fmt_ts(x).is_some(), (lo..=hi).contains(&x), "{x}");
+        }
+        // monotonic year: every value inside the range formats
+        let mut s = lo;
+        while s < hi { assert!(fmt_ts(s).is_some()); s += 86_400 * 37 + 1234; }
     }
 
     #[test]
