@@ -40,6 +40,9 @@ mod world_model;
 mod learning;
 mod safety;
 mod versioned;
+#[cfg(test)]
+#[path = "versioned/tests_format_sync.rs"]
+mod tests_format_sync;
 mod log_tools;
 mod csvio;
 mod ingest_tools;

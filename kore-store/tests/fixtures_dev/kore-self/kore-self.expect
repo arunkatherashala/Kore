@@ -1,0 +1,848 @@
+== log vlog_v5 format 5 latest 47
+v 0 e97fb29e7fab5a122d4b0b16cae3f253d21d3e5ca526aacbb7fd9584876cdee1
+v 1 8a51c64b00973185b827d283275addf7169e921f9b779c3aa22c20d68919216d
+v 2 e806267a6eb49b2a6221b10f8a7071fbd8fe959dcf018ca4ff199091ea419073
+v 3 c794797026b057cb11268c5153e471b3ad8f31a08193beacd210064102f6ad54
+v 4 656bdb296ada0976584a10b711443f89aca389e929b880b5d918c8861092cc7f
+v 5 3264dbbe75be454907301c2d322999670d56887816683c66ffacda6bb31e54f2
+v 6 af2cc328bc2e4a4041b8023f12a9af7fc1ef32708afeec777ab12ffd742fb0df
+v 7 2e13230c179d14dede1997b8f67949e0cf7b1d729152529dabf7d7f0f4f8b7a4
+v 8 cfa9ebc20c2f0f1285b01b21f7d53850b3423fe8ef0aaa9129dbf387a6c801aa
+v 9 ebf127d0142e4019df8db412b671523f5bbc7ddb8b9170ab0944c93d52901185
+v 10 b8439fa567ac9048dbd383f24e1b0941e8fe5163884582caf02e5fcba1fb3346
+v 11 e94f5cfd628d830edef0294f7e0becc8fe6b668a4550e4b63aa5ec8f76f71c30
+v 12 86560965767d83022b88f18f59a6de37ad7af8806fac3847f9fb3451ff3a1487
+v 13 b2b6dc9b2e7a2a95f62df91c8832cba2990324b95c6f27f1942c8aa6c436840c
+v 14 bfa5e385e7db37bcace1d3e5863e73c039b4f579ea08b53782261aac0ea0adb1
+v 15 6df26a51231eb2be2a7efd217b6b7bd684f657830c9930ed004d900ed54f8564
+v 16 5f936835aea236fec65234f76f0b8d2da613ca9c142b1ca6f6269686d05b9031
+v 17 ab2aef7ac1b4cef6e81be9115a112727c51f7568e02dc439a4170b6684c75369
+v 18 022f3d85a3047c7a835296814608b5b65e513dc888b8c3cb684e22f3ca2e181c
+v 19 3166e00bb6f1fd3ce8b215fe8901d87f6bc3f421dbcc833b18e5607260c790a0
+v 20 4a902fef67f90011cce648c5529d694617be4bb0a71df99a943ddf313170e0b7
+v 21 9cf98dc9bce302f5172bdd5123f816be69ceb866836b6d665beb96be8924f85c
+v 22 9b052286f3eb5a953a32e3d9d82f84bde265c15ff414a4605b8070313bb8a8ad
+v 23 5b76e9e60d4eaa191442a7b85b6fff195111bb77f65a6f6c7ea31ab41771a2bc
+v 24 55c2db6c08c9f5db4ba694140988e085fa7baf4542b72cd4b49bf9127f0f51cd
+v 25 b874d35b569c8dba8b9383ca9be47646ca4da6c8d88649cd763cb08b5f37290b
+v 26 a39c4f12a497d9b4890084ee3de7f2acee16401448c0c29b5c87e5b8eccda009
+v 27 afe2abbaa34f67a9b34b96d56bbc5bfa69880ecad3f996760ee55ab33de233d5
+v 28 4b8d440f0fef1322045c118a4d8e77ef93e4d4bfadc8076a37eb2d3a4a8496e0
+v 29 c5064b8ac9e1ec8d232d446f2972895728b3c9ad0350157c1df6682c2fda29fc
+v 30 1ae518bd886f0e89122962f98e0cc24b29ca6717e76dc6fda8a9c4f97675dfbf
+v 31 2e1691ffbf2d2907ff142f7f29d8f4b2e0f8635ee9e57fbdce28b59d9316e305
+v 32 6c598f61c65dc00cc680c52f0a1e12933f60da3dcd79da8a4d83c18f423c0f56
+v 33 b5b96864bafbe27e1c357576cf6634c762d06cb3b5ad87170b74c52d088abbbd
+v 34 2d8149b05bcd2a255df637df91d730667748cd7e8177a68d221ccf6b1e948f47
+v 35 b68d28ea9a84994ab332ba338712085ac970d46feb6b28e804819421f87b27e8
+v 36 95135bdd99e9216ebd32eada25159d1e3161510a1ce6b8e46d54b6ce3c30bfc0
+v 37 98e03c64dc74c8d4ff2d0393b4f9dc8b87c3bd17078d0c87ad5672872e65effc
+v 38 7a92249e909ceb2f9d5c8b4d91044c6216f7f9b821720d19fb3a78c3f06bb60a
+v 39 b033ce0d5451e625d558aa943a3a32eafbb6f984290bfa75ea3267049c7b0bcf
+v 40 0655f8cb2f9b6df9a130dcb9c54ac3d88df1eec55ce521d7cc88cceba5b5ec1d
+v 41 964ecccf6339d30301919b1e94238375e40346f2cc292767ceeba3bc2f055544
+v 42 66d1910b6d98c28782ae3c1c3316c571c2b86efd8664278531e5e758eadf21f0
+v 43 55ee773c8eb5ace1520232fea96d94fb8db435feed73d57783c47e633b7e593f
+v 44 70489a278785e113f015a931b4a4af9c99c3ce2a065bda2efe51c9d470683c42
+v 45 c533d04641e2a3ec992cfda94e97021ad3d2b5886bf6e7e6837f42fed828ead2
+v 46 e74badfcdc217984331c6b2c83348be883efecfdef36934298148c561fb58f7f
+v 47 6c31b2dfcfbed2dbbd858258d5f3bce4bd975a195a9b26b0b2e6bd8752c0539c
+runs 1
+ckpt 47 checkpoints/fsync-0000000047.kore step 7 content a1326476c923169d5c2a9246dfbbc971f092878053abb6aa039f32b5d6a6f07b payload 636865636b706f696e74207061796c6f61642000ff2077697468206279746573
+== log vlog_v4 format 4 latest 30
+v 0 8f3ed9989037ec7c6a05595cecaf8453c64999e03dd3f9f0842832e10a9c7671
+v 1 bcf896492bccb10f6463dd9acf1c09a605b6d99d3b41977f70dd79a5523e5dff
+v 2 e9f8838e39573cd09801e080101babc518bf7072535ab2271efb6c8ec7b4523a
+v 3 ce90276b822f26b96d9def32f0bf333221b738d75d8e6a68200af76e29db4d42
+v 4 5e958ec17fff349ff69a4105dd101056e5de90018820bc6460099ff0761a5758
+v 5 6373d2f7cec74963906f06aceab5e915936f32198884e46e931c90d5c457932f
+v 6 85befb5d6ac9a3c03d3c8e92d00f9d9e83c44d7f4a2866c6da0fc812ec18a1e1
+v 7 1be56b9aa17c41b73ef111530aab636c75500f90b10c4a099a2228909cd5916a
+v 8 1c40f4322db90019f9746b9886fb189e4aa1650b2ee45b26a6ef203c05471b21
+v 9 cc63f8d7a66ee60a38f677adf567325ecdf92167c832a942661e1fd1ecaa61fb
+v 10 f35f9be691e085b1080f6fcf6d637c357b06d9be15d3f76d0ad9a61445db75a5
+v 11 b96d7179644b6c25d3fc002ac69e4cd17ed944d63796d3d57a2f17f261d5d7a5
+v 12 3398765db25a936ee80efd445fc190a4b10347ea6220cb5c5922defb8e57ec37
+v 13 35ec977f285a9a2f2e0b36f9d078e4907a5d89b178cd9b3e460acc2b3f85b02e
+v 14 0c61ff49524927bdc00b15dcd3144ae906381021a1d4733dd8dea1797cd183a9
+v 15 80494e952a127a40771dc3bb0d1e5c37894d68b137b73a4db0281eb7898fbc26
+v 16 c6f2c97310c4afa7c6bf9c0a675668f0d48880d663a0c303cfa932d097840016
+v 17 43b5d6aa3a0f8cb55174ee9bdf77bc01621c037f1d692e4c348ed826a7a760ff
+v 18 d693131607ea6ba5922185567a8c52546d2c82fc4cd5bb0dd35251777c484ddd
+v 19 53fb7499f53af02c47fc5f3018650bca5dc33c2c8dab71aa2851bb8a855a4337
+v 20 cab8fec19fb44a7af7f19b5ec73e84675aa2b387c409ba7ead4ca789d1d86ec6
+v 21 a6e84c068adc8168447462415340ac6537844f30643933a327fafad1548765d4
+v 22 43fa77126968f26bbd57d2aa150f9ae83e9067f5610ba246c2b2f4e848ed3fc1
+v 23 a2b036cf866ad00b01c463052dc260e6a35020eabe618f9f2c05e9fff084408e
+v 24 31c1f5e84afba60cfdb8f76654f97cf7ece35a165c214672b7603ebd940aca48
+v 25 1233c0bbd9b36de124600863a6610e334f048b90b5d197600eb284f6a29e5718
+v 26 401da67e1639499e7f82aa1e0601ddc13f0f84a8bb1e7caacf954b33428dc75b
+v 27 1312b5ea1d268d32009af35df24a0360c6136d4ad973afc64e69ebc9cb8653ee
+v 28 516e3cfa39e1dec3eac75a2a5d88d73558d111b7069b8e77452903cb058120e4
+v 29 270a55d29a5e6d737b31ee00afe1feccccb112251aac13f31920bbfc0ce63d40
+v 30 7c1b6eda37a780fb939faed78f9610908fa4dd6b29ca5b2c49291dd899b36df4
+runs 0
+ckpt 30 checkpoints/fsync-0000000030.kore step 3 content e929d903e684fbd35ccc80a5ba3fd7bb833264fc075732edfd79d60aba0bd949 payload 
+== rows [{"meta":{"a":[0,{"b":"café"}],"c":null},"mixed":1,"name":"n0","ok":true,"score":0.0,"step":0},{"meta":{"a":[1,{"b":"café"}],"c":null},"mixed":"one","name":"n1","ok":false,"score":0.3333333333333333,"step":1},{"meta":{"a":[2,{"b":"café"}],"c":null},"mixed":"one","name":"n2","ok":true,"score":0.6666666666666666,"step":2},{"meta":{"a":[3,{"b":"café"}],"c":null},"mixed":1,"name":"n3","ok":false,"score":1.0,"step":3},{"meta":{"a":[4,{"b":"café"}],"c":null},"mixed":"one","name":"n4","ok":true,"score":1.3333333333333333,"step":4},{"meta":{"a":[5,{"b":"café"}],"c":null},"mixed":"one","name":"n5","ok":false,"score":1.6666666666666667,"step":5},{"meta":{"a":[6,{"b":"café"}],"c":null},"mixed":1,"name":"n6","ok":true,"score":2.0,"step":6},{"meta":{"a":[7,{"b":"café"}],"c":null},"mixed":"one","name":"n7","ok":false,"score":2.3333333333333335,"step":7},{"meta":{"a":[8,{"b":"café"}],"c":null},"mixed":"one","name":"n8","ok":true,"score":2.6666666666666665,"step":8},{"meta":{"a":[9,{"b":"café"}],"c":null},"mixed":1,"name":"n9","ok":false,"score":3.0,"step":9},{"meta":{"a":[10,{"b":"café"}],"c":null},"mixed":"one","name":"n10","ok":true,"score":3.3333333333333335,"step":10},{"meta":{"a":[11,{"b":"café"}],"c":null},"mixed":"one","name":"n11","ok":false,"score":3.6666666666666665,"step":11}]
+== payload {"plan":{"steps":[1,2,3]},"note":"café"}
+== file brain/payload.kore kore
+rows 1
+payload str 0 6756518b78c9c9df
+== file brain/rows.kore kore
+rows 12
+meta:json str 0 6e1cbfd3eaa85b9d
+mixed:json str 0 0cd8b46c86334815
+name str 0 d546aa84194f5777
+ok bool 0 e33c7ad112a8c3b5
+score f64 0 7e1fca96d3917c58
+step i64 0 d1bfcab80dc54d81
+== file vlog_v4/tester/log/checkpoints/fsync-0000000030.kore kore
+rows 1
+ckpt_format i64 0 7194f3e59ae47dcd
+kind str 0 1500f0699842c4a2
+version i64 0 0c7ad712d190f072
+chain_hash str 0 c533f78da98d8b7c
+step i64 0 af8a81f7b0c3120f
+content_sha256 str 0 a6ab969ecc3e79aa
+payload_hex str 0 d80d6caea7dc7eec
+== file vlog_v4/tester/log/events/0000000001.kore kore
+rows 1
+event_id str 0 e8c0dc6411d01804
+occurred_at str 0 d1b8477e221e6591
+recorded_at str 0 b534c7d2cfbd5b18
+source str 0 07fd0cf1b8fa58ca
+kind str 0 b5858db0dd4311a4
+text str 0 c4523aec6d98c27b
+tags str 0 79338818cf05c329
+redacted bool 0 082f2207b4e88cc4
+== file vlog_v4/tester/log/events/0000000002.kore kore
+rows 2
+event_id str 0 d99d06570bd367c3
+occurred_at str 0 d9e3042286d0259c
+recorded_at str 0 d181d6dcc8610f6d
+source str 0 d1011240d935a399
+kind str 0 7e2c6a079040ba0b
+text str 0 94fe5e528f00e3e0
+tags str 0 eefda3c89017cdfd
+redacted bool 0 ad2e3077479b3a8d
+== file vlog_v4/tester/log/events/0000000003.kore kore
+rows 3
+event_id str 0 d3d462b1c2f00959
+occurred_at str 0 fc1a4a64bf84056e
+recorded_at str 0 83017849c1d40688
+source str 0 7d9e643d10e0175e
+kind str 0 9159fc1966ba6a46
+text str 0 faaaf46e4789062a
+tags str 0 a99854b224c7de51
+redacted bool 0 9b45decf91de846c
+== file vlog_v4/tester/log/events/0000000004.kore kore
+rows 1
+event_id str 0 ae25bb1da92459da
+occurred_at str 0 c3a75d1f81e35bde
+recorded_at str 0 bdf3a79e285ae581
+source str 0 07fd0cf1b8fa58ca
+kind str 0 b5858db0dd4311a4
+text str 0 e3bf43112389488e
+tags str 0 79338818cf05c329
+redacted bool 0 082f2207b4e88cc4
+== file vlog_v4/tester/log/events/0000000005.kore kore
+rows 2
+event_id str 0 b7fd79506741f373
+occurred_at str 0 d495f854e2625d40
+recorded_at str 0 6b46f568d0efc1f7
+source str 0 d1011240d935a399
+kind str 0 7e2c6a079040ba0b
+text str 0 5c92a7e864d43e40
+tags str 0 eefda3c89017cdfd
+redacted bool 0 ad2e3077479b3a8d
+== file vlog_v4/tester/log/events/0000000006.kore kore
+rows 3
+event_id str 0 9508da0abb52e8c7
+occurred_at str 0 ee6092284b7bf7a9
+recorded_at str 0 f15ae9522bb57fe3
+source str 0 7d9e643d10e0175e
+kind str 0 9159fc1966ba6a46
+text str 0 0ac1ff3eb8bd8e47
+tags str 0 a99854b224c7de51
+redacted bool 0 9b45decf91de846c
+== file vlog_v4/tester/log/events/0000000007.kore kore
+rows 1
+event_id str 0 f9237767be1fdd80
+occurred_at str 0 bf6e4a34cabce1e7
+recorded_at str 0 9f5cdb59bf5e00be
+source str 0 07fd0cf1b8fa58ca
+kind str 0 b5858db0dd4311a4
+text str 0 349a5aeccd8e5af5
+tags str 0 79338818cf05c329
+redacted bool 0 082f2207b4e88cc4
+== file vlog_v4/tester/log/events/0000000008.kore kore
+rows 2
+event_id str 0 24db14238bf252e6
+occurred_at str 0 59ccf671bc0d0878
+recorded_at str 0 248385a554027305
+source str 0 d1011240d935a399
+kind str 0 7e2c6a079040ba0b
+text str 0 6c630892269c1740
+tags str 0 eefda3c89017cdfd
+redacted bool 0 ad2e3077479b3a8d
+== file vlog_v4/tester/log/events/0000000009.kore kore
+rows 3
+event_id str 0 039f8d65af3b26d4
+occurred_at str 0 f2b43c3ad61e5236
+recorded_at str 0 71bae3650028f807
+source str 0 7d9e643d10e0175e
+kind str 0 9159fc1966ba6a46
+text str 0 0ba3b38f2452e155
+tags str 0 a99854b224c7de51
+redacted bool 0 9b45decf91de846c
+== file vlog_v4/tester/log/events/0000000010.kore kore
+rows 1
+event_id str 0 eec031741bddcaa3
+occurred_at str 0 f4e758ecc44a35ab
+recorded_at str 0 4986748081ecbd54
+source str 0 07fd0cf1b8fa58ca
+kind str 0 b5858db0dd4311a4
+text str 0 bf2eac98321fd0b3
+tags str 0 79338818cf05c329
+redacted bool 0 082f2207b4e88cc4
+== file vlog_v4/tester/log/events/0000000011.kore kore
+rows 2
+event_id str 0 e81c35b6dd5a9cbe
+occurred_at str 0 06a8a4e5ff17033e
+recorded_at str 0 4d971562730b116d
+source str 0 d1011240d935a399
+kind str 0 7e2c6a079040ba0b
+text str 0 84b193aeafb01788
+tags str 0 eefda3c89017cdfd
+redacted bool 0 ad2e3077479b3a8d
+== file vlog_v4/tester/log/events/0000000012.kore kore
+rows 3
+event_id str 0 57c120984b18a3b1
+occurred_at str 0 d5b9850d39ab6db6
+recorded_at str 0 e2234c39ae0a91c4
+source str 0 7d9e643d10e0175e
+kind str 0 9159fc1966ba6a46
+text str 0 57caa495bde27ae9
+tags str 0 a99854b224c7de51
+redacted bool 0 9b45decf91de846c
+== file vlog_v4/tester/log/events/0000000013.kore kore
+rows 1
+event_id str 0 94d394942ec55502
+occurred_at str 0 d10dc84799f9d362
+recorded_at str 0 1d06a4b99b45619f
+source str 0 07fd0cf1b8fa58ca
+kind str 0 b5858db0dd4311a4
+text str 0 c9f04f528296374f
+tags str 0 79338818cf05c329
+redacted bool 0 082f2207b4e88cc4
+== file vlog_v4/tester/log/events/0000000014.kore kore
+rows 2
+event_id str 0 71414867aa50fbd1
+occurred_at str 0 dec6628157242f92
+recorded_at str 0 b7b55188876c2e23
+source str 0 d1011240d935a399
+kind str 0 7e2c6a079040ba0b
+text str 0 576b574749c193ba
+tags str 0 eefda3c89017cdfd
+redacted bool 0 ad2e3077479b3a8d
+== file vlog_v4/tester/log/events/0000000015.kore kore
+rows 3
+event_id str 0 4d6b0aad616d14a0
+occurred_at str 0 e2c16dfc2d13dd57
+recorded_at str 0 1836cd0557516505
+source str 0 7d9e643d10e0175e
+kind str 0 9159fc1966ba6a46
+text str 0 b27f424ebbd1abdb
+tags str 0 a99854b224c7de51
+redacted bool 0 9b45decf91de846c
+== file vlog_v4/tester/log/events/0000000016.kore kore
+rows 1
+event_id str 0 5c998c71f476f557
+occurred_at str 0 87f3cb583d6db62d
+recorded_at str 0 ff013c6841f0692e
+source str 0 07fd0cf1b8fa58ca
+kind str 0 b5858db0dd4311a4
+text str 0 dcb0fd64f15f7159
+tags str 0 79338818cf05c329
+redacted bool 0 082f2207b4e88cc4
+== file vlog_v4/tester/log/events/0000000017.kore kore
+rows 2
+event_id str 0 d587a73b98c5b351
+occurred_at str 0 5c6ce0263d7855c2
+recorded_at str 0 f24cb4fcede2ac09
+source str 0 d1011240d935a399
+kind str 0 7e2c6a079040ba0b
+text str 0 07f43124fed6271e
+tags str 0 eefda3c89017cdfd
+redacted bool 0 ad2e3077479b3a8d
+== file vlog_v4/tester/log/events/0000000018.kore kore
+rows 3
+event_id str 0 97c7b3fdf9533b71
+occurred_at str 0 270955e250b15b25
+recorded_at str 0 2caf03c2d247204a
+source str 0 7d9e643d10e0175e
+kind str 0 9159fc1966ba6a46
+text str 0 3a82370b0f79a53e
+tags str 0 a99854b224c7de51
+redacted bool 0 9b45decf91de846c
+== file vlog_v4/tester/log/events/0000000019.kore kore
+rows 1
+event_id str 0 d1c1b6615e1df8ec
+occurred_at str 0 c84fe62017691384
+recorded_at str 0 1261edbec569610c
+source str 0 07fd0cf1b8fa58ca
+kind str 0 b5858db0dd4311a4
+text str 0 a78b29271cb40860
+tags str 0 79338818cf05c329
+redacted bool 0 082f2207b4e88cc4
+== file vlog_v4/tester/log/events/0000000020.kore kore
+rows 2
+event_id str 0 e9b6b3b1595da73c
+occurred_at str 0 aaa32274f3addf68
+recorded_at str 0 a6fd8aa7995a1b2d
+source str 0 d1011240d935a399
+kind str 0 7e2c6a079040ba0b
+text str 0 d557ab0b06433228
+tags str 0 eefda3c89017cdfd
+redacted bool 0 ad2e3077479b3a8d
+== file vlog_v4/tester/log/events/0000000021.kore kore
+rows 3
+event_id str 0 c7868fad7bd822e0
+occurred_at str 0 4d686587a41c4c16
+recorded_at str 0 d84143e2063c9dbc
+source str 0 7d9e643d10e0175e
+kind str 0 9159fc1966ba6a46
+text str 0 4e0bdac472f4d8b8
+tags str 0 a99854b224c7de51
+redacted bool 0 9b45decf91de846c
+== file vlog_v4/tester/log/events/0000000022.kore kore
+rows 1
+event_id str 0 3688f7a0cc217094
+occurred_at str 0 253ff168b2c62346
+recorded_at str 0 fa4ca9ac3ca0a8e1
+source str 0 07fd0cf1b8fa58ca
+kind str 0 b5858db0dd4311a4
+text str 0 822e6f6c7d2c8a69
+tags str 0 79338818cf05c329
+redacted bool 0 082f2207b4e88cc4
+== file vlog_v4/tester/log/events/0000000023.kore kore
+rows 2
+event_id str 0 29dc5bc0cc8060e7
+occurred_at str 0 3d7edb2502f48884
+recorded_at str 0 0f5576d1fc2a3743
+source str 0 d1011240d935a399
+kind str 0 7e2c6a079040ba0b
+text str 0 08d4a9eef9f194b8
+tags str 0 eefda3c89017cdfd
+redacted bool 0 ad2e3077479b3a8d
+== file vlog_v4/tester/log/events/0000000024.kore kore
+rows 3
+event_id str 0 fc1874a0ae7cecf7
+occurred_at str 0 3034bb6c54e91da9
+recorded_at str 0 1bea9089573251f7
+source str 0 7d9e643d10e0175e
+kind str 0 9159fc1966ba6a46
+text str 0 81a6a7f7a4ab8945
+tags str 0 a99854b224c7de51
+redacted bool 0 9b45decf91de846c
+== file vlog_v4/tester/log/events/0000000025.kore kore
+rows 1
+event_id str 0 70a665b5b7ce7123
+occurred_at str 0 f24afe05259764e3
+recorded_at str 0 ca86b17b6a8ec466
+source str 0 07fd0cf1b8fa58ca
+kind str 0 b5858db0dd4311a4
+text str 0 d19f7d094a6edd69
+tags str 0 79338818cf05c329
+redacted bool 0 082f2207b4e88cc4
+== file vlog_v4/tester/log/events/0000000026.kore kore
+rows 2
+event_id str 0 f6e25232c462e040
+occurred_at str 0 3ebaa604670b7a1c
+recorded_at str 0 ae45f47421a97ed5
+source str 0 d1011240d935a399
+kind str 0 7e2c6a079040ba0b
+text str 0 f7bd43ae603bd26a
+tags str 0 eefda3c89017cdfd
+redacted bool 0 ad2e3077479b3a8d
+== file vlog_v4/tester/log/events/0000000027.kore kore
+rows 3
+event_id str 0 4281076ad7e17591
+occurred_at str 0 41512196fe3056c2
+recorded_at str 0 597b0e87f3d92e66
+source str 0 7d9e643d10e0175e
+kind str 0 9159fc1966ba6a46
+text str 0 95c12aac5fe842a2
+tags str 0 a99854b224c7de51
+redacted bool 0 9b45decf91de846c
+== file vlog_v4/tester/log/events/0000000028.kore kore
+rows 1
+event_id str 0 52b06a98c2abf9e0
+occurred_at str 0 61ad9286339c0418
+recorded_at str 0 0485399670a42493
+source str 0 07fd0cf1b8fa58ca
+kind str 0 b5858db0dd4311a4
+text str 0 9d903100ce79729a
+tags str 0 79338818cf05c329
+redacted bool 0 082f2207b4e88cc4
+== file vlog_v4/tester/log/events/0000000029.kore kore
+rows 2
+event_id str 0 34b725d11d5f1240
+occurred_at str 0 a92d9872f9e0f848
+recorded_at str 0 0f72a95c0569a29d
+source str 0 d1011240d935a399
+kind str 0 7e2c6a079040ba0b
+text str 0 b48d2bbe20bc0c5a
+tags str 0 eefda3c89017cdfd
+redacted bool 0 ad2e3077479b3a8d
+== file vlog_v4/tester/log/events/0000000030.kore kore
+rows 3
+event_id str 0 08325dbd56132758
+occurred_at str 0 86fc94ffcb8b04fd
+recorded_at str 0 c065bfca3e88c9d8
+source str 0 7d9e643d10e0175e
+kind str 0 9159fc1966ba6a46
+text str 0 1d3cbcab8f28ca86
+tags str 0 a99854b224c7de51
+redacted bool 0 9b45decf91de846c
+== file vlog_v4/tester/log/outcomes/0000000006.kore kore
+rows 1
+pred_id str 0 7a375c16c0796a2c
+resolved_at str 0 54f2419503cfe412
+actual str 0 40698fc96eaf57b2
+outcome_event_id str 1 af63bd4c8601b7df
+== file vlog_v4/tester/log/outcomes/0000000011.kore kore
+rows 1
+pred_id str 0 9b76e50c5265138f
+resolved_at str 0 54f2419503cfe412
+actual str 0 40698fc96eaf57b2
+outcome_event_id str 1 af63bd4c8601b7df
+== file vlog_v4/tester/log/outcomes/0000000016.kore kore
+rows 1
+pred_id str 0 bf689263b0f585ce
+resolved_at str 0 54f2419503cfe412
+actual str 0 40698fc96eaf57b2
+outcome_event_id str 1 af63bd4c8601b7df
+== file vlog_v4/tester/log/outcomes/0000000021.kore kore
+rows 1
+pred_id str 0 564b8d3dfefb2efc
+resolved_at str 0 54f2419503cfe412
+actual str 0 40698fc96eaf57b2
+outcome_event_id str 1 af63bd4c8601b7df
+== file vlog_v4/tester/log/outcomes/0000000026.kore kore
+rows 1
+pred_id str 0 8f7b1a136739b31b
+resolved_at str 0 54f2419503cfe412
+actual str 0 40698fc96eaf57b2
+outcome_event_id str 1 af63bd4c8601b7df
+== file vlog_v4/tester/log/predictions/0000000006.kore kore
+rows 1
+pred_id str 0 7a375c16c0796a2c
+made_at str 0 d1b8477e221e6591
+question_id str 0 6ce597f041ddb268
+target str 0 07fd07f1b8fa504b
+options str 0 996166804f0379e6
+probs str 0 a6e18d2b8c536542
+model_id str 0 07fd0ef1b8fa5c30
+model_version str 0 07fd4af1b8fac224
+features_cite str 0 269e1ee96667d9ef
+resolves_by str 1 af63bd4c8601b7df
+== file vlog_v4/tester/log/predictions/0000000011.kore kore
+rows 1
+pred_id str 0 9b76e50c5265138f
+made_at str 0 d1b8477e221e6591
+question_id str 0 85de8ec996129463
+target str 0 07fd07f1b8fa504b
+options str 0 996166804f0379e6
+probs str 0 a6e18d2b8c536542
+model_id str 0 07fd0ef1b8fa5c30
+model_version str 0 07fd4af1b8fac224
+features_cite str 0 84ee5ec7c0c6e0eb
+resolves_by str 1 af63bd4c8601b7df
+== file vlog_v4/tester/log/predictions/0000000016.kore kore
+rows 1
+pred_id str 0 bf689263b0f585ce
+made_at str 0 d1b8477e221e6591
+question_id str 0 85de91c99612997c
+target str 0 07fd07f1b8fa504b
+options str 0 996166804f0379e6
+probs str 0 a6e18d2b8c536542
+model_id str 0 07fd0ef1b8fa5c30
+model_version str 0 07fd4af1b8fac224
+features_cite str 0 90f968f8e0656e91
+resolves_by str 1 af63bd4c8601b7df
+== file vlog_v4/tester/log/predictions/0000000021.kore kore
+rows 1
+pred_id str 0 564b8d3dfefb2efc
+made_at str 0 d1b8477e221e6591
+question_id str 0 85d49cc9960a57a8
+target str 0 07fd07f1b8fa504b
+options str 0 996166804f0379e6
+probs str 0 a6e18d2b8c536542
+model_id str 0 07fd0ef1b8fa5c30
+model_version str 0 07fd4af1b8fac224
+features_cite str 0 42c4da63c1d2f51d
+resolves_by str 1 af63bd4c8601b7df
+== file vlog_v4/tester/log/predictions/0000000026.kore kore
+rows 1
+pred_id str 0 8f7b1a136739b31b
+made_at str 0 d1b8477e221e6591
+question_id str 0 85d4a1c9960a6027
+target str 0 07fd07f1b8fa504b
+options str 0 996166804f0379e6
+probs str 0 a6e18d2b8c536542
+model_id str 0 07fd0ef1b8fa5c30
+model_version str 0 07fd4af1b8fac224
+features_cite str 0 16b8f3e2ea394b1b
+resolves_by str 1 af63bd4c8601b7df
+== file vlog_v4/tester/log/revision_causes/0000000003.kore kore
+rows 1
+rev_id str 0 15f51575f3372b23
+event_id str 0 ed43ff9bcbb75e2d
+== file vlog_v4/tester/log/revision_causes/0000000005.kore kore
+rows 1
+rev_id str 0 129d78aba3f63c68
+event_id str 0 ae25bb1da92459da
+== file vlog_v4/tester/log/revision_causes/0000000007.kore kore
+rows 1
+rev_id str 0 9098937ced4ef44a
+event_id str 0 96508fe4d081bb5e
+== file vlog_v4/tester/log/revision_causes/0000000009.kore kore
+rows 1
+rev_id str 0 0d65955e1502dce3
+event_id str 0 bed1d636672c8164
+== file vlog_v4/tester/log/revision_causes/0000000011.kore kore
+rows 1
+rev_id str 0 ae77be66f4629f0c
+event_id str 0 eec031741bddcaa3
+== file vlog_v4/tester/log/revision_causes/0000000013.kore kore
+rows 1
+rev_id str 0 a26179cdce0591b8
+event_id str 0 254c04fa2a113265
+== file vlog_v4/tester/log/revision_causes/0000000015.kore kore
+rows 1
+rev_id str 0 ef8f81a50bf7e005
+event_id str 0 c6c4399e71ab1e29
+== file vlog_v4/tester/log/revision_causes/0000000017.kore kore
+rows 1
+rev_id str 0 4e366c69f0f65506
+event_id str 0 5c998c71f476f557
+== file vlog_v4/tester/log/revision_causes/0000000019.kore kore
+rows 1
+rev_id str 0 ec8ccc8acea3896d
+event_id str 0 c1fcfd65c4c0fb52
+== file vlog_v4/tester/log/revision_causes/0000000021.kore kore
+rows 1
+rev_id str 0 6c1c2917d6e54ce8
+event_id str 0 da01c36991bd0b7d
+== file vlog_v4/tester/log/revision_causes/0000000023.kore kore
+rows 1
+rev_id str 0 bc14f61ab219abdd
+event_id str 0 3688f7a0cc217094
+== file vlog_v4/tester/log/revision_causes/0000000025.kore kore
+rows 1
+rev_id str 0 473a29d33e379615
+event_id str 0 b974a8ffcce8bb4b
+== file vlog_v4/tester/log/revision_causes/0000000027.kore kore
+rows 1
+rev_id str 0 b2900b2339304e9b
+event_id str 0 8694e182c1951599
+== file vlog_v4/tester/log/revision_causes/0000000029.kore kore
+rows 1
+rev_id str 0 3de3b4112fd25b73
+event_id str 0 52b06a98c2abf9e0
+== file vlog_v4/tester/log/revisions/0000000003.kore kore
+rows 1
+rev_id str 0 15f51575f3372b23
+entity_type str 0 93eede1740e81183
+key str 0 6c8d1ef041926ef7
+stance str 0 6cc704f041c3bb10
+confidence f64 0 507aa3dc8e279781
+rationale str 0 2da83c4920a45c57
+supersedes str 1 af63bd4c8601b7df
+valid_from str 0 d1b8477e221e6591
+author str 0 06fe33553111f660
+recorded_at str 0 057ff7f6d06ff16a
+== file vlog_v4/tester/log/revisions/0000000005.kore kore
+rows 1
+rev_id str 0 129d78aba3f63c68
+entity_type str 0 93eede1740e81183
+key str 0 6c8d1cf041926b91
+stance str 0 6cc707f041c3c029
+confidence f64 0 504423dc8df92e91
+rationale str 0 230ab846c7431209
+supersedes str 1 af63bd4c8601b7df
+valid_from str 0 d1b8477e221e6591
+author str 0 06fe33553111f660
+recorded_at str 0 814a6bae3d22952c
+== file vlog_v4/tester/log/revisions/0000000007.kore kore
+rows 1
+rev_id str 0 9098937ced4ef44a
+entity_type str 0 93eede1740e81183
+key str 0 6c8d1ff0419270aa
+stance str 0 6cc706f041c3be76
+confidence f64 0 507aa3dc8e279781
+rationale str 0 f442ec72472a9c03
+supersedes str 1 af63bd4c8601b7df
+valid_from str 0 d1b8477e221e6591
+author str 0 06fe33553111f660
+recorded_at str 0 9f5cdb59bf5e00be
+== file vlog_v4/tester/log/revisions/0000000009.kore kore
+rows 1
+rev_id str 0 0d65955e1502dce3
+entity_type str 0 93eede1740e81183
+key str 0 6c8d1df041926d44
+stance str 0 6cc704f041c3bb10
+confidence f64 0 504423dc8df92e91
+rationale str 0 0edbf1eec0cfd6f5
+supersedes str 1 af63bd4c8601b7df
+valid_from str 0 d1b8477e221e6591
+author str 0 06fe33553111f660
+recorded_at str 0 d4c698946c63e223
+== file vlog_v4/tester/log/revisions/0000000011.kore kore
+rows 1
+rev_id str 0 ae77be66f4629f0c
+entity_type str 0 93eede1740e81183
+key str 0 6c8d20f04192725d
+stance str 0 6cc707f041c3c029
+confidence f64 0 507aa3dc8e279781
+rationale str 0 2686129099721d67
+supersedes str 1 af63bd4c8601b7df
+valid_from str 0 d1b8477e221e6591
+author str 0 06fe33553111f660
+recorded_at str 0 8384f49b88020fe9
+== file vlog_v4/tester/log/revisions/0000000013.kore kore
+rows 1
+rev_id str 0 a26179cdce0591b8
+entity_type str 0 93eede1740e81183
+key str 0 6c8d1ef041926ef7
+stance str 0 6cc706f041c3be76
+confidence f64 0 504423dc8df92e91
+rationale str 0 5fe90c0099a24abd
+supersedes str 0 15f51575f3372b23
+valid_from str 0 d1b8477e221e6591
+author str 0 06fe33553111f660
+recorded_at str 0 1d06a4b99b45619f
+== file vlog_v4/tester/log/revisions/0000000015.kore kore
+rows 1
+rev_id str 0 ef8f81a50bf7e005
+entity_type str 0 93eede1740e81183
+key str 0 6c8d1cf041926b91
+stance str 0 6cc704f041c3bb10
+confidence f64 0 507aa3dc8e279781
+rationale str 0 3c8a21d27891d7d3
+supersedes str 0 129d78aba3f63c68
+valid_from str 0 d1b8477e221e6591
+author str 0 06fe33553111f660
+recorded_at str 0 75c140be41cf0a85
+== file vlog_v4/tester/log/revisions/0000000017.kore kore
+rows 1
+rev_id str 0 4e366c69f0f65506
+entity_type str 0 93eede1740e81183
+key str 0 6c8d1ff0419270aa
+stance str 0 6cc707f041c3c029
+confidence f64 0 504423dc8df92e91
+rationale str 0 b7906cd3d3c44dd9
+supersedes str 0 9098937ced4ef44a
+valid_from str 0 d1b8477e221e6591
+author str 0 06fe33553111f660
+recorded_at str 0 6f28b0d0acb3bfcb
+== file vlog_v4/tester/log/revisions/0000000019.kore kore
+rows 1
+rev_id str 0 ec8ccc8acea3896d
+entity_type str 0 93eede1740e81183
+key str 0 6c8d1df041926d44
+stance str 0 6cc706f041c3be76
+confidence f64 0 507aa3dc8e279781
+rationale str 0 992e89a82174ffaf
+supersedes str 0 0d65955e1502dce3
+valid_from str 0 d1b8477e221e6591
+author str 0 06fe33553111f660
+recorded_at str 0 1261edbec569610c
+== file vlog_v4/tester/log/revisions/0000000021.kore kore
+rows 1
+rev_id str 0 6c1c2917d6e54ce8
+entity_type str 0 93eede1740e81183
+key str 0 6c8d20f04192725d
+stance str 0 6cc704f041c3bb10
+confidence f64 0 504423dc8df92e91
+rationale str 0 367c579d1404fde8
+supersedes str 0 ae77be66f4629f0c
+valid_from str 0 d1b8477e221e6591
+author str 0 06fe33553111f660
+recorded_at str 0 978d75dc3c652d4a
+== file vlog_v4/tester/log/revisions/0000000023.kore kore
+rows 1
+rev_id str 0 bc14f61ab219abdd
+entity_type str 0 93eede1740e81183
+key str 0 6c8d1ef041926ef7
+stance str 0 6cc707f041c3c029
+confidence f64 0 507aa3dc8e279781
+rationale str 0 9a32b587594d16ae
+supersedes str 0 a26179cdce0591b8
+valid_from str 0 d1b8477e221e6591
+author str 0 06fe33553111f660
+recorded_at str 0 4498c9e35691b8f8
+== file vlog_v4/tester/log/revisions/0000000025.kore kore
+rows 1
+rev_id str 0 473a29d33e379615
+entity_type str 0 93eede1740e81183
+key str 0 6c8d1cf041926b91
+stance str 0 6cc706f041c3be76
+confidence f64 0 504423dc8df92e91
+rationale str 0 5ee84b15ed8737e4
+supersedes str 0 ef8f81a50bf7e005
+valid_from str 0 d1b8477e221e6591
+author str 0 06fe33553111f660
+recorded_at str 0 ca86b17b6a8ec466
+== file vlog_v4/tester/log/revisions/0000000027.kore kore
+rows 1
+rev_id str 0 b2900b2339304e9b
+entity_type str 0 93eede1740e81183
+key str 0 6c8d1ff0419270aa
+stance str 0 6cc704f041c3bb10
+confidence f64 0 507aa3dc8e279781
+rationale str 0 07075b40cce4e12a
+supersedes str 0 4e366c69f0f65506
+valid_from str 0 d1b8477e221e6591
+author str 0 06fe33553111f660
+recorded_at str 0 79451582862cffc4
+== file vlog_v4/tester/log/revisions/0000000029.kore kore
+rows 1
+rev_id str 0 3de3b4112fd25b73
+entity_type str 0 93eede1740e81183
+key str 0 6c8d1df041926d44
+stance str 0 6cc707f041c3c029
+confidence f64 0 504423dc8df92e91
+rationale str 0 41234d1649f58f80
+supersedes str 0 ec8ccc8acea3896d
+valid_from str 0 d1b8477e221e6591
+author str 0 06fe33553111f660
+recorded_at str 0 59f14ababf337e11
+== file vlog_v4/tester/log/schema_meta/0000000000.kore kore
+rows 1
+format_version i64 0 d6af10b864380b28
+created_at str 0 038937ee7219d3fd
+== file vlog_v5/tester/log/checkpoints/fsync-0000000047.kore kore
+rows 1
+ckpt_format i64 0 7194f3e59ae47dcd
+kind str 0 1500f0699842c4a2
+version i64 0 5c704c69cfa25463
+chain_hash str 0 66fc9e7c6b43c520
+step i64 0 339f65d38505e98b
+content_sha256 str 0 7c36ca104212579a
+payload_hex str 0 ea93f38f6760dd3f
+== file vlog_v5/tester/log/events/0000000001.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000002.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000003.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000004.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000005.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000006.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000007.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000008.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000009.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000010.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000011.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000012.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000013.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000014.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000015.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000016.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000017.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000018.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000019.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000020.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000021.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000022.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000023.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000024.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000025.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000026.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000027.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000028.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000029.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000030.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000031.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000032.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000033.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000034.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000035.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000036.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000037.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000038.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000039.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000040.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000042.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000043.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000044.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000045.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000046.kore not-a-kore-store-file
+== file vlog_v5/tester/log/events/0000000047.kore not-a-kore-store-file
+== file vlog_v5/tester/log/index/0000000000-0000000040.kore rowgroups
+rows 137
+sk i64 0 c13b3ef76fbe78c1
+key str 0 245a500b759ed2f3
+a i64 0 e5d687a5ec614448
+f0 str 79 1d02996d32ef3fff
+f1 str 86 5a49e210cc190663
+f2 str 112 87a868e0356e7a91
+f3 str 131 1519eff186a928b4
+== file vlog_v5/tester/log/outcomes/0000000006.kore not-a-kore-store-file
+== file vlog_v5/tester/log/outcomes/0000000011.kore not-a-kore-store-file
+== file vlog_v5/tester/log/outcomes/0000000016.kore not-a-kore-store-file
+== file vlog_v5/tester/log/outcomes/0000000021.kore not-a-kore-store-file
+== file vlog_v5/tester/log/outcomes/0000000026.kore not-a-kore-store-file
+== file vlog_v5/tester/log/outcomes/0000000031.kore not-a-kore-store-file
+== file vlog_v5/tester/log/outcomes/0000000036.kore not-a-kore-store-file
+== file vlog_v5/tester/log/outcomes/0000000047.kore not-a-kore-store-file
+== file vlog_v5/tester/log/predictions/0000000006.kore not-a-kore-store-file
+== file vlog_v5/tester/log/predictions/0000000011.kore not-a-kore-store-file
+== file vlog_v5/tester/log/predictions/0000000016.kore not-a-kore-store-file
+== file vlog_v5/tester/log/predictions/0000000021.kore not-a-kore-store-file
+== file vlog_v5/tester/log/predictions/0000000026.kore not-a-kore-store-file
+== file vlog_v5/tester/log/predictions/0000000031.kore not-a-kore-store-file
+== file vlog_v5/tester/log/predictions/0000000036.kore not-a-kore-store-file
+== file vlog_v5/tester/log/predictions/0000000047.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000003.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000005.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000007.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000009.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000011.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000013.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000015.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000017.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000019.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000021.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000023.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000025.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000027.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000029.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000031.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000033.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000035.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000037.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000039.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000044.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revision_causes/0000000046.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000003.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000005.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000007.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000009.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000011.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000013.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000015.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000017.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000019.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000021.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000023.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000025.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000027.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000029.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000031.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000033.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000035.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000037.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000039.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000044.kore not-a-kore-store-file
+== file vlog_v5/tester/log/revisions/0000000046.kore not-a-kore-store-file
+== file vlog_v5/tester/log/schema_meta/0000000000.kore not-a-kore-store-file
