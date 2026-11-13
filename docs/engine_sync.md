@@ -135,3 +135,106 @@ with NULLs; all answered as expected except PERCENTILE_CONT .. WITHIN GROUP, REG
 (errors). Bug 1 showed with same-function aggregates over expressions or literals (`sum(v*2), sum(v*3)`,
 `count(1), count(null)`); the World T shape `COUNT(x), COUNT(*), AVG(x)` came out right (5, 7, 1.05). Whether any being outcome changes is settled by the
 golden tests in step 4, not by this list.
+
+## 3. Sync: what was brought, and every deviation from master
+
+Commits on `engine-sync` (not merged into `dev`): cf0795d5 (mechanical copy), 1ee55dea (kore-self match arms),
+6ff789f9 (dev's ORDER BY / NULL tests on the new engine), facf3c4b (one ORDER BY fix), plus the docs commits.
+
+Identical to master 236ae86c: kore-core, kore-sql (every file of src, tests, examples) except `src/executor.rs`
+(deviation 1), kore-join, kore-spill, kore-delta, kore-io, kore-catalog, kore-vectorized, kore-parquet/Cargo.toml,
+`benchmarks/tpcds_honest/queries.json` (fixture read by `kore-sql/tests/p4_bind.rs`), and six crates that dev never
+changed and that no longer compiled against the new engine: kore-optimize, kore-ffi, kore-python, kore-kafka,
+kore-dml, kore-node (`cargo check --workspace` is clean afterwards).
+
+Deviations from master (every file where the branch differs from 236ae86c inside the synced crates, and the crates
+deliberately kept from dev):
+
+| # | file / crate | what differs | why |
+|---|---|---|---|
+| 1 | `kore-sql/src/executor.rs` | `sql_cmp_f64`: the NULL-aware ORDER BY sort and its top-N path compare doubles with -0.0 = 0.0 (master: `f64::total_cmp`, -0.0 < 0.0); 13 lines | dev's DuckDB ORDER BY oracle on the synced engine: 12 of 2,366 cases disagreed (group `floats`, keys with a NULLS clause), 0 after |
+| 2 | `kore-parquet/src/lib.rs` | master's file plus dev's `meta` and `read_batches` (capped, timestamp-keeping reader of World M3) | kore-self's World M3 source needs them; clean 3-way merge (ancestor e89640d0), nothing of master's file changed |
+| 3 | `kore-window` (whole crate) | dev's copy kept (stable sorts, NULL semantics); master's adds `apply_window_framed` / `WindowFrame` and still sorts with `par_sort_unstable_by` | master's kore-sql no longer calls kore-window (its windows are `kore-sql/src/window.rs`); only kore-tpch uses it; no synced crate calls the framed API |
+| 4 | `kore-store` (whole crate) | dev's copy kept (the KORE file format work: v3/v4, codecs, dictionaries, row groups); master's 4-file change (mmap reader, readable writer) not brought | kore-self's `.kore` files depend on dev's format; master's kore-sql / kore-spill / kore-io compile and pass against it (they use `KoreReader::read_file`, `KoreWriter::write_file`) |
+| 5 | `kore-distributed` (whole crate) | dev's copy kept (TCP cluster via kore-coord / kore-worker) | used by kore-self `main.rs`; compiles against the new engine |
+| 6 | `kore-sql/tests/null_semantics.rs` | master's file; dev's file of the same name renamed to `null_semantics_dev.rs` | name clash; both kept |
+| 7 | `kore-sql/tests/null_semantics_dev.rs` (dev-only) | two expectations changed: REGEXP_LIKE removed from the unknown-function list; `LAST_VALUE(x) OVER (PARTITION BY g ORDER BY d)` expects `[1, NULL, 3, 4]` | master implements REGEXP_LIKE; the old copy returned the partition's last value, the SQL default frame ends at the current row (DuckDB gives `[1, NULL, 3, 4]`) |
+| 8 | `kore-sql/tests/order_by_multikey.rs`, `kore-sql/examples/order_by_oracle_gen.rs` (dev-only) | without a NULLS clause the reference / the DuckDB SQL places NULL as the smallest value (ASC NULLS FIRST, DESC NULLS LAST); oracle group `rand_orderby_legacy` renamed `rand_orderby_default` | the old copy's per-type legacy NULL placement (Int64 i64::MIN, Float64 f64::MAX, text "") does not exist in master's engine, which follows the Spark default |
+| 9 | `kore-sql/tests/oracle_duckdb/compare_order_by.py` (dev-only) | unchanged | - |
+| 10 | kore-self `kore_query.rs` (3 matches), `versioned/sql.rs` (1 match) | arms for `Value::Array` / `Value::Map` | new enum variants; they never come out of a DataBlock column, so printed values and the World T result digest are unchanged for every column type |
+| 11 | workspace `Cargo.toml` | dev's (master's 33 extra members not added) | not engine, not used by kore-self |
+| 12 | every other crate | dev's copy | compiles against the new engine unchanged |
+
+## 4. Tests on the synced engine
+
+Debug builds, `--offline`, `--no-fail-fast`, `CARGO_TARGET_DIR=C:/Users/skathera/kw/target-dev`, sums of the
+`test result` lines (ignored tests not counted):
+
+| crate | passed | failed |
+|---|---|---|
+| kore-sql (master's 28 test files incl. spill.rs, plus order_by_multikey, null_semantics_dev, unit tests) | 351 | 0 |
+| kore-core / kore-join / kore-spill / kore-delta / kore-io | 50 / 13 / 17 / 20 / 3 | 0 |
+| kore-catalog / kore-vectorized / kore-parquet / kore-window | 28 / 28 / 15 / 4 | 0 |
+| **engine crates, total** | **529** | **0** |
+| kore-store | 63 | 0 |
+| kore-self | 700 | **2** (World T golden, World T engine-behaviour pins; below) |
+| **all** | **1,292** | **2** |
+
+kore-tpch: builds, has no tests (0 / 0). `cargo check --workspace --offline`: clean.
+
+DuckDB ORDER BY oracle (DuckDB 1.5.6 from the existing `engines` env, `python -I`, scratch data in
+`C:/Users/skathera/kw/engine-sync-oracle`, deleted afterwards): 2,366 queries, 0 disagreements (12 before
+deviation 1, all in group `floats`, -0.0 vs 0.0).
+
+### Golden and World T / World M3 / being outcome tests
+
+* `tests_b13_golden.rs` (via `tests_b13.rs`, `with_the_b13_switch_off_every_chooser_is_byte_identical_to_e9ed7d1d`):
+  **passes**, unchanged.
+* `world_t/tests_golden.rs::existing_worlds_are_byte_identical_with_world_t_off`: **passes**.
+* `world_t/tests_golden.rs::world_t_default_being_is_byte_identical`: **FAILS** (file not edited). Got
+  `["a0170c83ccaade2f", "44d774c20f505838:23548:6000"]`, pinned `["091ce2aa622226d4", "beb34713af0726b8:22847:6000"]`:
+  the logged life (seed 11) and the measurement life (seed 101, budget 6000; reward 22,847 -> 23,548) both changed.
+* `world_t/tests_engine.rs::engine_behaviour_the_world_t_tools_work_around`: **FAILS** (file not edited). It pins the
+  old engine's behaviour on purpose ("if one of these starts failing, the engine changed: revisit `tools.rs`"). On
+  master's engine: `REGEXP_LIKE(g, 'a')` is a function (true, false, true, NULL) instead of an error;
+  `SELECT "d" FROM t` returns the text `'d'` on every row (a double-quoted string literal, Spark style) instead of an
+  error; `PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x)` parses (3.0); `ORDER BY s DESC` puts the NULL sum last
+  (Spark) instead of first (PostgreSQL), so both `ORDER BY s DESC` and `.. NULLS LAST` start with `a`; the self CROSS
+  JOIN `SELECT a.x, b.x FROM t a CROSS JOIN t b` works (16 rows) instead of an error. Items 1 (COUNT), 2 (unknown
+  functions other than REGEXP_LIKE) and 5 (LAG NULLs) are unchanged.
+* World M3 tests: 14 of 14 pass. Every other kore-self test passes.
+
+Why the World T golden changed (exactly which SQL answers, and which engine is wrong): every query the World T being
+ran was traced (input table digest, SQL, outcome, result) in both builds for the two lives of the golden test (old
+copy 8589a219: 1,582 queries; synced: 1,608). The trace was a temporary, uncommitted wrapper around
+`world_t::tools::guarded_sql`, removed afterwards; with it the old build still passed its golden. The first query of
+the logged life already differs. Over the (input, SQL) pairs present in both traces, 296 differ, all on tables the
+**naive loader** read wrongly, so that numbers are text or the whole header is one tab-joined column name:
+
+| class | pairs | example | old copy | synced engine | DuckDB 1.5.6 |
+|---|---|---|---|---|---|
+| a column that does not exist (naive load: the header became one column `\ufeffsku\twarehouse\t...`) | 210 | `SELECT COUNT(*) AS v FROM t WHERE stock > 18` | `0` (an unknown column reads as NULL: probe bug 20) | error `column not found: stock` | error `Referenced column "stock" not found` |
+| text column compared with a number, SUM over a text column | 81 | `SELECT COUNT(*) AS v FROM t WHERE tries > 14` (`tries` is text); `SELECT SUM(amount) AS v FROM t WHERE method = 'card'` | `0`; `NULL` | `25`; `6023.24` (text read as a number, Spark style) | error without a cast; `25`; `6023.24` with `TRY_CAST(.. AS DOUBLE)` |
+| MAX over a text column | 5 | `SELECT MAX(amount) AS v FROM t` | `NULL` | `'98.27'` (the text maximum) | `'98.27'` |
+
+In all 296 pairs the synced engine agrees with DuckDB, as written or, in the 81, with the text column read as a
+number where DuckDB demands an explicit cast (in 3 of the 81 only the SUM was checked: my TRY_CAST rewrite changed
+the COUNT(amount) next to it, which is the same in both KORE builds). In none of the 296 does the old copy agree with
+DuckDB either way. So the golden changed because **the old engine was wrong**: it answered queries on a column that
+does not exist (0 / NULL instead of an error) and silently returned 0 / NULL for comparisons and sums over text.
+With the synced engine the measurement life of the golden earns more (23,548 vs 22,847 over 6,000 steps). The golden
+files were not edited; whether to re-pin them (and to update `tests_engine.rs` and the "engine needs" list in
+docs/world_t.md) is the owner's decision.
+
+## 5. What this means for earlier results
+
+Results measured before this sync (World T, W2, W2b, S1, M3) used the old engine copy; runs after the sync are
+compared only on fresh seeds. No measurement run and no report seed was run for this sync.
+
+Limits: the probe ran master's tests on dev's copy with stand-ins for master's test switches (a no-op memory limit:
+spill paths not exercised on dev); case-list tests stop at the first failing check per test, so the 787 listed cases
+are a lower bound; p3_gap and semi_join_perf were killed at 900 s on dev (debug), not completed; the World T analysis
+covers the two lives of the golden test (seeds 11 and 101), not the report seeds; DuckDB was the referee with one
+stated rewrite (TRY_CAST) where it refuses implicit casts; master's kore-store change was not evaluated; kore-window
+and kore-store are dev's copies, so the branch is not a byte copy of master's engine; whether master's single-key
+external sort above 256 MB keeps ties stable was not checked.
