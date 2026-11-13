@@ -108,3 +108,69 @@ Tests over the fixtures (they pass on dev before the replacement: kore-store 67 
 * `kore-self/src/versioned/tests_format_sync.rs`: the logs open (full and fast open through the index run) with
   the pinned hashes, checkpoint and brain rows; a new commit on the old format-4 log verifies; re-writing the
   whole fixture set gives the bytes dev wrote, file for file.
+
+## 3. Replacement
+
+`git checkout origin/fileformat -- kore-store` (commit 07cdf70a): kore-store is now byte for byte fileformat's
+5bcb2d41 plus the format-sync files of the previous commit (`git diff 5bcb2d41 -- kore-store` lists only
+`examples/gen_dev_fixtures.rs`, `tests/common/dev_data.rs`, `tests/dev_fixtures.rs`, `tests/fixtures_dev/**`).
+
+Callers: no change was needed. kore-self (all targets, through `cargo test -p kore-self`) and
+`cargo check -p kore-sql -p kore-connect -p kore-io -p kore-iceberg -p kore-object-store -p kore-spill
+-p kore-shuffle-store -p kore-bench -p kore-api` compile unchanged. So there is no "fix callers" commit.
+(`cargo build --workspace --all-targets` was started and stopped: free space on C: fell from 56 GB to 23 GB
+while it ran; only the crates above were checked.)
+
+### Deviations
+
+None. fileformat's kore-store is a superset of dev's (0 files deleted, no public item removed, Cargo.toml
+unchanged), so nothing dev had needed to be kept on top of it.
+
+## 4. Results
+
+| test | result |
+|---|---|
+| kore-store, all tests (new crate + `dev_fixtures.rs`) | 117 passed, 0 failed (dev before the replacement: 67 passed, 0 failed with `dev_fixtures.rs`; 63 without) |
+| `dev_fixtures.rs`: fixtures unchanged, every `store/` file reads to the written values, every `kore-self/` file reads as dev read it, writer round-trip + same bytes | 4 passed, 0 failed |
+| kore-self, `cargo test -p kore-self` in full | 704 passed, 0 failed, 2 ignored (dev d9edbcfc: 702 passed; +2 = `tests_format_sync`) |
+| `tests_format_sync`: dev logs (format 5 with index run + checkpoint, format 4 with dictionary) and brain files open with the pinned content; fast open = full open; re-writing the fixture set gives dev's bytes | 2 passed (generator ignored) |
+| goldens, files unchanged: `being::world_t::tests_golden` (2 tests), `tests_b13::with_the_b13_switch_off_every_chooser_is_byte_identical_to_e9ed7d1d`, format-2 checkpoint tests (`tests_s1::a_format_2_world_t_checkpoint_is_refused_and_the_log_is_folded`, `tests_w2b::a_format_2_checkpoint_of_a_table_being_is_refused_and_the_log_is_folded_to_the_same_state`, `tests_w2::an_old_format_world_t_checkpoint_is_not_used_and_the_log_is_folded`) | all pass |
+
+Old files: all 19 `store/` files read to exactly the values written (NaN as one value, see section 2), every
+version of the version log too; all 179 `.kore` files of the kore-self fixtures decode to the digests dev pinned;
+both dev-written logs verify and open with the same version hashes, the same index-run use and the same
+checkpoints, and a new commit on the dev-written format-4 log verifies.
+
+## 5. Bytes and forward compatibility
+
+Same bytes: with the options the brain uses the new writer writes exactly dev's bytes: `to_bytes`,
+`write_file`, row groups, the kore-store version log, `to_bytes_compact` with default options and with a shared
+dictionary (`dev_fixtures.rs::writer_round_trip_and_same_bytes_as_dev`), and every file of a complete kore-self
+fixture set (both logs incl. MANIFESTs, dictionaries, index run and checkpoints, `kore_rows`, `aru_store`;
+`tests_format_sync::rewriting_the_fixture_set_gives_the_bytes_dev_wrote`). So old readers read what the synced
+brain writes today.
+
+Forward compatibility of the opt-in settings, checked with a throwaway build: a scratch example (not committed)
+wrote 40 files with the new writer (6 tables x default, v4 default, v4 `fast()`, v4 `quick()`, v5
+`with_compact_directory(true)`, rule mode, row groups); `examples/read_hash.rs` read them with the new code and
+with dev's code (a detached worktree at d9edbcfc, removed afterwards):
+
+| written with | dev's reader |
+|---|---|
+| default, v4 default, v4 `fast()`, v4 `quick()` (24 files), row groups (4 files) | reads all, same value hashes as the new reader |
+| rule mode where no rule wins (all-NULL, empty, no columns: the writer falls back to version 4 bytes) (3 files) | reads, same hashes |
+| v5 compact directory (6 files) | refuses: "unsupported version 5" |
+| rule mode with rules (version 6) (3 files) | refuses: "unsupported version 6" |
+
+No file was misread; the only failures are clear version refusals. Rule mode, version 5 and key indexes are
+not used by the brain (no caller); turning any of them on would need dev's old binaries to be retired first.
+
+## 6. Limits
+
+* The fixtures cover the column shapes and writers the brain uses, synthetic data only (no copy of a real brain
+  home; the live run's files were not touched). Log formats 2, 3 and 5 segments are kore-self's own codec and
+  are not affected by kore-store, but the fixtures include a format-5 log anyway.
+* Not covered: encrypted files (`to_bytes_encrypted`; the brain does not encrypt), the v3 codec writer
+  (`to_bytes_with`, not used by kore-self).
+* Only kore-store and kore-self tests were run; the other callers were compile-checked, not tested.
+* No speed or size measurement was made.
