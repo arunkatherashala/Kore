@@ -98,7 +98,11 @@ fn world_t_digests() -> Vec<String> {
     out
 }
 
-const GOLDEN_WT: [&str; 2] = ["091ce2aa622226d4", "beb34713af0726b8:22847:6000"];
+// Re-pinned 2026-11-13 (owner ok) after the engine sync from master-kore-engine 236ae86c: was
+// ["091ce2aa622226d4", "beb34713af0726b8:22847:6000"]. The change is traced in docs/engine_sync.md: 296 (table, query)
+// pairs answered differently, all on tables the naive loader read wrongly; the new engine agrees with DuckDB on all
+// 296, the old engine on none. World T results measured before this commit used the old engine copy.
+const GOLDEN_WT: [&str; 2] = ["a0170c83ccaade2f", "44d774c20f505838:23548:6000"];
 
 #[test]
 fn world_t_default_being_is_byte_identical() {
